@@ -27,7 +27,11 @@ interface McpTestResult {
 function getStatuses(cwd: string): Promise<Record<string, McpServer['status']>> {
   return new Promise((resolve) => {
     let out = ''
-    const child = spawn(CLAUDE_BIN, ['mcp', 'list'], { cwd, env: { ...process.env } })
+    const child = spawn(CLAUDE_BIN, ['mcp', 'list'], {
+      cwd,
+      env: { ...process.env },
+      windowsHide: true, // no cmd window flash on Windows
+    })
     // Health-checking remote servers can take ~10s; give it generous headroom.
     const timer = setTimeout(() => {
       try {
@@ -72,7 +76,11 @@ function getStatuses(cwd: string): Promise<Record<string, McpServer['status']>> 
 function testServer(cwd: string, name: string): Promise<McpTestResult> {
   return new Promise((resolve) => {
     let out = ''
-    const child = spawn(CLAUDE_BIN, ['mcp', 'list'], { cwd, env: { ...process.env } })
+    const child = spawn(CLAUDE_BIN, ['mcp', 'list'], {
+      cwd,
+      env: { ...process.env },
+      windowsHide: true, // no cmd window flash on Windows
+    })
     const timer = setTimeout(() => {
       try {
         child.kill()

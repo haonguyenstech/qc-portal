@@ -66,6 +66,7 @@ export function runClaude(
       env: { ...process.env },
       cwd: opts?.cwd,
       stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true, // no cmd window flash on Windows
     })
     const timer = setTimeout(() => {
       settled = true
@@ -140,6 +141,7 @@ export function runClaudeStream(
     const child = spawn(CLAUDE_BIN, args, {
       env: { ...process.env },
       stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true, // no cmd window flash on Windows
     })
     const timer = setTimeout(() => {
       if (settled) return

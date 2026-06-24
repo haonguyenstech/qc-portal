@@ -263,7 +263,10 @@ function runCommand(
     let stdout = ''
     let stderr = ''
     let settled = false
-    const child = spawn(CLAUDE_BIN, args, { env: { ...process.env } })
+    const child = spawn(CLAUDE_BIN, args, {
+      env: { ...process.env },
+      windowsHide: true, // no cmd window flash on Windows
+    })
     const timer = setTimeout(() => {
       settled = true
       try {

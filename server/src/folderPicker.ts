@@ -30,7 +30,8 @@ export function pickFolderNative(
         'Add-Type -AssemblyName System.Windows.Forms; ' +
         '$f = New-Object System.Windows.Forms.FolderBrowserDialog; ' +
         "if($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK){ Write-Output $f.SelectedPath }"
-      execFile('powershell', ['-NoProfile', '-STA', '-Command', ps], (err, stdout) => {
+      // windowsHide hides the PowerShell console; the GUI dialog it opens still shows.
+      execFile('powershell', ['-NoProfile', '-STA', '-Command', ps], { windowsHide: true }, (err, stdout) => {
         if (err) return resolve({ path: null, error: err.message })
         resolve({ path: stdout.trim() || null })
       })

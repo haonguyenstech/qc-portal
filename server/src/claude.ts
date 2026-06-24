@@ -165,8 +165,12 @@ export function runQc(
     stdio: ['ignore', 'pipe', 'pipe'],
     // Own process group so we can signal the *whole* tree (claude + its MCP
     // servers + the Playwright browser) at once, instead of just the lead
-    // process — otherwise killing claude leaves the browser orphaned.
-    detached: true,
+    // process — otherwise killing claude leaves the browser orphaned. POSIX
+    // only: on Windows `detached` opens a console window and the group-kill via
+    // process.kill(-pid) doesn't apply (killTree falls back to child.kill).
+    detached: process.platform !== 'win32',
+    // Never flash a cmd window when launching claude(.cmd) on Windows.
+    windowsHide: true,
   })
 
   cb.onEvent({ ts: now(), kind: 'system', text: `Started QC run for ${opts.ticketId}` })

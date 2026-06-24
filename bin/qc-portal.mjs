@@ -113,6 +113,7 @@ async function start({ open = true } = {}) {
     cwd: ROOT,
     detached: true,
     stdio: ['ignore', out, out],
+    windowsHide: true, // run the background server without a console window
     env: { ...process.env, QC_PORT: String(PORT) },
   })
   child.unref()
