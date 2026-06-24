@@ -12,3 +12,4 @@ runtime/
 # dev scratch (not part of the release)
 snap.md
 settings-projects-*.png
+.serena/
