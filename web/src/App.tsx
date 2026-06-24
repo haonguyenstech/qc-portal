@@ -214,7 +214,7 @@ function App() {
           <span className="size-1.5 rounded-full bg-emerald-500" aria-hidden />
           QC Portal
           <span className="ml-auto rounded-full bg-muted px-1.5 py-0.5 font-mono text-[10px] tracking-tight">
-            v0.1
+            v{__APP_VERSION__}
           </span>
         </div>
       </aside>

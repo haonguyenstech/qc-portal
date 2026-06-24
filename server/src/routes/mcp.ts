@@ -330,6 +330,24 @@ mcpRouter.get('/', async (req, res) => {
 })
 
 /**
+ * Reveal the FULL env value for a server's first env key, for the localhost
+ * "copy" action only. The list endpoint masks secrets so they never sit in the
+ * page; this returns the real value on explicit user request. Localhost-only,
+ * never logged — the same token already lives in .mcp.json on this machine.
+ */
+mcpRouter.get('/:name/secret', (req, res) => {
+  const project = resolveProject(req)
+  if (!project) return res.status(400).json({ error: 'project not found' })
+
+  const servers = readMcp(mcpJsonFor(project.rootPath)).mcpServers ?? {}
+  const entry = servers[req.params.name] ?? localProjectMcpServers(project.rootPath)[req.params.name]
+  const env = entry?.env
+  const first = env ? Object.entries(env).find(([, v]) => typeof v === 'string') : undefined
+  if (!first) return res.status(404).json({ error: 'no secret to reveal' })
+  return res.json({ key: first[0], value: first[1] })
+})
+
+/**
  * Reveal the active project's root folder (where .mcp.json lives) in the OS file
  * explorer on the machine running the server.
  */

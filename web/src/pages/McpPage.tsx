@@ -31,6 +31,7 @@ import {
   mcpOauthStatus,
   openMcpFolder,
   removeMcp,
+  revealMcpSecret,
   runMcpTest,
   saveMcpToken,
   testMcp,
@@ -352,9 +353,20 @@ function ConnectServices({
     const copyId = `${name}:${key}`
     const copied = copiedEnv === copyId
     async function copyValue() {
-      await navigator.clipboard.writeText(`${key}=${value}`)
-      setCopiedEnv(copyId)
-      window.setTimeout(() => setCopiedEnv((current) => (current === copyId ? null : current)), 1200)
+      // The shown value is masked — fetch the real key on demand to copy it.
+      try {
+        const real = await revealMcpSecret(name, projectId)
+        await navigator.clipboard.writeText(real.value)
+        setCopiedEnv(copyId)
+        window.setTimeout(
+          () => setCopiedEnv((current) => (current === copyId ? null : current)),
+          1200,
+        )
+      } catch (err) {
+        toast.error('Failed to copy key', {
+          description: err instanceof Error ? err.message : 'Unknown error',
+        })
+      }
     }
     return (
       <div className="flex min-w-0 items-center gap-1 rounded-md bg-muted/50 px-2 py-1 text-muted-foreground">

@@ -842,6 +842,16 @@ export function removeMcp(name: string, projectId: string): Promise<void> {
   )
 }
 
+/** Reveal the full (unmasked) env value for a server, for the copy action. */
+export function revealMcpSecret(
+  name: string,
+  projectId: string,
+): Promise<{ key: string; value: string }> {
+  return request(
+    `/api/mcp/${encodeURIComponent(name)}/secret?projectId=${encodeURIComponent(projectId)}`,
+  )
+}
+
 export interface McpCapabilityResult {
   ok: boolean
   detail: string
