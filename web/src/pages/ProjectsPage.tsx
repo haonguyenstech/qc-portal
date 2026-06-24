@@ -1,0 +1,1357 @@
+import { useMemo, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { toast } from 'sonner'
+import {
+  AlertCircle,
+  ArrowRight,
+  Check,
+  CheckCircle2,
+  Clock,
+  Copy,
+  Cpu,
+  Gauge,
+  FolderGit2,
+  FolderOpen,
+  FolderPlus,
+  Info,
+  Loader2,
+  Pencil,
+  Pin,
+  PinOff,
+  PlayCircle,
+  Plus,
+  Search,
+  Sparkles,
+  Terminal,
+  Trash2,
+  Wand2,
+  X,
+} from 'lucide-react'
+import { Button } from '@/components/ui/button'
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import {
+  Dialog,
+  DialogClose,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from '@/components/ui/dialog'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Badge } from '@/components/ui/badge'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { cn } from '@/lib/utils'
+import {
+  claudeStatus,
+  claudeUsage,
+  createProject,
+  deleteProject,
+  initProject,
+  listProjects,
+  pickFolder,
+  testClaudeModel,
+  updateProject,
+  type UsageWindow,
+} from '@/lib/api'
+import { useProjects } from '@/lib/project-context'
+import { relativeTime } from '@/lib/format'
+import type { Project } from '@/lib/types'
+
+/** Mirror of the server's safeFolderName — turns a display name into a safe
+ *  single folder segment, so the UI can preview the renamed path. */
+function safeFolderName(name: string): string {
+  return name
+    .replace(/[/\\:*?"<>|]+/g, ' ')
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\x00-\x1f]+/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/^\.+/, '')
+    .slice(0, 100)
+    .trim()
+}
+
+/** Replace the last segment of a path with a new folder name (preview only). */
+function withFolderName(fullPath: string, folder: string): string {
+  const sep = fullPath.includes('\\') && !fullPath.includes('/') ? '\\' : '/'
+  const parts = fullPath.split(/[/\\]/)
+  parts[parts.length - 1] = folder
+  return parts.join(sep)
+}
+
+/** A "Browse…" button that opens the OS folder picker and reports the chosen path. */
+function BrowseButton({ onPick }: { onPick: (path: string) => void }) {
+  const [loading, setLoading] = useState(false)
+  async function browse() {
+    setLoading(true)
+    try {
+      const res = await pickFolder()
+      if (res.path) onPick(res.path)
+    } catch (err) {
+      toast.error('Could not open folder picker', {
+        description: err instanceof Error ? err.message : 'Unknown error',
+      })
+    } finally {
+      setLoading(false)
+    }
+  }
+  return (
+    <Button
+      type="button"
+      variant="outline"
+      size="sm"
+      onClick={browse}
+      disabled={loading}
+      className="h-11 shrink-0 transition-all duration-200 hover:shadow-sm active:scale-[0.98]"
+    >
+      {loading ? (
+        <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+      ) : (
+        <FolderOpen className="mr-1.5 h-3.5 w-3.5" />
+      )}
+      Browse…
+    </Button>
+  )
+}
+
+/** A compact pill showing whether a given capability is present in the repo. */
+function HealthChip({ ok, label }: { ok: boolean | undefined; label: string }) {
+  return (
+    <span
+      className={cn(
+        'inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11px] font-medium transition-colors duration-200',
+        ok
+          ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+          : 'border-dashed border-border bg-transparent text-muted-foreground/70',
+      )}
+      title={ok ? `${label} detected` : `${label} not found`}
+    >
+      {ok ? (
+        <CheckCircle2 className="h-3 w-3" />
+      ) : (
+        <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/30" aria-hidden />
+      )}
+      {label}
+    </span>
+  )
+}
+
+/** Compact "N/3 ready" pill with a tiny segmented bar summarizing setup. */
+function ReadinessPill({ count }: { count: number }) {
+  const full = count >= 3
+  return (
+    <span
+      className={cn(
+        'inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11px] font-medium',
+        full
+          ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+          : count === 0
+            ? 'border-border bg-muted/50 text-muted-foreground'
+            : 'border-amber-200 bg-amber-50 text-amber-700',
+      )}
+      title={`${count} of 3 capabilities configured`}
+    >
+      {full ? <Sparkles className="h-3 w-3" /> : null}
+      <span className="flex gap-0.5" aria-hidden>
+        {Array.from({ length: 3 }).map((_, i) => (
+          <span
+            key={i}
+            className={cn(
+              'h-2.5 w-1 rounded-full transition-colors',
+              i < count
+                ? full
+                  ? 'bg-emerald-500'
+                  : 'bg-amber-500'
+                : 'bg-muted-foreground/25',
+            )}
+          />
+        ))}
+      </span>
+      {full ? 'Ready' : `${count}/3`}
+    </span>
+  )
+}
+
+/** A single summary tile in the overview strip. */
+function StatTile({
+  icon: Icon,
+  label,
+  value,
+  tone = 'default',
+}: {
+  icon: React.ComponentType<{ className?: string }>
+  label: string
+  value: React.ReactNode
+  tone?: 'default' | 'primary' | 'emerald' | 'amber'
+}) {
+  const tones = {
+    default: 'border-border bg-muted/40 text-muted-foreground',
+    primary: 'border-primary/20 bg-primary/10 text-primary',
+    emerald: 'border-emerald-200 bg-emerald-50 text-emerald-600',
+    amber: 'border-amber-200 bg-amber-50 text-amber-600',
+  }
+  return (
+    <div className="flex min-w-0 items-center gap-3 rounded-lg border bg-background/70 p-3">
+      <span
+        className={cn(
+          'flex size-9 shrink-0 items-center justify-center rounded-lg border',
+          tones[tone],
+        )}
+      >
+        <Icon className="h-4 w-4" />
+      </span>
+      <div className="min-w-0 leading-tight">
+        <div className="truncate text-lg font-semibold tracking-tight">{value}</div>
+        <div className="truncate text-xs text-muted-foreground">{label}</div>
+      </div>
+    </div>
+  )
+}
+
+function ProjectCard({ project }: { project: Project }) {
+  const queryClient = useQueryClient()
+  const { refetch: refetchContext, activeProjectId, setActiveProjectId } = useProjects()
+  const [editing, setEditing] = useState(false)
+  const [deleteOpen, setDeleteOpen] = useState(false)
+  const [deleteConfirmName, setDeleteConfirmName] = useState('')
+  const [renameConfirmOpen, setRenameConfirmOpen] = useState(false)
+  const [name, setName] = useState(project.name)
+  const [rootPath, setRootPath] = useState(project.rootPath)
+  const isActive = activeProjectId === project.id
+  const notFound = project.exists === false
+  const readiness =
+    (project.hasSkills ? 1 : 0) + (project.hasMcp ? 1 : 0) + (project.hasClaudeMd ? 1 : 0)
+  const canDelete = deleteConfirmName === project.name
+
+  // Whether saving will move the folder on disk (name changed → new basename).
+  const renameSafe = safeFolderName(name)
+  const renameTarget = renameSafe ? withFolderName(rootPath.trim(), renameSafe) : ''
+  const willMoveFolder =
+    !!renameSafe && name.trim() !== project.name && renameTarget !== rootPath.trim()
+
+  function afterChange() {
+    queryClient.invalidateQueries({ queryKey: ['projects'] })
+    refetchContext()
+  }
+
+  const updateMutation = useMutation({
+    mutationFn: () =>
+      updateProject(project.id, { name: name.trim(), rootPath: rootPath.trim() }),
+    onSuccess: (updated) => {
+      const moved = updated.rootPath !== project.rootPath
+      toast.success('Project updated', {
+        description: moved ? `Folder renamed → ${updated.rootPath}` : `${name} saved.`,
+      })
+      setEditing(false)
+      afterChange()
+    },
+    onError: (err) =>
+      toast.error('Failed to update project', {
+        description: err instanceof Error ? err.message : 'Unknown error',
+      }),
+  })
+
+  const pinMutation = useMutation({
+    mutationFn: () => updateProject(project.id, { pinned: !project.pinned }),
+    onSuccess: () => {
+      toast.success(project.pinned ? 'Unpinned' : 'Pinned to top', { description: project.name })
+      afterChange()
+    },
+    onError: (err) =>
+      toast.error('Failed to update project', {
+        description: err instanceof Error ? err.message : 'Unknown error',
+      }),
+  })
+
+  const deleteMutation = useMutation({
+    mutationFn: () => deleteProject(project.id),
+    onSuccess: () => {
+      toast.success('Project deleted', { description: `${project.name} removed.` })
+      setDeleteOpen(false)
+      setDeleteConfirmName('')
+      afterChange()
+    },
+    onError: (err) =>
+      toast.error('Failed to delete project', {
+        description: err instanceof Error ? err.message : 'Unknown error',
+      }),
+  })
+
+  const initMutation = useMutation({
+    mutationFn: () => initProject(project.id),
+    onSuccess: (res) => {
+      if (res.created.length === 0) {
+        toast.info('Already initialized', {
+          description: 'This folder already has the Claude Code setup.',
+        })
+      } else {
+        toast.success('Project initialized', {
+          description: `Created ${res.created.join(', ')}${
+            res.templateName ? ` from “${res.templateName}”` : ''
+          }.`,
+        })
+      }
+      afterChange()
+    },
+    onError: (err) =>
+      toast.error('Failed to initialize project', {
+        description: err instanceof Error ? err.message : 'Unknown error',
+      }),
+  })
+
+  async function copyPath() {
+    try {
+      await navigator.clipboard.writeText(project.rootPath)
+      toast.success('Path copied', { description: project.rootPath })
+    } catch {
+      toast.error('Could not copy path')
+    }
+  }
+
+  return (
+    <Card
+      className={cn(
+        'group relative flex flex-col gap-0 overflow-hidden py-0 shadow-sm transition-all duration-200',
+        isActive
+          ? 'border-2 border-sky-500 bg-sky-50/40 shadow-md ring-2 ring-sky-500/20'
+          : 'border hover:-translate-y-0.5 hover:shadow-md',
+        notFound && !isActive && 'border-destructive/30',
+      )}
+    >
+      {/* left status accent rail */}
+      <span
+        className={cn(
+          'absolute inset-y-0 left-0 w-1 transition-colors duration-200',
+          isActive
+            ? 'bg-sky-500'
+            : notFound
+              ? 'bg-destructive/60'
+              : 'bg-transparent group-hover:bg-border',
+        )}
+        aria-hidden
+      />
+      {/* top accent line — animates in on hover for inactive cards */}
+      {!isActive && !notFound && (
+        <span
+          className="absolute inset-x-0 top-0 h-0.5 origin-left scale-x-0 bg-gradient-to-r from-primary/70 to-primary/20 transition-transform duration-300 group-hover:scale-x-100"
+          aria-hidden
+        />
+      )}
+
+      <CardHeader className="flex flex-row items-start justify-between gap-3 space-y-0 p-4 pl-5">
+        <div className="min-w-0 flex-1 space-y-1.5">
+          {editing ? (
+            <div className="space-y-3">
+              <div className="space-y-1.5">
+                <Label htmlFor={`name-${project.id}`}>Name</Label>
+                <Input
+                  id={`name-${project.id}`}
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor={`path-${project.id}`}>Root path</Label>
+                <div className="flex gap-2">
+                  <Input
+                    id={`path-${project.id}`}
+                    value={rootPath}
+                    onChange={(e) => setRootPath(e.target.value)}
+                    className="flex-1 font-mono text-xs"
+                  />
+                  <BrowseButton onPick={setRootPath} />
+                </div>
+              </div>
+              {/* Renaming the project moves its folder on disk to match — preview it. */}
+              {willMoveFolder && (
+                <p className="flex items-start gap-2 rounded-lg border border-amber-200/70 bg-amber-50/50 px-3 py-2.5 text-[11px] leading-snug text-amber-700">
+                  <FolderGit2 className="mt-0.5 size-3.5 shrink-0" />
+                  <span>
+                    Saving renames the folder to{' '}
+                    <span className="font-mono text-foreground">{renameTarget}</span> — the real
+                    directory moves. You'll confirm first.
+                  </span>
+                </p>
+              )}
+            </div>
+          ) : (
+            <>
+              <CardTitle className="flex flex-wrap items-center gap-2 text-sm">
+                <span
+                  className={cn(
+                    'flex h-7 w-7 shrink-0 items-center justify-center rounded-md border transition-all duration-200',
+                    isActive
+                      ? 'border-transparent bg-gradient-to-b from-primary to-primary/85 text-primary-foreground shadow-sm ring-1 ring-black/5'
+                      : notFound
+                        ? 'border-destructive/20 bg-destructive/5 text-destructive'
+                        : 'border-border bg-muted/50 text-muted-foreground group-hover:border-primary/20 group-hover:bg-primary/5 group-hover:text-primary',
+                  )}
+                >
+                  <FolderGit2 className="h-3.5 w-3.5" />
+                </span>
+                <span className="truncate font-semibold tracking-tight">{project.name}</span>
+                {isActive && <Badge className="shrink-0">active</Badge>}
+                {project.pinned && (
+                  <Badge variant="secondary" className="shrink-0 gap-1">
+                    <Pin className="h-3 w-3" />
+                    Pinned
+                  </Badge>
+                )}
+                {notFound && (
+                  <Badge variant="destructive" className="shrink-0 gap-1">
+                    <AlertCircle className="h-3 w-3" />
+                    Not found
+                  </Badge>
+                )}
+              </CardTitle>
+              <div className="flex items-center gap-1 pl-9">
+                <span
+                  className="truncate font-mono text-xs text-muted-foreground"
+                  title={project.rootPath}
+                >
+                  {project.rootPath}
+                </span>
+                <button
+                  type="button"
+                  onClick={copyPath}
+                  aria-label="Copy path"
+                  className="shrink-0 rounded p-0.5 text-muted-foreground/50 opacity-0 transition-all duration-200 hover:bg-muted hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
+                >
+                  <Copy className="h-3 w-3" />
+                </button>
+              </div>
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 pl-9 pt-0.5">
+                <ReadinessPill count={readiness} />
+                <span
+                  className="flex items-center gap-1 text-[11px] text-muted-foreground"
+                  title={new Date(project.createdAt).toLocaleString()}
+                >
+                  <Clock className="h-3 w-3" />
+                  Added {relativeTime(project.createdAt)}
+                </span>
+              </div>
+            </>
+          )}
+        </div>
+        <div className="flex shrink-0 items-center gap-1">
+          {editing ? (
+            <>
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={() => {
+                  // Moving the folder is destructive — confirm & warn first.
+                  if (willMoveFolder) setRenameConfirmOpen(true)
+                  else updateMutation.mutate()
+                }}
+                disabled={updateMutation.isPending || !name.trim() || !rootPath.trim()}
+                aria-label="Save"
+                className="text-emerald-600 transition-all duration-200 hover:bg-emerald-50 hover:text-emerald-700 active:scale-[0.98] disabled:text-muted-foreground"
+              >
+                {updateMutation.isPending ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Check className="h-4 w-4" />
+                )}
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={() => {
+                  setName(project.name)
+                  setRootPath(project.rootPath)
+                  setEditing(false)
+                }}
+                aria-label="Cancel"
+                className="transition-all duration-200 active:scale-[0.98]"
+              >
+                <X className="h-4 w-4" />
+              </Button>
+            </>
+          ) : (
+            <div
+              className={cn(
+                'flex items-center gap-1 transition-opacity duration-200',
+                // Keep actions visible when pinned so the pin state is always togglable.
+                project.pinned
+                  ? 'opacity-100'
+                  : 'sm:opacity-0 sm:group-hover:opacity-100 sm:focus-within:opacity-100',
+              )}
+            >
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={() => pinMutation.mutate()}
+                disabled={pinMutation.isPending}
+                aria-label={project.pinned ? 'Unpin project' : 'Pin project to top'}
+                title={project.pinned ? 'Unpin' : 'Pin to top'}
+                className={cn(
+                  'size-8 transition-all duration-200 active:scale-[0.98]',
+                  project.pinned
+                    ? 'text-primary hover:text-primary'
+                    : 'text-muted-foreground hover:text-foreground',
+                )}
+              >
+                {pinMutation.isPending ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : project.pinned ? (
+                  <PinOff className="h-3.5 w-3.5" />
+                ) : (
+                  <Pin className="h-3.5 w-3.5" />
+                )}
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={() => setEditing(true)}
+                aria-label="Edit"
+                className="size-8 text-muted-foreground transition-all duration-200 hover:text-foreground active:scale-[0.98]"
+              >
+                <Pencil className="h-3.5 w-3.5" />
+              </Button>
+              {(
+                <Dialog
+                  open={deleteOpen}
+                  onOpenChange={(open) => {
+                    setDeleteOpen(open)
+                    if (!open) setDeleteConfirmName('')
+                  }}
+                >
+                  <DialogTrigger asChild>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      disabled={deleteMutation.isPending}
+                      aria-label="Delete"
+                      className="size-8 text-muted-foreground transition-all duration-200 hover:bg-destructive/10 hover:text-destructive active:scale-[0.98] disabled:opacity-50"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </Button>
+                  </DialogTrigger>
+                  <DialogContent className="sm:max-w-md">
+                    <DialogHeader>
+                      <div className="flex items-start gap-3">
+                        <span className="flex size-10 shrink-0 items-center justify-center rounded-xl border border-destructive/20 bg-destructive/10 text-destructive">
+                          <Trash2 className="size-5" />
+                        </span>
+                        <div className="space-y-1 text-left">
+                          <DialogTitle>Delete project?</DialogTitle>
+                          <DialogDescription>
+                            Remove this project from QC Portal. The folder and files on disk will
+                            not be deleted.
+                          </DialogDescription>
+                        </div>
+                      </div>
+                    </DialogHeader>
+                    <div className="rounded-lg border bg-muted/30 p-3">
+                      <div className="truncate text-sm font-semibold">{project.name}</div>
+                      <div className="mt-1 truncate font-mono text-xs text-muted-foreground">
+                        {project.rootPath}
+                      </div>
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor={`delete-confirm-${project.id}`}>
+                        Type project name to confirm
+                      </Label>
+                      <Input
+                        id={`delete-confirm-${project.id}`}
+                        value={deleteConfirmName}
+                        onChange={(e) => setDeleteConfirmName(e.target.value)}
+                        placeholder={project.name}
+                        autoComplete="off"
+                        disabled={deleteMutation.isPending}
+                      />
+                    </div>
+                    <DialogFooter>
+                      <DialogClose asChild>
+                        <Button variant="outline" disabled={deleteMutation.isPending}>
+                          Cancel
+                        </Button>
+                      </DialogClose>
+                      <Button
+                        variant="destructive"
+                        onClick={() => deleteMutation.mutate()}
+                        disabled={deleteMutation.isPending || !canDelete}
+                      >
+                        {deleteMutation.isPending ? (
+                          <Loader2 className="size-4 animate-spin" />
+                        ) : (
+                          <Trash2 className="size-4" />
+                        )}
+                        Delete project
+                      </Button>
+                    </DialogFooter>
+                  </DialogContent>
+                </Dialog>
+              )}
+            </div>
+          )}
+        </div>
+      </CardHeader>
+      {!editing && (
+        <CardContent className="mt-auto flex flex-wrap items-center justify-between gap-3 border-t bg-muted/20 px-4 py-2.5 pl-5">
+          <div className="flex flex-wrap gap-1.5">
+            <HealthChip ok={project.hasSkills} label="Skills" />
+            <HealthChip ok={project.hasMcp} label="MCP" />
+            <HealthChip ok={project.hasClaudeMd} label="CLAUDE.md" />
+          </div>
+          <div className="flex items-center gap-2">
+            {!notFound && readiness < 3 && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => initMutation.mutate()}
+                    disabled={initMutation.isPending}
+                    className="group/init relative gap-1.5 overflow-hidden border-primary/30 bg-gradient-to-r from-primary/10 to-primary/[0.02] text-primary transition-all duration-200 hover:border-primary/50 hover:from-primary hover:to-primary hover:text-primary-foreground hover:shadow-md hover:shadow-primary/25 active:scale-[0.98] disabled:opacity-70"
+                  >
+                    {/* sheen sweep on hover */}
+                    <span
+                      aria-hidden
+                      className="pointer-events-none absolute inset-y-0 -left-full w-1/2 -skew-x-12 bg-gradient-to-r from-transparent via-white/25 to-transparent transition-all duration-700 ease-out group-hover/init:left-full"
+                    />
+                    {initMutation.isPending ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <Wand2 className="h-3.5 w-3.5 transition-transform duration-300 group-hover/init:-rotate-12 group-hover/init:scale-110" />
+                    )}
+                    {initMutation.isPending ? 'Initializing…' : 'Init'}
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="top" className="max-w-none whitespace-nowrap">
+                  Scaffold the missing setup — CLAUDE.md, the qc-testing skill &amp; .mcp.json
+                </TooltipContent>
+              </Tooltip>
+            )}
+            {isActive ? (
+              <span className="flex items-center gap-1.5 text-sm font-medium text-primary">
+                <CheckCircle2 className="h-4 w-4" />
+                Active
+              </span>
+            ) : (
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => setActiveProjectId(project.id)}
+                className="group/btn gap-1.5 transition-all duration-200 hover:bg-primary hover:text-primary-foreground hover:shadow-md hover:shadow-primary/25 active:scale-[0.98]"
+              >
+                Switch
+                <ArrowRight className="h-3.5 w-3.5 transition-transform duration-200 group-hover/btn:translate-x-1" />
+              </Button>
+            )}
+          </div>
+        </CardContent>
+      )}
+
+      {/* Confirm + warn before moving the folder on disk. */}
+      <Dialog open={renameConfirmOpen} onOpenChange={(o) => !updateMutation.isPending && setRenameConfirmOpen(o)}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <div className="flex items-start gap-3">
+              <span className="flex size-10 shrink-0 items-center justify-center rounded-xl border border-amber-300/40 bg-amber-100 text-amber-700">
+                <FolderGit2 className="size-5" />
+              </span>
+              <div className="space-y-1 text-left">
+                <DialogTitle>Rename the folder on disk?</DialogTitle>
+                <DialogDescription>
+                  Renaming this project moves its folder on disk. Anything writing into it will
+                  break, so make sure nothing is running first.
+                </DialogDescription>
+              </div>
+            </div>
+          </DialogHeader>
+          <div className="space-y-2 overflow-hidden rounded-lg border bg-muted/30 p-3 text-xs">
+            <div className="flex items-center gap-2">
+              <span className="w-9 shrink-0 text-muted-foreground">From</span>
+              <span className="min-w-0 flex-1 truncate font-mono text-muted-foreground line-through">
+                {project.rootPath}
+              </span>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="w-9 shrink-0 text-muted-foreground">To</span>
+              <span className="min-w-0 flex-1 truncate font-mono font-medium text-foreground">
+                {renameTarget}
+              </span>
+            </div>
+          </div>
+          <ul className="space-y-1.5 text-[13px] text-muted-foreground">
+            <li className="flex gap-2">
+              <AlertCircle className="mt-0.5 size-3.5 shrink-0 text-amber-600" />
+              Make sure no QC run, crawl, or test-case job is using this project — files would be
+              written to the old path.
+            </li>
+            <li className="flex gap-2">
+              <AlertCircle className="mt-0.5 size-3.5 shrink-0 text-amber-600" />
+              Update any external references (terminals, editors, scripts) to the new path.
+            </li>
+          </ul>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setRenameConfirmOpen(false)}
+              disabled={updateMutation.isPending}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={() => {
+                setRenameConfirmOpen(false)
+                updateMutation.mutate()
+              }}
+              disabled={updateMutation.isPending}
+              className="bg-amber-600 text-white hover:bg-amber-700"
+            >
+              {updateMutation.isPending ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : (
+                <FolderGit2 className="size-4" />
+              )}
+              Rename &amp; move folder
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </Card>
+  )
+}
+
+/** The body of the "Add project" dialog. Calls onDone() once the project is created. */
+function AddProjectForm({ onDone }: { onDone: () => void }) {
+  const queryClient = useQueryClient()
+  const { refetch: refetchContext } = useProjects()
+  const [name, setName] = useState('')
+  const [rootPath, setRootPath] = useState('')
+
+  const mutation = useMutation({
+    mutationFn: () => createProject({ name: name.trim(), rootPath: rootPath.trim() }),
+    onSuccess: (p) => {
+      toast.success('Project added', { description: `${p.name} created.` })
+      setName('')
+      setRootPath('')
+      queryClient.invalidateQueries({ queryKey: ['projects'] })
+      refetchContext()
+      onDone()
+    },
+    onError: (err) =>
+      toast.error('Failed to add project', {
+        description: err instanceof Error ? err.message : 'Unknown error',
+      }),
+  })
+
+  const canSubmit = name.trim() && rootPath.trim()
+
+  return (
+    <form
+      onSubmit={(e) => {
+        e.preventDefault()
+        if (canSubmit) mutation.mutate()
+      }}
+      className="space-y-5"
+    >
+      <div className="space-y-2">
+        <Label htmlFor="new-project-name" className="flex items-center gap-1.5">
+          <FolderGit2 className="size-3.5 text-muted-foreground" />
+          Name
+        </Label>
+        <div className="group relative">
+          <FolderGit2 className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground transition-colors group-focus-within:text-primary" />
+          <Input
+            id="new-project-name"
+            placeholder="My App"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            autoFocus
+            className="h-11 pl-9 shadow-xs transition-shadow focus-visible:shadow-sm"
+          />
+        </div>
+        <p className="text-xs text-muted-foreground">A friendly label shown across QC.</p>
+      </div>
+
+      <div className="space-y-2">
+        <Label htmlFor="new-project-path" className="flex items-center gap-1.5">
+          <FolderOpen className="size-3.5 text-muted-foreground" />
+          Root path
+        </Label>
+        <div className="flex gap-2">
+          <div className="group relative flex-1">
+            <FolderOpen className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground transition-colors group-focus-within:text-primary" />
+            <Input
+              id="new-project-path"
+              placeholder="/Users/you/code/my-app"
+              value={rootPath}
+              onChange={(e) => setRootPath(e.target.value)}
+              className="h-11 pl-9 font-mono text-sm shadow-xs transition-shadow focus-visible:shadow-sm"
+            />
+          </div>
+          <BrowseButton onPick={setRootPath} />
+        </div>
+        <p className="text-xs text-muted-foreground">
+          Click <span className="font-medium text-foreground">Browse…</span> to pick the folder,
+          or paste an absolute path.
+        </p>
+      </div>
+
+      <div className="flex flex-col gap-3 border-t pt-4 sm:flex-row sm:items-center sm:justify-between">
+        <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+          <Info className="size-3.5" />
+          Registers an existing repo folder — nothing is created on disk.
+        </p>
+        <Button
+          type="submit"
+          disabled={mutation.isPending || !canSubmit}
+          className="group h-11 px-6 text-sm font-semibold shadow-sm transition-all hover:shadow-md active:scale-[0.98]"
+        >
+          {mutation.isPending ? (
+            <>
+              <Loader2 className="size-4 animate-spin" />
+              Adding…
+            </>
+          ) : (
+            <>
+              <Plus className="size-4" />
+              Add project
+              <ArrowRight className="size-4 transition-transform group-hover:translate-x-0.5" />
+            </>
+          )}
+        </Button>
+      </div>
+    </form>
+  )
+}
+
+function AddProjectDialog() {
+  const [open, setOpen] = useState(false)
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger asChild>
+        <Button className="h-11 shrink-0 px-5 font-semibold shadow-sm transition-all hover:shadow-md active:scale-[0.98]">
+          <Plus className="size-4" />
+          Add project
+        </Button>
+      </DialogTrigger>
+      <DialogContent className="sm:max-w-2xl">
+        <DialogHeader>
+          <div className="flex items-start gap-3">
+            <span className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-b from-primary to-primary/85 text-primary-foreground shadow-sm ring-1 ring-black/5">
+              <FolderPlus className="size-5" />
+            </span>
+            <div className="space-y-1 text-left">
+              <DialogTitle>Add project</DialogTitle>
+              <DialogDescription>
+                Register an existing repo folder so QC can run against it.
+              </DialogDescription>
+            </div>
+          </div>
+        </DialogHeader>
+        <AddProjectForm onDone={() => setOpen(false)} />
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function usageBarColor(pct: number): string {
+  if (pct >= 90) return 'bg-red-500'
+  if (pct >= 70) return 'bg-amber-500'
+  return 'bg-primary'
+}
+
+function UsageRow({ w }: { w: UsageWindow }) {
+  const pct = Math.max(0, Math.min(100, w.percent))
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-center justify-between gap-2 text-sm">
+        <span className="font-medium">{w.label}</span>
+        <span className="tabular-nums font-semibold">{w.percent}%</span>
+      </div>
+      <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
+        <div
+          className={cn('h-full rounded-full transition-all duration-500', usageBarColor(pct))}
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+      <div className="flex items-center gap-1 text-[11px] text-muted-foreground">
+        <Clock className="h-3 w-3" />
+        resets {w.reset}
+      </div>
+    </div>
+  )
+}
+
+function ClaudeUsageCard() {
+  const { data, isLoading, isError, refetch, isFetching } = useQuery({
+    queryKey: ['claude-usage'],
+    queryFn: claudeUsage,
+    refetchInterval: 60_000,
+  })
+
+  return (
+    <Card className="overflow-hidden shadow-sm">
+      <div className="flex items-center gap-2 border-b bg-muted/30 px-4 py-2.5">
+        <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+          <Gauge className="size-4" />
+        </span>
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-medium leading-tight">Claude usage</p>
+          <p className="text-[11px] text-muted-foreground">
+            Your subscription limits, live from Claude Code's <span className="font-mono">/usage</span>
+          </p>
+        </div>
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={() => refetch()}
+          disabled={isFetching}
+          aria-label="Refresh usage"
+          className="size-7 text-muted-foreground hover:text-foreground"
+        >
+          <Loader2 className={cn('size-3.5', isFetching && 'animate-spin')} />
+        </Button>
+      </div>
+      <CardContent className="space-y-4 p-4">
+        {isLoading ? (
+          <div className="flex items-center gap-2 py-4 text-sm text-muted-foreground">
+            <Loader2 className="size-4 animate-spin" />
+            Reading usage…
+          </div>
+        ) : isError || !data?.available ? (
+          <div className="flex items-start gap-2 rounded-lg border border-amber-200/70 bg-amber-50/50 px-3 py-2.5 text-[13px] text-amber-700">
+            <AlertCircle className="mt-0.5 size-4 shrink-0 text-amber-600" />
+            <span>
+              {data?.error ??
+                'Could not read Claude usage. Make sure Claude Code is signed in with a subscription.'}
+            </span>
+          </div>
+        ) : (
+          <>
+            {data.windows.map((w) => (
+              <UsageRow key={w.label} w={w} />
+            ))}
+            {data.details && (
+              <details className="group">
+                <summary className="cursor-pointer text-[11px] font-medium text-muted-foreground hover:text-foreground">
+                  What's contributing
+                </summary>
+                <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap rounded-lg border bg-muted/30 px-3 py-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
+                  {data.details}
+                </pre>
+              </details>
+            )}
+          </>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
+function AiRuntimeCard() {
+  const { data, isLoading, isError, error } = useQuery({
+    queryKey: ['claude-status'],
+    queryFn: claudeStatus,
+    staleTime: 60_000,
+    refetchOnWindowFocus: false,
+  })
+  const [results, setResults] = useState<Record<string, string>>({})
+  const testMutation = useMutation({
+    mutationFn: (model: string) => testClaudeModel(model),
+    onSuccess: (res) => {
+      setResults((m) => ({
+        ...m,
+        [res.model]: res.ok ? 'OK' : res.detail,
+      }))
+      if (res.ok) toast.success(`${res.model} works`, { description: res.detail })
+      else toast.error(`${res.model} failed`, { description: res.detail })
+    },
+    onError: (err, model) => {
+      const detail = err instanceof Error ? err.message : 'Model test failed'
+      setResults((m) => ({ ...m, [model]: detail }))
+      toast.error(`${model} failed`, { description: detail })
+    },
+  })
+  const testingModel = testMutation.isPending ? (testMutation.variables as string) : null
+  const modelUseCases: Record<string, string[]> = {
+    sonnet: ['QC default', 'Feature work', 'Bug fixes', 'Review'],
+    opus: ['Architecture', 'Hard bugs', 'Risky refactor', 'Security'],
+    haiku: ['Fast check', 'Summary', 'Small edit', 'Low risk'],
+  }
+
+  return (
+    <Card className="overflow-hidden py-0 shadow-sm">
+      <CardContent className="space-y-4 p-4">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+          <div className="flex min-w-0 items-start gap-3">
+            <span
+              className={cn(
+                'flex size-11 shrink-0 items-center justify-center rounded-xl border shadow-sm',
+                data?.installed
+                  ? 'border-emerald-200 bg-emerald-50 text-emerald-600'
+                  : 'border-amber-200 bg-amber-50 text-amber-600',
+              )}
+            >
+              {isLoading ? (
+                <Loader2 className="h-5 w-5 animate-spin" />
+              ) : data?.installed ? (
+                <Cpu className="h-5 w-5" />
+              ) : (
+                <AlertCircle className="h-5 w-5" />
+              )}
+            </span>
+            <div className="min-w-0 space-y-2">
+              <div className="flex flex-wrap items-center gap-2">
+                <h2 className="text-base font-semibold tracking-tight">AI runtime</h2>
+                <Badge
+                  variant={data?.installed ? 'secondary' : 'outline'}
+                  className={cn(
+                    'gap-1 font-medium',
+                    data?.installed
+                      ? 'bg-emerald-50 text-emerald-700'
+                      : 'bg-amber-50 text-amber-700',
+                  )}
+                >
+                  {data?.installed ? (
+                    <CheckCircle2 className="h-3 w-3" />
+                  ) : (
+                    <AlertCircle className="h-3 w-3" />
+                  )}
+                  {isLoading ? 'Checking' : data?.installed ? 'Ready' : 'Install required'}
+                </Badge>
+              </div>
+              <p className="max-w-xl text-sm text-muted-foreground">
+                {isLoading
+                  ? 'Checking Claude Code on this device…'
+                  : data?.installed
+                    ? 'Choose a Claude Code model alias and run a quick local smoke test.'
+                    : 'Claude Code CLI is required before QC can test models.'}
+              </p>
+              <div className="flex flex-wrap gap-2">
+                <span className="inline-flex items-center gap-1.5 rounded-md border bg-muted/30 px-2 py-1 text-xs text-muted-foreground">
+                  <Terminal className="h-3.5 w-3.5" />
+                  <span className="font-mono">{data?.binary ?? 'claude'}</span>
+                </span>
+                <span className="inline-flex items-center gap-1.5 rounded-md border bg-muted/30 px-2 py-1 text-xs text-muted-foreground">
+                  <Gauge className="h-3.5 w-3.5" />
+                  <span className="font-mono">{data?.version ?? 'version pending'}</span>
+                </span>
+              </div>
+              {(isError || data?.error) && (
+                <p className="text-xs text-destructive">
+                  {isError && error instanceof Error ? error.message : data?.error}
+                </p>
+              )}
+              {!isLoading && !data?.installed && data?.installCommand && (
+                <code className="block w-fit rounded-md bg-muted px-2 py-1 font-mono text-xs text-muted-foreground">
+                  {data.installCommand}
+                </code>
+              )}
+            </div>
+          </div>
+        </div>
+
+        <div className="flex flex-col gap-2">
+          {(data?.models ?? []).map((model) => {
+            const testing = testingModel === model.id
+            return (
+              <div
+                key={model.id}
+                className="flex items-center gap-3 rounded-lg border bg-muted/20 px-3 py-2 transition-colors hover:bg-muted/30"
+              >
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="text-sm font-semibold tracking-tight">{model.label}</div>
+                    <Badge variant="outline" className="font-mono text-[10px]">
+                      {model.id}
+                    </Badge>
+                  </div>
+                  <div className="mt-0.5 line-clamp-3 text-[11px] leading-snug text-muted-foreground">
+                    {model.description}
+                  </div>
+                  <div className="mt-1.5 flex flex-wrap gap-1">
+                    {(modelUseCases[model.id] ?? []).map((item) => (
+                      <span
+                        key={item}
+                        className="rounded-full bg-background px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground"
+                      >
+                        {item}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={!data?.installed || testing || testMutation.isPending}
+                  onClick={() => testMutation.mutate(model.id)}
+                  className="h-8 shrink-0 px-3"
+                >
+                  {testing ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <PlayCircle className="h-3.5 w-3.5" />
+                  )}
+                  Test
+                </Button>
+                {results[model.id] && (
+                  <div
+                    className={cn(
+                      'max-w-28 shrink-0 truncate rounded-md px-2 py-1 text-[11px]',
+                      results[model.id].startsWith('OK')
+                        ? 'bg-emerald-50 text-emerald-700'
+                        : 'bg-red-50 text-destructive',
+                    )}
+                    title={results[model.id]}
+                  >
+                    {results[model.id]}
+                  </div>
+                )}
+              </div>
+            )
+          })}
+          {isLoading &&
+            Array.from({ length: 3 }).map((_, i) => (
+              <div key={i} className="h-[58px] animate-pulse rounded-lg bg-muted" />
+            ))}
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
+
+export default function ProjectsPage() {
+  const [searchParams, setSearchParams] = useSearchParams()
+  const { data, isLoading, isError, error } = useQuery({
+    queryKey: ['projects'],
+    queryFn: listProjects,
+  })
+  const { activeProjectId } = useProjects()
+  const [query, setQuery] = useState('')
+  const tabParam = searchParams.get('tab')
+  const activeTab = tabParam === 'models' ? 'models' : 'projects'
+
+  function onTabChange(value: string) {
+    if (value !== 'projects' && value !== 'models') return
+    const next = new URLSearchParams(searchParams)
+    next.set('tab', value)
+    setSearchParams(next)
+  }
+
+  const stats = useMemo(() => {
+    const list = data ?? []
+    return {
+      total: list.length,
+      ready: list.filter((p) => p.hasSkills && p.hasMcp && p.hasClaudeMd).length,
+      missing: list.filter((p) => p.exists === false).length,
+      activeName: list.find((p) => p.id === activeProjectId)?.name ?? '—',
+    }
+  }, [data, activeProjectId])
+
+  const filtered = useMemo(() => {
+    const list = data ?? []
+    const q = query.trim().toLowerCase()
+    if (!q) return list
+    return list.filter(
+      (p) =>
+        p.name.toLowerCase().includes(q) || p.rootPath.toLowerCase().includes(q),
+    )
+  }, [data, query])
+
+  const hasProjects = !isLoading && !isError && data && data.length > 0
+
+  return (
+    <div className="mx-auto max-w-6xl space-y-8">
+      <header className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+        <div className="space-y-1">
+          <h1 className="text-3xl font-semibold tracking-tight">Settings</h1>
+          <p className="max-w-2xl text-sm text-muted-foreground">
+            Manage the repo folders QC runs against and the Claude Code models used for AI
+            workflows.
+          </p>
+        </div>
+      </header>
+
+      <Tabs value={activeTab} onValueChange={onTabChange} className="space-y-6">
+        <TabsList className="grid h-auto w-full grid-cols-1 gap-3 rounded-none bg-transparent p-0 sm:grid-cols-2">
+          <TabsTrigger
+            value="projects"
+            className="group h-auto justify-start gap-3 rounded-lg border bg-card px-4 py-3 text-left shadow-sm transition-all hover:-translate-y-0.5 hover:bg-muted/30 hover:shadow-md data-[state=active]:border-primary/40 data-[state=active]:bg-primary/5 data-[state=active]:text-foreground data-[state=active]:shadow-md"
+          >
+            <span className="flex size-10 shrink-0 items-center justify-center rounded-lg border bg-muted/40 text-muted-foreground transition-colors group-data-[state=active]:border-primary/20 group-data-[state=active]:bg-primary/10 group-data-[state=active]:text-primary">
+              <FolderGit2 className="size-5" />
+            </span>
+            <span className="min-w-0 flex-1 space-y-0.5">
+              <span className="block text-sm font-semibold tracking-tight">Projects</span>
+              <span className="block truncate text-xs font-normal text-muted-foreground">
+                Folders, setup, active repo
+              </span>
+            </span>
+            <Badge variant="secondary" className="shrink-0 font-mono text-[10px]">
+              {stats.total}
+            </Badge>
+          </TabsTrigger>
+          <TabsTrigger
+            value="models"
+            className="group h-auto justify-start gap-3 rounded-lg border bg-card px-4 py-3 text-left shadow-sm transition-all hover:-translate-y-0.5 hover:bg-muted/30 hover:shadow-md data-[state=active]:border-primary/40 data-[state=active]:bg-primary/5 data-[state=active]:text-foreground data-[state=active]:shadow-md"
+          >
+            <span className="flex size-10 shrink-0 items-center justify-center rounded-lg border bg-muted/40 text-muted-foreground transition-colors group-data-[state=active]:border-primary/20 group-data-[state=active]:bg-primary/10 group-data-[state=active]:text-primary">
+              <Cpu className="size-5" />
+            </span>
+            <span className="min-w-0 flex-1 space-y-0.5">
+              <span className="block text-sm font-semibold tracking-tight">AI models</span>
+              <span className="block truncate text-xs font-normal text-muted-foreground">
+                Claude Code model tests
+              </span>
+            </span>
+            <Badge variant="secondary" className="shrink-0 text-[10px]">
+              3 models
+            </Badge>
+          </TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="projects" className="space-y-6">
+          <section className="overflow-hidden rounded-xl border bg-card shadow-sm">
+            <div className="flex flex-col gap-4 bg-muted/20 p-5 sm:flex-row sm:items-center sm:justify-between">
+              <div className="space-y-1">
+                <h2 className="text-lg font-semibold tracking-tight">Projects</h2>
+                <p className="max-w-2xl text-sm text-muted-foreground">
+                  Add repo folders, choose the active workspace, and track setup readiness.
+                </p>
+              </div>
+              <AddProjectDialog />
+            </div>
+
+            {hasProjects && (
+              <div className="grid gap-3 p-4 sm:grid-cols-3">
+                <StatTile icon={FolderGit2} label="Registered" value={stats.total} />
+                <StatTile
+                  icon={CheckCircle2}
+                  label="Active project"
+                  value={<span className="truncate">{stats.activeName}</span>}
+                  tone="primary"
+                />
+                <StatTile
+                  icon={stats.missing > 0 ? AlertCircle : Check}
+                  label={stats.missing > 0 ? 'Folders not found' : 'Fully configured'}
+                  value={stats.missing > 0 ? stats.missing : stats.ready}
+                  tone={stats.missing > 0 ? 'amber' : 'emerald'}
+                />
+              </div>
+            )}
+
+            {hasProjects && data.length > 3 && (
+              <div className="flex flex-col gap-3 border-t bg-background/70 p-4 sm:flex-row sm:items-center sm:justify-between">
+                <div className="relative w-full max-w-md">
+                  <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+                  <Input
+                    placeholder="Filter by name or path…"
+                    value={query}
+                    onChange={(e) => setQuery(e.target.value)}
+                    className="h-10 pl-9"
+                  />
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Showing {filtered.length} of {data.length}
+                </p>
+              </div>
+            )}
+          </section>
+
+          {isLoading && (
+            <div className="grid gap-4">
+              {Array.from({ length: 4 }).map((_, i) => (
+                <ProjectCardSkeleton key={i} />
+              ))}
+            </div>
+          )}
+
+          {isError && (
+            <div className="flex items-start gap-3 rounded-lg border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm text-destructive">
+              <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+              <span>{error instanceof Error ? error.message : 'Failed to load projects'}</span>
+            </div>
+          )}
+
+          {hasProjects && filtered.length > 0 && (
+            <div className="grid gap-4">
+              {filtered.map((p) => (
+                <ProjectCard key={p.id} project={p} />
+              ))}
+            </div>
+          )}
+
+          {hasProjects && filtered.length === 0 && (
+            <div className="flex flex-col items-center justify-center gap-2 rounded-xl border border-dashed bg-muted/20 px-6 py-12 text-center">
+              <Search className="h-6 w-6 text-muted-foreground" />
+              <p className="text-sm text-muted-foreground">
+                No projects match <span className="font-medium text-foreground">“{query}”</span>.
+              </p>
+              <Button variant="ghost" size="sm" onClick={() => setQuery('')}>
+                Clear filter
+              </Button>
+            </div>
+          )}
+
+          {!isLoading && !isError && data && data.length === 0 && (
+            <div className="flex flex-col items-center justify-center gap-3 rounded-xl border border-dashed bg-muted/20 px-6 py-14 text-center">
+              <span className="flex h-12 w-12 items-center justify-center rounded-full border bg-background text-muted-foreground shadow-sm">
+                <FolderGit2 className="h-6 w-6" />
+              </span>
+              <div className="space-y-1">
+                <h2 className="text-base font-medium tracking-tight">No projects yet</h2>
+                <p className="mx-auto max-w-sm text-sm text-muted-foreground">
+                  Register your first repo folder to start running QC against it.
+                </p>
+              </div>
+              <AddProjectDialog />
+            </div>
+          )}
+        </TabsContent>
+
+        <TabsContent value="models" className="space-y-6">
+          <section className="rounded-xl border bg-card p-5 shadow-sm">
+            <div className="space-y-1">
+              <h2 className="text-lg font-semibold tracking-tight">AI models</h2>
+              <p className="max-w-2xl text-sm text-muted-foreground">
+                Check Claude Code availability and test which model fits quick checks, default QC,
+                or deeper reasoning work.
+              </p>
+            </div>
+          </section>
+          <ClaudeUsageCard />
+          <AiRuntimeCard />
+        </TabsContent>
+      </Tabs>
+    </div>
+  )
+}
+
+function ProjectCardSkeleton() {
+  return (
+    <Card className="overflow-hidden py-0 shadow-sm">
+      <CardHeader className="flex flex-row items-start justify-between gap-3 space-y-0 p-5">
+        <div className="flex-1 space-y-2">
+          <div className="flex items-center gap-2">
+            <span className="h-8 w-8 animate-pulse rounded-lg bg-muted" />
+            <span className="h-4 w-32 animate-pulse rounded bg-muted" />
+          </div>
+          <span className="ml-10 block h-3 w-48 animate-pulse rounded bg-muted" />
+        </div>
+        <div className="flex gap-1">
+          <span className="h-9 w-9 animate-pulse rounded-md bg-muted" />
+          <span className="h-9 w-9 animate-pulse rounded-md bg-muted" />
+        </div>
+      </CardHeader>
+      <CardContent className="flex items-center justify-between gap-3 border-t bg-muted/20 px-5 py-4">
+        <div className="flex gap-1.5">
+          <span className="h-7 w-16 animate-pulse rounded-full bg-muted" />
+          <span className="h-7 w-12 animate-pulse rounded-full bg-muted" />
+          <span className="h-7 w-20 animate-pulse rounded-full bg-muted" />
+        </div>
+        <span className="h-8 w-24 animate-pulse rounded-md bg-muted" />
+      </CardContent>
+    </Card>
+  )
+}

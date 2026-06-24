@@ -1,0 +1,14 @@
+node_modules/
+dist/
+*.log
+data/*.db
+data/*.db-*
+data/server.pid
+runtime/
+.playwright-mcp/
+.env
+.DS_Store
+
+# dev scratch (not part of the release)
+snap.md
+settings-projects-*.png
