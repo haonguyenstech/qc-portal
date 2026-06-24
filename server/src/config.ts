@@ -15,6 +15,13 @@ export const testResultDirFor = (root: string) =>
 export const skillsDirFor = (root: string) => path.join(root, '.claude', 'skills')
 export const mcpJsonFor = (root: string) => path.join(root, '.mcp.json')
 
+// Skills bundled with the portal itself (shipped in the repo at <root>/templates/
+// skills/<name>). `init` scaffolds the `qc-testing` skill from here when there's
+// no existing project to clone it from — e.g. on a brand-new install. `here` is
+// server/dist at runtime, so the repo root is two levels up (same as DB_PATH).
+export const BUNDLED_SKILLS_DIR = path.join(here, '..', '..', 'templates', 'skills')
+export const bundledSkillDir = (name: string) => path.join(BUNDLED_SKILLS_DIR, name)
+
 // The portal is a STANDALONE tool that manages many projects — it does not assume
 // it lives inside any project. Optionally seed ONE default project from QC_REPO_ROOT
 // (an absolute repo path). If unset or not a real folder, the portal simply starts

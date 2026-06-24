@@ -358,8 +358,8 @@ function ConnectServices({
     }
     return (
       <div className="flex min-w-0 items-center gap-1 rounded-md bg-muted/50 px-2 py-1 text-muted-foreground">
-        <div className="min-w-0 flex-1 truncate font-mono text-[11px]" title={`${key}=${value}`}>
-          API key: {key}={value}
+        <div className="min-w-0 flex-1 truncate font-mono text-[11px]" title={value}>
+          {value}
         </div>
         <button
           type="button"

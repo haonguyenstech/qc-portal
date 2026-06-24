@@ -9,7 +9,7 @@ import {
   listRuns,
   updateProject,
 } from '../db.js'
-import { mcpJsonFor, skillsDirFor } from '../config.js'
+import { bundledSkillDir, mcpJsonFor, skillsDirFor } from '../config.js'
 import { pickFolderNative } from '../folderPicker.js'
 import { listTestcaseJobs } from '../testcaseJobs.js'
 import { listCrawlJobs } from '../crawlJobs.js'
@@ -228,20 +228,27 @@ projectsRouter.post('/:id/init', (req, res) => {
       created.push('CLAUDE.md')
     }
 
-    // 2. .claude/skills/ — only scaffold the `qc-testing` skill, never the
-    // template's other skills. We copy just that one subfolder (if the template
-    // has it) so a fresh project starts with the QC brain and nothing else.
+    // 2. .claude/skills/qc-testing — scaffold ONLY the `qc-testing` skill (the QC
+    // brain), never the template's other skills. Source preference: an existing
+    // template project's copy (may be customized), else the skill bundled with the
+    // portal (templates/skills/qc-testing) — so a brand-new install with no other
+    // projects to clone from still gets the skill. Keyed on the skill folder, not
+    // the parent, so a pre-existing empty .claude/skills doesn't block it.
     const targetSkills = skillsDirFor(root)
-    if (!isDir(targetSkills)) {
-      fs.mkdirSync(targetSkills, { recursive: true })
+    const targetQcSkill = path.join(targetSkills, QC_SKILL)
+    if (!isDir(targetQcSkill)) {
       const tplQcSkill = template ? path.join(skillsDirFor(template.rootPath), QC_SKILL) : null
-      if (tplQcSkill && isDir(tplQcSkill)) {
-        fs.cpSync(tplQcSkill, path.join(targetSkills, QC_SKILL), {
-          recursive: true,
-          filter: skipDsStore,
-        })
+      const sourceQcSkill =
+        tplQcSkill && isDir(tplQcSkill)
+          ? tplQcSkill
+          : isDir(bundledSkillDir(QC_SKILL))
+            ? bundledSkillDir(QC_SKILL)
+            : null
+      if (sourceQcSkill) {
+        fs.mkdirSync(targetSkills, { recursive: true })
+        fs.cpSync(sourceQcSkill, targetQcSkill, { recursive: true, filter: skipDsStore })
+        created.push('.claude/skills/qc-testing')
       }
-      created.push('.claude/skills')
     }
 
     // 3. .mcp.json
