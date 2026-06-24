@@ -89,11 +89,11 @@ function testServer(cwd: string, name: string): Promise<McpTestResult> {
     child.stderr?.on('data', (d) => (out += String(d)))
     child.on('error', (e) => {
       clearTimeout(timer)
-      resolve({
-        ok: false,
-        detail: e instanceof Error ? e.message : 'Failed to run claude mcp list.',
-        status: 'failed',
-      })
+      const msg = e instanceof Error ? e.message : ''
+      const detail = /ENOENT/.test(msg)
+        ? `Could not find the Claude CLI (tried "${CLAUDE_BIN}"). Install Claude Code and ensure \`claude\` is on PATH, or set the QC_CLAUDE_BIN env var to its full path, then restart the portal.`
+        : msg || 'Failed to run claude mcp list.'
+      resolve({ ok: false, detail, status: 'failed' })
     })
     child.on('close', () => {
       clearTimeout(timer)

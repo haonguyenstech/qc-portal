@@ -35,7 +35,37 @@ export const DEFAULT_PROJECT_ROOT: string | null = resolveDefaultRoot()
 export const PORT = Number(process.env.QC_PORT ?? 5174)
 
 // The `claude` binary. Override with QC_CLAUDE_BIN if not on PATH.
-export const CLAUDE_BIN = process.env.QC_CLAUDE_BIN ?? 'claude'
+//
+// On Windows the portal server is launched detached by the `qc-portal` command,
+// and `%APPDATA%\npm` (where `npm i -g` puts `claude.cmd`) is not always on that
+// process's PATH — which surfaces as `spawn claude ENOENT`. So if no override is
+// given, probe the standard install locations and use an absolute path when we
+// find one. Falls back to plain `claude` (PATH lookup via cross-spawn) so
+// non-Windows behaviour is unchanged.
+function resolveClaudeBin(): string {
+  const override = process.env.QC_CLAUDE_BIN
+  if (override) return override
+  if (process.platform === 'win32') {
+    const { APPDATA, LOCALAPPDATA, USERPROFILE } = process.env
+    const candidates = [
+      APPDATA && path.join(APPDATA, 'npm', 'claude.cmd'),
+      APPDATA && path.join(APPDATA, 'npm', 'claude.exe'),
+      LOCALAPPDATA && path.join(LOCALAPPDATA, 'Programs', 'claude', 'claude.exe'),
+      USERPROFILE && path.join(USERPROFILE, '.local', 'bin', 'claude.exe'),
+      USERPROFILE && path.join(USERPROFILE, 'AppData', 'Local', 'claude', 'claude.exe'),
+    ].filter((p): p is string => Boolean(p))
+    for (const candidate of candidates) {
+      try {
+        if (fs.statSync(candidate).isFile()) return candidate
+      } catch {
+        /* not here — try next */
+      }
+    }
+  }
+  return 'claude'
+}
+
+export const CLAUDE_BIN = resolveClaudeBin()
 
 // Local SQLite database file.
 export const DB_PATH =
