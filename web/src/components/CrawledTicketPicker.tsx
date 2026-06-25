@@ -4,7 +4,6 @@ import { Link } from 'react-router-dom'
 import {
   CheckCircle2,
   ChevronsUpDown,
-  ClipboardList,
   DownloadCloud,
   Loader2,
   Search,
@@ -14,7 +13,8 @@ import {
 import { cn } from '@/lib/utils'
 import { Label } from '@/components/ui/label'
 import { listCrawledTickets, type CrawledTicket } from '@/lib/api'
-import { relativeTime } from '@/lib/format'
+import { CrawledStatusHeader, CrawledTicketRow } from '@/components/CrawledTicketRow'
+import { groupCrawledByStatus } from '@/lib/crawled-tickets'
 
 interface Props {
   value: string
@@ -92,8 +92,8 @@ export function CrawledTicketPicker({ value, onChange, projectId, disabled }: Pr
           onClick={() => setOpen((o) => !o)}
           aria-expanded={open}
           className={cn(
-            'flex h-11 w-full items-center gap-2 rounded-md border bg-background px-3 text-left text-sm shadow-xs transition-all',
-            'hover:border-primary/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40',
+            'flex h-11 w-full items-center gap-2 rounded-xl border border-border/60 bg-background px-3 text-left text-sm shadow-none transition-all',
+            'hover:border-border focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40',
             'disabled:cursor-not-allowed disabled:opacity-50',
             open && 'border-primary/50 ring-2 ring-ring/30',
           )}
@@ -136,9 +136,9 @@ export function CrawledTicketPicker({ value, onChange, projectId, disabled }: Pr
         </button>
 
         {open && !disabled && (
-          <div className="absolute z-20 mt-1.5 w-full overflow-hidden rounded-lg border bg-popover shadow-lg">
+          <div className="absolute z-20 mt-1.5 w-full overflow-hidden rounded-2xl border border-border/60 bg-popover shadow-lg">
             {/* Search box */}
-            <div className="flex items-center gap-2 border-b px-3 py-2">
+            <div className="flex items-center gap-2 border-b border-border/60 px-3 py-2">
               <Search className="size-3.5 shrink-0 text-muted-foreground" />
               <input
                 autoFocus
@@ -159,7 +159,7 @@ export function CrawledTicketPicker({ value, onChange, projectId, disabled }: Pr
               )}
             </div>
 
-            <div className="max-h-72 overflow-y-auto p-1">
+            <div className="max-h-72 overflow-y-auto">
               {isLoading ? (
                 <div className="flex items-center gap-2 px-3 py-6 text-xs text-muted-foreground">
                   <Loader2 className="size-3.5 animate-spin" />
@@ -175,7 +175,7 @@ export function CrawledTicketPicker({ value, onChange, projectId, disabled }: Pr
                   <Link
                     to="/tickets"
                     onClick={() => setOpen(false)}
-                    className="mt-1 inline-flex items-center gap-1 rounded-md bg-primary px-2.5 py-1 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/90"
+                    className="mt-1 inline-flex items-center gap-1 rounded-full bg-primary px-2.5 py-1 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/90"
                   >
                     <DownloadCloud className="size-3.5" />
                     Go to Tickets
@@ -187,52 +187,26 @@ export function CrawledTicketPicker({ value, onChange, projectId, disabled }: Pr
                   No crawled ticket matches “{query}”.
                 </div>
               ) : (
-                tickets.map((t) => {
-                  const id = idOf(t)
-                  const isSel = id === value
-                  return (
-                    <button
-                      key={t.name}
-                      type="button"
-                      onClick={() => {
-                        onChange(id)
-                        setOpen(false)
-                        setQuery('')
-                      }}
-                      className={cn(
-                        'flex w-full items-start gap-2.5 rounded-md px-2.5 py-2 text-left transition-colors',
-                        isSel ? 'bg-primary/10' : 'hover:bg-accent',
-                      )}
-                    >
-                      <span
-                        className={cn(
-                          'mt-0.5 grid size-4 shrink-0 place-items-center rounded-full border',
-                          isSel ? 'border-primary bg-primary text-primary-foreground' : 'border-muted-foreground/40',
-                        )}
-                        aria-hidden
-                      >
-                        {isSel && <CheckCircle2 className="size-3" />}
-                      </span>
-                      <span className="min-w-0 flex-1">
-                        <span className="flex items-center gap-2">
-                          <span className="truncate font-mono text-xs font-semibold">{id}</span>
-                          {t.testcaseVersions > 0 && (
-                            <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-violet-500/10 px-1.5 py-0.5 text-[10px] font-medium text-violet-600">
-                              <ClipboardList className="size-2.5" />
-                              {t.testcaseVersions}
-                            </span>
-                          )}
-                        </span>
-                        {t.title && <span className="line-clamp-1 text-sm">{t.title}</span>}
-                        {t.crawledAt && (
-                          <span className="text-[11px] text-muted-foreground">
-                            crawled {relativeTime(t.crawledAt)}
-                          </span>
-                        )}
-                      </span>
-                    </button>
-                  )
-                })
+                groupCrawledByStatus(tickets).map((group) => (
+                  <div key={group.status || '∅'}>
+                    <CrawledStatusHeader status={group.status} count={group.tickets.length} />
+                    <ul className="divide-y">
+                      {group.tickets.map((t) => (
+                        <li key={t.name}>
+                          <CrawledTicketRow
+                            ticket={t}
+                            selected={idOf(t) === value}
+                            onSelect={() => {
+                              onChange(idOf(t))
+                              setOpen(false)
+                              setQuery('')
+                            }}
+                          />
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ))
               )}
             </div>
           </div>

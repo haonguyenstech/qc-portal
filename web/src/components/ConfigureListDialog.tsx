@@ -104,7 +104,7 @@ export function ConfigureListDialog({
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            <span className="flex size-8 items-center justify-center rounded-lg bg-gradient-to-b from-primary to-primary/85 text-primary-foreground shadow-sm ring-1 ring-black/5">
+            <span className="flex size-8 items-center justify-center rounded-xl bg-foreground text-background">
               <ListChecks className="size-4" />
             </span>
             Pick a ClickUp list
@@ -122,7 +122,7 @@ export function ConfigureListDialog({
               Workspace
             </Label>
             <Select value={team} onValueChange={setTeam}>
-              <SelectTrigger className="h-10 w-full">
+              <SelectTrigger className="h-10 w-full rounded-xl">
                 <SelectValue placeholder="Choose a workspace" />
               </SelectTrigger>
               <SelectContent>
@@ -141,7 +141,7 @@ export function ConfigureListDialog({
               Space
             </Label>
             <Select value={space} onValueChange={setSpace} disabled={!team || spacesLoading}>
-              <SelectTrigger className="h-10 w-full">
+              <SelectTrigger className="h-10 w-full rounded-xl">
                 <SelectValue placeholder={spacesLoading ? 'Loading…' : 'Choose a space'} />
               </SelectTrigger>
               <SelectContent>
@@ -161,7 +161,7 @@ export function ConfigureListDialog({
               {listsLoading && <Loader2 className="size-3 animate-spin text-muted-foreground" />}
             </Label>
             <Select value={listId} onValueChange={setListId} disabled={!space || listsLoading}>
-              <SelectTrigger className="h-10 w-full">
+              <SelectTrigger className="h-10 w-full rounded-xl">
                 <SelectValue placeholder={listsLoading ? 'Loading…' : 'Choose a list'} />
               </SelectTrigger>
               <SelectContent>
@@ -184,7 +184,7 @@ export function ConfigureListDialog({
               type="button"
               variant="ghost"
               size="sm"
-              className="text-muted-foreground hover:text-destructive"
+              className="rounded-full text-muted-foreground hover:text-destructive"
               onClick={() => {
                 onClear()
                 onOpenChange(false)
@@ -195,7 +195,12 @@ export function ConfigureListDialog({
           ) : (
             <span />
           )}
-          <Button type="button" onClick={onSubmit} disabled={!chosenList}>
+          <Button
+            type="button"
+            onClick={onSubmit}
+            disabled={!chosenList}
+            className="rounded-full transition-all duration-200 active:scale-[0.98]"
+          >
             Use this list
           </Button>
         </DialogFooter>

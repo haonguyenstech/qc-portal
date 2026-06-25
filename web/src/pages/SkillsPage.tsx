@@ -150,7 +150,7 @@ function FileForm({
   const charCount = content.length
   const isMarkdown = /\.m/.test(file.name) && file.name.toLowerCase().endsWith('.md')
 
-  const [mode, setMode] = useState<'edit' | 'preview'>('edit')
+  const [mode, setMode] = useState<'edit' | 'preview'>('preview')
   const [copied, setCopied] = useState(false)
 
   async function copy() {
@@ -181,7 +181,7 @@ function FileForm({
           </span>
 
           {isMarkdown && (
-            <div className="flex rounded-md border bg-background p-0.5">
+            <div className="flex rounded-xl border border-border/60 bg-background p-0.5">
               <button
                 type="button"
                 onClick={() => setMode('edit')}
@@ -492,7 +492,7 @@ function NewSkillForm({
                 type="submit"
                 size="lg"
                 disabled={mutation.isPending || !name.trim()}
-                className="group h-11 px-6 text-sm font-semibold shadow-sm transition-all hover:shadow-md active:scale-[0.98]"
+                className="group h-11 rounded-full px-6 text-sm font-semibold shadow-none transition-all duration-200 hover:shadow-sm active:scale-[0.98]"
               >
                 {mutation.isPending ? (
                   <>
@@ -525,7 +525,7 @@ function NewSkillDialog({
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
-        <Button className="group shadow-sm transition-all hover:shadow-md active:scale-[0.98]">
+        <Button className="group rounded-full shadow-none transition-all duration-200 hover:shadow-sm active:scale-[0.98]">
           <Plus className="size-4" />
           New skill
         </Button>
@@ -533,7 +533,7 @@ function NewSkillDialog({
       <DialogContent className="sm:max-w-2xl">
         <DialogHeader>
           <div className="flex items-start gap-3">
-            <span className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-b from-primary to-primary/85 text-primary-foreground shadow-sm ring-1 ring-black/5">
+            <span className="flex size-10 shrink-0 items-center justify-center rounded-2xl bg-foreground text-background">
               <Wrench className="size-5" />
             </span>
             <div className="space-y-1 text-left">
@@ -571,7 +571,7 @@ function OpenFolderButton({ projectId }: { projectId: string }) {
       size="sm"
       onClick={() => mutation.mutate()}
       disabled={mutation.isPending}
-      className="shrink-0 gap-1.5 active:scale-[0.98]"
+      className="shrink-0 gap-1.5 rounded-full active:scale-[0.98]"
     >
       {mutation.isPending ? (
         <Loader2 className="size-3.5 animate-spin" />
@@ -666,7 +666,7 @@ function EditSkillDialog({
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
           <div className="flex items-start gap-3">
-            <span className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-b from-primary to-primary/85 text-primary-foreground shadow-sm ring-1 ring-black/5">
+            <span className="flex size-10 shrink-0 items-center justify-center rounded-2xl bg-foreground text-background">
               <Pencil className="size-5" />
             </span>
             <div className="space-y-1 text-left">
@@ -802,7 +802,7 @@ function DeleteSkillDialog({
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
           <div className="flex items-start gap-3">
-            <span className="flex size-10 shrink-0 items-center justify-center rounded-xl border border-destructive/20 bg-destructive/10 text-destructive">
+            <span className="flex size-10 shrink-0 items-center justify-center rounded-2xl border border-destructive/20 bg-destructive/10 text-destructive">
               <Trash2 className="size-5" />
             </span>
             <div className="space-y-1 text-left">
@@ -816,7 +816,7 @@ function DeleteSkillDialog({
           </div>
         </DialogHeader>
 
-        <div className="rounded-lg border bg-muted/30 p-3">
+        <div className="rounded-xl border border-border/60 bg-muted/30 p-3">
           <div className="truncate font-mono text-sm font-semibold">{skill.name}</div>
           {skill.description && (
             <div className="mt-1 line-clamp-2 text-xs text-muted-foreground">
@@ -885,13 +885,18 @@ export default function SkillsPage() {
   if (!activeProjectId) {
     return (
       <div className="mx-auto max-w-6xl space-y-6">
-        <header className="space-y-1">
-          <h1 className="text-3xl font-semibold tracking-tight">Skills</h1>
-          <p className="text-sm text-muted-foreground">
-            Edit the QC skill files that drive acceptance testing.
-          </p>
+        <header className="flex items-start gap-3">
+          <span className="mt-0.5 flex size-11 shrink-0 items-center justify-center rounded-2xl bg-foreground text-background">
+            <Wrench className="size-5" />
+          </span>
+          <div className="space-y-1">
+            <h1 className="text-3xl font-semibold tracking-tight">Skills</h1>
+            <p className="text-sm text-muted-foreground">
+              Edit the QC skill files that drive acceptance testing.
+            </p>
+          </div>
         </header>
-        <Card className="border-dashed">
+        <Card className="rounded-3xl border-dashed border-border/60 shadow-none">
           <CardContent className="flex flex-col items-center justify-center gap-3 py-20 text-center">
             <div className="flex h-12 w-12 items-center justify-center rounded-full bg-muted">
               <Wrench className="h-6 w-6 text-muted-foreground" />
@@ -909,15 +914,20 @@ export default function SkillsPage() {
   }
 
   return (
-    <div className="mx-auto flex max-w-6xl flex-col gap-5">
+    <div className="mx-auto max-w-6xl space-y-8">
       <header className="space-y-4">
         <div className="flex flex-wrap items-end justify-between gap-3">
-          <div className="space-y-1">
-            <h1 className="text-3xl font-semibold tracking-tight">Skills</h1>
-            <p className="text-sm text-muted-foreground">
-              Edit the QC skill files that drive acceptance testing
-              {activeProject ? ` for ${activeProject.name}` : ''}.
-            </p>
+          <div className="flex items-start gap-3">
+            <span className="mt-0.5 flex size-11 shrink-0 items-center justify-center rounded-2xl bg-foreground text-background">
+              <Wrench className="size-5" />
+            </span>
+            <div className="space-y-1">
+              <h1 className="text-3xl font-semibold tracking-tight">Skills</h1>
+              <p className="text-sm text-muted-foreground">
+                Edit the QC skill files that drive acceptance testing
+                {activeProject ? ` for ${activeProject.name}` : ''}.
+              </p>
+            </div>
           </div>
           <NewSkillDialog
             projectId={activeProjectId}
@@ -930,9 +940,9 @@ export default function SkillsPage() {
 
         {/* Per-project context: makes it unmistakable which .claude/skills is being edited. */}
         {activeProject && (
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-xl border bg-card px-4 py-3 shadow-sm">
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-2xl border border-border/60 bg-card px-4 py-3 shadow-none">
             <span className="flex items-center gap-2">
-              <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-primary/20 bg-primary/10 text-primary">
+              <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-border/60 bg-muted/60 text-muted-foreground">
                 <FolderGit2 className="h-4 w-4" />
               </span>
               <span className="leading-tight">
@@ -946,7 +956,7 @@ export default function SkillsPage() {
             </span>
             <div className="ml-auto flex min-w-0 items-center gap-2">
               <span
-                className="flex min-w-0 items-center gap-1.5 rounded-md border bg-muted/40 px-2.5 py-1.5 font-mono text-xs text-muted-foreground"
+                className="flex min-w-0 items-center gap-1.5 rounded-full border border-border/60 bg-muted/50 px-3 py-1.5 font-mono text-xs text-muted-foreground"
                 title={`${activeProject.rootPath}/.claude/skills`}
               >
                 <FolderTree className="h-3.5 w-3.5 shrink-0 text-primary/70" />
@@ -969,7 +979,7 @@ export default function SkillsPage() {
       </header>
 
       {/* IDE-style workspace: one panel, list rail + editor pane */}
-      <div className="flex min-h-[34rem] flex-col overflow-hidden rounded-xl border bg-card shadow-sm lg:h-[calc(100svh-13rem)] lg:flex-row">
+      <div className="flex min-h-[34rem] flex-col overflow-hidden rounded-3xl border border-border/60 bg-card shadow-none lg:h-[calc(100svh-13rem)] lg:flex-row">
         {/* ── skills rail ── */}
         <aside className="flex w-full shrink-0 flex-col border-b lg:w-72 lg:border-b-0 lg:border-r">
           <div className="flex items-center justify-between border-b px-4 py-3">
@@ -1028,7 +1038,7 @@ export default function SkillsPage() {
                           type="button"
                           onClick={() => setSelected(s.name)}
                           className={cn(
-                            'group relative w-full overflow-hidden rounded-lg border px-3 py-2.5 text-left transition-all duration-200 active:scale-[0.99]',
+                            'group relative w-full overflow-hidden rounded-xl border px-3 py-2.5 text-left transition-all duration-200 active:scale-[0.99]',
                             isActive
                               ? 'border-primary/20 bg-primary/10 ring-1 ring-primary/40'
                               : 'border-transparent hover:-translate-y-0.5 hover:bg-muted/60',

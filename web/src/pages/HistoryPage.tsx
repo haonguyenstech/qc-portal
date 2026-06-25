@@ -1,14 +1,12 @@
-import { useState, type ReactNode } from 'react'
+import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import {
-  Activity,
   AlertCircle,
   ArrowUpRight,
   CalendarClock,
   CheckCircle2,
   Clock3,
-  Gauge,
   History as HistoryIcon,
   Inbox,
   Layers,
@@ -118,90 +116,56 @@ function matchesFilter(run: RunSummary, filter: Filter): boolean {
   }
 }
 
-/** A clickable stat that doubles as a status filter. */
-function FilterTile({
+/** A small read-only metric pill for the overview band (avg duration, latest, total). */
+function MetricChip({
+  icon: Icon,
   label,
   value,
-  icon: Icon,
-  accent = 'default',
-  active,
-  onClick,
 }: {
+  icon: typeof Clock3
   label: string
   value: string | number
-  icon: typeof CheckCircle2
-  accent?: 'default' | 'emerald' | 'red' | 'sky'
-  active: boolean
-  onClick?: () => void
 }) {
-  const accentText =
-    accent === 'emerald'
-      ? 'text-emerald-600'
-      : accent === 'red'
-        ? 'text-red-600'
-        : accent === 'sky'
-          ? 'text-sky-600'
-          : 'text-foreground'
-  const ring =
-    accent === 'emerald'
-      ? 'ring-emerald-500/40 bg-emerald-50/50'
-      : accent === 'red'
-        ? 'ring-red-500/40 bg-red-50/50'
-        : accent === 'sky'
-          ? 'ring-sky-500/40 bg-sky-50/50'
-          : 'ring-primary/40 bg-primary/5'
-  const Comp = onClick ? 'button' : 'div'
   return (
-    <Comp
-      type={onClick ? 'button' : undefined}
-      onClick={onClick}
-      className={cn(
-        'group flex min-w-0 items-center gap-3 rounded-lg border bg-card px-4 py-3 text-left shadow-xs transition-all duration-200',
-        onClick && 'hover:-translate-y-0.5 hover:shadow-md active:scale-[0.98]',
-        active ? `border-transparent ring-2 ${ring}` : 'ring-0',
-      )}
-    >
-      <span
-        className={cn(
-          'flex size-9 shrink-0 items-center justify-center rounded-lg bg-muted/60 transition-colors',
-          accentText,
-        )}
-      >
-        <Icon className="size-4" />
-      </span>
-      <div className="min-w-0">
-        <div className={cn('text-xl font-semibold tabular-nums tracking-tight', accentText)}>
-          {value}
-        </div>
-        <div className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-          {label}
-        </div>
-      </div>
-    </Comp>
+    <span className="inline-flex items-center gap-1.5 rounded-full border border-border/60 bg-muted/50 px-3 py-1.5 text-xs">
+      <Icon className="size-3.5 text-muted-foreground" />
+      <span className="font-semibold tabular-nums text-foreground">{value}</span>
+      <span className="text-muted-foreground">{label}</span>
+    </span>
   )
 }
 
-function CompactMetric({
-  icon: Icon,
-  label,
-  value,
-}: {
-  icon: typeof CalendarClock
+interface FilterMeta {
+  value: Filter
   label: string
-  value: ReactNode
-}) {
+  count: number
+  /** Tailwind bg- for the legend dot + distribution segment. */
+  dot: string
+  /** ring + tint applied when this filter is active. */
+  ring: string
+}
+
+/** A clickable stat that doubles as a status filter AND the distribution legend. */
+function FilterChip({ meta, active, onClick }: { meta: FilterMeta; active: boolean; onClick: () => void }) {
   return (
-    <div className="flex min-w-0 items-center gap-2.5 rounded-lg border bg-background/80 px-3 py-2 shadow-xs">
-      <span className="flex size-8 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">
-        <Icon className="size-4" />
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={active}
+      className={cn(
+        'flex items-center gap-2.5 rounded-2xl border border-border/60 bg-muted/50 px-3.5 py-2.5 text-left shadow-none transition-all duration-200',
+        'hover:-translate-y-0.5 hover:border-border hover:shadow-sm active:scale-[0.98]',
+        active ? `border-transparent ring-2 ${meta.ring}` : 'ring-0',
+      )}
+    >
+      <span className={cn('size-2.5 shrink-0 rounded-full', meta.dot)} aria-hidden />
+      <span className="min-w-0">
+        <span className="block text-lg font-semibold leading-none tabular-nums tracking-tight">
+          {meta.count}
+        </span>
+        <span className="mt-1 block text-[11px] font-medium text-muted-foreground">{meta.label}</span>
       </span>
-      <div className="min-w-0">
-        <div className="truncate text-sm font-semibold tabular-nums">{value}</div>
-        <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
-          {label}
-        </div>
-      </div>
-    </div>
+    </button>
   )
 }
 
@@ -299,7 +263,7 @@ function HistoryRow({ run }: { run: RunSummary }) {
         <Link
           to={to}
           aria-label={`Open report for ${run.ticketId}`}
-          className="ml-auto flex size-8 items-center justify-center rounded-md text-muted-foreground transition-all group-hover:bg-background group-hover:text-foreground group-hover:shadow-xs active:scale-[0.95]"
+          className="ml-auto flex size-8 items-center justify-center rounded-xl text-muted-foreground transition-all group-hover:bg-background group-hover:text-foreground active:scale-[0.95]"
         >
           <ArrowUpRight className="size-4" />
         </Link>
@@ -345,6 +309,45 @@ export default function HistoryPage() {
   const latestRun = runs[0]
   const avgDuration = averageDuration(runs)
 
+  // Distribution segments (out of total runs) for the overview bar.
+  const total = runs.length || 1
+  const segments = [
+    { key: 'passed', pct: (passed / total) * 100, cls: 'bg-emerald-500' },
+    { key: 'failed', pct: (failed / total) * 100, cls: 'bg-red-500' },
+    { key: 'active', pct: (active / total) * 100, cls: 'bg-sky-500' },
+  ]
+
+  const filters: FilterMeta[] = [
+    {
+      value: 'all',
+      label: 'Total runs',
+      count: runs.length,
+      dot: 'bg-foreground',
+      ring: 'ring-primary/40 bg-primary/5',
+    },
+    {
+      value: 'passed',
+      label: 'Passed',
+      count: passed,
+      dot: 'bg-emerald-500',
+      ring: 'ring-emerald-500/40 bg-emerald-50/50',
+    },
+    {
+      value: 'failed',
+      label: 'Failed',
+      count: failed,
+      dot: 'bg-red-500',
+      ring: 'ring-red-500/40 bg-red-50/50',
+    },
+    {
+      value: 'active',
+      label: 'Active',
+      count: active,
+      dot: 'bg-sky-500',
+      ring: 'ring-sky-500/40 bg-sky-50/50',
+    },
+  ]
+
   const q = query.trim().toLowerCase()
   const visible = runs.filter(
     (r) =>
@@ -356,124 +359,96 @@ export default function HistoryPage() {
   )
 
   return (
-    <div className="mx-auto max-w-6xl space-y-6">
-      <section className="overflow-hidden rounded-xl border bg-card shadow-sm">
-        <div className="border-b bg-gradient-to-br from-muted/80 via-card to-card px-6 py-6">
-          <div className="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
-            <div className="flex min-w-0 gap-4">
-              <span className="flex size-12 shrink-0 items-center justify-center rounded-xl border border-primary/15 bg-primary text-primary-foreground shadow-sm">
-                <HistoryIcon className="size-5" />
-              </span>
-              <div className="min-w-0 space-y-2">
-                <div className="flex flex-wrap items-center gap-2">
-                  <h1 className="text-3xl font-semibold tracking-tight">Run History</h1>
-                  {active > 0 && (
-                    <span className="inline-flex items-center gap-1.5 rounded-full bg-sky-100 px-2.5 py-1 text-xs font-semibold text-sky-700">
-                      <span className="relative flex size-1.5">
-                        <span className="absolute inline-flex size-full animate-ping rounded-full bg-current opacity-75" />
-                        <span className="relative inline-flex size-1.5 rounded-full bg-current" />
-                      </span>
-                      {active} live
-                    </span>
-                  )}
-                </div>
-                <p className="max-w-2xl text-sm leading-6 text-muted-foreground">
-                  Browse previous QC executions, compare pass/fail outcomes, and open the full
-                  evidence report for any ticket.
-                </p>
+    <div className="mx-auto max-w-6xl space-y-8">
+      <header className="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
+        <div className="flex items-start gap-3">
+          <span className="mt-0.5 flex size-11 shrink-0 items-center justify-center rounded-2xl bg-foreground text-background">
+            <HistoryIcon className="size-5" />
+          </span>
+          <div className="min-w-0 space-y-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <h1 className="text-3xl font-semibold tracking-tight">Run History</h1>
+              {active > 0 && (
+                <span className="inline-flex items-center gap-1.5 rounded-full bg-sky-100 px-2.5 py-1 text-xs font-semibold text-sky-700">
+                  <span className="relative flex size-1.5">
+                    <span className="absolute inline-flex size-full animate-ping rounded-full bg-current opacity-75" />
+                    <span className="relative inline-flex size-1.5 rounded-full bg-current" />
+                  </span>
+                  {active} live
+                </span>
+              )}
+            </div>
+            <p className="max-w-2xl text-sm leading-6 text-muted-foreground">
+              Browse previous QC executions, compare pass/fail outcomes, and open the full evidence
+              report for any ticket.
+            </p>
+          </div>
+        </div>
+
+        <Button asChild size="sm" className="w-fit rounded-full transition-all duration-200 active:scale-[0.98]">
+          <Link to="/">
+            <Sparkles className="size-4" />
+            New run
+          </Link>
+        </Button>
+      </header>
+
+      {!isLoading && !isError && hasRuns && (
+        <>
+          {/* Results overview — pass rate + distribution + filters, all in one band. */}
+          <section className="space-y-4 rounded-3xl border border-border/60 bg-card p-5 shadow-none">
+            <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-3">
+              <div className="flex items-baseline gap-2.5">
+                <span className="text-4xl font-semibold tabular-nums tracking-tight">
+                  {passRate === null ? '—' : `${passRate}%`}
+                </span>
+                <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                  decision
+                  <br className="hidden sm:block" /> pass rate
+                </span>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <MetricChip icon={Layers} label="runs" value={runs.length} />
+                <MetricChip icon={Clock3} label="avg" value={avgDuration ?? '—'} />
+                <MetricChip
+                  icon={CalendarClock}
+                  label="latest"
+                  value={latestRun ? relativeTime(latestRun.createdAt) : '—'}
+                />
               </div>
             </div>
 
-            <Button asChild size="sm" className="w-fit">
-              <Link to="/">
-                <Sparkles className="size-4" />
-                New run
-              </Link>
-            </Button>
-          </div>
-        </div>
+            {/* Distribution bar — passed / failed / active out of all runs. */}
+            <div
+              className="flex h-2.5 w-full overflow-hidden rounded-full bg-muted"
+              title={`${passed} passed · ${failed} failed · ${active} active · ${runs.length} total`}
+            >
+              {segments.map((s) =>
+                s.pct > 0 ? (
+                  <span
+                    key={s.key}
+                    className={cn('h-full transition-[width] duration-500', s.cls)}
+                    style={{ width: `${s.pct}%` }}
+                  />
+                ) : null,
+              )}
+            </div>
 
-        <div className="grid gap-3 p-5 sm:grid-cols-3">
-          <CompactMetric
-            icon={Layers}
-            label="Stored runs"
-            value={isLoading ? 'Loading' : runs.length}
-          />
-          <CompactMetric
-            icon={Gauge}
-            label="Decision pass rate"
-            value={passRate === null ? '—' : `${passRate}%`}
-          />
-          <CompactMetric
-            icon={CalendarClock}
-            label="Latest run"
-            value={latestRun ? relativeTime(latestRun.createdAt) : '—'}
-          />
-          <CompactMetric
-            icon={Clock3}
-            label="Average duration"
-            value={avgDuration ?? '—'}
-          />
-          <CompactMetric
-            icon={CheckCircle2}
-            label="Passed"
-            value={passed}
-          />
-          <CompactMetric
-            icon={XCircle}
-            label="Needs review"
-            value={failed}
-          />
-        </div>
-      </section>
+            {/* Filters double as the distribution legend. */}
+            <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4">
+              {filters.map((meta) => (
+                <FilterChip
+                  key={meta.value}
+                  meta={meta}
+                  active={filter === meta.value}
+                  onClick={() => setFilter((f) => (f === meta.value ? 'all' : meta.value))}
+                />
+              ))}
+            </div>
+          </section>
 
-      {!isLoading && !isError && hasRuns && (
-        <section className="space-y-4">
-          <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-            <FilterTile
-              label="Total runs"
-              value={runs.length}
-              icon={Layers}
-              active={filter === 'all'}
-              onClick={() => setFilter('all')}
-            />
-            <FilterTile
-              label="Passed"
-              value={passed}
-              icon={CheckCircle2}
-              accent="emerald"
-              active={filter === 'passed'}
-              onClick={() => setFilter('passed')}
-            />
-            <FilterTile
-              label="Failed"
-              value={failed}
-              icon={XCircle}
-              accent="red"
-              active={filter === 'failed'}
-              onClick={() => setFilter('failed')}
-            />
-            {active > 0 ? (
-              <FilterTile
-                label="Active"
-                value={active}
-                icon={Activity}
-                accent="sky"
-                active={filter === 'active'}
-                onClick={() => setFilter('active')}
-              />
-            ) : (
-              <FilterTile
-                label="Pass rate"
-                value={passRate === null ? '—' : `${passRate}%`}
-                icon={Gauge}
-                accent="emerald"
-                active={false}
-              />
-            )}
-          </div>
-
-          <div className="rounded-xl border bg-card p-3 shadow-sm">
+          {/* Toolbar — search + result count. */}
+          <div className="rounded-3xl border border-border/60 bg-card p-3 shadow-none">
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <div className="group relative w-full sm:max-w-md">
                 <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground transition-colors group-focus-within:text-primary" />
@@ -481,7 +456,7 @@ export default function HistoryPage() {
                   placeholder="Search ticket, project or URL..."
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
-                  className="h-10 bg-background pl-9"
+                  className="h-10 rounded-full bg-background pl-9"
                 />
               </div>
               <div className="flex items-center justify-between gap-3 sm:justify-end">
@@ -493,6 +468,7 @@ export default function HistoryPage() {
                       setFilter('all')
                       setQuery('')
                     }}
+                    className="rounded-full transition-all duration-200 active:scale-[0.98]"
                   >
                     Clear
                   </Button>
@@ -505,10 +481,10 @@ export default function HistoryPage() {
               </div>
             </div>
           </div>
-        </section>
+        </>
       )}
 
-      <Card className="overflow-hidden py-0 shadow-sm">
+      <Card className="overflow-hidden rounded-3xl border-border/60 py-0 shadow-none">
         <CardContent className="p-0">
           {isLoading && (
             <div className="p-4">
@@ -517,7 +493,7 @@ export default function HistoryPage() {
           )}
 
           {isError && (
-            <div className="m-4 flex flex-col items-center justify-center gap-3 rounded-lg border border-destructive/30 bg-destructive/5 py-12 text-center">
+            <div className="m-4 flex flex-col items-center justify-center gap-3 rounded-2xl border border-destructive/30 bg-destructive/5 py-12 text-center">
               <AlertCircle className="size-6 text-destructive" />
               <div className="space-y-1">
                 <p className="text-sm font-medium text-destructive">Could not load runs</p>
@@ -532,7 +508,7 @@ export default function HistoryPage() {
 
           {!isLoading && !isError && !hasRuns && (
             <div className="flex flex-col items-center justify-center gap-4 py-20 text-center">
-              <div className="flex size-14 items-center justify-center rounded-full border bg-muted/40 text-muted-foreground">
+              <div className="flex size-14 items-center justify-center rounded-2xl border border-border/60 bg-muted/60 text-muted-foreground">
                 <Inbox className="size-6" />
               </div>
               <div className="space-y-1.5">
@@ -541,7 +517,7 @@ export default function HistoryPage() {
                   Once you run a QC check, it will show up here with its status and results.
                 </p>
               </div>
-              <Button asChild className="active:scale-[0.98]">
+              <Button asChild className="rounded-full transition-all duration-200 active:scale-[0.98]">
                 <Link to="/">Start your first run</Link>
               </Button>
             </div>
@@ -549,7 +525,7 @@ export default function HistoryPage() {
 
           {!isLoading && !isError && hasRuns && visible.length === 0 && (
             <div className="flex flex-col items-center justify-center gap-3 py-16 text-center">
-              <div className="flex size-12 items-center justify-center rounded-full border bg-muted/40 text-muted-foreground">
+              <div className="flex size-12 items-center justify-center rounded-2xl border border-border/60 bg-muted/60 text-muted-foreground">
                 <Search className="size-5" />
               </div>
               <div className="space-y-1">
@@ -565,6 +541,7 @@ export default function HistoryPage() {
                   setFilter('all')
                   setQuery('')
                 }}
+                className="rounded-full transition-all duration-200 active:scale-[0.98]"
               >
                 Clear filters
               </Button>

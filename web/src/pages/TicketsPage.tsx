@@ -321,7 +321,7 @@ function CrawlResultRow({ result }: { result: CrawlResult }) {
             ))}
           </ul>
           {failed > 0 && (
-            <ul className="space-y-0.5 rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-[11px] text-amber-700">
+            <ul className="space-y-0.5 rounded-xl border border-amber-200 bg-amber-50 px-2 py-1 text-[11px] text-amber-700">
               {result.attachmentErrors.map((e, i) => (
                 <li key={i} className="truncate">
                   {e}
@@ -341,7 +341,7 @@ function CrawlResultsPanel({ results }: { results: CrawlResult[] }) {
   const totalFiles = results.reduce((n, r) => n + r.files.length, 0)
   const totalAtt = results.reduce((n, r) => n + r.attachmentCount, 0)
   return (
-    <Card className="border-emerald-200/70 bg-emerald-50/30 shadow-sm">
+    <Card className="rounded-3xl border-emerald-200/70 bg-emerald-50/30 shadow-none">
       <CardContent className="space-y-2.5 py-4">
         <div className="flex items-center gap-2">
           <span className="flex size-7 shrink-0 items-center justify-center rounded-full bg-emerald-100 text-emerald-600 ring-1 ring-emerald-600/20">
@@ -354,7 +354,7 @@ function CrawlResultsPanel({ results }: { results: CrawlResult[] }) {
             {totalFiles} files · {totalAtt} attachment{totalAtt === 1 ? '' : 's'}
           </span>
         </div>
-        <ul className="divide-y rounded-lg border bg-card">
+        <ul className="divide-y rounded-2xl border border-border/60 bg-card">
           {results.map((r) => (
             <CrawlResultRow key={r.displayId} result={r} />
           ))}
@@ -400,8 +400,8 @@ function CrawlLogPanel({
   }
 
   return (
-    <Card className="overflow-hidden shadow-sm">
-      <div className="flex items-center gap-2 border-b bg-muted/40 px-3 py-2">
+    <Card className="overflow-hidden rounded-3xl border-border/60 shadow-none">
+      <div className="flex items-center gap-2 border-b border-border/60 bg-muted/40 px-3 py-2">
         <button
           type="button"
           onClick={onToggle}
@@ -431,7 +431,7 @@ function CrawlLogPanel({
             type="button"
             onClick={onClear}
             title="Clear log"
-            className="inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] font-medium text-muted-foreground transition-colors hover:text-foreground"
+            className="inline-flex items-center gap-1 rounded-full px-1.5 py-1 text-[11px] font-medium text-muted-foreground transition-colors hover:text-foreground"
           >
             <X className="size-3.5" />
             Clear
@@ -739,7 +739,7 @@ export default function TicketsPage() {
               type="button"
               onClick={() => toggleExpand(t)}
               aria-label={isOpen ? 'Collapse subtasks' : 'Expand subtasks'}
-              className="flex w-5 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:text-foreground"
+              className="flex w-5 shrink-0 items-center justify-center rounded-xl text-muted-foreground transition-colors hover:text-foreground"
             >
               {isLoading ? (
                 <Loader2 className="size-3.5 animate-spin" />
@@ -757,7 +757,7 @@ export default function TicketsPage() {
             onClick={() => toggleSelect(t)}
             aria-pressed={isSel}
             className={cn(
-              'relative flex flex-1 items-center gap-3 overflow-hidden rounded-lg border px-3 py-2.5 text-left transition-all duration-200 hover:-translate-y-0.5 hover:shadow-sm',
+              'relative flex flex-1 items-center gap-3 overflow-hidden rounded-2xl border px-3 py-2.5 text-left transition-all duration-200 hover:-translate-y-0.5 hover:shadow-sm',
               // Reserve room on the right for the hover action buttons: the ClickUp
               // link is always present; the delete button shows only when crawled.
               t.url ? (crawled ? 'pr-16' : 'pr-9') : crawled ? 'pr-9' : '',
@@ -774,7 +774,7 @@ export default function TicketsPage() {
             )}
             <span
               className={cn(
-                'flex size-[18px] shrink-0 items-center justify-center rounded-[6px] border transition-colors',
+                'flex size-[18px] shrink-0 items-center justify-center rounded-md border transition-colors',
                 isSel
                   ? 'border-primary bg-primary text-primary-foreground'
                   : crawled
@@ -788,7 +788,7 @@ export default function TicketsPage() {
             <span className="min-w-0 flex-1 space-y-1">
               <span className="block break-words text-sm font-medium leading-snug">{t.name}</span>
               <span className="flex min-w-0 flex-wrap items-center gap-1.5">
-                <span className="rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] font-medium text-muted-foreground">
+                <span className="rounded-xl border border-border/60 bg-muted/60 px-1.5 py-0.5 font-mono text-[10px] font-medium text-muted-foreground">
                   {t.displayId}
                 </span>
                 <StatusPill status={t.status} color={t.statusColor} />
@@ -835,7 +835,7 @@ export default function TicketsPage() {
               title="Open in ClickUp"
               aria-label={`Open ${t.displayId} in ClickUp`}
               className={cn(
-                'absolute top-2 flex size-7 items-center justify-center rounded-md text-muted-foreground opacity-0 transition-all hover:bg-muted hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100 active:scale-95',
+                'absolute top-2 flex size-7 items-center justify-center rounded-xl text-muted-foreground opacity-0 transition-all hover:bg-muted hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100 active:scale-95',
                 crawled ? 'right-9' : 'right-2',
               )}
             >
@@ -848,7 +848,7 @@ export default function TicketsPage() {
               onClick={() => setPendingDelete(t)}
               title="Delete downloaded files"
               aria-label={`Delete crawled files for ${t.displayId}`}
-              className="absolute right-2 top-2 flex size-7 items-center justify-center rounded-md text-muted-foreground opacity-0 transition-all hover:bg-destructive/10 hover:text-destructive focus-visible:opacity-100 group-hover:opacity-100 active:scale-95"
+              className="absolute right-2 top-2 flex size-7 items-center justify-center rounded-xl text-muted-foreground opacity-0 transition-all hover:bg-destructive/10 hover:text-destructive focus-visible:opacity-100 group-hover:opacity-100 active:scale-95"
             >
               <Trash2 className="size-3.5" />
             </button>
@@ -889,14 +889,14 @@ export default function TicketsPage() {
     return (
       <div className="mx-auto max-w-6xl space-y-6">
         <header className="flex items-center gap-3">
-          <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-primary/20 bg-gradient-to-br from-primary/15 to-primary/5 text-primary shadow-sm">
+          <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-foreground text-background">
             <Ticket className="h-5 w-5" />
           </span>
           <h1 className="text-3xl font-semibold tracking-tight">Tickets</h1>
         </header>
-        <Card className="shadow-sm">
+        <Card className="rounded-3xl border-border/60 shadow-none">
           <CardContent className="flex flex-col items-center gap-3 py-16 text-center">
-            <span className="flex h-12 w-12 items-center justify-center rounded-full border border-border bg-muted/50 text-muted-foreground">
+            <span className="flex h-12 w-12 items-center justify-center rounded-2xl border border-border/60 bg-muted/60 text-muted-foreground">
               <Ticket className="h-5 w-5" />
             </span>
             <p className="text-sm text-muted-foreground">
@@ -912,7 +912,7 @@ export default function TicketsPage() {
     <div className="mx-auto max-w-6xl space-y-8">
       <header className="space-y-4">
         <div className="flex items-start gap-3">
-          <span className="mt-0.5 flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-primary/20 bg-gradient-to-br from-primary/15 to-primary/5 text-primary shadow-sm">
+          <span className="mt-0.5 flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-foreground text-background">
             <Ticket className="h-5 w-5" />
           </span>
           <div className="space-y-1">
@@ -925,9 +925,9 @@ export default function TicketsPage() {
         </div>
 
         {activeProject && (
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-xl border bg-card px-4 py-3 shadow-sm">
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-2xl border border-border/60 bg-card px-4 py-3 shadow-none">
             <span className="flex items-center gap-2">
-              <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-primary/20 bg-primary/10 text-primary">
+              <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-border/60 bg-muted/60 text-muted-foreground">
                 <FolderGit2 className="h-4 w-4" />
               </span>
               <span className="leading-tight">
@@ -941,7 +941,7 @@ export default function TicketsPage() {
             </span>
             <div className="ml-auto flex min-w-0 items-center gap-2">
               <span
-                className="flex min-w-0 items-center gap-1.5 rounded-md border bg-muted/40 px-2.5 py-1.5 font-mono text-xs text-muted-foreground"
+                className="flex min-w-0 items-center gap-1.5 rounded-full border border-border/60 bg-muted/50 px-3 py-1.5 font-mono text-xs text-muted-foreground"
                 title={`${activeProject.rootPath}/testing/tickets`}
               >
                 <FolderDown className="h-3.5 w-3.5 shrink-0 text-primary/70" />
@@ -957,9 +957,9 @@ export default function TicketsPage() {
       </header>
 
       {!configured ? (
-        <Card className="shadow-sm">
+        <Card className="rounded-3xl border-border/60 shadow-none">
           <CardContent className="flex flex-col items-center gap-3 py-16 text-center">
-            <span className="flex h-12 w-12 items-center justify-center rounded-full border border-border bg-muted/50 text-muted-foreground">
+            <span className="flex h-12 w-12 items-center justify-center rounded-2xl border border-border/60 bg-muted/60 text-muted-foreground">
               <ListChecks className="h-5 w-5" />
             </span>
             <p className="text-sm text-muted-foreground">
@@ -974,7 +974,7 @@ export default function TicketsPage() {
       ) : (
         <div className="space-y-6">
           {/* Browser */}
-          <Card className="shadow-sm">
+          <Card className="rounded-3xl border-border/60 shadow-none">
             <CardContent className="space-y-3 py-5">
               <div className="flex items-center justify-between gap-2">
                 <span className="flex items-center gap-1.5 text-sm font-medium">
@@ -1034,7 +1034,7 @@ export default function TicketsPage() {
                   value={query}
                   autoComplete="off"
                   onChange={(e) => setQuery(e.target.value)}
-                  className="h-11 pl-9 shadow-xs transition-shadow focus-visible:shadow-sm"
+                  className="h-11 rounded-full pl-9 shadow-none"
                 />
                 {isFetching && (
                   <Loader2 className="absolute right-3 top-1/2 size-4 -translate-y-1/2 animate-spin text-muted-foreground" />
@@ -1142,9 +1142,9 @@ export default function TicketsPage() {
           is always reachable without a second column eating the page width. */}
       {configured && selected.size > 0 && (
         <div className="sticky bottom-4 z-20">
-          <div className="space-y-2 rounded-xl border bg-card/95 px-3 py-2.5 shadow-lg backdrop-blur supports-[backdrop-filter]:bg-card/80">
+          <div className="space-y-2 rounded-3xl border border-border/60 bg-card/95 px-3 py-2.5 shadow-lg backdrop-blur supports-[backdrop-filter]:bg-card/80">
             <div className="flex flex-wrap items-center gap-2 sm:gap-3">
-              <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+              <span className="flex size-8 shrink-0 items-center justify-center rounded-2xl bg-foreground text-background">
                 <DownloadCloud className="size-4" />
               </span>
               <div className="min-w-0 flex-1">
@@ -1169,7 +1169,7 @@ export default function TicketsPage() {
               <Select value={crawlModel} onValueChange={chooseCrawlModel} disabled={busy}>
                 <SelectTrigger
                   size="sm"
-                  className="h-9 w-auto min-w-[8.5rem] shrink-0 gap-2"
+                  className="h-9 w-auto min-w-[8.5rem] shrink-0 gap-2 rounded-full"
                   aria-label="Crawl processing model"
                 >
                   <Sparkles className="size-3.5 shrink-0 text-primary" />
@@ -1201,14 +1201,14 @@ export default function TicketsPage() {
                 size="sm"
                 onClick={() => setSelected(new Map())}
                 disabled={busy}
-                className="shrink-0"
+                className="shrink-0 rounded-full transition-all duration-200 active:scale-[0.98]"
               >
                 Clear
               </Button>
               <Button
                 onClick={() => crawl.mutate([...selected.values()])}
                 disabled={busy}
-                className="shrink-0 transition-all duration-200 active:scale-[0.98]"
+                className="shrink-0 rounded-full transition-all duration-200 active:scale-[0.98]"
               >
                 {busy ? (
                   <>
@@ -1255,7 +1255,7 @@ export default function TicketsPage() {
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
-              <span className="flex size-8 items-center justify-center rounded-lg bg-destructive/10 text-destructive">
+              <span className="flex size-8 items-center justify-center rounded-xl bg-destructive/10 text-destructive">
                 <Trash2 className="size-4" />
               </span>
               Delete crawled files
@@ -1273,7 +1273,7 @@ export default function TicketsPage() {
           {/* Test cases live inside the ticket folder — deleting it loses them
               too, and they aren't recreated by a re-crawl. Warn first. */}
           {pendingDelete && testcaseCount(pendingDelete) > 0 && (
-            <div className="flex items-start gap-2.5 rounded-lg border border-amber-300/60 bg-amber-50 px-3 py-2.5 text-amber-800">
+            <div className="flex items-start gap-2.5 rounded-2xl border border-amber-300/60 bg-amber-50 px-3 py-2.5 text-amber-800">
               <AlertCircle className="mt-0.5 size-4 shrink-0 text-amber-600" />
               <div className="space-y-0.5 text-sm">
                 <p className="font-medium">
@@ -1292,6 +1292,7 @@ export default function TicketsPage() {
               variant="ghost"
               onClick={() => setPendingDelete(null)}
               disabled={del.isPending}
+              className="rounded-full transition-all duration-200 active:scale-[0.98]"
             >
               Cancel
             </Button>
@@ -1299,6 +1300,7 @@ export default function TicketsPage() {
               variant="destructive"
               onClick={() => pendingDelete && del.mutate(pendingDelete)}
               disabled={del.isPending}
+              className="rounded-full transition-all duration-200 active:scale-[0.98]"
             >
               {del.isPending ? (
                 <>

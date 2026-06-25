@@ -98,9 +98,11 @@ export function GenerateOverviewDialog({
   return (
     <Dialog open={open} onOpenChange={(o) => !busy && onOpenChange(o)}>
       <DialogContent className="flex max-h-[92vh] w-[97vw] flex-col gap-0 overflow-hidden p-0 sm:max-w-[44rem]">
-        <DialogHeader className="shrink-0 space-y-1 border-b bg-muted/30 px-5 py-3">
+        <DialogHeader className="shrink-0 space-y-1 border-b border-border/60 bg-muted/60 px-5 py-3">
           <DialogTitle className="flex items-center gap-2 text-base">
-            <Wand2 className="h-4 w-4 text-primary" />
+            <span className="flex size-8 items-center justify-center rounded-xl bg-foreground text-background">
+              <Wand2 className="size-4" />
+            </span>
             Read &amp; write overview
           </DialogTitle>
           <DialogDescription>
@@ -125,17 +127,19 @@ export function GenerateOverviewDialog({
                     disabled={disabled}
                     title={disabled ? 'No existing overview to update yet' : undefined}
                     className={cn(
-                      'flex items-start gap-2.5 rounded-xl border p-3 text-left transition-all duration-200',
+                      'flex items-start gap-2.5 rounded-2xl border border-border/60 p-3 text-left transition-all duration-200',
                       active
-                        ? 'border-primary bg-primary/5 ring-1 ring-primary/30'
-                        : 'hover:border-primary/40 hover:bg-accent',
+                        ? 'border-foreground bg-muted/60 ring-1 ring-foreground/20'
+                        : 'hover:border-border hover:bg-accent',
                       disabled && 'pointer-events-none opacity-40',
                     )}
                   >
                     <span
                       className={cn(
-                        'flex size-8 shrink-0 items-center justify-center rounded-lg',
-                        active ? 'bg-primary/15 text-primary' : 'bg-muted text-muted-foreground',
+                        'flex size-8 shrink-0 items-center justify-center rounded-xl',
+                        active
+                          ? 'bg-foreground text-background'
+                          : 'border border-border/60 bg-muted/60 text-muted-foreground',
                       )}
                     >
                       <m.icon className="size-4" />
@@ -171,7 +175,7 @@ export function GenerateOverviewDialog({
           </div>
         </div>
 
-        <div className="flex shrink-0 items-center justify-between gap-2 border-t bg-muted/20 px-5 py-3">
+        <div className="flex shrink-0 items-center justify-between gap-2 border-t border-border/60 bg-muted/60 px-5 py-3">
           <span className="text-xs text-muted-foreground">
             {sourceCount} source{sourceCount === 1 ? '' : 's'} selected
           </span>
@@ -180,7 +184,7 @@ export function GenerateOverviewDialog({
             size="sm"
             onClick={() => generate.mutate()}
             disabled={busy || sourceCount === 0}
-            className="transition-all duration-200 active:scale-[0.98]"
+            className="rounded-full transition-all duration-200 active:scale-[0.98]"
           >
             {busy ? (
               <>

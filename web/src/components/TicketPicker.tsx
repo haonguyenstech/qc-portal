@@ -214,7 +214,7 @@ export function TicketPicker({ value, onChange, projectId, disabled }: Props) {
         </div>
 
         {open && (
-          <div className="absolute z-20 mt-1.5 max-h-72 w-full overflow-y-auto rounded-lg border bg-popover p-1 shadow-lg">
+          <div className="absolute z-20 mt-1.5 max-h-72 w-full overflow-y-auto rounded-2xl border border-border/60 bg-popover p-1 shadow-lg">
             {!tasks && isFetching && (
               <div className="flex items-center gap-2 px-3 py-2 text-xs text-muted-foreground">
                 <Loader2 className="size-3.5 animate-spin" />

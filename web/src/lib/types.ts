@@ -3,7 +3,7 @@ export interface Project { id: string; name: string; rootPath: string; isDefault
 export interface RunSummary { id: string; projectId: string; projectName: string | null; ticketId: string; appUrl: string; slug: string | null; status: RunStatus; passCount: number; failCount: number; totalAcs: number; createdAt: string; finishedAt: string | null }
 export type Phase = 'intake'|'plan'|'setup'|'collect'|'analyze'|'aggregate'|'report'|'unknown'
 export interface LogEvent { ts: string; kind: 'text'|'tool'|'tool_result'|'phase'|'system'|'error'|'done'; phase?: Phase; text: string; tool?: string }
-export interface RunDetail extends RunSummary { reportMd: string | null; issuesMd: string | null; screenshots: string[]; logTail: LogEvent[] }
+export interface RunDetail extends RunSummary { reportMd: string | null; issuesMd: string | null; screenshots: string[]; logTail: LogEvent[]; hasSession?: boolean }
 export interface StreamMessage { runId: string; event: LogEvent }
 export interface SkillSummary { name: string; description: string; files: string[] }
 export interface SkillFile { name: string; content: string }

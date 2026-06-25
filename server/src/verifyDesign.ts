@@ -1,7 +1,13 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { testingDirFor, ticketsDirFor } from './config.js'
-import { CRAWL_SUMMARY_MODELS, parseClaudeJsonResult, runClaude } from './claudeExec.js'
+import {
+  CRAWL_SUMMARY_MODELS,
+  parseClaudeJsonResult,
+  runClaude,
+  runClaudeStream,
+  type StreamLog,
+} from './claudeExec.js'
 
 const DEFAULT_MODEL = 'sonnet'
 const MAX_TICKET_CHARS = 40_000
@@ -224,6 +230,14 @@ export async function verifyDesign(opts: {
   model?: string
   /** One-off checklist for this run; overrides the saved testing/templates/design-check.md. */
   checklistOverride?: string
+  /**
+   * When provided, the Claude run streams its progress through this callback (init,
+   * tool use, assistant text) so a background job can surface a live log — exactly
+   * like test-case generation. Omit it to keep the buffered (synchronous) behavior.
+   */
+  onLog?: (log: StreamLog) => void
+  /** Aborts the in-flight Claude run so a job cancel takes effect promptly. */
+  signal?: AbortSignal
 }): Promise<VerifyResult> {
   const folder = opts.folder.trim()
   if (!folder) throw statusError('folder is required', 400)
@@ -262,28 +276,49 @@ export async function verifyDesign(opts: {
     : readChecklist(opts.rootPath)
   const model = normalizeModel(opts.model)
 
-  const result = await runClaude(
-    [
-      '-p',
-      '--model',
-      model,
-      '--output-format',
-      'json',
-      '--no-session-persistence',
-      // Run unattended; the QC skill's mutation guards still apply. Needed so the
-      // model can use the project's Figma/Playwright MCP tools to open the design.
-      '--permission-mode',
-      'bypassPermissions',
-      '--max-budget-usd',
-      '0.80',
-      verifyPrompt({ ticketContent, figmaUrl, instructions, checklist, projectName: opts.projectName }),
-    ],
-    VERIFY_TIMEOUT_MS,
-    { cwd: opts.rootPath, usageSource: 'design-verify', model },
-  )
+  const prompt = verifyPrompt({
+    ticketContent,
+    figmaUrl,
+    instructions,
+    checklist,
+    projectName: opts.projectName,
+  })
+  // Shared flags. Run unattended (the QC skill's mutation guards still apply) so the
+  // model can use the project's Figma/Playwright MCP tools to open the design.
+  const commonFlags = [
+    '--no-session-persistence',
+    '--permission-mode',
+    'bypassPermissions',
+    '--max-budget-usd',
+    '0.80',
+  ]
 
-  if (result.timedOut) throw statusError('Timed out while verifying the design.', 504)
-  const { text, isError } = parseClaudeJsonResult(result.stdout || result.stderr)
+  let text: string
+  let isError: boolean
+  if (opts.onLog) {
+    // Streaming path — a background job wants live progress. stream-json + --verbose
+    // emits the init/tool/assistant events runClaudeStream forwards through onLog.
+    const r = await runClaudeStream(
+      ['-p', '--model', model, '--output-format', 'stream-json', '--verbose', ...commonFlags, prompt],
+      VERIFY_TIMEOUT_MS,
+      opts.onLog,
+      { cwd: opts.rootPath, usageSource: 'design-verify', model, signal: opts.signal },
+    )
+    if (r.aborted) throw statusError('Verification cancelled.', 499)
+    if (r.timedOut) throw statusError('Timed out while verifying the design.', 504)
+    text = r.text
+    isError = r.isError
+  } else {
+    const result = await runClaude(
+      ['-p', '--model', model, '--output-format', 'json', ...commonFlags, prompt],
+      VERIFY_TIMEOUT_MS,
+      { cwd: opts.rootPath, usageSource: 'design-verify', model },
+    )
+    if (result.timedOut) throw statusError('Timed out while verifying the design.', 504)
+    const parsed = parseClaudeJsonResult(result.stdout || result.stderr)
+    text = parsed.text
+    isError = parsed.isError
+  }
   if (isError || !text) {
     throw statusError('Claude did not return a result. Check the model and Figma access.', 502)
   }

@@ -28,6 +28,7 @@ import {
   startTestcaseJob,
 } from '../testcaseJobs.js'
 import { verifyDesign } from '../verifyDesign.js'
+import { cancelVerifyJob, getVerifyJob, listVerifyJobs, startVerifyJob } from '../verifyJobs.js'
 
 export const aiRouter = Router()
 
@@ -680,6 +681,7 @@ aiRouter.post('/testcases', async (req, res) => {
       template: parseTemplate(req.body?.template),
       instructions: typeof req.body?.instructions === 'string' ? req.body.instructions : '',
       model: typeof req.body?.model === 'string' ? req.body.model : undefined,
+      appUrl: typeof req.body?.appUrl === 'string' ? req.body.appUrl : undefined,
     })
     res.json(result)
   } catch (err) {
@@ -741,6 +743,60 @@ aiRouter.post('/verify-design', async (req, res) => {
   }
 })
 
+/**
+ * Start a BACKGROUND Design Check job. The verify runs server-side and keeps going
+ * across browser reloads; the client polls GET /verify-design/jobs/:id for live
+ * progress + the streamed log, and renders the findings once it finishes. Body:
+ *   { projectId, folder, figmaUrl, instructions?, model?, projectName?, checklist? }
+ */
+aiRouter.post('/verify-design/jobs', (req, res) => {
+  const project = resolveProject(req)
+  if (!project) return res.status(400).json({ error: 'project not found' })
+
+  const folder = typeof req.body?.folder === 'string' ? req.body.folder.trim() : ''
+  if (!folder) return res.status(400).json({ error: 'folder is required' })
+  const figmaUrl = typeof req.body?.figmaUrl === 'string' ? req.body.figmaUrl.trim() : ''
+  if (!figmaUrl) return res.status(400).json({ error: 'figmaUrl is required' })
+  const projectName =
+    typeof req.body?.projectName === 'string' && req.body.projectName.trim()
+      ? req.body.projectName.trim()
+      : project.name || 'this project'
+
+  const checklist = parseTemplate(req.body?.checklist)
+  const job = startVerifyJob({
+    projectId: project.id,
+    projectName,
+    rootPath: project.rootPath,
+    folder,
+    figmaUrl,
+    instructions: typeof req.body?.instructions === 'string' ? req.body.instructions : '',
+    model: typeof req.body?.model === 'string' ? req.body.model : '',
+    checklistOverride: typeof checklist?.content === 'string' ? checklist.content : undefined,
+  })
+  res.json({ jobId: job.id, job })
+})
+
+/** List this project's Design Check jobs (newest first). */
+aiRouter.get('/verify-design/jobs', (req, res) => {
+  const project = resolveProject(req)
+  if (!project) return res.status(400).json({ error: 'project not found' })
+  res.json({ jobs: listVerifyJobs(project.id) })
+})
+
+/** Poll a single Design Check job by id. */
+aiRouter.get('/verify-design/jobs/:id', (req, res) => {
+  const job = getVerifyJob(req.params.id)
+  if (!job) return res.status(404).json({ error: 'job not found' })
+  res.json({ job })
+})
+
+/** Cancel a running Design Check job (terminal) — kill the in-flight Claude run. */
+aiRouter.post('/verify-design/jobs/:id/cancel', (req, res) => {
+  const job = cancelVerifyJob(req.params.id)
+  if (!job) return res.status(404).json({ error: 'job not found' })
+  res.json({ job })
+})
+
 /** List a project's saved Design Check records (newest first). */
 aiRouter.get('/verify-design/history', (req, res) => {
   const project = resolveProject(req)
@@ -785,11 +841,22 @@ aiRouter.post('/testcases/jobs', (req, res) => {
       ? req.body.projectName.trim()
       : project.name || 'this project'
 
+  // Optional per-ticket live app URL (folder → url). Kept only for the folders in
+  // this job; invalid/non-string entries are dropped (generation re-validates too).
+  const rawAppUrls =
+    req.body?.appUrls && typeof req.body.appUrls === 'object' ? req.body.appUrls : {}
+  const appUrls: Record<string, string> = {}
+  for (const folder of folders) {
+    const u = (rawAppUrls as Record<string, unknown>)[folder]
+    if (typeof u === 'string' && u.trim()) appUrls[folder] = u.trim()
+  }
+
   const job = startTestcaseJob({
     projectId: project.id,
     projectName,
     rootPath: project.rootPath,
     folders,
+    appUrls,
     template: parseTemplate(req.body?.template),
     instructions: typeof req.body?.instructions === 'string' ? req.body.instructions : '',
     model: typeof req.body?.model === 'string' ? req.body.model : '',

@@ -133,12 +133,26 @@ export function detectTemplateFormat(
   return 'markdown'
 }
 
+/** Trim & validate an app URL — only http(s) is allowed. '' (or invalid) → null. */
+export function normalizeAppUrl(raw: string | undefined | null): string | null {
+  const s = typeof raw === 'string' ? raw.trim() : ''
+  if (!s) return null
+  try {
+    const u = new URL(s)
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return null
+    return u.toString()
+  } catch {
+    return null
+  }
+}
+
 function testCasesPrompt(
   ticketContent: string,
   projectName: string,
   template: { name: string; content: string } | null,
   instructions: string,
   format: TestcaseFormat,
+  appUrl: string | null,
 ): string {
   // The output-shape instructions and the "output only X" rule both depend on the
   // target format so CSV templates produce a real, importable CSV (not Markdown).
@@ -165,12 +179,23 @@ function testCasesPrompt(
     ? `\nAdditional instructions from the QC engineer — follow these closely:\n${instructions}\n`
     : ''
 
+  // When the QC engineer supplies a live app URL, ground the cases in the REAL UI:
+  // open it with the browser/Playwright tools and reconcile it against the ticket.
+  const appBlock = appUrl
+    ? `\nA LIVE APP URL for the feature under test has been provided: ${appUrl}
+Use your browser/Playwright tool to OPEN this URL and explore the actual running app before writing the cases:
+- Reconcile the ticket's requirements against what the app actually does — note the real labels, fields, buttons, validation messages, and flows you observe, and use them in the steps and expected results (e.g. exact button text, real field names) instead of guessing.
+- Cover the real UI states you can see (empty, loading, error, success) and any discrepancies between the ticket and the live app — write a case (or note) for each gap.
+- Do NOT perform destructive or irreversible actions on the app (no deleting data, submitting payments, etc.). Read and navigate only; describe such actions as test steps instead of doing them.
+- If the URL cannot be opened, fall back to writing cases from the ticket alone and note that the live app could not be reached.\n`
+    : ''
+
   return `You are a senior QC engineer writing manual acceptance test cases for the project "${projectName}".
 
 Below is a ClickUp ticket (its details and comments). Read it and produce a thorough, executable set of test cases a QC engineer can run to verify this ticket is correctly implemented.
 
 ${formatBlock}
-${instructionBlock}
+${appBlock}${instructionBlock}
 Coverage:
 - Happy paths, edge cases, validation/negative cases, and any error states the ticket implies.
 - Where the ticket is ambiguous, still write a case and note the assumption inline.
@@ -231,6 +256,8 @@ export async function generateTestcaseVersion(opts: {
   template?: { name?: string; content?: string } | null
   instructions?: string
   model?: string
+  /** Optional live app URL — when set, Claude opens it (browser tools) to ground the cases. */
+  appUrl?: string | null
   /** Called with each streamed log line so callers can surface progress live. */
   onLog?: (log: StreamLog) => void
   /** Fires to cancel an in-flight generation (pause/cancel of a job). */
@@ -267,32 +294,45 @@ export async function generateTestcaseVersion(opts: {
   }
 
   const model = normalizeModel(opts.model)
+  const appUrl = normalizeAppUrl(opts.appUrl)
   // A CSV template yields a real .csv (importable into a spreadsheet); otherwise Markdown.
   const format = detectTemplateFormat(template)
   onLog({
     level: 'info',
-    text: `Reading ticket (${ticketContent.length.toLocaleString()} chars)… output: ${format.toUpperCase()}`,
+    text: `Reading ticket (${ticketContent.length.toLocaleString()} chars)… output: ${format.toUpperCase()}${
+      appUrl ? ` · checking live app ${appUrl}` : ''
+    }`,
   })
+  // With a live app URL the model opens it via the project's MCP browser tools, so
+  // run inside the project folder with permissions bypassed (mirrors verifyDesign),
+  // and give it a bigger budget — driving a browser costs more than a plain draft.
+  const baseArgs = [
+    '-p',
+    '--model',
+    model,
+    '--output-format',
+    'stream-json',
+    '--verbose',
+    '--no-session-persistence',
+  ]
+  const appArgs = appUrl ? ['--permission-mode', 'bypassPermissions'] : []
+  // CSV output mirrors a detailed template; checking a live app drives a browser —
+  // both need more headroom than a plain Markdown table before the cost cap cuts in.
+  const budget = appUrl ? '3.00' : format === 'csv' ? '2.00' : '0.50'
   const result = await runClaudeStream(
     [
-      '-p',
-      '--model',
-      model,
-      '--output-format',
-      'stream-json',
-      '--verbose',
-      '--no-session-persistence',
+      ...baseArgs,
+      ...appArgs,
       '--max-budget-usd',
-      // CSV output mirrors a detailed template, so it needs more headroom than a
-      // plain Markdown table before the cost cap cuts it off.
-      format === 'csv' ? '2.00' : '0.50',
-      testCasesPrompt(ticketContent, opts.projectName, template, instructions, format),
+      budget,
+      testCasesPrompt(ticketContent, opts.projectName, template, instructions, format, appUrl),
     ],
-    // A full CSV (many multi-line cases) takes far longer to stream than a Markdown
-    // table — give it up to 8 min before timing out.
+    // A full CSV (many multi-line cases) — or opening and exploring a live app —
+    // takes far longer to stream than a Markdown table; give it up to 8 min.
     480000,
     onLog,
-    { signal: opts.signal, usageSource: 'testcase', model },
+    // Only load the project's MCP servers (cwd) when we actually need the browser.
+    { signal: opts.signal, usageSource: 'testcase', model, cwd: appUrl ? opts.rootPath : undefined },
   )
   if (result.aborted) throw statusError('Generation stopped.', 499)
   if (result.timedOut) throw statusError('Timed out while generating test cases.', 504)

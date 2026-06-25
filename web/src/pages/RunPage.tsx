@@ -71,6 +71,8 @@ import { ManageHintsDialog } from '@/components/ManageHintsDialog'
 import { RunPresetsDialog } from '@/components/RunPresetsDialog'
 import { useRunPresets, type RunPreset } from '@/lib/presets'
 import { CrawledTicketPicker } from '@/components/CrawledTicketPicker'
+import { CrawledStatusHeader, CrawledTicketRow } from '@/components/CrawledTicketRow'
+import { groupCrawledByStatus } from '@/lib/crawled-tickets'
 import { TicketTestCasePicker, testcaseRelPath } from '@/components/TicketTestCasePicker'
 
 // Which Claude model drives the QC run. `auto` sends no --model flag, so the
@@ -229,8 +231,8 @@ function FeatureTicketsPicker({
       )}
 
       {/* searchable checklist of crawled tickets */}
-      <div className="overflow-hidden rounded-lg border bg-background">
-        <div className="flex items-center gap-2 border-b px-3 py-2">
+      <div className="overflow-hidden rounded-2xl border border-border/60 bg-muted/60">
+        <div className="flex items-center gap-2 border-b border-border/60 px-3 py-2">
           <Search className="size-3.5 shrink-0 text-muted-foreground" />
           <input
             value={query}
@@ -255,41 +257,27 @@ function FeatureTicketsPicker({
               No crawled ticket matches “{query}”.
             </div>
           ) : (
-            filtered.map((t) => {
-              const id = ticketIdOf(t)
-              const isSel = value.includes(id)
-              const blocked = !isSel && atMax
-              return (
-                <button
-                  key={t.name}
-                  type="button"
-                  disabled={disabled || blocked}
-                  onClick={() => toggle(id)}
-                  title={blocked ? `Up to ${MAX_FEATURE_TICKETS} tickets per run` : undefined}
-                  className={cn(
-                    'flex w-full items-start gap-2.5 rounded-md px-2.5 py-2 text-left transition-colors',
-                    isSel ? 'bg-primary/10' : 'hover:bg-accent',
-                    blocked && 'cursor-not-allowed opacity-40 hover:bg-transparent',
-                  )}
-                >
-                  <span
-                    className={cn(
-                      'mt-0.5 grid size-4 shrink-0 place-items-center rounded border',
-                      isSel
-                        ? 'border-primary bg-primary text-primary-foreground'
-                        : 'border-muted-foreground/40',
-                    )}
-                    aria-hidden
-                  >
-                    {isSel && <Check className="size-3" />}
-                  </span>
-                  <span className="min-w-0 flex-1">
-                    <span className="truncate font-mono text-xs font-semibold">{id}</span>
-                    {t.title && <span className="line-clamp-1 text-sm">{t.title}</span>}
-                  </span>
-                </button>
-              )
-            })
+            groupCrawledByStatus(filtered).map((group) => (
+              <div key={group.status || '∅'}>
+                <CrawledStatusHeader status={group.status} count={group.tickets.length} />
+                <ul className="divide-y">
+                  {group.tickets.map((t) => {
+                    const id = ticketIdOf(t)
+                    const isSel = value.includes(id)
+                    return (
+                      <li key={t.name}>
+                        <CrawledTicketRow
+                          ticket={t}
+                          selected={isSel}
+                          onSelect={() => toggle(id)}
+                          blocked={disabled || (!isSel && atMax)}
+                        />
+                      </li>
+                    )
+                  })}
+                </ul>
+              </div>
+            ))
           )}
         </div>
       </div>
@@ -393,7 +381,7 @@ function WorkflowStepsEditor({
         type="button"
         disabled={disabled}
         onClick={add}
-        className="inline-flex items-center gap-1.5 rounded-md border border-dashed border-border px-2.5 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:border-primary/40 hover:bg-primary/5 hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
+        className="inline-flex items-center gap-1.5 rounded-full border border-dashed border-border/60 px-2.5 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:border-border hover:bg-muted/60 hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
       >
         <Plus className="size-3.5" />
         Add step
@@ -627,60 +615,56 @@ export default function RunPage() {
   }
 
   return (
-    <div className="space-y-6">
-      <section className="overflow-hidden rounded-xl border bg-card shadow-sm">
-        <div className="border-b bg-gradient-to-br from-muted/80 via-card to-card px-6 py-6">
-          <div className="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
-            <div className="flex min-w-0 gap-4">
-              <span className="flex size-12 shrink-0 items-center justify-center rounded-xl bg-primary text-primary-foreground shadow-sm ring-1 ring-black/5">
-                <Play className="size-5" />
-              </span>
-              <div className="space-y-2">
-                <div className="flex flex-wrap items-center gap-2">
-                  <h1 className="text-3xl font-semibold tracking-tight">Launch QC Run</h1>
-                  {activeProject && (
-                    <Badge variant="secondary" className="gap-1 font-normal">
-                      <span className="size-1.5 rounded-full bg-emerald-500" />
-                      {activeProject.name}
-                    </Badge>
-                  )}
-                </div>
-                <p className="max-w-2xl text-sm leading-6 text-muted-foreground">
-                  Configure a ticket, live app URL, model, and run instructions. When started, the run
-                  moves to the live tracker and writes a structured QC report.
-                </p>
-              </div>
+    <div className="mx-auto max-w-6xl space-y-8">
+      <header className="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
+        <div className="flex items-start gap-3">
+          <span className="mt-0.5 flex size-11 shrink-0 items-center justify-center rounded-2xl bg-foreground text-background">
+            <Play className="size-5" />
+          </span>
+          <div className="space-y-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <h1 className="text-3xl font-semibold tracking-tight">Launch QC Run</h1>
+              {activeProject && (
+                <Badge variant="secondary" className="gap-1 font-normal">
+                  <span className="size-1.5 rounded-full bg-emerald-500" />
+                  {activeProject.name}
+                </Badge>
+              )}
             </div>
+            <p className="max-w-2xl text-sm leading-6 text-muted-foreground">
+              Configure a ticket, live app URL, model, and run instructions. When started, the run
+              moves to the live tracker and writes a structured QC report.
+            </p>
+          </div>
+        </div>
 
-            <div className="grid grid-cols-3 gap-2 sm:min-w-[24rem]">
-              <div className="rounded-lg border bg-background/80 px-3 py-2 shadow-xs">
-                <div className="text-lg font-semibold tabular-nums">{recent.length}</div>
-                <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
-                  Runs
-                </div>
-              </div>
-              <div className="rounded-lg border bg-background/80 px-3 py-2 shadow-xs">
-                <div className="text-lg font-semibold tabular-nums">{liveRuns}</div>
-                <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
-                  Live
-                </div>
-              </div>
-              <div className="rounded-lg border bg-background/80 px-3 py-2 shadow-xs">
-                <div className="text-lg font-semibold tabular-nums">{completedRuns}</div>
-                <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
-                  Complete
-                </div>
-              </div>
+        <div className="grid grid-cols-3 gap-2 sm:min-w-[24rem]">
+          <div className="rounded-2xl border border-border/60 bg-muted/60 px-3 py-2 shadow-none">
+            <div className="text-lg font-semibold tabular-nums">{recent.length}</div>
+            <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+              Runs
+            </div>
+          </div>
+          <div className="rounded-2xl border border-border/60 bg-muted/60 px-3 py-2 shadow-none">
+            <div className="text-lg font-semibold tabular-nums">{liveRuns}</div>
+            <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+              Live
+            </div>
+          </div>
+          <div className="rounded-2xl border border-border/60 bg-muted/60 px-3 py-2 shadow-none">
+            <div className="text-lg font-semibold tabular-nums">{completedRuns}</div>
+            <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+              Complete
             </div>
           </div>
         </div>
-      </section>
+      </header>
 
       <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_21rem]">
-        <Card className="overflow-hidden border-border/60 py-0 shadow-md">
-          <CardHeader className="gap-3 border-b bg-muted/25 py-5">
+        <Card className="overflow-hidden rounded-3xl border-border/60 py-0 shadow-none">
+          <CardHeader className="gap-3 border-b border-border/60 bg-muted/60 py-5">
             <div className="flex items-start gap-3">
-              <span className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-b from-primary to-primary/85 text-primary-foreground shadow-sm ring-1 ring-black/5">
+              <span className="flex size-10 shrink-0 items-center justify-center rounded-2xl bg-foreground text-background">
               <Sparkles className="size-5" />
             </span>
             <div className="space-y-1">
@@ -715,7 +699,7 @@ export default function RunPage() {
           >
             {/* mode toggle + run templates */}
             <div className="flex flex-wrap items-center justify-between gap-3">
-              <div className="inline-flex w-full rounded-lg border bg-muted/40 p-1 sm:w-auto">
+              <div className="inline-flex w-full rounded-full border border-border/60 bg-muted/60 p-1 sm:w-auto">
                 {(
                   [
                     { value: 'simple' as const, label: 'Single ticket', icon: Sparkles },
@@ -731,7 +715,7 @@ export default function RunPage() {
                       onClick={() => chooseMode(opt.value)}
                       aria-pressed={active}
                       className={cn(
-                        'inline-flex flex-1 items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium transition-all sm:flex-none',
+                        'inline-flex flex-1 items-center justify-center gap-1.5 rounded-full px-3 py-1.5 text-sm font-medium transition-all sm:flex-none',
                         active
                           ? 'bg-background text-foreground shadow-sm'
                           : 'text-muted-foreground hover:text-foreground',
@@ -749,7 +733,7 @@ export default function RunPage() {
                 size="sm"
                 onClick={() => setManagingPresets(true)}
                 disabled={!activeProject}
-                className="gap-1.5"
+                className="gap-1.5 rounded-full"
               >
                 <Bookmark className="size-3.5" />
                 Templates
@@ -762,7 +746,7 @@ export default function RunPage() {
             </div>
 
             {mode === 'advanced' && (
-              <div className="flex items-start gap-2 rounded-lg border border-primary/20 bg-primary/[0.03] px-3 py-2 text-xs leading-relaxed text-muted-foreground">
+              <div className="flex items-start gap-2 rounded-2xl border border-border/60 bg-muted/60 px-3 py-2 text-xs leading-relaxed text-muted-foreground">
                 <Layers className="mt-0.5 size-3.5 shrink-0 text-primary" />
                 <span>
                   <span className="font-medium text-foreground">Feature run:</span> pick the related
@@ -929,7 +913,7 @@ export default function RunPage() {
                 {modelInfo.description}
               </p>
               {/* why-to-choose guidance: best result vs. best fee */}
-              <div className="flex items-start gap-2 rounded-lg border border-border/60 bg-muted/30 px-3 py-2 text-xs leading-relaxed text-muted-foreground">
+              <div className="flex items-start gap-2 rounded-2xl border border-border/60 bg-muted/60 px-3 py-2 text-xs leading-relaxed text-muted-foreground">
                 <Lightbulb className="mt-0.5 size-3.5 shrink-0 text-amber-500" />
                 <span>
                   <span className="font-medium text-foreground">Choosing a model:</span> for the
@@ -989,7 +973,7 @@ export default function RunPage() {
             </div>
 
             {/* action band */}
-            <div className="-mx-6 mt-2 flex flex-col gap-3 border-t bg-muted/40 px-6 py-4 sm:flex-row sm:items-center sm:justify-between">
+            <div className="-mx-6 mt-2 flex flex-col gap-3 border-t border-border/60 bg-muted/60 px-6 py-4 sm:flex-row sm:items-center sm:justify-between">
               {activeProject ? (
                 <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
                   <Activity className="size-3.5" />
@@ -1007,7 +991,7 @@ export default function RunPage() {
                 size="lg"
                 disabled={!canSubmit}
                 title={!activeProject ? 'Select a project first' : 'Run QC  ·  ⌘/Ctrl + Enter'}
-                className="group h-11 px-6 text-sm font-semibold shadow-sm transition-all hover:shadow-md active:scale-[0.98]"
+                className="group h-11 rounded-full px-6 text-sm font-semibold shadow-none transition-all duration-200 hover:shadow-sm active:scale-[0.98]"
               >
                 {submitting ? (
                   <>
@@ -1028,8 +1012,8 @@ export default function RunPage() {
         </Card>
 
         <aside className="space-y-4">
-          <Card className="overflow-hidden py-0 shadow-sm">
-            <CardHeader className="border-b bg-gradient-to-br from-muted/70 via-card to-card py-4">
+          <Card className="overflow-hidden rounded-3xl border-border/60 py-0 shadow-none">
+            <CardHeader className="border-b border-border/60 bg-muted/60 py-4">
               <CardTitle className="flex items-center gap-2 text-base">
                 <Check className="size-4 text-muted-foreground" />
                 Run readiness
@@ -1038,7 +1022,7 @@ export default function RunPage() {
             </CardHeader>
             <CardContent className="space-y-3 p-4">
               {readyChecks.map((item) => (
-                <div key={item.label} className="flex items-center gap-3 rounded-lg border bg-background/70 p-3">
+                <div key={item.label} className="flex items-center gap-3 rounded-2xl border border-border/60 bg-muted/60 p-3">
                   <span
                     className={cn(
                       'flex size-7 shrink-0 items-center justify-center rounded-full',
@@ -1055,7 +1039,7 @@ export default function RunPage() {
                   </div>
                 </div>
               ))}
-              <div className="rounded-lg border bg-muted/30 p-3">
+              <div className="rounded-2xl border border-border/60 bg-muted/60 p-3">
                 <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                   Run mode
                 </div>
@@ -1071,8 +1055,8 @@ export default function RunPage() {
             </CardContent>
           </Card>
 
-          <Card className="overflow-hidden py-0 shadow-sm">
-            <CardHeader className="flex flex-row items-center justify-between gap-4 space-y-0 border-b py-4">
+          <Card className="overflow-hidden rounded-3xl border-border/60 py-0 shadow-none">
+            <CardHeader className="flex flex-row items-center justify-between gap-4 space-y-0 border-b border-border/60 py-4">
               <CardTitle className="flex items-center gap-2 text-base">
                 <Clock className="size-4 text-muted-foreground" />
                 Recent runs
@@ -1116,7 +1100,7 @@ export default function RunPage() {
             </CardContent>
           </Card>
 
-          <Card className="bg-primary text-primary-foreground shadow-sm">
+          <Card className="rounded-3xl border-border/60 bg-primary text-primary-foreground shadow-none">
             <CardContent className="space-y-2 p-4">
               <div className="flex items-center gap-2 text-sm font-semibold">
                 <Lightbulb className="size-4" />

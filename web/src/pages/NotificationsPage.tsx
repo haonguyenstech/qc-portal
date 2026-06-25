@@ -38,19 +38,21 @@ export default function NotificationsPage() {
   const navigate = useNavigate()
 
   return (
-    <div className="space-y-6">
+    <div className="mx-auto max-w-6xl space-y-8">
       <div className="flex items-center justify-between gap-4">
-        <div>
-          <h1 className="flex items-center gap-2 text-2xl font-semibold tracking-tight">
-            <Bell className="h-6 w-6" />
-            Notifications
-          </h1>
-          <p className="mt-1 text-sm text-muted-foreground">
-            {notifications.length === 0
-              ? 'Updates from your test-case generation jobs show up here.'
-              : `${notifications.length} notification${notifications.length === 1 ? '' : 's'}` +
-                (unreadCount > 0 ? ` · ${unreadCount} unread` : '')}
-          </p>
+        <div className="flex items-start gap-3">
+          <span className="mt-0.5 flex size-11 shrink-0 items-center justify-center rounded-2xl bg-foreground text-background">
+            <Bell className="size-5" />
+          </span>
+          <div className="space-y-1">
+            <h1 className="text-3xl font-semibold tracking-tight">Notifications</h1>
+            <p className="text-sm text-muted-foreground">
+              {notifications.length === 0
+                ? 'Updates from your test-case generation jobs show up here.'
+                : `${notifications.length} notification${notifications.length === 1 ? '' : 's'}` +
+                  (unreadCount > 0 ? ` · ${unreadCount} unread` : '')}
+            </p>
+          </div>
         </div>
         {notifications.length > 0 && (
           <div className="flex items-center gap-2">
@@ -59,7 +61,7 @@ export default function NotificationsPage() {
               size="sm"
               onClick={markAllRead}
               disabled={unreadCount === 0}
-              className="transition-all duration-200 active:scale-[0.98]"
+              className="rounded-full transition-all duration-200 active:scale-[0.98]"
             >
               <CheckCheck className="h-4 w-4" />
               Mark all read
@@ -68,7 +70,7 @@ export default function NotificationsPage() {
               variant="outline"
               size="sm"
               onClick={clearAll}
-              className="text-muted-foreground transition-all duration-200 hover:text-destructive active:scale-[0.98]"
+              className="rounded-full text-muted-foreground transition-all duration-200 hover:text-destructive active:scale-[0.98]"
             >
               <Trash2 className="h-4 w-4" />
               Clear all
@@ -78,9 +80,9 @@ export default function NotificationsPage() {
       </div>
 
       {notifications.length === 0 ? (
-        <Card>
+        <Card className="rounded-3xl border-border/60 shadow-none">
           <CardContent className="flex flex-col items-center gap-3 py-16 text-center">
-            <span className="flex h-12 w-12 items-center justify-center rounded-full bg-muted">
+            <span className="flex h-12 w-12 items-center justify-center rounded-full border border-border bg-muted/50 text-muted-foreground">
               <Bell className="h-6 w-6 text-muted-foreground" />
             </span>
             <div className="text-sm font-medium">No notifications yet</div>
@@ -90,9 +92,9 @@ export default function NotificationsPage() {
           </CardContent>
         </Card>
       ) : (
-        <Card>
+        <Card className="overflow-hidden rounded-3xl border-border/60 shadow-none">
           <CardContent className="p-0">
-            <ul className="divide-y divide-border">
+            <ul className="divide-y divide-border/60">
               {notifications.map((n) => {
                 const { icon: Icon, color, ring } = KIND_STYLES[n.kind]
                 return (
@@ -142,7 +144,7 @@ export default function NotificationsPage() {
                         e.stopPropagation()
                         remove(n.id)
                       }}
-                      className="shrink-0 rounded-md p-1.5 text-muted-foreground/50 opacity-0 transition-all hover:bg-muted hover:text-foreground group-hover:opacity-100"
+                      className="shrink-0 rounded-lg p-1.5 text-muted-foreground/50 opacity-0 transition-all hover:bg-muted hover:text-foreground group-hover:opacity-100"
                     >
                       <X className="h-4 w-4" />
                     </button>

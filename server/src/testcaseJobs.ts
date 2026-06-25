@@ -17,6 +17,8 @@ export interface TestcaseJobItem {
   version?: number
   savedTo?: string
   error?: string
+  /** Optional live app URL for this ticket — server-only, not exposed publicly. */
+  appUrl?: string
 }
 
 export type TestcaseLogLevel = 'info' | 'success' | 'error'
@@ -82,7 +84,14 @@ function toPublic(j: TestcaseJob): PublicTestcaseJob {
     doneCount: j.doneCount,
     createdAt: j.createdAt,
     updatedAt: j.updatedAt,
-    items: j.items.map((i) => ({ ...i })),
+    // Strip the server-only appUrl; expose only the public item fields.
+    items: j.items.map(({ folder, status, version, savedTo, error }) => ({
+      folder,
+      status,
+      version,
+      savedTo,
+      error,
+    })),
     logs: j.logs.map((l) => ({ ...l })),
   }
 }
@@ -165,6 +174,7 @@ async function runJob(job: TestcaseJob): Promise<void> {
         template: job.template,
         instructions: job.instructions,
         model: job.model,
+        appUrl: item.appUrl,
         signal: ac.signal,
         onLog: (l) => pushLog(job, l.level, l.text, item.folder),
       })
@@ -212,6 +222,8 @@ export function startTestcaseJob(opts: {
   projectName: string
   rootPath: string
   folders: string[]
+  /** Optional per-folder live app URL (folder → url) to ground that ticket's cases. */
+  appUrls?: Record<string, string>
   template: { name?: string; content?: string } | null
   instructions: string
   model: string
@@ -224,7 +236,11 @@ export function startTestcaseJob(opts: {
     template: opts.template,
     instructions: opts.instructions,
     model: opts.model,
-    items: opts.folders.map((folder) => ({ folder, status: 'pending' as const })),
+    items: opts.folders.map((folder) => ({
+      folder,
+      status: 'pending' as const,
+      appUrl: opts.appUrls?.[folder],
+    })),
     logs: [],
     total: opts.folders.length,
     doneCount: 0,

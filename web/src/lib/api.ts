@@ -73,6 +73,31 @@ export function initProject(
   return request(`/api/projects/${encodeURIComponent(id)}/init`, { method: 'POST' })
 }
 
+// ---- Project CLAUDE.md ----
+
+export interface ProjectClaudeMd {
+  content: string // the file's text ('' when it doesn't exist yet)
+  exists: boolean // whether CLAUDE.md is present at the project root
+  savedAt: string | null // ISO mtime, or null when absent
+  size: number // bytes on disk
+}
+
+/** Read the project's root CLAUDE.md (the Claude Code guidance for that repo). */
+export function getProjectClaudeMd(projectId: string): Promise<ProjectClaudeMd> {
+  return request(`/api/projects/${encodeURIComponent(projectId)}/claude-md`)
+}
+
+/** Create or overwrite the project's root CLAUDE.md. */
+export function saveProjectClaudeMd(
+  projectId: string,
+  content: string,
+): Promise<ProjectClaudeMd> {
+  return request(`/api/projects/${encodeURIComponent(projectId)}/claude-md`, {
+    method: 'PUT',
+    body: JSON.stringify({ content }),
+  })
+}
+
 // ---- Runs ----
 
 export function createRun(body: {
@@ -616,6 +641,78 @@ export function openDesignCheckFolder(projectId: string): Promise<{ ok: true; pa
   })
 }
 
+// ---- Design Check background jobs ----
+// A verify runs server-side so it finishes even if the browser reloads or navigates
+// away; the client polls the job by id for the live log and the findings. A verify
+// run is a single Claude run, so there's no batch and no pause/resume — just
+// running → done / error / cancelled.
+
+/** Whole-job status. `done`/`error`/`cancelled` are terminal. */
+export type VerifyJobStatus = 'running' | 'done' | 'error' | 'cancelled'
+
+export type VerifyLogLevel = 'info' | 'success' | 'error'
+
+export interface VerifyLogLine {
+  time: string
+  level: VerifyLogLevel
+  text: string
+}
+
+/** The findings payload, surfaced once a Design Check job finishes. */
+export interface VerifyJobResult {
+  summary: string
+  findings: DesignFinding[]
+  model: string
+  savedPath: string | null
+  savedAt: string | null
+  recordId: string | null
+}
+
+export interface VerifyJob {
+  id: string
+  projectId: string
+  folder: string
+  figmaUrl: string
+  model: string
+  status: VerifyJobStatus
+  logs: VerifyLogLine[]
+  result: VerifyJobResult | null
+  error: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+/** Start a background Design Check job for a crawled ticket against a Figma design. */
+export function startVerifyDesignJob(body: {
+  projectId: string
+  folder: string
+  figmaUrl: string
+  instructions?: string
+  model?: string
+  projectName?: string
+  /** One-off checklist for this run; overrides the saved project design-check checklist. */
+  checklist?: { name: string; content: string } | null
+}): Promise<{ jobId: string; job: VerifyJob }> {
+  return request('/api/ai/verify-design/jobs', { method: 'POST', body: JSON.stringify(body) })
+}
+
+/** Poll one Design Check job by id. */
+export function getVerifyDesignJob(jobId: string): Promise<{ job: VerifyJob }> {
+  return request(`/api/ai/verify-design/jobs/${encodeURIComponent(jobId)}`)
+}
+
+/** List this project's Design Check jobs (newest first). */
+export function listVerifyDesignJobs(projectId: string): Promise<{ jobs: VerifyJob[] }> {
+  return request(`/api/ai/verify-design/jobs?projectId=${encodeURIComponent(projectId)}`)
+}
+
+/** Cancel a running Design Check job (terminal) — kills the in-flight Claude run. */
+export function cancelVerifyDesignJob(jobId: string): Promise<{ job: VerifyJob }> {
+  return request(`/api/ai/verify-design/jobs/${encodeURIComponent(jobId)}/cancel`, {
+    method: 'POST',
+  })
+}
+
 // ---- Project file templates ----
 
 export interface ProjectTemplate {
@@ -682,6 +779,8 @@ export function generateTestCases(body: {
   instructions?: string
   projectName?: string
   model?: string
+  /** Optional live app URL — Claude opens it to ground the cases in the real UI. */
+  appUrl?: string
 }): Promise<TestCaseResult> {
   return request('/api/ai/testcases', {
     method: 'POST',
@@ -776,6 +875,8 @@ export interface TestCaseJob {
 export function startTestCaseJob(body: {
   projectId: string
   folders: string[]
+  /** Optional per-folder live app URL (folder → url) to ground that ticket's cases. */
+  appUrls?: Record<string, string>
   template?: { name: string; content: string } | null
   instructions?: string
   projectName?: string
@@ -960,4 +1061,37 @@ export function listRunFiles(id: string): Promise<{ slug: string | null; files: 
 /** Reveal a run's output folder in the OS file explorer. */
 export function openRunFolder(id: string): Promise<{ ok: true; path: string }> {
   return request(`/api/qc/runs/${encodeURIComponent(id)}/open`, { method: 'POST' })
+}
+
+// ---- Version / updates ----
+
+export interface UpdateCheck {
+  current: string | null
+  latest: string | null
+  updateAvailable: boolean
+  behind: number
+  checkedAt: string
+  error: string | null
+}
+
+/** Live installed version, read from the install's package.json at request time. */
+export function getVersion(): Promise<{ current: string | null }> {
+  return request('/api/version')
+}
+
+/** Fetch latest upstream and report whether `qc-portal --update` would move HEAD forward. */
+export function checkForUpdate(): Promise<UpdateCheck> {
+  return request('/api/version/check', { method: 'POST' })
+}
+
+/** The portal's own release notes (CHANGELOG.md) for the Release Notes page. */
+export function getReleaseNotes(): Promise<{ current: string | null; markdown: string | null }> {
+  return request('/api/version/changelog')
+}
+
+// ---- Terminal ----
+
+/** Whether the device-terminal feature is usable (node-pty native binding loaded). */
+export function terminalAvailable(): Promise<{ ok: boolean; error?: string }> {
+  return request('/api/terminal/available')
 }

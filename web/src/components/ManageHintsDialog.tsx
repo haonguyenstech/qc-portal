@@ -51,7 +51,7 @@ export function ManageHintsDialog({
       <DialogContent className="sm:max-w-xl">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            <span className="flex size-8 items-center justify-center rounded-lg bg-gradient-to-b from-primary to-primary/85 text-primary-foreground shadow-sm ring-1 ring-black/5">
+            <span className="flex size-8 items-center justify-center rounded-xl bg-foreground text-background">
               <Lightbulb className="size-4" />
             </span>
             Manage hints
@@ -64,13 +64,16 @@ export function ManageHintsDialog({
         <ScrollArea className="-mx-1 max-h-[55vh] px-1">
           <div className="space-y-3 pb-1">
             {hints.length === 0 && (
-              <p className="rounded-lg border border-dashed bg-muted/30 px-3 py-6 text-center text-sm text-muted-foreground">
+              <p className="rounded-2xl border border-dashed border-border/60 bg-muted/40 px-3 py-6 text-center text-sm text-muted-foreground">
                 No hints yet — add one below.
               </p>
             )}
 
             {hints.map((hint, i) => (
-              <div key={hint.id} className="space-y-2 rounded-lg border bg-card p-3 shadow-xs">
+              <div
+                key={hint.id}
+                className="space-y-2 rounded-2xl border border-border/60 bg-card p-3 shadow-none transition-all duration-200 hover:border-border hover:shadow-sm"
+              >
                 <div className="flex items-center gap-2">
                   <Input
                     aria-label={`Hint ${i + 1} label`}
@@ -102,7 +105,7 @@ export function ManageHintsDialog({
             ))}
 
             {/* add new */}
-            <div className="space-y-2 rounded-lg border border-dashed bg-muted/20 p-3">
+            <div className="space-y-2 rounded-2xl border border-dashed border-border/60 bg-muted/40 p-3">
               <Label className="text-xs font-medium text-muted-foreground">New hint</Label>
               <Input
                 value={newLabel}
@@ -122,7 +125,7 @@ export function ManageHintsDialog({
                 size="sm"
                 onClick={onAdd}
                 disabled={!canAdd}
-                className="w-full sm:w-auto"
+                className="w-full rounded-full transition-all duration-200 active:scale-[0.98] sm:w-auto"
               >
                 <Plus className="size-4" />
                 Add hint
@@ -137,12 +140,16 @@ export function ManageHintsDialog({
             variant="ghost"
             size="sm"
             onClick={resetHints}
-            className="text-muted-foreground"
+            className="rounded-full text-muted-foreground"
           >
             <RotateCcw className="size-4" />
             Reset to defaults
           </Button>
-          <Button type="button" onClick={() => onOpenChange(false)}>
+          <Button
+            type="button"
+            onClick={() => onOpenChange(false)}
+            className="rounded-full transition-all duration-200 active:scale-[0.98]"
+          >
             Done
           </Button>
         </DialogFooter>

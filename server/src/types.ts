@@ -42,6 +42,7 @@ export interface RunDetail extends RunSummary {
   issuesMd: string | null // raw testing/<slug>/issues.md
   screenshots: string[] // relative paths under the run folder, e.g. "screenshots/ac1-list.png"
   logTail: LogEvent[] // last N events (full stream is over WS while running)
+  hasSession: boolean // the Claude session is still resumable for a follow-up chat
 }
 
 // ---- live stream events (server -> web over WebSocket) ----

@@ -346,8 +346,8 @@ function GenerateFromClickUp({
   if (!configured) return null
 
   return (
-    <Card className="overflow-hidden shadow-sm">
-      <div className="flex flex-wrap items-center gap-2 border-b bg-muted/30 px-4 py-2.5">
+    <Card className="overflow-hidden rounded-3xl border-border/60 shadow-none">
+      <div className="flex flex-wrap items-center gap-2 border-b border-border/60 bg-muted/60 px-4 py-2.5">
         <span className="flex items-center gap-2 text-sm font-medium">
           <ListChecks className="h-4 w-4 text-primary" />
           Generate from ClickUp
@@ -426,7 +426,7 @@ function GenerateFromClickUp({
                 onToggle={toggleAllDocs}
               />
             )}
-            <div className="max-h-56 overflow-auto rounded-lg border bg-background/50">
+            <div className="max-h-56 overflow-auto rounded-xl border border-border/60 bg-muted/60">
               {docsError ? (
                 <p className="px-3 py-6 text-center text-xs text-destructive">
                   {docErr instanceof Error ? docErr.message : 'Failed to load docs'}
@@ -502,7 +502,7 @@ function GenerateFromClickUp({
                 onToggle={toggleAllTickets}
               />
             )}
-            <div className="max-h-56 overflow-auto rounded-lg border bg-background/50">
+            <div className="max-h-56 overflow-auto rounded-xl border border-border/60 bg-muted/60">
               {ticketsError ? (
                 <p className="px-3 py-6 text-center text-xs text-destructive">
                   {ticketErr instanceof Error ? ticketErr.message : 'Failed to load tickets'}
@@ -577,12 +577,12 @@ function GenerateFromClickUp({
               onClick={() => setOverviewOpen(true)}
               disabled={total === 0}
               className={cn(
-                'group flex items-start gap-3 rounded-xl border bg-card p-3 text-left transition-all duration-200',
-                'hover:-translate-y-0.5 hover:border-primary/40 hover:shadow-md active:scale-[0.99]',
+                'group flex items-start gap-3 rounded-2xl border border-border/60 bg-muted/60 p-3 text-left transition-all duration-200',
+                'hover:-translate-y-0.5 hover:border-border hover:shadow-sm active:scale-[0.99]',
                 'disabled:pointer-events-none disabled:opacity-50',
               )}
             >
-              <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary transition-colors group-hover:bg-primary/15">
+              <span className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-foreground text-background">
                 <Wand2 className="size-4" />
               </span>
               <span className="min-w-0">
@@ -601,12 +601,12 @@ function GenerateFromClickUp({
               onClick={() => setDiagramOpen(true)}
               disabled={total === 0}
               className={cn(
-                'group flex items-start gap-3 rounded-xl border bg-card p-3 text-left transition-all duration-200',
-                'hover:-translate-y-0.5 hover:border-violet-400/50 hover:shadow-md active:scale-[0.99]',
+                'group flex items-start gap-3 rounded-2xl border border-border/60 bg-muted/60 p-3 text-left transition-all duration-200',
+                'hover:-translate-y-0.5 hover:border-border hover:shadow-sm active:scale-[0.99]',
                 'disabled:pointer-events-none disabled:opacity-50',
               )}
             >
-              <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-violet-500/10 text-violet-600 transition-colors group-hover:bg-violet-500/15 dark:text-violet-400">
+              <span className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-foreground text-background">
                 <Workflow className="size-4" />
               </span>
               <span className="min-w-0">
@@ -787,10 +787,13 @@ export default function OverviewPage() {
   if (!activeProjectId) {
     return (
       <div className="mx-auto max-w-6xl space-y-6">
-        <header className="space-y-1">
+        <header className="flex items-center gap-3">
+          <span className="flex size-11 shrink-0 items-center justify-center rounded-2xl bg-foreground text-background">
+            <BookOpen className="size-5" />
+          </span>
           <h1 className="text-3xl font-semibold tracking-tight">Overview</h1>
         </header>
-        <Card className="shadow-sm">
+        <Card className="rounded-3xl border-border/60 shadow-none">
           <CardContent className="flex flex-col items-center gap-3 py-16 text-center">
             <span className="flex h-12 w-12 items-center justify-center rounded-full border border-border bg-muted/50 text-muted-foreground">
               <BookOpen className="h-5 w-5" />
@@ -828,20 +831,25 @@ export default function OverviewPage() {
   return (
     <div className="mx-auto max-w-6xl space-y-8">
       <header className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-        <div className="space-y-1">
-          <h1 className="text-3xl font-semibold tracking-tight">Overview</h1>
-          <p className="max-w-2xl text-sm text-muted-foreground">
-            A free-text intro about{' '}
-            <span className="font-medium text-foreground">{activeProject?.name}</span> — what it is
-            and what to know before running QC.
-          </p>
+        <div className="flex items-start gap-3">
+          <span className="mt-0.5 flex size-11 shrink-0 items-center justify-center rounded-2xl bg-foreground text-background">
+            <BookOpen className="size-5" />
+          </span>
+          <div className="space-y-1">
+            <h1 className="text-3xl font-semibold tracking-tight">Overview</h1>
+            <p className="max-w-2xl text-sm text-muted-foreground">
+              A free-text intro about{' '}
+              <span className="font-medium text-foreground">{activeProject?.name}</span> — what it
+              is and what to know before running QC.
+            </p>
+          </div>
         </div>
         {!editing && description && (
           <Button
             size="sm"
             variant="outline"
             onClick={() => startEditing()}
-            className="shrink-0 transition-all duration-200 active:scale-[0.98]"
+            className="shrink-0 rounded-full transition-all duration-200 active:scale-[0.98]"
           >
             <Pencil className="h-3.5 w-3.5" />
             Edit
@@ -851,9 +859,9 @@ export default function OverviewPage() {
 
       {/* Project context chip — which repo this intro belongs to. */}
       {activeProject && (
-        <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-xl border bg-card px-4 py-3 shadow-sm">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-2xl border border-border/60 bg-card px-4 py-3 shadow-none">
           <span className="flex items-center gap-2">
-            <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-primary/20 bg-primary/10 text-primary">
+            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-border/60 bg-muted/60 text-muted-foreground">
               <FolderGit2 className="h-4 w-4" />
             </span>
             <span className="leading-tight">
@@ -867,7 +875,7 @@ export default function OverviewPage() {
           </span>
           <div className="ml-auto flex min-w-0 items-center gap-2">
             <span
-              className="min-w-0 truncate rounded-md border bg-muted/40 px-2.5 py-1.5 font-mono text-xs text-muted-foreground"
+              className="min-w-0 truncate rounded-full border border-border/60 bg-muted/50 px-3 py-1.5 font-mono text-xs text-muted-foreground"
               title={activeProject.rootPath}
             >
               {activeProject.rootPath}
@@ -888,8 +896,8 @@ export default function OverviewPage() {
       )}
 
       {editing ? (
-        <Card className="overflow-hidden shadow-sm">
-          <div className="flex items-center justify-between gap-2 border-b bg-muted/30 px-4 py-2.5">
+        <Card className="overflow-hidden rounded-3xl border-border/60 shadow-none">
+          <div className="flex items-center justify-between gap-2 border-b border-border/60 bg-muted/60 px-4 py-2.5">
             <span className="flex items-center gap-2 text-sm font-medium">
               <FileText className="h-4 w-4 text-muted-foreground" />
               Editing intro
@@ -904,6 +912,7 @@ export default function OverviewPage() {
                   setEditing(false)
                 }}
                 disabled={save.isPending}
+                className="rounded-full"
               >
                 <X className="h-3.5 w-3.5" />
                 Cancel
@@ -912,7 +921,7 @@ export default function OverviewPage() {
                 size="sm"
                 onClick={() => save.mutate()}
                 disabled={save.isPending}
-                className="transition-all duration-200 active:scale-[0.98]"
+                className="rounded-full transition-all duration-200 active:scale-[0.98]"
               >
                 {save.isPending ? (
                   <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -932,7 +941,7 @@ export default function OverviewPage() {
           />
         </Card>
       ) : description ? (
-        <Card className="shadow-sm">
+        <Card className="rounded-3xl border-border/60 shadow-none">
           <CardContent className="px-6 py-5">
             <div className={MD_CLASS}>
               <ReactMarkdown remarkPlugins={[remarkGfm]}>{description}</ReactMarkdown>
@@ -941,9 +950,9 @@ export default function OverviewPage() {
         </Card>
       ) : (
         // No intro yet — invite the user to write one.
-        <Card className="border-dashed shadow-sm">
+        <Card className="rounded-3xl border-dashed border-border/60 shadow-none">
           <CardContent className="flex flex-col items-center gap-3 py-16 text-center">
-            <span className="flex h-12 w-12 items-center justify-center rounded-full border border-primary/20 bg-primary/10 text-primary">
+            <span className="flex h-12 w-12 items-center justify-center rounded-2xl bg-foreground text-background">
               <Sparkles className="h-5 w-5" />
             </span>
             <div className="space-y-1">
@@ -955,7 +964,7 @@ export default function OverviewPage() {
             </div>
             <Button
               onClick={() => startEditing(PLACEHOLDER)}
-              className="transition-all duration-200 active:scale-[0.98]"
+              className="rounded-full transition-all duration-200 active:scale-[0.98]"
             >
               <Pencil className="h-4 w-4" />
               Write intro
@@ -1003,7 +1012,7 @@ export default function OverviewPage() {
                 variant="outline"
                 onClick={() => startEditingDiagram()}
                 disabled={!selectedDiagram}
-                className="transition-all duration-200 active:scale-[0.98]"
+                className="rounded-full transition-all duration-200 active:scale-[0.98]"
               >
                 <Code2 className="h-3.5 w-3.5" />
                 Edit
@@ -1015,7 +1024,7 @@ export default function OverviewPage() {
                     variant="destructive"
                     onClick={() => delDiagram.mutate()}
                     disabled={delDiagram.isPending}
-                    className="h-8"
+                    className="h-8 rounded-full"
                   >
                     {delDiagram.isPending ? (
                       <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -1029,7 +1038,7 @@ export default function OverviewPage() {
                     variant="outline"
                     onClick={() => setConfirmDeleteDiagram(false)}
                     disabled={delDiagram.isPending}
-                    className="h-8"
+                    className="h-8 rounded-full"
                   >
                     Cancel
                   </Button>
@@ -1040,7 +1049,7 @@ export default function OverviewPage() {
                   variant="outline"
                   onClick={() => setConfirmDeleteDiagram(true)}
                   disabled={!selectedDiagram}
-                  className="h-8 text-destructive transition-all duration-200 hover:text-destructive active:scale-[0.98]"
+                  className="h-8 rounded-full text-destructive transition-all duration-200 hover:text-destructive active:scale-[0.98]"
                 >
                   <Trash2 className="h-3.5 w-3.5" />
                   Delete
@@ -1051,8 +1060,8 @@ export default function OverviewPage() {
         </div>
 
         {editingDiagram && selectedDiagram ? (
-          <Card className="overflow-hidden shadow-sm">
-            <div className="flex flex-wrap items-center justify-between gap-2 border-b bg-muted/30 px-4 py-2.5">
+          <Card className="overflow-hidden rounded-3xl border-border/60 shadow-none">
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/60 bg-muted/60 px-4 py-2.5">
               <span className="flex min-w-0 flex-1 items-center gap-2 text-sm font-medium">
                 <Code2 className="h-4 w-4 shrink-0 text-muted-foreground" />
                 <Input
@@ -1071,6 +1080,7 @@ export default function OverviewPage() {
                   variant="ghost"
                   onClick={() => setEditingDiagram(false)}
                   disabled={saveDiagram.isPending}
+                  className="rounded-full"
                 >
                   <X className="h-3.5 w-3.5" />
                   Cancel
@@ -1079,7 +1089,7 @@ export default function OverviewPage() {
                   size="sm"
                   onClick={() => saveDiagram.mutate()}
                   disabled={saveDiagram.isPending || !nameDraft.trim()}
-                  className="transition-all duration-200 active:scale-[0.98]"
+                  className="rounded-full transition-all duration-200 active:scale-[0.98]"
                 >
                   {saveDiagram.isPending ? (
                     <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -1099,7 +1109,7 @@ export default function OverviewPage() {
                 spellCheck={false}
                 className="min-h-[360px] resize-y rounded-none border-0 border-b font-mono text-xs leading-relaxed focus-visible:ring-0 lg:border-b-0 lg:border-r"
               />
-              <div className="min-h-[360px] overflow-auto bg-background/50 p-4">
+              <div className="min-h-[360px] overflow-auto bg-muted/60 p-4">
                 <p className="mb-2 flex items-center gap-1.5 text-[11px] uppercase tracking-wide text-muted-foreground">
                   <Sparkles className="h-3 w-3" />
                   Live preview
@@ -1109,16 +1119,16 @@ export default function OverviewPage() {
             </div>
           </Card>
         ) : selectedDiagram ? (
-          <Card className="shadow-sm">
+          <Card className="rounded-3xl border-border/60 shadow-none">
             <CardContent className="px-6 py-5">
               <MermaidDiagram chart={selectedDiagram.content} />
             </CardContent>
           </Card>
         ) : (
           // No diagrams yet — invite the user to generate or hand-write one.
-          <Card className="border-dashed shadow-sm">
+          <Card className="rounded-3xl border-dashed border-border/60 shadow-none">
             <CardContent className="flex flex-col items-center gap-3 py-14 text-center">
-              <span className="flex h-12 w-12 items-center justify-center rounded-full border border-primary/20 bg-primary/10 text-primary">
+              <span className="flex h-12 w-12 items-center justify-center rounded-2xl bg-foreground text-background">
                 <Workflow className="h-5 w-5" />
               </span>
               <div className="space-y-1">
@@ -1134,7 +1144,7 @@ export default function OverviewPage() {
                 variant="outline"
                 onClick={() => addBlank.mutate()}
                 disabled={addBlank.isPending}
-                className="transition-all duration-200 active:scale-[0.98]"
+                className="rounded-full transition-all duration-200 active:scale-[0.98]"
               >
                 {addBlank.isPending ? (
                   <Loader2 className="h-4 w-4 animate-spin" />

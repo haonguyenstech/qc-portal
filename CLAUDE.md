@@ -58,6 +58,7 @@ server/src/
   crawl.ts          core single-ticket crawl: download detail+comments+attachments (+ optional summary.md)
   crawlJobs.ts      in-memory background-job registry for ticket crawling (logs + per-item status)
   runManager.ts     in-flight run lifecycle (spawn, stream, shutdown)
+  terminal.ts       device pseudo-terminal: node-pty shell bridged over /ws/terminal (one shell per socket)
   hub.ts            WebSocket pub/sub by runId (replays persisted events to late subscribers)
   projectScope.ts   resolves the active project's root path; path-guards file writes
   clickup.ts        ClickUp ticket lookup + crawl
@@ -71,9 +72,12 @@ web/src/
   main.tsx          React Query + Project + Notification providers + Toaster mount
   index.css         Tailwind v4 theme — oklch design tokens (light + .dark)
   pages/            OverviewPage, TicketsPage, TestCasePage, RunPage, RunningPage, HistoryPage,
-                    RunDetailPage, SkillsPage, McpPage, NotificationsPage, ProjectsPage (at /settings)
+                    RunDetailPage, SkillsPage, McpPage, NotificationsPage, TerminalPage (at /terminal),
+                    ReleaseNotesPage
+                    (at /releases — renders CHANGELOG.md + check-for-updates), ProjectsPage (at /settings)
   components/ui/    shadcn primitives (button, card, dialog, select, tabs, table, scroll-area, …)
   components/       feature pieces: NotificationBell, TestCaseJobWatcher, CrawlJobWatcher, ManageRulesDialog,
+                    ContinueSessionPanel (resume a finished run's session in a terminal, see "Continue session" below),
                     MermaidDiagram (lazy mermaid render, used by OverviewPage),
                     OpenFolderButton (reveals a project folder in the OS file explorer),
                     dialogs (RunPresetsDialog, ManageHintsDialog, TicketPicker, …)
@@ -215,6 +219,54 @@ to expose a new upload slot. Current kinds:
   Checklist upload (md/csv/xlsx, Excel→CSV in-browser, preview dialog) shows "Using project checklist"
   with Preview/Override when one is saved, exactly like the TestCase template upload.
 
+## Terminal page (device shell)
+
+**`/terminal` (`TerminalPage.tsx`, "Terminal" under the sidebar's Tools group)** — a real
+pseudo-terminal on the machine running the server, rendered in-browser with **xterm.js**
+(`@xterm/xterm` + `@xterm/addon-fit`). **Connect** spawns the user's login shell
+(`$SHELL -l`, or `%ComSpec%`/PowerShell on Windows) with `cwd` = the **active project's root** via
+**`node-pty`**, bridged over a dedicated **`/ws/terminal`** WebSocket; **Disconnect** (or `ws` close)
+kills the shell — one shell per socket, nothing persists across reconnects. It behaves like a native
+terminal (interactive TUIs work — e.g. type `claude` to start a session).
+
+- **WebSocket protocol** — server→client frames are **raw terminal bytes** (`term.write`); client→server
+  frames are **JSON control** messages: `{type:'input',data}` for keystrokes and `{type:'resize',cols,rows}`
+  on fit. Connection query params: `projectId`, `cols`, `rows`.
+- **Upgrade routing** — `index.ts` uses two `noServer` `WebSocketServer`s and a single `server.on('upgrade')`
+  that dispatches by pathname (`/ws` → run hub, `/ws/terminal` → `handleTerminalConnection`); unknown paths
+  are `socket.destroy()`ed. Don't go back to `new WebSocketServer({ server, path })` — multiple path-bound
+  servers on one HTTP server don't compose.
+- **node-pty** is a native module shipped with prebuilt binaries (mac/win, arm64/x64). It's loaded lazily
+  and defensively in `terminal.ts` — if the binding can't load, `GET /api/terminal/available` returns
+  `{ok:false,error}` and the page shows an "unavailable" card instead of crashing the portal. On posix the
+  module re-asserts the prebuild's `spawn-helper` exec bit before the first spawn (some extractions strip it,
+  surfacing as `posix_spawnp failed`).
+
+## Continue session (resume a finished run in a terminal)
+
+A QC run's Claude session is **kept alive after the report is written** so the engineer can keep
+working in it — the session is not closed when the run ends. The "Continue session" panel on
+`RunDetailPage` is a **real interactive terminal** (the same xterm/PTY engine as the Terminal page),
+wired to resume *that run's* session. This reuses the existing session capture: `onSession` stores the
+stream-json `init` event's `session_id` into `runs.sessionId`.
+
+- **Server** — `/ws/terminal?runId=<id>` (in `terminal.ts`, `resolveTarget`) spawns
+  **`claude --resume <sessionId>`** interactively (cwd = the run's project root) instead of a plain
+  shell. Bad/absent session or unknown run → an error line is written to the terminal and the socket
+  closes. On Windows the resume goes through `cmd.exe /c claude …` so the `.cmd` resolves.
+- **`GET /api/qc/runs/:id`** returns **`hasSession`** (`getRunSession(id) != null`) so the panel only
+  shows when the conversation can be continued.
+- **UI** — `ContinueSessionPanel.tsx` (under the summary, when `run.hasSession`) uses the shared
+  **`useXtermSession`** hook (`web/src/lib/useXtermSession.ts`) — the xterm + fit + WebSocket plumbing
+  factored out of the Terminal page, parameterized only by the connect query (`runId` here,
+  `projectId` for the plain Terminal page). **Connect** is disabled while the run is still
+  `running`/`queued` (the session is in use). On disconnect it invalidates `['run', id]` /
+  `['run-files', id]` so a report/evidence the interactive session changed refreshes.
+- **Process cleanup** — `killPtyTree` signals the pty's whole **process group** (`process.kill(-pid)`;
+  node-pty's child is a setsid session leader) so `claude` *and the MCP servers it spawns* die on
+  disconnect, escalating SIGTERM→SIGKILL. Don't downgrade this to a bare `pty.kill()` — that leaves
+  MCP children orphaned.
+
 ## Conventions
 
 **Data fetching** — TanStack Query everywhere. Reads use `useQuery({ queryKey: [...], queryFn })`;
@@ -222,13 +274,15 @@ keys are scoped by project, e.g. `['mcp', projectId]`, `['projects']`. Writes us
 with `onSuccess`/`onError` that fire a `sonner` `toast` and `queryClient.invalidateQueries(...)` to
 refresh. Never call `fetch` from a component — add a function to `lib/api.ts` and import it.
 
-**Styling** — Tailwind v4 + shadcn/ui (new-york style, lucide icons, slate base). Use semantic
-tokens (`bg-primary`, `text-muted-foreground`, `border-border`, `bg-card`), never raw hex. Status
-colors follow a fixed palette: emerald = ok/connected/ready, amber = pending/warning, red/
-`destructive` = failed/error. Compose classes with `cn(...)`. Common interaction polish seen across
-pages: `transition-all duration-200 active:scale-[0.98]`, hover lift (`hover:-translate-y-0.5
-hover:shadow-md`), and `Loader2 className="animate-spin"` for pending states. Icons come from
-`lucide-react`.
+**Styling** — Tailwind v4 + shadcn/ui (new-york style, lucide icons, slate base) following the
+**System-Style UI** design language (see its own section below — fonts, radii, borders, elevation,
+pills). Use semantic tokens (`bg-primary`, `text-muted-foreground`, `border-border`, `bg-card`),
+never raw hex. Status colors follow a fixed palette: emerald = ok/connected/ready, amber =
+pending/warning, red/`destructive` = failed/error. Compose classes with `cn(...)`. Common interaction
+polish: `transition-all duration-200 active:scale-[0.98]`, hover lift (`hover:-translate-y-0.5
+hover:shadow-sm`), and `Loader2 className="animate-spin"` for pending states. Icons come from
+`lucide-react`. The **`system-style-ui` project skill** (`.claude/skills/system-style-ui/`) carries
+the full recipe and `McpPage.tsx` is the canonical reference implementation.
 
 **Component shape** — pages are single files that define small local sub-components (e.g.
 `ProjectCard`, `AiRuntimeCard`, `ConnectServices`, `StatTile`) above the default export. Follow that
@@ -238,6 +292,29 @@ call), not just presence in config — keep that distinction.
 **Server** — ES modules; relative imports use the compiled `.js` extension (e.g.
 `from './db.js'`). Each resource is an Express router under `routes/` mounted in `index.ts`. All file
 writes go through `projectScope.ts` path-guarding so they can't escape the project root.
+
+## System-Style UI (design language)
+
+The portal follows a **System-Style UI** inspired by Google's Antigravity site
+(`antigravity.google`): clean, neutral, large-radius, hairline-bordered, flat surfaces over heavy
+shadows. It is layered on top of the existing slate oklch token set — semantic tokens still apply;
+this just fixes the *shape, weight, and elevation* vocabulary. The `system-style-ui` project skill
+holds the actionable recipe; `web/src/pages/McpPage.tsx` is the canonical implementation.
+
+- **Typography** — UI font `Google Sans Flex` → `Google Sans` → sans-serif; mono `Google Sans Code`.
+  Loaded in `web/index.html` (one Google Fonts `<link>`) and wired to `--font-sans` / `--font-mono`
+  in `web/src/index.css`. **The Flex `wght` axis is requested `300..700`** so `font-medium` (500),
+  `font-semibold` (600), and `font-bold` (700) are *real* weights — narrowing it (e.g. `400..500`,
+  which Antigravity itself ships) makes the browser synthesize faux-bold for `font-semibold`. Don't
+  narrow it back. Headings use `font-semibold tracking-tight`.
+- **Radii (large)** — primary surfaces/cards `rounded-3xl` (24px); secondary surfaces, context bars,
+  and icon chips `rounded-2xl` / `rounded-xl` (16/12px); inline pills `rounded-xl`. **Buttons are
+  fully rounded pills (`rounded-full`).**
+- **Borders & elevation (flat)** — hairline, low-contrast borders: `border-border/60`, strengthening
+  to `border-border` only on hover. No resting drop shadow (`shadow-none`); convey elevation with a
+  tinted surface (`bg-muted/60`) plus a subtle hover lift (`hover:-translate-y-0.5 hover:shadow-sm`).
+- **Marks** — icon badges are high-contrast solids (`rounded-2xl bg-foreground text-background`), not
+  gradient chips. Reserve the blue accent (`#3279F9`-like) for sparing emphasis; default to neutral.
 
 ## Critical constraints
 

@@ -73,9 +73,9 @@
 }
 
 @theme inline {
-  --font-sans: "Geist", ui-sans-serif, system-ui, -apple-system, "Segoe UI",
-    sans-serif;
-  --font-mono: "Geist Mono", ui-monospace, "SF Mono", "JetBrains Mono",
+  --font-sans: "Google Sans Flex", "Google Sans", ui-sans-serif, system-ui,
+    -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "Google Sans Code", ui-monospace, "SF Mono", "JetBrains Mono",
     "Fira Code", monospace;
 
   /* Shadows tinted with the slate hue instead of flat black — softer, more premium. */

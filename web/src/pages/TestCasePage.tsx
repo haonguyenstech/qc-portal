@@ -15,6 +15,7 @@ import {
   FileUp,
   FolderGit2,
   FolderTree,
+  Globe,
   Info,
   ListChecks,
   Loader2,
@@ -37,6 +38,7 @@ import {
   Dialog,
   DialogContent,
   DialogDescription,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
@@ -250,7 +252,7 @@ function CsvTable({ csv }: { csv: string }) {
   return (
     // w-max lets the table grow past the dialog width so overflow-x-auto gives a
     // real horizontal scrollbar; min-w-full keeps it filling narrow tables.
-    <div className="overflow-x-auto rounded-lg border">
+    <div className="overflow-x-auto rounded-2xl border border-border/60">
       <table className="w-max min-w-full border-collapse text-xs">
         <thead>
           <tr>
@@ -304,9 +306,9 @@ function TemplatePreviewDialog({
   return (
     <Dialog open={!!template} onOpenChange={onOpenChange}>
       <DialogContent className="flex max-h-[92vh] w-[97vw] flex-col gap-0 overflow-hidden p-0 sm:max-w-[90rem]">
-        <DialogHeader className="shrink-0 space-y-2 border-b bg-muted/30 px-5 py-3">
+        <DialogHeader className="shrink-0 space-y-2 border-b border-border/60 bg-muted/30 px-5 py-3">
           <DialogTitle className="flex items-center gap-2 text-base">
-            <FileText className="h-4 w-4 text-primary" />
+            <FileText className="h-4 w-4 text-muted-foreground" />
             <span className="truncate font-mono text-sm">{template?.name}</span>
           </DialogTitle>
           <DialogDescription>
@@ -318,11 +320,193 @@ function TemplatePreviewDialog({
           {!template ? null : isCsv ? (
             <CsvTable csv={template.content} />
           ) : (
-            <pre className="overflow-x-auto whitespace-pre-wrap break-words rounded-lg border bg-muted/30 p-4 font-mono text-xs leading-relaxed">
+            <pre className="overflow-x-auto whitespace-pre-wrap break-words rounded-2xl border border-border/60 bg-muted/30 p-4 font-mono text-xs leading-relaxed">
               {template.content}
             </pre>
           )}
         </div>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+// Remember the last live app URL per project so the Generate dialog can prefill the
+// "set for all" field — QC engineers usually test many tickets against one staging URL.
+const APP_URL_PREFIX = 'qc.testcaseAppUrl.'
+function loadDefaultAppUrl(projectId: string | null): string {
+  if (!projectId) return ''
+  try {
+    return localStorage.getItem(APP_URL_PREFIX + projectId) ?? ''
+  } catch {
+    return ''
+  }
+}
+function saveDefaultAppUrl(projectId: string, url: string): void {
+  try {
+    if (url.trim()) localStorage.setItem(APP_URL_PREFIX + projectId, url.trim())
+  } catch {
+    /* storage unavailable */
+  }
+}
+
+/** Looks like a usable http(s) URL? (light client check; the server re-validates). */
+function isLikelyUrl(s: string): boolean {
+  const t = s.trim()
+  if (!t) return false
+  try {
+    const u = new URL(t)
+    return u.protocol === 'http:' || u.protocol === 'https:'
+  } catch {
+    return false
+  }
+}
+
+/**
+ * The "Generate" confirmation dialog. Previews the selected tickets and lets the QC
+ * engineer paste an optional live app URL per ticket — when set, Claude opens that
+ * URL to ground the cases in the real running app; blank means ticket-only.
+ */
+function GenerateDialog({
+  open,
+  onOpenChange,
+  tickets,
+  appUrls,
+  onChangeUrl,
+  onApplyAll,
+  onConfirm,
+  pending,
+  modelLabel,
+  defaultAllUrl,
+}: {
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  tickets: CrawledTicket[]
+  appUrls: Record<string, string>
+  onChangeUrl: (folder: string, url: string) => void
+  onApplyAll: (url: string) => void
+  onConfirm: () => void
+  pending: boolean
+  modelLabel: string
+  defaultAllUrl: string
+}) {
+  const [allUrl, setAllUrl] = useState(defaultAllUrl)
+  const count = tickets.length
+  const withUrl = tickets.filter((t) => (appUrls[t.name] ?? '').trim()).length
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="flex max-h-[88vh] w-[95vw] flex-col gap-0 overflow-hidden p-0 sm:max-w-2xl">
+        <DialogHeader className="shrink-0 space-y-1.5 border-b border-border/60 bg-muted/30 px-5 py-4">
+          <DialogTitle className="flex items-center gap-2 text-base">
+            <Wand2 className="h-4 w-4 text-primary" />
+            Generate test cases
+          </DialogTitle>
+          <DialogDescription>
+            {count} ticket{count === 1 ? '' : 's'} selected. Optionally paste a live{' '}
+            <span className="font-medium text-foreground">app URL</span> for each — Claude opens it
+            and grounds the cases in the real running app. Leave blank to generate from the ticket
+            alone.
+          </DialogDescription>
+        </DialogHeader>
+
+        {count > 1 && (
+          <div className="shrink-0 space-y-1.5 border-b border-border/60 px-5 py-3">
+            <label className="text-xs font-medium text-muted-foreground">Set one URL for all</label>
+            <div className="flex items-center gap-2">
+              <div className="relative min-w-0 flex-1">
+                <Globe className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  value={allUrl}
+                  onChange={(e) => setAllUrl(e.target.value)}
+                  placeholder="https://staging.example.com/feature"
+                  className="h-9 pl-9"
+                />
+              </div>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => onApplyAll(allUrl.trim())}
+                disabled={!allUrl.trim()}
+                className="shrink-0 rounded-full"
+              >
+                Apply to all
+              </Button>
+            </div>
+          </div>
+        )}
+
+        <div className="min-h-0 flex-1 space-y-2 overflow-auto px-5 py-3">
+          {tickets.map((t) => {
+            const url = appUrls[t.name] ?? ''
+            const invalid = url.trim().length > 0 && !isLikelyUrl(url)
+            return (
+              <div
+                key={t.name}
+                className="space-y-2 rounded-xl border border-border/60 bg-muted/20 p-3"
+              >
+                <div className="flex min-w-0 items-center gap-2">
+                  <Ticket className="size-3.5 shrink-0 text-muted-foreground" />
+                  <span className="shrink-0 font-mono text-xs font-medium">
+                    {t.displayId ?? t.name}
+                  </span>
+                  {t.title && (
+                    <span className="min-w-0 truncate text-xs text-muted-foreground">
+                      {t.title}
+                    </span>
+                  )}
+                  {(url.trim() ? isLikelyUrl(url) : false) && (
+                    <span className="ml-auto inline-flex shrink-0 items-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700">
+                      <Globe className="size-2.5" />
+                      checks app
+                    </span>
+                  )}
+                </div>
+                <div className="relative">
+                  <Globe className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+                  <Input
+                    value={url}
+                    onChange={(e) => onChangeUrl(t.name, e.target.value)}
+                    placeholder="App URL (optional) — https://…"
+                    className={cn('h-9 pl-9', invalid && 'border-amber-400 focus-visible:ring-amber-400')}
+                  />
+                </div>
+                {invalid && (
+                  <p className="text-[11px] text-amber-600">
+                    Doesn't look like an http(s) URL — it'll be ignored unless corrected.
+                  </p>
+                )}
+              </div>
+            )
+          })}
+        </div>
+
+        <DialogFooter className="shrink-0 items-center gap-2 border-t border-border/60 bg-muted/20 px-5 py-3 sm:justify-between">
+          <span className="mr-auto text-xs text-muted-foreground">
+            {withUrl > 0 ? `${withUrl}/${count} will check the live app` : 'Ticket-only generation'}{' '}
+            · model <span className="font-medium text-foreground">{modelLabel}</span>
+          </span>
+          <div className="flex items-center gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => onOpenChange(false)}
+              disabled={pending}
+              className="rounded-full"
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              onClick={onConfirm}
+              disabled={pending}
+              className="rounded-full transition-all duration-200 active:scale-[0.98]"
+            >
+              {pending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Wand2 className="h-4 w-4" />}
+              Generate ({count})
+            </Button>
+          </div>
+        </DialogFooter>
       </DialogContent>
     </Dialog>
   )
@@ -520,9 +704,9 @@ function TestCasePreviewDialog({
   return (
     <Dialog open={!!folder} onOpenChange={onOpenChange}>
       <DialogContent className="flex max-h-[92vh] w-[97vw] flex-col gap-0 overflow-hidden p-0 sm:max-w-[90rem]">
-        <DialogHeader className="shrink-0 space-y-2 border-b bg-muted/30 px-5 py-3">
+        <DialogHeader className="shrink-0 space-y-2 border-b border-border/60 bg-muted/30 px-5 py-3">
           <DialogTitle className="flex items-center gap-2 text-base">
-            <ClipboardList className="h-4 w-4 text-primary" />
+            <ClipboardList className="h-4 w-4 text-muted-foreground" />
             <span className="truncate font-mono text-sm">{folder}</span>
           </DialogTitle>
           <DialogDescription className="flex flex-wrap items-center gap-2">
@@ -538,7 +722,7 @@ function TestCasePreviewDialog({
                     setConfirmDelete(false)
                   }}
                 >
-                  <SelectTrigger size="sm" className="h-7 w-44">
+                  <SelectTrigger size="sm" className="h-7 w-44 rounded-full">
                     <SelectValue placeholder="Pick a version" />
                   </SelectTrigger>
                   <SelectContent>
@@ -649,7 +833,7 @@ function JobLogPanel({ logs, running }: { logs: TestCaseLogLine[]; running: bool
   }, [logs, open])
 
   return (
-    <div className="overflow-hidden rounded-lg border border-zinc-800 bg-zinc-950">
+    <div className="overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-950">
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
@@ -731,6 +915,9 @@ export default function TestCasePage() {
   const [picked, setPicked] = useState<Set<string>>(new Set())
   const [instructions, setInstructions] = useState('')
   const [managingRules, setManagingRules] = useState(false)
+  // Optional live app URL per ticket (folder → url) + the Generate confirm dialog.
+  const [appUrls, setAppUrls] = useState<Record<string, string>>({})
+  const [genOpen, setGenOpen] = useState(false)
   // Which Claude model drafts the test cases. Persisted across sessions.
   const [model, setModel] = useState<string>(() => {
     try {
@@ -764,6 +951,8 @@ export default function TestCasePage() {
     setPreviewFolder(null)
     setPicked(new Set())
     setInstructions('')
+    setAppUrls({})
+    setGenOpen(false)
     setJobId(loadActiveJobId(activeProjectId))
   }
 
@@ -814,19 +1003,33 @@ export default function TestCasePage() {
       ? { name: 'testcase.md (project)', content: savedTemplate.content }
       : null
 
-  // Start a server-side background job for the selected tickets.
+  // Start a server-side background job for the selected tickets. Only valid http(s)
+  // app URLs for currently-selected folders are sent (blank/invalid → ticket-only).
   const start = useMutation({
-    mutationFn: () =>
-      startTestCaseJob({
+    mutationFn: () => {
+      const cleanUrls: Record<string, string> = {}
+      for (const folder of selectedFolders) {
+        const u = (appUrls[folder] ?? '').trim()
+        if (u && isLikelyUrl(u)) cleanUrls[folder] = u
+      }
+      return startTestCaseJob({
         projectId: activeProjectId as string,
         folders: [...selectedFolders],
+        appUrls: cleanUrls,
         template: effectiveTemplate,
         instructions: buildInstructions(rules, picked, instructions),
         projectName: activeProject?.name,
         model,
-      }),
+      })
+    },
     onSuccess: ({ jobId: id }) => {
       setJobId(id)
+      setGenOpen(false)
+      // Remember a used app URL to prefill next time (the first non-empty one).
+      const firstUrl = [...selectedFolders]
+        .map((f) => (appUrls[f] ?? '').trim())
+        .find((u) => u && isLikelyUrl(u))
+      if (firstUrl) saveDefaultAppUrl(activeProjectId as string, firstUrl)
       // Persist so a reload reconnects, and so the global TestCaseJobWatcher will
       // announce completion even if we navigate away from this page.
       saveActiveJobId(activeProjectId as string, id)
@@ -949,10 +1152,13 @@ export default function TestCasePage() {
   if (!activeProjectId) {
     return (
       <div className="mx-auto max-w-6xl space-y-6">
-        <header className="space-y-1">
+        <header className="flex items-center gap-3">
+          <span className="flex size-11 shrink-0 items-center justify-center rounded-2xl bg-foreground text-background">
+            <ClipboardList className="size-5" />
+          </span>
           <h1 className="text-3xl font-semibold tracking-tight">Test cases</h1>
         </header>
-        <Card className="shadow-sm">
+        <Card className="rounded-3xl border-border/60 shadow-none">
           <CardContent className="flex flex-col items-center gap-3 py-16 text-center">
             <span className="flex h-12 w-12 items-center justify-center rounded-full border border-border bg-muted/50 text-muted-foreground">
               <ClipboardList className="h-5 w-5" />
@@ -980,19 +1186,24 @@ export default function TestCasePage() {
   return (
     <div className="mx-auto max-w-6xl space-y-8">
       <header className="space-y-4">
-        <div className="space-y-1">
-          <h1 className="text-3xl font-semibold tracking-tight">Test cases</h1>
-          <p className="max-w-2xl text-sm text-muted-foreground">
-            Pick up to {MAX_TICKETS} crawled tickets and let Claude draft manual test cases for each
-            — optionally following a template you upload. Saved per ticket under{' '}
-            <code className="font-mono">testcases/</code>.
-          </p>
+        <div className="flex items-start gap-3">
+          <span className="mt-0.5 flex size-11 shrink-0 items-center justify-center rounded-2xl bg-foreground text-background">
+            <ClipboardList className="size-5" />
+          </span>
+          <div className="space-y-1">
+            <h1 className="text-3xl font-semibold tracking-tight">Test cases</h1>
+            <p className="max-w-2xl text-sm text-muted-foreground">
+              Pick up to {MAX_TICKETS} crawled tickets and let Claude draft manual test cases for
+              each — optionally following a template you upload. Saved per ticket under{' '}
+              <code className="font-mono">testcases/</code>.
+            </p>
+          </div>
         </div>
 
         {activeProject && (
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-xl border bg-card px-4 py-3 shadow-sm">
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-2xl border border-border/60 bg-card px-4 py-3 shadow-none">
             <span className="flex items-center gap-2">
-              <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-primary/20 bg-primary/10 text-primary">
+              <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-border/60 bg-muted/60 text-muted-foreground">
                 <FolderGit2 className="h-4 w-4" />
               </span>
               <span className="leading-tight">
@@ -1006,7 +1217,7 @@ export default function TestCasePage() {
             </span>
             <div className="ml-auto flex min-w-0 items-center gap-2">
               <span
-                className="flex min-w-0 items-center gap-1.5 rounded-md border bg-muted/40 px-2.5 py-1.5 font-mono text-xs text-muted-foreground"
+                className="flex min-w-0 items-center gap-1.5 rounded-full border border-border/60 bg-muted/50 px-3 py-1.5 font-mono text-xs text-muted-foreground"
                 title={`${activeProject.rootPath}/testing/tickets`}
               >
                 <FolderTree className="h-3.5 w-3.5 shrink-0 text-primary/70" />
@@ -1030,9 +1241,9 @@ export default function TestCasePage() {
       </header>
 
       <div className="space-y-4">
-        <Card className="overflow-hidden shadow-sm">
-          <div className="flex items-center gap-2 border-b bg-muted/30 px-4 py-2.5 text-sm font-medium">
-            <Ticket className="h-4 w-4 text-primary" />
+        <Card className="overflow-hidden rounded-3xl border-border/60 shadow-none">
+          <div className="flex items-center gap-2 border-b border-border/60 bg-muted/30 px-4 py-2.5 text-sm font-medium">
+            <Ticket className="h-4 w-4 text-muted-foreground" />
             Crawled tickets
             <span className="ml-auto text-xs font-normal text-muted-foreground">
               {selectedFolders.size}/{MAX_TICKETS} selected
@@ -1050,7 +1261,7 @@ export default function TestCasePage() {
                 />
               </div>
               <Select value={tcFilter} onValueChange={(v) => setTcFilter(v as TcFilter)}>
-                <SelectTrigger size="sm" className="h-9 w-auto min-w-[10.5rem] gap-2" aria-label="Filter by test cases">
+                <SelectTrigger size="sm" className="h-9 w-auto min-w-[10.5rem] gap-2 rounded-full" aria-label="Filter by test cases">
                   <ListChecks className="h-3.5 w-3.5 text-muted-foreground" />
                   <SelectValue />
                 </SelectTrigger>
@@ -1065,7 +1276,7 @@ export default function TestCasePage() {
                 </SelectContent>
               </Select>
             </div>
-            <div className="flex items-start gap-2 rounded-md bg-muted/40 px-2.5 py-2 text-xs leading-relaxed text-muted-foreground">
+            <div className="flex items-start gap-2 rounded-xl bg-muted/60 px-2.5 py-2 text-xs leading-relaxed text-muted-foreground">
               <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
               <p>
                 Select up to {MAX_TICKETS} tickets. Fewer tickets give better, more focused results
@@ -1077,7 +1288,7 @@ export default function TestCasePage() {
                 badge to preview existing versions.
               </p>
             </div>
-            <div className="max-h-[28rem] overflow-auto rounded-lg border bg-background/50">
+            <div className="max-h-[28rem] overflow-auto rounded-2xl border border-border/60 bg-background/50">
               {crawledLoading ? (
                 <p className="flex items-center justify-center gap-2 px-3 py-8 text-xs text-muted-foreground">
                   <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -1139,9 +1350,9 @@ export default function TestCasePage() {
         </Card>
 
         {/* Template upload */}
-        <Card className="overflow-hidden shadow-sm">
-          <div className="flex items-center gap-2 border-b bg-muted/30 px-4 py-2.5 text-sm font-medium">
-            <FileText className="h-4 w-4 text-primary" />
+        <Card className="overflow-hidden rounded-3xl border-border/60 shadow-none">
+          <div className="flex items-center gap-2 border-b border-border/60 bg-muted/30 px-4 py-2.5 text-sm font-medium">
+            <FileText className="h-4 w-4 text-muted-foreground" />
             Template
             <span className="text-xs font-normal text-muted-foreground">optional</span>
           </div>
@@ -1154,7 +1365,7 @@ export default function TestCasePage() {
               className="hidden"
             />
             {template ? (
-              <div className="flex items-center gap-2 rounded-lg border bg-background/50 px-3 py-2">
+              <div className="flex items-center gap-2 rounded-xl border border-border/60 bg-muted/60 px-3 py-2">
                 <FileText className="h-4 w-4 shrink-0 text-muted-foreground" />
                 <span className="min-w-0 flex-1 truncate text-sm">{template.name}</span>
                 <span className="shrink-0 text-[11px] text-muted-foreground">
@@ -1165,7 +1376,7 @@ export default function TestCasePage() {
                   onClick={() =>
                     setPreviewTemplate({ name: template.name, content: template.content })
                   }
-                  className="shrink-0 rounded-md p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                  className="shrink-0 rounded-lg p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
                   aria-label="Preview template"
                   title="Preview template"
                 >
@@ -1174,14 +1385,14 @@ export default function TestCasePage() {
                 <button
                   type="button"
                   onClick={() => setTemplate(null)}
-                  className="shrink-0 rounded-md p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                  className="shrink-0 rounded-lg p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
                   aria-label="Remove template"
                 >
                   <X className="h-3.5 w-3.5" />
                 </button>
               </div>
             ) : savedTemplate ? (
-              <div className="flex items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50/60 px-3 py-2">
+              <div className="flex items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50/60 px-3 py-2">
                 <FileText className="h-4 w-4 shrink-0 text-emerald-600" />
                 <span className="min-w-0 flex-1 text-sm">
                   Using <span className="font-medium">project template</span>
@@ -1199,7 +1410,7 @@ export default function TestCasePage() {
                       content: savedTemplate.content,
                     })
                   }
-                  className="shrink-0"
+                  className="shrink-0 rounded-full transition-all duration-200 active:scale-[0.98]"
                 >
                   <Eye className="h-3.5 w-3.5" />
                   Preview
@@ -1209,7 +1420,7 @@ export default function TestCasePage() {
                   variant="outline"
                   size="sm"
                   onClick={() => fileInput.current?.click()}
-                  className="shrink-0"
+                  className="shrink-0 rounded-full transition-all duration-200 active:scale-[0.98]"
                 >
                   <FileUp className="h-3.5 w-3.5" />
                   Override
@@ -1220,7 +1431,7 @@ export default function TestCasePage() {
                 type="button"
                 variant="outline"
                 onClick={() => fileInput.current?.click()}
-                className="w-full justify-center transition-all duration-200 active:scale-[0.98]"
+                className="w-full justify-center rounded-full transition-all duration-200 active:scale-[0.98]"
               >
                 <FileUp className="h-4 w-4" />
                 Upload template
@@ -1237,9 +1448,9 @@ export default function TestCasePage() {
         </Card>
 
         {/* Instructions & quick rules */}
-        <Card className="overflow-hidden shadow-sm">
-          <div className="flex items-center gap-2 border-b bg-muted/30 px-4 py-2.5 text-sm font-medium">
-            <ListChecks className="h-4 w-4 text-primary" />
+        <Card className="overflow-hidden rounded-3xl border-border/60 shadow-none">
+          <div className="flex items-center gap-2 border-b border-border/60 bg-muted/30 px-4 py-2.5 text-sm font-medium">
+            <ListChecks className="h-4 w-4 text-muted-foreground" />
             Instructions &amp; rules
             <span className="text-xs font-normal text-muted-foreground">optional</span>
             <div className="ml-auto flex items-center gap-3">
@@ -1268,7 +1479,7 @@ export default function TestCasePage() {
                 Tap the areas you want the test cases to focus on:
               </p>
               {rules.length === 0 ? (
-                <p className="rounded-md border border-dashed bg-muted/20 px-3 py-3 text-center text-xs text-muted-foreground">
+                <p className="rounded-xl border border-dashed border-border/60 bg-muted/20 px-3 py-3 text-center text-xs text-muted-foreground">
                   No rules yet —{' '}
                   <button
                     type="button"
@@ -1303,13 +1514,13 @@ export default function TestCasePage() {
         </Card>
 
         {/* Pick which Claude model drafts the cases — same options as the crawl picker. */}
-        <div className="flex flex-wrap items-center gap-3 rounded-lg border border-border bg-card px-3 py-2.5">
+        <div className="flex flex-wrap items-center gap-3 rounded-2xl border border-border/60 bg-card px-3 py-2.5 shadow-none">
           <div className="flex items-center gap-1.5 text-sm font-medium">
             <Sparkles className="h-4 w-4 text-primary" />
             Model
           </div>
           <Select value={model} onValueChange={chooseModel} disabled={isActive || start.isPending}>
-            <SelectTrigger size="sm" className="h-9 w-auto min-w-[10rem] gap-2" aria-label="Test-case generation model">
+            <SelectTrigger size="sm" className="h-9 w-auto min-w-[10rem] gap-2 rounded-full" aria-label="Test-case generation model">
               <SelectValue aria-label={modelInfo.label}>
                 <span className="text-xs font-medium">{modelInfo.label}</span>
               </SelectValue>
@@ -1334,9 +1545,9 @@ export default function TestCasePage() {
 
         <div className="flex gap-2">
           <Button
-            onClick={() => start.mutate()}
+            onClick={() => setGenOpen(true)}
             disabled={selectedFolders.size === 0 || isActive || start.isPending}
-            className="flex-1 justify-center transition-all duration-200 active:scale-[0.98]"
+            className="flex-1 justify-center rounded-full transition-all duration-200 active:scale-[0.98]"
           >
             {isRunning || start.isPending ? (
               <>
@@ -1363,7 +1574,7 @@ export default function TestCasePage() {
               variant="outline"
               onClick={() => pause.mutate()}
               disabled={controlPending}
-              className="shrink-0 transition-all duration-200 active:scale-[0.98]"
+              className="shrink-0 rounded-full transition-all duration-200 active:scale-[0.98]"
             >
               <Pause className="h-4 w-4" />
               Pause
@@ -1375,7 +1586,7 @@ export default function TestCasePage() {
               variant="outline"
               onClick={() => resume.mutate()}
               disabled={controlPending}
-              className="shrink-0 transition-all duration-200 active:scale-[0.98]"
+              className="shrink-0 rounded-full transition-all duration-200 active:scale-[0.98]"
             >
               <Play className="h-4 w-4" />
               Resume
@@ -1387,7 +1598,7 @@ export default function TestCasePage() {
               variant="outline"
               onClick={() => cancel.mutate()}
               disabled={controlPending}
-              className="shrink-0 text-destructive transition-all duration-200 hover:text-destructive active:scale-[0.98]"
+              className="shrink-0 rounded-full text-destructive transition-all duration-200 hover:text-destructive active:scale-[0.98]"
             >
               <Ban className="h-4 w-4" />
               Cancel
@@ -1407,9 +1618,9 @@ export default function TestCasePage() {
         {/* Per-ticket results — hidden while actively generating (the button + live
             logs already show progress); shown once the job is paused/cancelled/done. */}
         {job && job.items.length > 0 && !isRunning && (
-          <Card className="overflow-hidden shadow-sm">
-            <div className="flex items-center gap-2 border-b bg-muted/30 px-4 py-2.5 text-sm font-medium">
-              <ClipboardList className="h-4 w-4 text-primary" />
+          <Card className="overflow-hidden rounded-3xl border-border/60 shadow-none">
+            <div className="flex items-center gap-2 border-b border-border/60 bg-muted/30 px-4 py-2.5 text-sm font-medium">
+              <ClipboardList className="h-4 w-4 text-muted-foreground" />
               Results
               <span className="text-xs font-normal text-muted-foreground">
                 {job.status === 'running'
@@ -1469,6 +1680,25 @@ export default function TestCasePage() {
         {/* Realtime generation logs (streamed from the server-side job). */}
         {job && job.logs.length > 0 && <JobLogPanel logs={job.logs} running={isRunning} />}
       </div>
+
+      <GenerateDialog
+        open={genOpen}
+        onOpenChange={(open) => !start.isPending && setGenOpen(open)}
+        tickets={(crawled ?? []).filter((c) => selectedFolders.has(c.name))}
+        appUrls={appUrls}
+        onChangeUrl={(folder, url) => setAppUrls((prev) => ({ ...prev, [folder]: url }))}
+        onApplyAll={(url) =>
+          setAppUrls((prev) => {
+            const next = { ...prev }
+            for (const folder of selectedFolders) next[folder] = url
+            return next
+          })
+        }
+        onConfirm={() => start.mutate()}
+        pending={start.isPending}
+        modelLabel={modelInfo.label}
+        defaultAllUrl={loadDefaultAppUrl(activeProjectId)}
+      />
 
       <TestCasePreviewDialog
         folder={previewFolder}

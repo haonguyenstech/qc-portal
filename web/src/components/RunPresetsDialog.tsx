@@ -87,7 +87,7 @@ export function RunPresetsDialog({
       <DialogContent className="sm:max-w-xl">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            <span className="flex size-8 items-center justify-center rounded-lg bg-gradient-to-b from-primary to-primary/85 text-primary-foreground shadow-sm ring-1 ring-black/5">
+            <span className="flex size-8 items-center justify-center rounded-xl bg-foreground text-background">
               <Bookmark className="size-4" />
             </span>
             Run templates
@@ -100,7 +100,7 @@ export function RunPresetsDialog({
         </DialogHeader>
 
         {/* save current */}
-        <div className="space-y-2 rounded-lg border border-dashed bg-muted/20 p-3">
+        <div className="space-y-2 rounded-2xl border border-dashed border-border/60 bg-muted/40 p-4">
           <div className="flex items-center justify-between gap-2">
             <Label htmlFor="preset-name" className="text-xs font-medium text-muted-foreground">
               Save current form as template
@@ -118,7 +118,7 @@ export function RunPresetsDialog({
               placeholder={
                 advanced ? 'Template name (e.g. Signup → invite flow)' : 'Template name (e.g. Smoke test · staging)'
               }
-              className="h-9"
+              className="h-9 rounded-xl"
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && canSave) {
                   e.preventDefault()
@@ -126,7 +126,12 @@ export function RunPresetsDialog({
                 }
               }}
             />
-            <Button type="button" onClick={onSave} disabled={!canSave} className="shrink-0">
+            <Button
+              type="button"
+              onClick={onSave}
+              disabled={!canSave}
+              className="shrink-0 rounded-full transition-all duration-200 active:scale-[0.98]"
+            >
               <Save className="size-4" />
               Save
             </Button>
@@ -149,21 +154,24 @@ export function RunPresetsDialog({
         <ScrollArea className="-mx-1 max-h-[45vh] px-1">
           <div className="space-y-2 pb-1">
             {presets.length === 0 ? (
-              <p className="rounded-lg border border-dashed bg-muted/30 px-3 py-6 text-center text-sm text-muted-foreground">
+              <p className="rounded-2xl border border-dashed border-border/60 bg-muted/40 px-3 py-6 text-center text-sm text-muted-foreground">
                 No templates yet.
               </p>
             ) : (
               presets.map((p) => {
                 const isFeature = p.mode === 'advanced'
                 return (
-                  <div key={p.id} className="space-y-2 rounded-lg border bg-card p-3 shadow-xs">
+                  <div
+                    key={p.id}
+                    className="space-y-2 rounded-2xl border border-border/60 bg-card p-3 shadow-none transition-all duration-200 hover:border-border hover:shadow-sm"
+                  >
                     <div className="flex items-center gap-2">
                       <span
                         className={
-                          'grid size-7 shrink-0 place-items-center rounded-md ' +
+                          'grid size-7 shrink-0 place-items-center rounded-xl ' +
                           (isFeature
-                            ? 'bg-primary/10 text-primary'
-                            : 'bg-muted text-muted-foreground')
+                            ? 'bg-foreground text-background'
+                            : 'border border-border/60 bg-muted/60 text-muted-foreground')
                         }
                         aria-hidden
                       >
@@ -177,7 +185,7 @@ export function RunPresetsDialog({
                         aria-label="Template name"
                         value={p.name}
                         onChange={(e) => renamePreset(p.id, e.target.value)}
-                        className="h-8 font-medium"
+                        className="h-8 rounded-xl font-medium"
                       />
                       <Button
                         type="button"
@@ -187,7 +195,7 @@ export function RunPresetsDialog({
                           onApply(p)
                           onOpenChange(false)
                         }}
-                        className="shrink-0"
+                        className="shrink-0 rounded-full transition-all duration-200 active:scale-[0.98]"
                       >
                         Load
                       </Button>
@@ -197,7 +205,7 @@ export function RunPresetsDialog({
                         size="icon"
                         onClick={() => removePreset(p.id)}
                         aria-label={`Delete ${p.name}`}
-                        className="size-8 shrink-0 text-muted-foreground hover:text-destructive"
+                        className="size-8 shrink-0 rounded-full text-muted-foreground hover:text-destructive"
                       >
                         <Trash2 className="size-4" />
                       </Button>
@@ -239,7 +247,7 @@ export function RunPresetsDialog({
                         {p.tickets.map((t, i) => (
                           <span
                             key={t}
-                            className="inline-flex items-center gap-1 rounded-full border border-border/70 bg-muted/40 px-2 py-0.5 font-mono text-[10px] text-muted-foreground"
+                            className="inline-flex items-center gap-1 rounded-full border border-border/60 bg-muted/60 px-2 py-0.5 font-mono text-[10px] text-muted-foreground"
                           >
                             {i === 0 && (
                               <span className="font-semibold uppercase tracking-wide text-primary">
@@ -264,7 +272,11 @@ export function RunPresetsDialog({
         </ScrollArea>
 
         <DialogFooter>
-          <Button type="button" onClick={() => onOpenChange(false)}>
+          <Button
+            type="button"
+            onClick={() => onOpenChange(false)}
+            className="rounded-full transition-all duration-200 active:scale-[0.98]"
+          >
             Done
           </Button>
         </DialogFooter>

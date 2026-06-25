@@ -2,7 +2,7 @@ import { Router } from 'express'
 import fs from 'node:fs'
 import path from 'node:path'
 import { testResultDirFor } from '../config.js'
-import { getEvents, getProject, getRun, listRuns } from '../db.js'
+import { getEvents, getProject, getRun, getRunSession, listRuns } from '../db.js'
 import { cancelRun, pauseRun, resumeRun, resolveSlug, startRun } from '../runManager.js'
 import { revealFolderNative } from '../folderPicker.js'
 import { CRAWL_SUMMARY_MODELS } from '../claudeExec.js'
@@ -166,6 +166,8 @@ qcRouter.get('/runs/:id', (req, res) => {
     issuesMd,
     screenshots,
     logTail: getEvents(run.id),
+    // Whether the run's Claude session is still resumable for a follow-up chat.
+    hasSession: getRunSession(run.id) != null,
   }
   return res.json(detail)
 })

@@ -276,6 +276,41 @@ projectsRouter.post('/:id/init', (req, res) => {
   })
 })
 
+// The project's root CLAUDE.md — the Claude Code guidance the qc-testing skill and
+// every headless run read. Editable from the Settings page next to file templates.
+const MAX_CLAUDE_MD_BYTES = 1024 * 1024 // 1 MB — guidance, not an asset.
+
+/** GET /api/projects/:id/claude-md — read the project's root CLAUDE.md. */
+projectsRouter.get('/:id/claude-md', (req, res) => {
+  const project = getProject(req.params.id)
+  if (!project) return res.status(404).json({ error: 'project not found' })
+  const file = path.join(project.rootPath, 'CLAUDE.md')
+  try {
+    const content = fs.readFileSync(file, 'utf8')
+    const stat = fs.statSync(file)
+    return res.json({ content, exists: true, savedAt: stat.mtime.toISOString(), size: stat.size })
+  } catch {
+    return res.json({ content: '', exists: false, savedAt: null, size: 0 })
+  }
+})
+
+/** PUT /api/projects/:id/claude-md — create or overwrite the project's CLAUDE.md. */
+projectsRouter.put('/:id/claude-md', (req, res) => {
+  const project = getProject(req.params.id)
+  if (!project) return res.status(404).json({ error: 'project not found' })
+  if (!isDir(project.rootPath)) {
+    return res.status(400).json({ error: `folder not found: ${project.rootPath}` })
+  }
+  const content = typeof req.body?.content === 'string' ? req.body.content : ''
+  if (Buffer.byteLength(content, 'utf8') > MAX_CLAUDE_MD_BYTES) {
+    return res.status(413).json({ error: 'CLAUDE.md too large (1 MB max)' })
+  }
+  const file = path.join(project.rootPath, 'CLAUDE.md')
+  fs.writeFileSync(file, content, 'utf8')
+  const stat = fs.statSync(file)
+  return res.json({ content, exists: true, savedAt: stat.mtime.toISOString(), size: stat.size })
+})
+
 projectsRouter.delete('/:id', (req, res) => {
   const existing = getProject(req.params.id)
   if (!existing) return res.status(404).json({ error: 'project not found' })

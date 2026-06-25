@@ -158,9 +158,9 @@ function TemplateCard({
   const previewContent = pending ? pending.content : (saved?.content ?? '')
 
   return (
-    <Card className="overflow-hidden shadow-sm">
-      <div className="flex items-center gap-2 border-b bg-muted/30 px-4 py-2.5">
-        <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+    <Card className="overflow-hidden rounded-3xl border-border/60 shadow-none transition-all duration-200 hover:-translate-y-0.5 hover:border-border hover:shadow-sm">
+      <div className="flex items-center gap-2 border-b border-border/60 bg-muted/60 px-4 py-2.5">
+        <span className="flex size-7 shrink-0 items-center justify-center rounded-xl border border-border/60 bg-muted/60 text-muted-foreground">
           <Icon className="size-4" />
         </span>
         <div className="min-w-0 flex-1">
@@ -190,7 +190,7 @@ function TemplateCard({
 
         {previewName ? (
           <div className="space-y-2">
-            <div className="flex items-center gap-2 rounded-lg border bg-background/50 px-3 py-2">
+            <div className="flex items-center gap-2 rounded-xl border border-border/60 bg-muted/60 px-3 py-2">
               <FileText className="size-4 shrink-0 text-muted-foreground" />
               <span className="min-w-0 flex-1 truncate text-sm">{previewName}</span>
               {pending && (
@@ -198,7 +198,7 @@ function TemplateCard({
                   type="button"
                   onClick={() => setPending(null)}
                   disabled={busy}
-                  className="shrink-0 rounded-md p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                  className="shrink-0 rounded-xl p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
                   aria-label="Discard upload"
                 >
                   <X className="size-3.5" />
@@ -206,7 +206,7 @@ function TemplateCard({
               )}
             </div>
             {/* Read-only preview of what will be / is stored. */}
-            <pre className="max-h-56 overflow-auto rounded-lg border bg-muted/30 px-3 py-2 font-mono text-[12px] leading-relaxed whitespace-pre">
+            <pre className="max-h-56 overflow-auto rounded-xl border border-border/60 bg-muted/60 px-3 py-2 font-mono text-[12px] leading-relaxed whitespace-pre">
               {previewContent}
             </pre>
           </div>
@@ -215,7 +215,7 @@ function TemplateCard({
             type="button"
             onClick={() => fileInput.current?.click()}
             disabled={busy}
-            className="flex w-full flex-col items-center justify-center gap-2 rounded-lg border border-dashed py-8 text-center text-muted-foreground transition-colors hover:border-primary/50 hover:bg-accent/40 hover:text-foreground"
+            className="flex w-full flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-border/60 py-8 text-center text-muted-foreground transition-colors hover:border-border hover:bg-muted/60 hover:text-foreground"
           >
             {reading ? (
               <Loader2 className="size-6 animate-spin" />
@@ -237,7 +237,7 @@ function TemplateCard({
             <Button
               onClick={() => save.mutate(pending.content)}
               disabled={busy}
-              className="transition-all duration-200 active:scale-[0.98]"
+              className="rounded-full transition-all duration-200 active:scale-[0.98]"
             >
               {save.isPending ? (
                 <>
@@ -258,6 +258,7 @@ function TemplateCard({
               onClick={() => fileInput.current?.click()}
               disabled={busy}
               size="sm"
+              className="rounded-full transition-all duration-200 active:scale-[0.98]"
             >
               <FileUp className="size-3.5" />
               {pending ? 'Pick another' : 'Replace'}
@@ -268,7 +269,7 @@ function TemplateCard({
               variant="ghost"
               onClick={() => remove.mutate()}
               disabled={busy}
-              className="ml-auto text-muted-foreground hover:text-destructive"
+              className="ml-auto rounded-full text-muted-foreground transition-all duration-200 hover:text-destructive active:scale-[0.98]"
             >
               {remove.isPending ? (
                 <Loader2 className="size-4 animate-spin" />
@@ -300,7 +301,7 @@ function OpenFolderButton({ projectId }: { projectId: string }) {
       size="sm"
       onClick={() => mutation.mutate()}
       disabled={mutation.isPending}
-      className="shrink-0 gap-1.5 active:scale-[0.98]"
+      className="shrink-0 gap-1.5 rounded-full active:scale-[0.98]"
     >
       {mutation.isPending ? (
         <Loader2 className="size-3.5 animate-spin" />
@@ -328,9 +329,9 @@ export default function ProjectSettingsPage() {
           <h1 className="text-3xl font-semibold tracking-tight">Settings</h1>
           <p className="text-sm text-muted-foreground">Per-project file templates and preferences.</p>
         </header>
-        <Card className="border-dashed">
+        <Card className="rounded-3xl border-dashed border-border/60 shadow-none">
           <CardContent className="flex flex-col items-center justify-center gap-3 py-20 text-center">
-            <div className="flex size-12 items-center justify-center rounded-full bg-muted">
+            <div className="flex size-12 items-center justify-center rounded-2xl border border-border/60 bg-muted/60 text-muted-foreground">
               <Settings className="size-6 text-muted-foreground" />
             </div>
             <div className="space-y-1">
@@ -352,7 +353,7 @@ export default function ProjectSettingsPage() {
     <div className="mx-auto max-w-6xl space-y-8">
       <header className="space-y-4">
         <div className="flex items-start gap-3">
-          <span className="flex size-11 shrink-0 items-center justify-center rounded-xl border border-primary/20 bg-gradient-to-br from-primary/15 to-primary/5 text-primary shadow-sm">
+          <span className="flex size-11 shrink-0 items-center justify-center rounded-2xl bg-foreground text-background">
             <Settings className="size-5" />
           </span>
           <div className="space-y-1">
@@ -368,9 +369,9 @@ export default function ProjectSettingsPage() {
 
         {/* Per-project context: makes it unmistakable which testing/templates is being edited. */}
         {activeProject && (
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-xl border bg-card px-4 py-3 shadow-sm">
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-2xl border border-border/60 bg-card px-4 py-3 shadow-none">
             <span className="flex items-center gap-2">
-              <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-primary/20 bg-primary/10 text-primary">
+              <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-border/60 bg-muted/60 text-muted-foreground">
                 <FolderGit2 className="h-4 w-4" />
               </span>
               <span className="leading-tight">
@@ -384,7 +385,7 @@ export default function ProjectSettingsPage() {
             </span>
             <div className="ml-auto flex min-w-0 items-center gap-2">
               <span
-                className="flex min-w-0 items-center gap-1.5 rounded-md border bg-muted/40 px-2.5 py-1.5 font-mono text-xs text-muted-foreground"
+                className="flex min-w-0 items-center gap-1.5 rounded-full border border-border/60 bg-muted/50 px-3 py-1.5 font-mono text-xs text-muted-foreground"
                 title={`${activeProject.rootPath}/testing/templates`}
               >
                 <FolderTree className="h-3.5 w-3.5 shrink-0 text-primary/70" />

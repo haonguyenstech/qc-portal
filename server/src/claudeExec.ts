@@ -128,7 +128,7 @@ export function runClaudeStream(
   args: string[],
   timeoutMs: number,
   onLog: (log: StreamLog) => void,
-  opts?: { signal?: AbortSignal; usageSource?: string; model?: string | null },
+  opts?: { signal?: AbortSignal; usageSource?: string; model?: string | null; cwd?: string },
 ): Promise<StreamResult> {
   return new Promise((resolve) => {
     let settled = false
@@ -138,8 +138,11 @@ export function runClaudeStream(
     let usage: { costUsd: number; inputTokens: number; outputTokens: number } | null = null
     // stdin 'ignore' → the CLI sees EOF immediately instead of waiting ~3s for
     // piped stdin that never comes ("no stdin data received in 3s" warning).
+    // Pass opts.cwd to run inside a project folder so its .mcp.json servers
+    // (Playwright, …) load — required when the prompt needs to open the real app.
     const child = spawn(CLAUDE_BIN, args, {
       env: { ...process.env },
+      cwd: opts?.cwd,
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true, // no cmd window flash on Windows
     })

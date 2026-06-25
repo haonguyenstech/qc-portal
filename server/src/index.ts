@@ -10,6 +10,7 @@ import { PORT } from './config.js'
 import { getEvents, reconcileInterruptedRuns, seedDefaultProject } from './db.js'
 import * as hub from './hub.js'
 import { shutdownActiveRuns } from './runManager.js'
+import { handleTerminalConnection, terminalAvailable } from './terminal.js'
 import { qcRouter } from './routes/qc.js'
 import { filesRouter } from './routes/files.js'
 import { skillsRouter } from './routes/skills.js'
@@ -19,6 +20,7 @@ import { clickupRouter } from './routes/clickup.js'
 import { aiRouter } from './routes/ai.js'
 import { templatesRouter } from './routes/templates.js'
 import { diagramsRouter } from './routes/diagrams.js'
+import { versionRouter } from './routes/version.js'
 
 // Optionally seed a default project from QC_REPO_ROOT (no-op if unset / already seeded).
 const defaultProject = seedDefaultProject()
@@ -38,6 +40,11 @@ app.get('/api/health', (_req, res) => {
   res.json({ ok: true })
 })
 
+// Whether the device-terminal feature can run (node-pty native binding loaded).
+app.get('/api/terminal/available', (_req, res) => {
+  res.json(terminalAvailable())
+})
+
 app.use('/api/projects', projectsRouter)
 app.use('/api/qc', qcRouter)
 app.use('/api/files', filesRouter)
@@ -47,6 +54,7 @@ app.use('/api/clickup', clickupRouter)
 app.use('/api/ai', aiRouter)
 app.use('/api/templates', templatesRouter)
 app.use('/api/diagrams', diagramsRouter)
+app.use('/api/version', versionRouter)
 
 // In a packaged install the Express server also serves the built web UI so the
 // whole portal is a single process on a single port (no Vite dev server). In dev
@@ -69,7 +77,26 @@ if (fs.existsSync(indexHtml)) {
 
 const server = http.createServer(app)
 
-const wss = new WebSocketServer({ server, path: '/ws' })
+// Two WebSocket endpoints share this HTTP server, routed by path on upgrade:
+//   /ws          → live QC-run event hub (subscribe by runId)
+//   /ws/terminal → a real device pseudo-terminal (one shell per connection)
+const wss = new WebSocketServer({ noServer: true })
+const terminalWss = new WebSocketServer({ noServer: true })
+
+server.on('upgrade', (req, socket, head) => {
+  const pathname = new URL(req.url ?? '', 'http://localhost').pathname
+  if (pathname === '/ws') {
+    wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req))
+  } else if (pathname === '/ws/terminal') {
+    terminalWss.handleUpgrade(req, socket, head, (ws) => terminalWss.emit('connection', ws, req))
+  } else {
+    socket.destroy()
+  }
+})
+
+terminalWss.on('connection', (ws: WebSocket, req) => {
+  handleTerminalConnection(ws, req)
+})
 
 wss.on('connection', (ws: WebSocket) => {
   ws.on('message', (data) => {

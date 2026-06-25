@@ -144,9 +144,11 @@ export function GenerateDiagramDialog({
   return (
     <Dialog open={open} onOpenChange={(o) => !busy && onOpenChange(o)}>
       <DialogContent className="flex max-h-[92vh] w-[97vw] flex-col gap-0 overflow-hidden p-0 sm:max-w-[64rem]">
-        <DialogHeader className="shrink-0 space-y-1 border-b bg-muted/30 px-5 py-3">
+        <DialogHeader className="shrink-0 space-y-1 border-b border-border/60 bg-muted/60 px-5 py-3">
           <DialogTitle className="flex items-center gap-2 text-base">
-            <Workflow className="h-4 w-4 text-primary" />
+            <span className="flex size-8 items-center justify-center rounded-xl bg-foreground text-background">
+              <Workflow className="size-4" />
+            </span>
             Generate diagram
           </DialogTitle>
           <DialogDescription>
@@ -194,7 +196,7 @@ export function GenerateDiagramDialog({
               </div>
             </div>
             {rules.length === 0 ? (
-              <p className="rounded-md border border-dashed bg-muted/20 px-3 py-3 text-center text-xs text-muted-foreground">
+              <p className="rounded-xl border border-dashed border-border/60 bg-muted/40 px-3 py-3 text-center text-xs text-muted-foreground">
                 No presets yet —{' '}
                 <button
                   type="button"
@@ -234,7 +236,7 @@ export function GenerateDiagramDialog({
           </div>
         </div>
 
-        <div className="flex shrink-0 items-center justify-between gap-2 border-t bg-muted/20 px-5 py-3">
+        <div className="flex shrink-0 items-center justify-between gap-2 border-t border-border/60 bg-muted/60 px-5 py-3">
           <span className="text-xs text-muted-foreground">
             {sourceCount} source{sourceCount === 1 ? '' : 's'} selected
           </span>
@@ -243,7 +245,7 @@ export function GenerateDiagramDialog({
             size="sm"
             onClick={() => generate.mutate()}
             disabled={busy || sourceCount === 0 || !name.trim()}
-            className="transition-all duration-200 active:scale-[0.98]"
+            className="rounded-full transition-all duration-200 active:scale-[0.98]"
           >
             {generate.isPending ? (
               <>

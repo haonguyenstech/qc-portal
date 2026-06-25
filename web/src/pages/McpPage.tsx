@@ -24,6 +24,14 @@ import {
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import {
   addMcp,
@@ -246,6 +254,8 @@ function ConnectServices({
   // Functional MCP test (fetch ticket / read design / open browser).
   const [capInputs, setCapInputs] = useState<Record<string, string>>({})
   const [capResults, setCapResults] = useState<Record<string, McpCapabilityResult>>({})
+  // Which server's functional-test dialog is open (null = closed).
+  const [capDialogName, setCapDialogName] = useState<string | null>(null)
   const capTest = useMutation({
     mutationFn: (name: string) => runMcpTest(name, projectId, capInputs[name] ?? ''),
     onSuccess: (res, name) => {
@@ -261,65 +271,114 @@ function ConnectServices({
   })
   const capTestingName = capTest.isPending ? (capTest.variables as string) : null
 
-  // The functional-test block rendered inside a connected card for known servers.
-  function capabilityTest(name: string) {
-    const spec = CAPABILITY[name]
-    if (!spec) return null
+  function serverLabel(name: string): string {
+    if (name === 'playwright') return 'Playwright'
+    return OAUTH_META[name as McpOauthProvider]?.label ?? name
+  }
+
+  // Card button that opens the functional-test dialog for a known server.
+  function functionalTestTrigger(name: string) {
+    if (!CAPABILITY[name]) return null
+    return (
+      <Button
+        size="sm"
+        variant="secondary"
+        onClick={() => setCapDialogName(name)}
+        className="w-full rounded-full transition-all duration-200 active:scale-[0.98]"
+      >
+        <FlaskConical className="h-3.5 w-3.5" />
+        Functional test
+      </Button>
+    )
+  }
+
+  // The functional-test dialog — a real action run through the MCP via Claude.
+  function functionalTestDialog() {
+    const name = capDialogName
+    const spec = name ? CAPABILITY[name] : null
+    if (!name || !spec) return null
     const running = capTestingName === name
     const result = capResults[name]
     const input = capInputs[name] ?? ''
     const disabled = running || (spec.needsInput && !input.trim())
     return (
-      <div className="space-y-1.5 rounded-lg border bg-muted/20 p-2">
-        <p className="flex items-center gap-1.5 px-0.5 text-[11px] font-medium text-muted-foreground">
-          <FlaskConical className="h-3 w-3" />
-          Functional test
-        </p>
-        {spec.needsInput && (
-          <Input
-            value={input}
-            onChange={(e) => setCapInputs((m) => ({ ...m, [name]: e.target.value }))}
-            placeholder={spec.placeholder}
-            aria-label={spec.inputLabel}
-            disabled={running}
-            className="h-8 text-xs"
-          />
-        )}
-        <Button
-          size="sm"
-          variant="secondary"
-          onClick={() => capTest.mutate(name)}
-          disabled={disabled}
-          className="w-full transition-all duration-200 active:scale-[0.98]"
-        >
-          {running ? (
-            <>
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              Testing…
-            </>
-          ) : (
-            <>
-              <FlaskConical className="h-3.5 w-3.5" />
-              {spec.action}
-            </>
-          )}
-        </Button>
-        {result && (
-          <p
-            className={cn(
-              'flex items-start gap-1.5 rounded-md px-2 py-1.5 text-[11px] leading-snug',
-              result.ok ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-700',
+      <Dialog
+        open
+        onOpenChange={(o) => {
+          if (!o && !running) setCapDialogName(null)
+        }}
+      >
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <FlaskConical className="h-4 w-4" />
+              Functional test — {serverLabel(name)}
+            </DialogTitle>
+            <DialogDescription>
+              Runs a real action through {serverLabel(name)} via Claude to confirm the server
+              actually works, not just that it's configured.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            {spec.needsInput && (
+              <div className="space-y-1.5">
+                <label className="text-xs font-medium text-muted-foreground">
+                  {spec.inputLabel}
+                </label>
+                <Input
+                  autoFocus
+                  value={input}
+                  onChange={(e) => setCapInputs((m) => ({ ...m, [name]: e.target.value }))}
+                  placeholder={spec.placeholder}
+                  aria-label={spec.inputLabel}
+                  disabled={running}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !disabled) capTest.mutate(name)
+                  }}
+                  className="h-9 text-sm"
+                />
+              </div>
             )}
-          >
-            {result.ok ? (
-              <CheckCircle2 className="mt-0.5 h-3 w-3 shrink-0" />
-            ) : (
-              <AlertCircle className="mt-0.5 h-3 w-3 shrink-0" />
+            {result && (
+              <p
+                className={cn(
+                  'flex items-start gap-1.5 rounded-md px-2.5 py-2 text-xs leading-snug',
+                  result.ok ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-700',
+                )}
+              >
+                {result.ok ? (
+                  <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                ) : (
+                  <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                )}
+                <span className="min-w-0 break-words">{result.detail}</span>
+              </p>
             )}
-            <span className="min-w-0 break-words">{result.detail}</span>
-          </p>
-        )}
-      </div>
+          </div>
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setCapDialogName(null)} disabled={running}>
+              Close
+            </Button>
+            <Button
+              onClick={() => capTest.mutate(name)}
+              disabled={disabled}
+              className="rounded-full transition-all duration-200 active:scale-[0.98]"
+            >
+              {running ? (
+                <>
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  Testing…
+                </>
+              ) : (
+                <>
+                  <FlaskConical className="h-4 w-4" />
+                  {spec.action}
+                </>
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     )
   }
 
@@ -369,7 +428,7 @@ function ConnectServices({
       }
     }
     return (
-      <div className="flex min-w-0 items-center gap-1 rounded-md bg-muted/50 px-2 py-1 text-muted-foreground">
+      <div className="flex min-w-0 items-center gap-1 rounded-xl bg-muted/60 px-2.5 py-1.5 text-muted-foreground">
         <div className="min-w-0 flex-1 truncate font-mono text-[11px]" title={value}>
           {value}
         </div>
@@ -396,7 +455,7 @@ function ConnectServices({
           size="sm"
           onClick={() => test.mutate(name)}
           disabled={testing || disconnecting}
-          className="w-full transition-all duration-200 active:scale-[0.98]"
+          className="w-full rounded-full transition-all duration-200 active:scale-[0.98]"
         >
           {testing ? (
             <>
@@ -425,13 +484,13 @@ function ConnectServices({
             <span className="min-w-0 break-words">{result.detail}</span>
           </p>
         )}
-        {capabilityTest(name)}
+        {functionalTestTrigger(name)}
         <Button
           size="sm"
           variant="outline"
           onClick={() => disconnect.mutate(name)}
           disabled={disconnecting || testing}
-          className="w-full transition-all duration-200 hover:border-destructive/30 hover:bg-destructive/10 hover:text-destructive active:scale-[0.98]"
+          className="w-full rounded-full transition-all duration-200 hover:border-destructive/30 hover:bg-destructive/10 hover:text-destructive active:scale-[0.98]"
         >
           {disconnecting ? (
             <>
@@ -466,9 +525,12 @@ function ConnectServices({
           const checking = checkingStatus && !isOpen
 
           return (
-            <Card key={provider} className="flex h-full flex-col gap-3 p-4 shadow-sm">
+            <Card
+              key={provider}
+              className="flex h-full flex-col gap-3 rounded-3xl border-border/60 p-5 shadow-none transition-all duration-200 hover:-translate-y-0.5 hover:border-border hover:shadow-sm"
+            >
               <div className="flex items-center gap-3">
-                <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-border bg-muted/50 text-muted-foreground">
+                <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl border border-border/60 bg-muted/60 text-muted-foreground">
                   <Icon className="h-4 w-4" />
                 </span>
                 <div className="min-w-0 leading-tight">
@@ -484,7 +546,7 @@ function ConnectServices({
               {configured && envPreview(provider)}
 
               {checking ? (
-                <Button size="sm" disabled className="mt-auto w-full">
+                <Button size="sm" disabled className="mt-auto w-full rounded-full">
                   <Loader2 className="h-3.5 w-3.5 animate-spin" />
                   Checking status…
                 </Button>
@@ -509,7 +571,7 @@ function ConnectServices({
                       size="sm"
                       onClick={() => saveToken.mutate(provider)}
                       disabled={!token.trim() || saving}
-                      className="flex-1 transition-all duration-200 active:scale-[0.98]"
+                      className="flex-1 rounded-full transition-all duration-200 active:scale-[0.98]"
                     >
                       {saving ? (
                         <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -544,7 +606,7 @@ function ConnectServices({
                 <Button
                   size="sm"
                   onClick={() => beginConnect(provider)}
-                  className="mt-auto w-full transition-all duration-200 active:scale-[0.98]"
+                  className="mt-auto w-full rounded-full transition-all duration-200 active:scale-[0.98]"
                 >
                   <Plug className="h-3.5 w-3.5" />
                   Connect
@@ -555,9 +617,9 @@ function ConnectServices({
         })}
 
         {/* Playwright needs no token — one-click project setup. */}
-        <Card className="flex h-full flex-col gap-3 p-4 shadow-sm">
+        <Card className="flex h-full flex-col gap-3 rounded-3xl border-border/60 p-5 shadow-none transition-all duration-200 hover:-translate-y-0.5 hover:border-border hover:shadow-sm">
           <div className="flex items-center gap-3">
-            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-border bg-muted/50 text-muted-foreground">
+            <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl border border-border/60 bg-muted/60 text-muted-foreground">
               <MousePointerClick className="h-4 w-4" />
             </span>
             <div className="min-w-0 leading-tight">
@@ -571,7 +633,7 @@ function ConnectServices({
             />
           </div>
           {checkingStatus ? (
-            <Button size="sm" disabled className="mt-auto w-full">
+            <Button size="sm" disabled className="mt-auto w-full rounded-full">
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
               Checking status…
             </Button>
@@ -579,7 +641,7 @@ function ConnectServices({
             connectedActions('playwright')
           ) : (
             <div className="mt-auto space-y-2">
-              <label className="flex items-center justify-between rounded-md bg-muted/50 px-2 py-1.5 text-xs text-muted-foreground">
+              <label className="flex items-center justify-between rounded-xl bg-muted/60 px-3 py-2 text-xs text-muted-foreground">
                 <span>Headless</span>
                 <input
                   type="checkbox"
@@ -592,7 +654,7 @@ function ConnectServices({
                 size="sm"
                 onClick={() => addPlaywright.mutate()}
                 disabled={addPlaywright.isPending}
-                className="w-full transition-all duration-200 active:scale-[0.98]"
+                className="w-full rounded-full transition-all duration-200 active:scale-[0.98]"
               >
                 {addPlaywright.isPending ? (
                   <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -605,6 +667,7 @@ function ConnectServices({
           )}
         </Card>
       </div>
+      {functionalTestDialog()}
     </section>
   )
 }
@@ -625,7 +688,7 @@ function OpenFolderButton({ projectId }: { projectId: string }) {
       size="sm"
       onClick={() => mutation.mutate()}
       disabled={mutation.isPending}
-      className="shrink-0 gap-1.5 active:scale-[0.98]"
+      className="shrink-0 gap-1.5 rounded-full active:scale-[0.98]"
     >
       {mutation.isPending ? (
         <Loader2 className="size-3.5 animate-spin" />
@@ -639,7 +702,7 @@ function OpenFolderButton({ projectId }: { projectId: string }) {
 
 export default function McpPage() {
   const { activeProjectId, activeProject } = useProjects()
-  const { data, isLoading, isFetching, isError, error } = useQuery({
+  const { data, isLoading, isError, error } = useQuery({
     queryKey: ['mcp', activeProjectId],
     queryFn: () => listMcp(activeProjectId as string),
     enabled: !!activeProjectId,
@@ -651,10 +714,13 @@ export default function McpPage() {
   if (!activeProjectId) {
     return (
       <div className="mx-auto max-w-6xl space-y-6">
-        <header className="space-y-1">
+        <header className="flex items-center gap-3">
+          <span className="flex size-11 shrink-0 items-center justify-center rounded-2xl bg-foreground text-background">
+            <Plug className="size-5" />
+          </span>
           <h1 className="text-3xl font-semibold tracking-tight">MCP servers</h1>
         </header>
-        <Card className="shadow-sm">
+        <Card className="rounded-3xl border-border/60 shadow-none">
           <CardContent className="flex flex-col items-center gap-3 py-16 text-center">
             <span className="flex h-12 w-12 items-center justify-center rounded-full border border-border bg-muted/50 text-muted-foreground">
               <Plug className="h-5 w-5" />
@@ -673,19 +739,24 @@ export default function McpPage() {
   return (
     <div className="mx-auto max-w-6xl space-y-8">
       <header className="space-y-4">
-        <div className="space-y-1">
-          <h1 className="text-3xl font-semibold tracking-tight">MCP servers</h1>
-          <p className="text-sm text-muted-foreground">
-            Each project has its own Model Context Protocol config — these servers apply only to
-            the active project's QC runs.
-          </p>
+        <div className="flex items-start gap-3">
+          <span className="mt-0.5 flex size-11 shrink-0 items-center justify-center rounded-2xl bg-foreground text-background">
+            <Plug className="size-5" />
+          </span>
+          <div className="space-y-1">
+            <h1 className="text-3xl font-semibold tracking-tight">MCP servers</h1>
+            <p className="text-sm text-muted-foreground">
+              Each project has its own Model Context Protocol config — these servers apply only to
+              the active project's QC runs.
+            </p>
+          </div>
         </div>
 
         {/* Per-project context: makes it unmistakable which .mcp.json is being edited. */}
         {activeProject && (
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-xl border bg-card px-4 py-3 shadow-sm">
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-2xl border border-border/60 bg-card px-4 py-3 shadow-none">
             <span className="flex items-center gap-2">
-              <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-primary/20 bg-primary/10 text-primary">
+              <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-border/60 bg-muted/60 text-muted-foreground">
                 <FolderGit2 className="h-4 w-4" />
               </span>
               <span className="leading-tight">
@@ -699,7 +770,7 @@ export default function McpPage() {
             </span>
             <div className="ml-auto flex min-w-0 items-center gap-2">
               <span
-                className="flex min-w-0 items-center gap-1.5 rounded-md border bg-muted/40 px-2.5 py-1.5 font-mono text-xs text-muted-foreground"
+                className="flex min-w-0 items-center gap-1.5 rounded-full border border-border/60 bg-muted/50 px-3 py-1.5 font-mono text-xs text-muted-foreground"
                 title={`${activeProject.rootPath}/.mcp.json`}
               >
                 <FileJson className="h-3.5 w-3.5 shrink-0 text-primary/70" />
@@ -722,7 +793,7 @@ export default function McpPage() {
       </header>
 
       {isError && (
-        <div className="flex items-center gap-2 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+        <div className="flex items-center gap-2 rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
           <AlertCircle className="h-4 w-4 shrink-0" />
           {error instanceof Error ? error.message : 'Failed to load MCP server status'}
         </div>
@@ -733,7 +804,7 @@ export default function McpPage() {
         existingNames={servers.map((s) => s.name)}
         statusByName={Object.fromEntries(servers.map((s) => [s.name, s.status]))}
         envByName={Object.fromEntries(servers.map((s) => [s.name, s.env]))}
-        checkingStatus={isLoading || isFetching}
+        checkingStatus={isLoading}
       />
     </div>
   )

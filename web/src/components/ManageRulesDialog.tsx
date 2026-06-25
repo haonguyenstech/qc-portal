@@ -64,7 +64,7 @@ export function ManageRulesDialog({
       <DialogContent className="sm:max-w-3xl">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            <span className="flex size-8 items-center justify-center rounded-lg bg-gradient-to-b from-primary to-primary/85 text-primary-foreground shadow-sm ring-1 ring-black/5">
+            <span className="flex size-8 items-center justify-center rounded-xl bg-foreground text-background">
               <ListChecks className="size-4" />
             </span>
             {title}
@@ -177,12 +177,17 @@ export function ManageRulesDialog({
               variant="ghost"
               size="sm"
               onClick={resetRules}
-              className="text-muted-foreground"
+              className="rounded-full text-muted-foreground"
             >
               <RotateCcw className="size-4" />
               Reset to defaults
             </Button>
-            <Button type="button" size="sm" onClick={() => onOpenChange(false)}>
+            <Button
+              type="button"
+              size="sm"
+              onClick={() => onOpenChange(false)}
+              className="rounded-full transition-all duration-200 active:scale-[0.98]"
+            >
               Done
             </Button>
           </div>

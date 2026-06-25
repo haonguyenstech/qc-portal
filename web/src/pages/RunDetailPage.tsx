@@ -35,6 +35,7 @@ import { Input } from '@/components/ui/input'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { OpenFolderButton } from '@/components/OpenFolderButton'
+import ContinueSessionPanel from '@/components/ContinueSessionPanel'
 import {
   createClickupIssueSubtasks,
   getRun,
@@ -71,7 +72,7 @@ function MarkdownView({ md, empty, icon }: { md: string | null; empty: string; i
   if (!md) {
     return (
       <div className="flex flex-col items-center justify-center gap-3 py-16 text-center">
-        <div className="flex h-11 w-11 items-center justify-center rounded-full bg-muted text-muted-foreground">
+        <div className="flex h-11 w-11 items-center justify-center rounded-2xl border border-border/60 bg-muted/60 text-muted-foreground">
           {icon}
         </div>
         <p className="text-sm text-muted-foreground">{empty}</p>
@@ -325,8 +326,8 @@ function MetaItem({
   children: React.ReactNode
 }) {
   return (
-    <div className="flex min-w-0 items-start gap-3 rounded-lg border bg-card/70 p-3 shadow-xs">
-      <span className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">
+    <div className="flex min-w-0 items-start gap-3 rounded-xl border border-border/60 bg-muted/60 p-3 shadow-none">
+      <span className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-xl border border-border/60 bg-muted/60 text-muted-foreground">
         {icon}
       </span>
       <div className="min-w-0 space-y-0.5">
@@ -358,12 +359,12 @@ function StatTile({
         : 'bg-muted/70 text-foreground ring-border'
 
   return (
-    <div className="rounded-lg border bg-card px-4 py-3 shadow-xs">
+    <div className="rounded-2xl border border-border/60 bg-muted/60 px-4 py-3 shadow-none">
       <div className="flex items-center justify-between gap-3">
         <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
           {label}
         </div>
-        <span className={cn('flex size-7 items-center justify-center rounded-md ring-1', toneClass)}>
+        <span className={cn('flex size-7 items-center justify-center rounded-xl ring-1', toneClass)}>
           {icon}
         </span>
       </div>
@@ -392,10 +393,10 @@ function OutcomePie({ data, total }: { data: OutcomeDatum[]; total: number }) {
   return (
     <div className="flex items-center justify-center">
       <div
-        className="relative flex size-44 items-center justify-center rounded-full border bg-muted shadow-inner"
+        className="relative flex size-44 items-center justify-center rounded-full border border-border/60 bg-muted shadow-inner"
         style={{ background }}
       >
-        <div className="flex size-28 flex-col items-center justify-center rounded-full border bg-card shadow-sm">
+        <div className="flex size-28 flex-col items-center justify-center rounded-full border border-border/60 bg-card shadow-none">
           <div className="text-3xl font-semibold tabular-nums">{total}</div>
           <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
             Cases
@@ -435,7 +436,7 @@ function OutcomeBars({ data, total }: { data: OutcomeDatum[]; total: number }) {
 function LogTrendChart({ buckets }: { buckets: { index: number; value: number; label: string }[] }) {
   if (buckets.length === 0) {
     return (
-      <div className="flex h-40 items-center justify-center rounded-lg border bg-muted/30 text-sm text-muted-foreground">
+      <div className="flex h-40 items-center justify-center rounded-2xl border border-border/60 bg-muted/30 text-sm text-muted-foreground">
         No timeline data
       </div>
     )
@@ -452,7 +453,7 @@ function LogTrendChart({ buckets }: { buckets: { index: number; value: number; l
   const area = `12,132 ${points} 288,132`
 
   return (
-    <div className="rounded-lg border bg-muted/20 p-3">
+    <div className="rounded-2xl border border-border/60 bg-muted/20 p-3">
       <svg viewBox="0 0 300 150" role="img" aria-label="Run log event trend" className="h-40 w-full">
         <defs>
           <linearGradient id="logTrendFill" x1="0" x2="0" y1="0" y2="1">
@@ -497,9 +498,9 @@ function SummaryReport({
 
   return (
     <section className="grid gap-4 xl:grid-cols-[1.15fr_0.85fr]">
-      <Card className="overflow-hidden py-0 shadow-sm">
+      <Card className="overflow-hidden rounded-3xl border-border/60 py-0 shadow-none">
         <CardContent className="p-0">
-          <div className="border-b bg-gradient-to-br from-muted/70 via-card to-card px-5 py-4">
+          <div className="border-b border-border/60 bg-muted/60 px-5 py-4">
             <div className="flex items-start justify-between gap-3">
               <div>
                 <div className="flex items-center gap-2 text-sm font-semibold">
@@ -520,7 +521,7 @@ function SummaryReport({
             <div className="space-y-5">
               <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
                 {outcomes.data.map((item) => (
-                  <div key={item.key} className={cn('rounded-lg px-3 py-2 ring-1', item.tone)}>
+                  <div key={item.key} className={cn('rounded-xl px-3 py-2 ring-1', item.tone)}>
                     <div className="text-2xl font-semibold tabular-nums">{item.value}</div>
                     <div className="text-[10px] font-semibold uppercase tracking-wide">{item.label}</div>
                   </div>
@@ -532,9 +533,9 @@ function SummaryReport({
         </CardContent>
       </Card>
 
-      <Card className="overflow-hidden py-0 shadow-sm">
+      <Card className="overflow-hidden rounded-3xl border-border/60 py-0 shadow-none">
         <CardContent className="p-0">
-          <div className="border-b bg-muted/40 px-5 py-4">
+          <div className="border-b border-border/60 bg-muted/40 px-5 py-4">
             <div className="flex items-center gap-2 text-sm font-semibold">
               <TrendingUp className="size-4" />
               Run signal
@@ -603,8 +604,8 @@ function IssueClickupPanel({
   const allSelected = selected.size === issues.length
 
   return (
-    <div className="mb-6 overflow-hidden rounded-xl border bg-card shadow-sm">
-      <div className="border-b bg-gradient-to-br from-muted/70 via-card to-card px-5 py-4">
+    <div className="mb-6 overflow-hidden rounded-3xl border border-border/60 bg-card shadow-none">
+      <div className="border-b border-border/60 bg-muted/60 px-5 py-4">
         <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
           <div>
             <div className="flex items-center gap-2 text-sm font-semibold">
@@ -628,12 +629,12 @@ function IssueClickupPanel({
             value={parentTask}
             onChange={(event) => setParentTask(event.target.value)}
             placeholder="Paste ClickUp ticket URL, e.g. https://app.clickup.com/t/86eut664j"
-            className="h-10"
+            className="h-10 rounded-full"
           />
           <Button
             onClick={() => mutation.mutate()}
             disabled={!parentTask.trim() || selectedIssues.length === 0 || mutation.isPending}
-            className="min-w-40"
+            className="min-w-40 rounded-full transition-all duration-200 active:scale-[0.98]"
           >
             {mutation.isPending ? (
               <Loader2 className="size-4 animate-spin" />
@@ -652,6 +653,7 @@ function IssueClickupPanel({
             onClick={() =>
               setSelected(allSelected ? new Set() : new Set(issues.map((issue) => issue.id)))
             }
+            className="rounded-full transition-all duration-200 active:scale-[0.98]"
           >
             {allSelected ? 'Clear selection' : 'Select all'}
           </Button>
@@ -667,8 +669,8 @@ function IssueClickupPanel({
               <label
                 key={issue.id}
                 className={cn(
-                  'flex cursor-pointer gap-3 rounded-lg border p-3 transition-colors',
-                  checked ? 'border-primary/30 bg-primary/5' : 'bg-background hover:bg-muted/40',
+                  'flex cursor-pointer gap-3 rounded-2xl border border-border/60 p-3 transition-colors',
+                  checked ? 'border-primary/30 bg-primary/5' : 'bg-muted/60 hover:bg-muted/40',
                 )}
               >
                 <input
@@ -701,7 +703,7 @@ function IssueClickupPanel({
         </div>
 
         {created.length > 0 && (
-          <div className="rounded-lg border bg-muted/30 p-3">
+          <div className="rounded-2xl border border-border/60 bg-muted/30 p-3">
             <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
               Created subtasks
             </div>
@@ -712,7 +714,7 @@ function IssueClickupPanel({
                   href={task.url}
                   target="_blank"
                   rel="noreferrer"
-                  className="inline-flex items-center gap-1 rounded-md border bg-background px-2 py-1 text-xs font-medium hover:text-primary"
+                  className="inline-flex items-center gap-1 rounded-full border border-border/60 bg-background px-2 py-1 text-xs font-medium hover:text-primary"
                 >
                   {task.displayId}
                   <ArrowUpRight className="size-3" />
@@ -783,7 +785,7 @@ function FilePreview({ projectId, slug, file }: { projectId: string; slug: strin
         <img
           src={url}
           alt={file.path}
-          className="max-h-[70vh] w-full rounded-lg border bg-muted/30 object-contain shadow-xs"
+          className="max-h-[70vh] w-full rounded-2xl border border-border/60 bg-muted/30 object-contain shadow-none"
         />
       </a>
     )
@@ -793,7 +795,7 @@ function FilePreview({ projectId, slug, file }: { projectId: string; slug: strin
       <div className="flex flex-col items-center justify-center gap-3 py-16 text-center">
         <FileIcon className="size-6 text-muted-foreground" />
         <p className="text-sm text-muted-foreground">No preview for this file type.</p>
-        <Button asChild variant="outline" size="sm">
+        <Button asChild variant="outline" size="sm" className="rounded-full transition-all duration-200 active:scale-[0.98]">
           <a href={url} target="_blank" rel="noreferrer">
             Open file
           </a>
@@ -815,7 +817,7 @@ function FilePreview({ projectId, slug, file }: { projectId: string; slug: strin
     )
   }
   return (
-    <pre className="overflow-x-auto whitespace-pre-wrap break-words rounded-lg border bg-muted/30 p-4 font-mono text-xs leading-relaxed shadow-xs">
+    <pre className="overflow-x-auto whitespace-pre-wrap break-words rounded-2xl border border-border/60 bg-muted/30 p-4 font-mono text-xs leading-relaxed shadow-none">
       {data}
     </pre>
   )
@@ -837,7 +839,7 @@ function FilesTab({
   if (!slug || files.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center gap-3 py-16 text-center">
-        <div className="flex size-11 items-center justify-center rounded-full bg-muted text-muted-foreground">
+        <div className="flex size-11 items-center justify-center rounded-2xl border border-border/60 bg-muted/60 text-muted-foreground">
           <Files className="size-5" />
         </div>
         <p className="text-sm text-muted-foreground">No extra evidence files for this run.</p>
@@ -846,8 +848,8 @@ function FilesTab({
   }
 
   return (
-    <div className="grid overflow-hidden rounded-lg border bg-card shadow-xs lg:grid-cols-[18rem_1fr]">
-      <ul className="max-h-[34rem] space-y-1 overflow-auto border-b bg-muted/25 p-2 lg:border-b-0 lg:border-r">
+    <div className="grid overflow-hidden rounded-2xl border border-border/60 bg-card shadow-none lg:grid-cols-[18rem_1fr]">
+      <ul className="max-h-[34rem] space-y-1 overflow-auto border-b border-border/60 bg-muted/25 p-2 lg:border-b-0 lg:border-r">
         {files.map((f) => {
           const isActive = active?.path === f.path
           return (
@@ -856,9 +858,9 @@ function FilesTab({
                 type="button"
                 onClick={() => setSel(f.path)}
                 className={cn(
-                  'flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-xs transition-colors',
+                  'flex w-full items-center gap-2 rounded-xl px-2.5 py-2 text-left text-xs transition-colors',
                   isActive
-                    ? 'bg-background text-foreground shadow-xs ring-1 ring-border'
+                    ? 'bg-background text-foreground ring-1 ring-border'
                     : 'text-muted-foreground hover:bg-muted hover:text-foreground',
                 )}
               >
@@ -882,20 +884,20 @@ function FilesTab({
 function DetailSkeleton() {
   return (
     <div className="animate-pulse space-y-6">
-      <div className="h-8 w-24 rounded-md bg-muted" />
+      <div className="h-8 w-24 rounded-full bg-muted" />
       <div className="space-y-3">
         <div className="flex items-center gap-3">
-          <div className="h-9 w-48 rounded-md bg-muted" />
+          <div className="h-9 w-48 rounded-xl bg-muted" />
           <div className="h-6 w-20 rounded-full bg-muted" />
         </div>
         <div className="h-4 w-64 rounded bg-muted" />
       </div>
       <div className="grid gap-4 sm:grid-cols-3">
-        <div className="h-24 rounded-xl bg-muted" />
-        <div className="h-24 rounded-xl bg-muted" />
-        <div className="h-24 rounded-xl bg-muted" />
+        <div className="h-24 rounded-2xl bg-muted" />
+        <div className="h-24 rounded-2xl bg-muted" />
+        <div className="h-24 rounded-2xl bg-muted" />
       </div>
-      <div className="h-72 rounded-xl bg-muted" />
+      <div className="h-72 rounded-3xl bg-muted" />
     </div>
   )
 }
@@ -921,15 +923,15 @@ export default function RunDetailPage() {
   if (isError || !run) {
     return (
       <div className="space-y-4">
-        <Button asChild variant="ghost" size="sm" className="-ml-2">
+        <Button asChild variant="ghost" size="sm" className="-ml-2 rounded-full transition-all duration-200 active:scale-[0.98]">
           <Link to="/history">
             <ArrowLeft className="mr-2 h-4 w-4" />
             Back to history
           </Link>
         </Button>
-        <Card>
+        <Card className="rounded-3xl border-border/60 shadow-none">
           <CardContent className="flex flex-col items-center justify-center gap-3 py-16 text-center">
-            <div className="flex h-12 w-12 items-center justify-center rounded-full bg-destructive/10 text-destructive">
+            <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-destructive/10 text-destructive">
               <AlertCircle className="h-6 w-6" />
             </div>
             <div className="space-y-1">
@@ -938,7 +940,7 @@ export default function RunDetailPage() {
                 {error instanceof Error ? error.message : 'Run not found'}
               </p>
             </div>
-            <Button asChild variant="outline" size="sm">
+            <Button asChild variant="outline" size="sm" className="rounded-full transition-all duration-200 active:scale-[0.98]">
               <Link to="/history">Back to history</Link>
             </Button>
           </CardContent>
@@ -970,7 +972,7 @@ export default function RunDetailPage() {
     ? 'border-red-200/70 bg-red-50/50'
     : run.status === 'passed'
       ? 'border-emerald-200/70 bg-emerald-50/40'
-      : 'border-border bg-card'
+      : 'border-border/60 bg-muted/60'
 
   // Files for the Files tab — exclude report/issues/screenshots (own tabs already).
   const filesSlug = filesData?.slug ?? run.slug
@@ -980,11 +982,11 @@ export default function RunDetailPage() {
 
   return (
     <div className="space-y-6">
-      <section className="overflow-hidden rounded-xl border bg-card shadow-sm">
-        <div className="border-b bg-gradient-to-br from-muted/80 via-card to-card px-6 py-5">
+      <section className="overflow-hidden rounded-3xl border border-border/60 bg-card shadow-none">
+        <div className="border-b border-border/60 bg-muted/60 px-6 py-5">
           <div className="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
             <div className="min-w-0 space-y-4">
-              <Button asChild variant="ghost" size="sm" className="-ml-3 h-8 transition-colors">
+              <Button asChild variant="ghost" size="sm" className="-ml-3 h-8 rounded-full transition-all duration-200 active:scale-[0.98]">
                 <Link to="/history">
                   <ArrowLeft className="mr-2 h-4 w-4" />
                   History
@@ -1012,7 +1014,7 @@ export default function RunDetailPage() {
             </div>
 
             <div className="flex shrink-0 flex-wrap items-center gap-2">
-              <Button asChild variant="outline" size="sm">
+              <Button asChild variant="outline" size="sm" className="rounded-full transition-all duration-200 active:scale-[0.98]">
                 <a href={run.appUrl} target="_blank" rel="noreferrer">
                   App URL
                   <ArrowUpRight className="ml-2 h-4 w-4" />
@@ -1024,7 +1026,7 @@ export default function RunDetailPage() {
         </div>
 
         <div className="grid gap-0 lg:grid-cols-[1fr_22rem]">
-          <div className="grid gap-3 border-b p-5 sm:grid-cols-2 xl:grid-cols-3 lg:border-b-0 lg:border-r">
+          <div className="grid gap-3 border-b border-border/60 p-5 sm:grid-cols-2 xl:grid-cols-3 lg:border-b-0 lg:border-r">
             {run.projectName && (
               <MetaItem icon={<FolderGit2 className="h-4 w-4" />} label="Project">
                 {run.projectName}
@@ -1168,12 +1170,16 @@ export default function RunDetailPage() {
         duration={duration}
       />
 
+      {run.hasSession && (
+        <ContinueSessionPanel runId={run.id} runStatus={run.status} hasSession={run.hasSession} />
+      )}
+
       {/* Content tabs */}
-      <Card className="overflow-hidden py-0 shadow-sm">
+      <Card className="overflow-hidden rounded-3xl border-border/60 py-0 shadow-none">
         <CardContent className="px-0">
           <Tabs defaultValue={defaultTab}>
-            <div className="sticky top-0 z-10 border-b bg-card/95 px-5 py-3 backdrop-blur">
-              <TabsList className="h-auto w-full justify-start overflow-x-auto rounded-lg bg-muted/70 p-1">
+            <div className="sticky top-0 z-10 border-b border-border/60 bg-card/95 px-5 py-3 backdrop-blur">
+              <TabsList className="h-auto w-full justify-start overflow-x-auto rounded-2xl bg-muted/70 p-1">
                 <TabsTrigger value="report" className="min-h-8 flex-none px-3">
                   Report
                   <PresenceDot on={!!run.reportMd} />
@@ -1221,7 +1227,7 @@ export default function RunDetailPage() {
             <TabsContent value="screenshots" className="m-0 p-6">
               {run.screenshots.length === 0 ? (
                 <div className="flex flex-col items-center justify-center gap-3 py-16 text-center">
-                  <div className="flex h-11 w-11 items-center justify-center rounded-full bg-muted text-muted-foreground">
+                  <div className="flex h-11 w-11 items-center justify-center rounded-2xl border border-border/60 bg-muted/60 text-muted-foreground">
                     <ImageIcon className="h-5 w-5" />
                   </div>
                   <p className="text-sm text-muted-foreground">No screenshots were captured.</p>
@@ -1237,7 +1243,7 @@ export default function RunDetailPage() {
                         href={src}
                         target="_blank"
                         rel="noreferrer"
-                        className="group overflow-hidden rounded-lg border bg-card shadow-xs transition-all duration-200 hover:-translate-y-0.5 hover:border-primary/40 hover:shadow-md active:scale-[0.98]"
+                        className="group overflow-hidden rounded-2xl border border-border/60 bg-card shadow-none transition-all duration-200 hover:-translate-y-0.5 hover:border-border hover:shadow-sm active:scale-[0.98]"
                       >
                         <div className="overflow-hidden">
                           <img
@@ -1247,7 +1253,7 @@ export default function RunDetailPage() {
                             className="aspect-video w-full object-cover transition-transform duration-300 group-hover:scale-[1.03]"
                           />
                         </div>
-                        <div className="flex items-center gap-1.5 border-t px-3 py-2 text-xs text-muted-foreground">
+                        <div className="flex items-center gap-1.5 border-t border-border/60 px-3 py-2 text-xs text-muted-foreground">
                           <FileText className="h-3.5 w-3.5 shrink-0" />
                           <span className="truncate font-mono" title={name}>
                             {name}
@@ -1265,7 +1271,7 @@ export default function RunDetailPage() {
             </TabsContent>
 
             <TabsContent value="log" className="m-0 p-6">
-              <div className="overflow-hidden rounded-xl border border-zinc-800 bg-zinc-950 shadow-md">
+              <div className="overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-950 shadow-none">
                 <div className="flex items-center gap-2 border-b border-zinc-800 bg-zinc-900/60 px-4 py-2.5">
                   <span className="flex gap-1.5" aria-hidden>
                     <span className="h-2.5 w-2.5 rounded-full bg-red-500/80" />

@@ -80,7 +80,7 @@ export function TicketTestCasePicker({ folder, projectId, value, onChange, disab
     return (
       <div className="space-y-2">
         {label}
-        <p className="rounded-md border border-dashed px-3 py-2.5 text-xs text-muted-foreground">
+        <p className="rounded-xl border border-dashed border-border/60 px-3 py-2.5 text-xs text-muted-foreground">
           Pick a ticket above to choose its test cases.
         </p>
       </div>
@@ -91,7 +91,7 @@ export function TicketTestCasePicker({ folder, projectId, value, onChange, disab
     return (
       <div className="space-y-2">
         {label}
-        <div className="flex items-center gap-2 rounded-md border px-3 py-2.5 text-xs text-muted-foreground">
+        <div className="flex items-center gap-2 rounded-xl border border-border/60 px-3 py-2.5 text-xs text-muted-foreground">
           <Loader2 className="size-3.5 animate-spin" />
           Loading test cases…
         </div>
@@ -104,7 +104,7 @@ export function TicketTestCasePicker({ folder, projectId, value, onChange, disab
     return (
       <div className="space-y-2">
         {label}
-        <div className="flex flex-col gap-2.5 rounded-lg border border-amber-300/60 bg-amber-50/60 px-3.5 py-3 dark:bg-amber-950/20 sm:flex-row sm:items-center">
+        <div className="flex flex-col gap-2.5 rounded-2xl border border-amber-300/60 bg-amber-50/60 px-3.5 py-3 dark:bg-amber-950/20 sm:flex-row sm:items-center">
           <FileText className="size-4 shrink-0 text-amber-600" />
           <div className="min-w-0 flex-1">
             <p className="text-sm font-medium text-amber-900 dark:text-amber-200">
@@ -118,7 +118,7 @@ export function TicketTestCasePicker({ folder, projectId, value, onChange, disab
             type="button"
             disabled={disabled}
             onClick={() => navigate(`/testcases?ticket=${encodeURIComponent(folder)}`)}
-            className="inline-flex shrink-0 items-center gap-1.5 rounded-md bg-amber-600 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-amber-600/90 disabled:opacity-50"
+            className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-amber-600 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-amber-600/90 disabled:opacity-50"
           >
             <Wand2 className="size-3.5" />
             Generate test cases
@@ -141,7 +141,7 @@ export function TicketTestCasePicker({ folder, projectId, value, onChange, disab
         }}
         disabled={disabled}
       >
-        <SelectTrigger className="h-11 w-full shadow-xs">
+        <SelectTrigger className="h-11 w-full rounded-xl shadow-none">
           <SelectValue placeholder="Choose a test-case version" />
         </SelectTrigger>
         <SelectContent>

@@ -4,8 +4,10 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import {
   AlertTriangle,
+  Ban,
   Check,
   CheckCircle2,
+  ChevronDown,
   ChevronsUpDown,
   Clock,
   Eye,
@@ -21,6 +23,7 @@ import {
   ScanSearch,
   Search,
   Sparkles,
+  Terminal,
   Ticket,
   X,
   XCircle,
@@ -45,22 +48,46 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import {
+  cancelVerifyDesignJob,
+  getVerifyDesignJob,
   listCrawledTickets,
   listDesignChecks,
   listTemplates,
   openDesignCheckFolder,
   openTemplatesFolder,
-  verifyDesign,
+  startVerifyDesignJob,
   type CrawledTicket,
   type DesignCheckRecord,
   type DesignFinding,
   type FindingCategory,
-  type VerifyDesignResult,
+  type VerifyJobResult,
+  type VerifyLogLine,
 } from '@/lib/api'
 import { OpenFolderButton } from '@/components/OpenFolderButton'
 import { useProjects } from '@/lib/project-context'
 
 const MODEL_KEY = 'qc.verifyModel'
+
+// The active background job id is remembered per project so a browser reload (or
+// navigating away and back) reconnects to the still-running server-side verify job.
+// The key is cleared by the global VerifyJobWatcher once a job finishes — this page
+// only writes it (on start) and reads it (to reconnect).
+const ACTIVE_JOB_PREFIX = 'qc.verifyJob.'
+function loadActiveJobId(projectId: string | null): string | null {
+  if (!projectId) return null
+  try {
+    return localStorage.getItem(ACTIVE_JOB_PREFIX + projectId)
+  } catch {
+    return null
+  }
+}
+function saveActiveJobId(projectId: string, jobId: string): void {
+  try {
+    localStorage.setItem(ACTIVE_JOB_PREFIX + projectId, jobId)
+  } catch {
+    /* storage unavailable */
+  }
+}
 
 // Checklist upload — mirrors the TestCase page's template upload. Markdown/CSV/Excel;
 // Excel is parsed to CSV in the browser before it's sent.
@@ -85,7 +112,7 @@ function CsvTable({ csv }: { csv: string }) {
   if (rows.length === 0) return null
   const [head, ...body] = rows
   return (
-    <div className="overflow-x-auto rounded-lg border">
+    <div className="overflow-x-auto rounded-2xl border border-border/60">
       <table className="w-full border-collapse text-left text-xs">
         <thead className="bg-muted/50">
           <tr>
@@ -124,9 +151,9 @@ function TemplatePreviewDialog({
   return (
     <Dialog open={!!template} onOpenChange={onOpenChange}>
       <DialogContent className="flex max-h-[92vh] w-[97vw] flex-col gap-0 overflow-hidden p-0 sm:max-w-[72rem]">
-        <DialogHeader className="shrink-0 space-y-2 border-b bg-muted/30 px-5 py-3">
+        <DialogHeader className="shrink-0 space-y-2 border-b border-border/60 bg-muted/30 px-5 py-3">
           <DialogTitle className="flex items-center gap-2 text-base">
-            <FileText className="h-4 w-4 text-primary" />
+            <FileText className="h-4 w-4 text-muted-foreground" />
             <span className="truncate font-mono text-sm">{template?.name}</span>
           </DialogTitle>
           <DialogDescription>
@@ -137,7 +164,7 @@ function TemplatePreviewDialog({
           {!template ? null : isCsv ? (
             <CsvTable csv={template.content} />
           ) : (
-            <pre className="overflow-x-auto whitespace-pre-wrap break-words rounded-lg border bg-muted/30 p-4 font-mono text-xs leading-relaxed">
+            <pre className="overflow-x-auto whitespace-pre-wrap break-words rounded-2xl border border-border/60 bg-muted/30 p-4 font-mono text-xs leading-relaxed">
               {template.content}
             </pre>
           )}
@@ -213,7 +240,7 @@ function FindingCard({ finding }: { finding: DesignFinding }) {
   const meta = CATEGORY[finding.category]
   const Icon = meta.icon
   return (
-    <div className={cn('flex gap-3 rounded-lg border px-3 py-2.5', meta.ring)}>
+    <div className={cn('flex gap-3 rounded-2xl border px-3 py-2.5', meta.ring)}>
       <Icon className={cn('mt-0.5 size-4 shrink-0', meta.text)} />
       <div className="min-w-0 space-y-0.5">
         <p className="text-sm font-medium leading-snug">{finding.title}</p>
@@ -225,7 +252,74 @@ function FindingCard({ finding }: { finding: DesignFinding }) {
   )
 }
 
-function Results({ result }: { result: VerifyDesignResult }) {
+/** Collapsible terminal-style live log for a Design Check job. */
+function JobLogPanel({ logs, running }: { logs: VerifyLogLine[]; running: boolean }) {
+  const [open, setOpen] = useState(true)
+  const bodyRef = useRef<HTMLDivElement>(null)
+
+  // Keep pinned to the newest line as logs stream in (only while expanded).
+  useEffect(() => {
+    if (open && bodyRef.current) bodyRef.current.scrollTop = bodyRef.current.scrollHeight
+  }, [logs, open])
+
+  return (
+    <div className="overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-950">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="flex w-full items-center gap-2 border-b border-zinc-800 bg-zinc-900/60 px-3 py-1.5 text-left"
+      >
+        <Terminal className="size-3.5 text-zinc-400" />
+        <span className="font-mono text-[10px] uppercase tracking-wide text-zinc-400">Logs</span>
+        {running && (
+          <span className="flex items-center gap-1 font-mono text-[10px] text-emerald-400">
+            <span className="inline-block size-1.5 animate-pulse rounded-full bg-emerald-400" />
+            live
+          </span>
+        )}
+        <span className="ml-auto font-mono text-[10px] text-zinc-600">
+          {logs.length} {logs.length === 1 ? 'line' : 'lines'}
+        </span>
+        <ChevronDown
+          className={cn('size-3.5 text-zinc-500 transition-transform', !open && '-rotate-90')}
+        />
+      </button>
+      {open && (
+        <div ref={bodyRef} className="max-h-72 overflow-y-auto p-3">
+          <div className="space-y-0.5 font-mono text-[11px] leading-relaxed">
+            {logs.length === 0 ? (
+              <div className="flex items-center gap-2 text-zinc-500">
+                <span className="inline-block size-1.5 animate-pulse rounded-full bg-zinc-500" />
+                Waiting for output…
+              </div>
+            ) : (
+              logs.map((l, i) => (
+                <div
+                  key={i}
+                  className={cn(
+                    'whitespace-pre-wrap break-words',
+                    l.level === 'error'
+                      ? 'text-red-400'
+                      : l.level === 'success'
+                        ? 'text-emerald-400'
+                        : 'text-zinc-300',
+                  )}
+                >
+                  <span className="mr-2 select-none text-zinc-600">
+                    {new Date(l.time).toLocaleTimeString()}
+                  </span>
+                  {l.text}
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function Results({ result }: { result: VerifyJobResult }) {
   const counts = result.findings.reduce<Record<string, number>>((acc, f) => {
     acc[f.category] = (acc[f.category] ?? 0) + 1
     return acc
@@ -235,7 +329,7 @@ function Results({ result }: { result: VerifyDesignResult }) {
   return (
     <div className="space-y-5">
       {/* Overall verdict + per-category tally */}
-      <Card className="shadow-sm">
+      <Card className="rounded-3xl border-border/60 shadow-none">
         <CardContent className="space-y-3 py-4">
           <div className="flex items-start gap-2">
             <Sparkles className="mt-0.5 size-4 shrink-0 text-primary" />
@@ -320,9 +414,9 @@ function HistoryCountChips({ counts }: { counts: DesignCheckRecord['counts'] }) 
 function HistoryCard({ records, projectId }: { records: DesignCheckRecord[]; projectId: string }) {
   if (records.length === 0) return null
   return (
-    <Card className="overflow-hidden shadow-sm">
-      <div className="flex items-center gap-2 border-b bg-muted/30 px-4 py-2.5 text-sm font-medium">
-        <History className="h-4 w-4 text-primary" />
+    <Card className="overflow-hidden rounded-3xl border-border/60 shadow-none">
+      <div className="flex items-center gap-2 border-b border-border/60 bg-muted/30 px-4 py-2.5 text-sm font-medium">
+        <History className="h-4 w-4 text-muted-foreground" />
         Saved design checks
         <span className="text-xs font-normal text-muted-foreground">{records.length}</span>
         <div className="ml-auto">
@@ -455,7 +549,7 @@ function CrawledTicketPicker({
         aria-expanded={open}
         aria-haspopup="listbox"
         className={cn(
-          'flex h-9 w-full items-center gap-2 rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors',
+          'flex h-9 w-full items-center gap-2 rounded-xl border border-border/60 bg-transparent px-3 py-1 text-sm shadow-none transition-colors',
           'focus:outline-none focus:ring-1 focus:ring-ring disabled:cursor-not-allowed disabled:opacity-50',
         )}
       >
@@ -469,7 +563,7 @@ function CrawledTicketPicker({
       </button>
 
       {open && (
-        <div className="absolute z-50 mt-1 w-full overflow-hidden rounded-md border bg-popover text-popover-foreground shadow-md">
+        <div className="absolute z-50 mt-1 w-full overflow-hidden rounded-2xl border border-border/60 bg-popover text-popover-foreground shadow-sm">
           <div className="border-b p-2">
             <div className="relative">
               <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
@@ -677,17 +771,26 @@ export default function VerifyDesignPage() {
   }
   const modelInfo = MODELS.find((m) => m.value === model) ?? MODELS[1]
 
-  // Reset selection when the active project changes.
+  // The id of the background verify job we're tracking (server-side, survives
+  // reload). Initialized from the per-project stored id so a reload reconnects.
+  const [jobId, setJobId] = useState<string | null>(() => loadActiveJobId(activeProjectId))
+
+  // Reset selection when the active project changes (and reconnect to that
+  // project's stored job, if any).
   const [seen, setSeen] = useState(activeProjectId)
   if (seen !== activeProjectId) {
     setSeen(activeProjectId)
     setFolder('')
     setTemplate(null)
+    setJobId(loadActiveJobId(activeProjectId))
   }
 
-  const verify = useMutation({
+  // Start a server-side background job. It keeps running across browser reloads;
+  // we poll it below, and the global VerifyJobWatcher announces completion even
+  // when this page is unmounted.
+  const start = useMutation({
     mutationFn: () =>
-      verifyDesign({
+      startVerifyDesignJob({
         projectId: activeProjectId as string,
         folder,
         figmaUrl: figmaUrl.trim(),
@@ -696,32 +799,55 @@ export default function VerifyDesignPage() {
         projectName: activeProject?.name,
         checklist: effectiveChecklist,
       }),
-    onSuccess: (data) => {
-      // Confirm the run was recorded + saved, and refresh the history list.
-      if (data.savedPath) {
-        toast.success('Design check saved', { description: data.savedPath })
-      }
-      queryClient.invalidateQueries({ queryKey: ['design-checks', activeProjectId] })
+    onSuccess: ({ jobId: id }) => {
+      setJobId(id)
+      saveActiveJobId(activeProjectId as string, id)
     },
     onError: (err) =>
-      toast.error('Verification failed', {
-        description: err instanceof Error ? err.message : 'Could not verify the design',
+      toast.error('Could not start verification', {
+        description: err instanceof Error ? err.message : 'Unknown error',
+      }),
+  })
+
+  // Poll the tracked job until it finishes. Stops polling once terminal.
+  const jobQuery = useQuery({
+    queryKey: ['verify-job', jobId],
+    queryFn: () => getVerifyDesignJob(jobId as string),
+    enabled: !!jobId,
+    retry: false,
+    refetchInterval: (query) => (query.state.data?.job?.status === 'running' ? 1500 : false),
+  })
+  const job = jobQuery.data?.job ?? null
+  const isRunning = job?.status === 'running'
+  // Completion (toast + bell notification + history refresh + clearing the stored
+  // job id) is handled globally by <VerifyJobWatcher/>, so it fires even when this
+  // page isn't mounted. This page just renders live progress + the findings.
+
+  const cancel = useMutation({
+    mutationFn: () => cancelVerifyDesignJob(jobId as string),
+    onSuccess: (j) => {
+      if (jobId) queryClient.setQueryData(['verify-job', jobId], j)
+      toast.info('Verification cancelled')
+    },
+    onError: (err) =>
+      toast.error('Could not cancel', {
+        description: err instanceof Error ? err.message : 'Unknown error',
       }),
   })
 
   const tickets = crawled ?? []
-  const canRun = !!activeProjectId && !!folder && !!figmaUrl.trim() && !verify.isPending
+  const canRun = !!activeProjectId && !!folder && !!figmaUrl.trim() && !start.isPending && !isRunning
 
   if (!activeProjectId) {
     return (
-      <div className="mx-auto max-w-5xl space-y-6">
+      <div className="mx-auto max-w-6xl space-y-6">
         <header className="space-y-1">
           <h1 className="text-3xl font-semibold tracking-tight">Design Check</h1>
           <p className="text-sm text-muted-foreground">
             Verify a ticket against its Figma design with AI.
           </p>
         </header>
-        <Card className="border-dashed">
+        <Card className="rounded-3xl border-dashed border-border/60 shadow-none">
           <CardContent className="flex flex-col items-center justify-center gap-3 py-20 text-center">
             <div className="flex size-12 items-center justify-center rounded-full bg-muted">
               <ScanSearch className="size-6 text-muted-foreground" />
@@ -737,10 +863,10 @@ export default function VerifyDesignPage() {
   }
 
   return (
-    <div className="mx-auto max-w-5xl space-y-6">
+    <div className="mx-auto max-w-6xl space-y-8">
       <header className="space-y-4">
         <div className="flex items-start gap-3">
-          <span className="flex size-11 shrink-0 items-center justify-center rounded-xl border border-primary/20 bg-gradient-to-br from-primary/15 to-primary/5 text-primary shadow-sm">
+          <span className="flex size-11 shrink-0 items-center justify-center rounded-2xl bg-foreground text-background">
             <ScanSearch className="size-5" />
           </span>
           <div className="space-y-1">
@@ -753,9 +879,9 @@ export default function VerifyDesignPage() {
         </div>
 
         {activeProject && (
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-xl border bg-card px-4 py-3 shadow-sm">
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-2xl border border-border/60 bg-card px-4 py-3 shadow-none">
             <span className="flex items-center gap-2">
-              <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-primary/20 bg-primary/10 text-primary">
+              <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-border/60 bg-muted/60 text-muted-foreground">
                 <FolderGit2 className="h-4 w-4" />
               </span>
               <span className="leading-tight">
@@ -769,7 +895,7 @@ export default function VerifyDesignPage() {
             </span>
             <div className="ml-auto flex min-w-0 items-center gap-2">
               <span
-                className="flex min-w-0 items-center gap-1.5 rounded-md border bg-muted/40 px-2.5 py-1.5 font-mono text-xs text-muted-foreground"
+                className="flex min-w-0 items-center gap-1.5 rounded-full border border-border/60 bg-muted/50 px-3 py-1.5 font-mono text-xs text-muted-foreground"
                 title={`${activeProject.rootPath}/testing/templates/design-check.md`}
               >
                 <FolderTree className="h-3.5 w-3.5 shrink-0 text-primary/70" />
@@ -794,7 +920,7 @@ export default function VerifyDesignPage() {
 
       {/* No overflow-hidden here: the Crawled-ticket search popover is absolutely
           positioned inside this card and must be able to extend past its edges. */}
-      <Card className="shadow-sm">
+      <Card className="rounded-3xl border-border/60 shadow-none">
         <CardContent className="space-y-4 p-4">
           {/* Ticket + Figma link */}
           <div className="grid gap-4 sm:grid-cols-2">
@@ -844,9 +970,9 @@ export default function VerifyDesignPage() {
       </Card>
 
       {/* Checklist — same standalone card style as the TestCase page's Template card. */}
-      <Card className="overflow-hidden shadow-sm">
-        <div className="flex items-center gap-2 border-b bg-muted/30 px-4 py-2.5 text-sm font-medium">
-          <ListChecks className="h-4 w-4 text-primary" />
+      <Card className="overflow-hidden rounded-3xl border-border/60 shadow-none">
+        <div className="flex items-center gap-2 border-b border-border/60 bg-muted/30 px-4 py-2.5 text-sm font-medium">
+          <ListChecks className="h-4 w-4 text-muted-foreground" />
           Checklist
           <span className="text-xs font-normal text-muted-foreground">optional</span>
         </div>
@@ -859,7 +985,7 @@ export default function VerifyDesignPage() {
             className="hidden"
           />
             {template ? (
-              <div className="flex items-center gap-2 rounded-lg border bg-background/50 px-3 py-2">
+              <div className="flex items-center gap-2 rounded-xl border border-border/60 bg-muted/60 px-3 py-2">
                 <FileText className="h-4 w-4 shrink-0 text-muted-foreground" />
                 <span className="min-w-0 flex-1 truncate text-sm">{template.name}</span>
                 <span className="shrink-0 text-[11px] text-muted-foreground">
@@ -870,7 +996,7 @@ export default function VerifyDesignPage() {
                   onClick={() =>
                     setPreviewTemplate({ name: template.name, content: template.content })
                   }
-                  className="shrink-0 rounded-md p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                  className="shrink-0 rounded-lg p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
                   aria-label="Preview checklist"
                   title="Preview checklist"
                 >
@@ -879,14 +1005,14 @@ export default function VerifyDesignPage() {
                 <button
                   type="button"
                   onClick={() => setTemplate(null)}
-                  className="shrink-0 rounded-md p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                  className="shrink-0 rounded-lg p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
                   aria-label="Remove checklist"
                 >
                   <X className="h-3.5 w-3.5" />
                 </button>
               </div>
             ) : savedChecklist ? (
-              <div className="flex items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50/60 px-3 py-2">
+              <div className="flex items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50/60 px-3 py-2">
                 <FileText className="h-4 w-4 shrink-0 text-emerald-600" />
                 <span className="min-w-0 flex-1 text-sm">
                   Using <span className="font-medium">project checklist</span>
@@ -908,7 +1034,7 @@ export default function VerifyDesignPage() {
                       content: savedChecklist.content,
                     })
                   }
-                  className="shrink-0"
+                  className="shrink-0 rounded-full transition-all duration-200 active:scale-[0.98]"
                 >
                   <Eye className="h-3.5 w-3.5" />
                   Preview
@@ -918,7 +1044,7 @@ export default function VerifyDesignPage() {
                   variant="outline"
                   size="sm"
                   onClick={() => fileInput.current?.click()}
-                  className="shrink-0"
+                  className="shrink-0 rounded-full transition-all duration-200 active:scale-[0.98]"
                 >
                   <FileUp className="h-3.5 w-3.5" />
                   Override
@@ -929,7 +1055,7 @@ export default function VerifyDesignPage() {
                 type="button"
                 variant="outline"
                 onClick={() => fileInput.current?.click()}
-                className="w-full justify-center transition-all duration-200 active:scale-[0.98]"
+                className="w-full justify-center rounded-full transition-all duration-200 active:scale-[0.98]"
               >
                 <FileUp className="h-4 w-4" />
                 Upload checklist
@@ -952,13 +1078,13 @@ export default function VerifyDesignPage() {
       </Card>
 
       {/* Model + run */}
-      <Card className="overflow-hidden shadow-sm">
+      <Card className="overflow-hidden rounded-3xl border-border/60 shadow-none">
         <CardContent className="space-y-3 p-4">
           <div className="flex flex-wrap items-end justify-between gap-3">
             <div className="space-y-1.5">
               <label className="text-xs font-medium text-muted-foreground">AI model</label>
-              <Select value={model} onValueChange={chooseModel} disabled={verify.isPending}>
-                <SelectTrigger className="w-56 gap-2">
+              <Select value={model} onValueChange={chooseModel} disabled={start.isPending || isRunning}>
+                <SelectTrigger className="w-56 gap-2 rounded-full">
                   <Sparkles className="size-3.5 shrink-0 text-primary" />
                   <SelectValue>
                     <span className="text-sm font-medium">{modelInfo.label}</span>
@@ -979,11 +1105,11 @@ export default function VerifyDesignPage() {
               </Select>
             </div>
             <Button
-              onClick={() => verify.mutate()}
+              onClick={() => start.mutate()}
               disabled={!canRun}
-              className="transition-all duration-200 active:scale-[0.98]"
+              className="rounded-full transition-all duration-200 active:scale-[0.98]"
             >
-              {verify.isPending ? (
+              {start.isPending || isRunning ? (
                 <>
                   <Loader2 className="size-4 animate-spin" />
                   Verifying…
@@ -1006,22 +1132,51 @@ export default function VerifyDesignPage() {
         </CardContent>
       </Card>
 
-      {verify.isPending && (
-        <Card className="border-dashed">
-          <CardContent className="flex flex-col items-center justify-center gap-3 py-14 text-center">
-            <Loader2 className="size-6 animate-spin text-primary" />
-            <div className="space-y-1">
-              <p className="text-sm font-medium">Verifying the design…</p>
-              <p className="max-w-sm text-sm text-muted-foreground">
-                The model is reading the ticket and inspecting the Figma design. This can take a
-                minute or two.
-              </p>
+      {/* Live progress — the verify runs server-side, so this survives reload and
+          navigating away (the global watcher announces completion either way). */}
+      {job && (isRunning || job.status === 'error') && (
+        <Card className="space-y-3 rounded-3xl border-border/60 p-4 shadow-none">
+          <CardContent className="space-y-3 p-0">
+            <div className="flex items-center gap-3">
+              {isRunning ? (
+                <Loader2 className="size-5 shrink-0 animate-spin text-primary" />
+              ) : (
+                <XCircle className="size-5 shrink-0 text-red-600" />
+              )}
+              <div className="min-w-0 flex-1 space-y-0.5">
+                <p className="text-sm font-medium">
+                  {isRunning ? 'Verifying the design…' : 'Verification failed'}
+                </p>
+                <p className="truncate text-[13px] text-muted-foreground">
+                  {isRunning
+                    ? 'The model is reading the ticket and inspecting the Figma design. This can take a minute or two — you can leave this page.'
+                    : (job.error ?? 'Could not verify the design.')}
+                </p>
+              </div>
+              {isRunning && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => cancel.mutate()}
+                  disabled={cancel.isPending}
+                  className="shrink-0 rounded-full text-destructive hover:text-destructive"
+                >
+                  {cancel.isPending ? (
+                    <Loader2 className="size-3.5 animate-spin" />
+                  ) : (
+                    <Ban className="size-3.5" />
+                  )}
+                  Cancel
+                </Button>
+              )}
             </div>
+            <JobLogPanel logs={job.logs} running={isRunning} />
           </CardContent>
         </Card>
       )}
 
-      {!verify.isPending && verify.data && <Results result={verify.data} />}
+      {job?.status === 'done' && job.result && <Results result={job.result} />}
 
       <HistoryCard records={history ?? []} projectId={activeProjectId} />
 

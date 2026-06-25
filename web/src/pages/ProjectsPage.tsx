@@ -22,6 +22,7 @@ import {
   PlayCircle,
   Plus,
   Search,
+  Settings,
   Sparkles,
   Terminal,
   Trash2,
@@ -107,7 +108,7 @@ function BrowseButton({ onPick }: { onPick: (path: string) => void }) {
       size="sm"
       onClick={browse}
       disabled={loading}
-      className="h-11 shrink-0 transition-all duration-200 hover:shadow-sm active:scale-[0.98]"
+      className="h-11 shrink-0 rounded-full transition-all duration-200 hover:shadow-sm active:scale-[0.98]"
     >
       {loading ? (
         <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
@@ -190,16 +191,16 @@ function StatTile({
   tone?: 'default' | 'primary' | 'emerald' | 'amber'
 }) {
   const tones = {
-    default: 'border-border bg-muted/40 text-muted-foreground',
+    default: 'border-border/60 bg-muted/60 text-muted-foreground',
     primary: 'border-primary/20 bg-primary/10 text-primary',
     emerald: 'border-emerald-200 bg-emerald-50 text-emerald-600',
     amber: 'border-amber-200 bg-amber-50 text-amber-600',
   }
   return (
-    <div className="flex min-w-0 items-center gap-3 rounded-lg border bg-background/70 p-3">
+    <div className="flex min-w-0 items-center gap-3 rounded-2xl border border-border/60 bg-muted/60 p-3">
       <span
         className={cn(
-          'flex size-9 shrink-0 items-center justify-center rounded-lg border',
+          'flex size-9 shrink-0 items-center justify-center rounded-xl border',
           tones[tone],
         )}
       >
@@ -316,10 +317,10 @@ function ProjectCard({ project }: { project: Project }) {
   return (
     <Card
       className={cn(
-        'group relative flex flex-col gap-0 overflow-hidden py-0 shadow-sm transition-all duration-200',
+        'group relative flex flex-col gap-0 overflow-hidden rounded-3xl py-0 shadow-none transition-all duration-200',
         isActive
-          ? 'border-2 border-sky-500 bg-sky-50/40 shadow-md ring-2 ring-sky-500/20'
-          : 'border hover:-translate-y-0.5 hover:shadow-md',
+          ? 'border-2 border-sky-500 bg-sky-50/40 shadow-sm ring-2 ring-sky-500/20'
+          : 'border border-border/60 hover:-translate-y-0.5 hover:border-border hover:shadow-sm',
         notFound && !isActive && 'border-destructive/30',
       )}
     >
@@ -369,7 +370,7 @@ function ProjectCard({ project }: { project: Project }) {
               </div>
               {/* Renaming the project moves its folder on disk to match — preview it. */}
               {willMoveFolder && (
-                <p className="flex items-start gap-2 rounded-lg border border-amber-200/70 bg-amber-50/50 px-3 py-2.5 text-[11px] leading-snug text-amber-700">
+                <p className="flex items-start gap-2 rounded-xl border border-amber-200/70 bg-amber-50/50 px-3 py-2.5 text-[11px] leading-snug text-amber-700">
                   <FolderGit2 className="mt-0.5 size-3.5 shrink-0" />
                   <span>
                     Saving renames the folder to{' '}
@@ -384,12 +385,12 @@ function ProjectCard({ project }: { project: Project }) {
               <CardTitle className="flex flex-wrap items-center gap-2 text-sm">
                 <span
                   className={cn(
-                    'flex h-7 w-7 shrink-0 items-center justify-center rounded-md border transition-all duration-200',
+                    'flex h-7 w-7 shrink-0 items-center justify-center rounded-xl border transition-all duration-200',
                     isActive
-                      ? 'border-transparent bg-gradient-to-b from-primary to-primary/85 text-primary-foreground shadow-sm ring-1 ring-black/5'
+                      ? 'border-transparent bg-foreground text-background'
                       : notFound
                         ? 'border-destructive/20 bg-destructive/5 text-destructive'
-                        : 'border-border bg-muted/50 text-muted-foreground group-hover:border-primary/20 group-hover:bg-primary/5 group-hover:text-primary',
+                        : 'border-border/60 bg-muted/60 text-muted-foreground group-hover:border-border group-hover:text-foreground',
                   )}
                 >
                   <FolderGit2 className="h-3.5 w-3.5" />
@@ -420,7 +421,7 @@ function ProjectCard({ project }: { project: Project }) {
                   type="button"
                   onClick={copyPath}
                   aria-label="Copy path"
-                  className="shrink-0 rounded p-0.5 text-muted-foreground/50 opacity-0 transition-all duration-200 hover:bg-muted hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
+                  className="shrink-0 rounded-lg p-0.5 text-muted-foreground/50 opacity-0 transition-all duration-200 hover:bg-muted hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
                 >
                   <Copy className="h-3 w-3" />
                 </button>
@@ -451,7 +452,7 @@ function ProjectCard({ project }: { project: Project }) {
                 }}
                 disabled={updateMutation.isPending || !name.trim() || !rootPath.trim()}
                 aria-label="Save"
-                className="text-emerald-600 transition-all duration-200 hover:bg-emerald-50 hover:text-emerald-700 active:scale-[0.98] disabled:text-muted-foreground"
+                className="rounded-full text-emerald-600 transition-all duration-200 hover:bg-emerald-50 hover:text-emerald-700 active:scale-[0.98] disabled:text-muted-foreground"
               >
                 {updateMutation.isPending ? (
                   <Loader2 className="h-4 w-4 animate-spin" />
@@ -468,7 +469,7 @@ function ProjectCard({ project }: { project: Project }) {
                   setEditing(false)
                 }}
                 aria-label="Cancel"
-                className="transition-all duration-200 active:scale-[0.98]"
+                className="rounded-full transition-all duration-200 active:scale-[0.98]"
               >
                 <X className="h-4 w-4" />
               </Button>
@@ -491,7 +492,7 @@ function ProjectCard({ project }: { project: Project }) {
                 aria-label={project.pinned ? 'Unpin project' : 'Pin project to top'}
                 title={project.pinned ? 'Unpin' : 'Pin to top'}
                 className={cn(
-                  'size-8 transition-all duration-200 active:scale-[0.98]',
+                  'size-8 rounded-full transition-all duration-200 active:scale-[0.98]',
                   project.pinned
                     ? 'text-primary hover:text-primary'
                     : 'text-muted-foreground hover:text-foreground',
@@ -510,7 +511,7 @@ function ProjectCard({ project }: { project: Project }) {
                 size="icon"
                 onClick={() => setEditing(true)}
                 aria-label="Edit"
-                className="size-8 text-muted-foreground transition-all duration-200 hover:text-foreground active:scale-[0.98]"
+                className="size-8 rounded-full text-muted-foreground transition-all duration-200 hover:text-foreground active:scale-[0.98]"
               >
                 <Pencil className="h-3.5 w-3.5" />
               </Button>
@@ -528,7 +529,7 @@ function ProjectCard({ project }: { project: Project }) {
                       size="icon"
                       disabled={deleteMutation.isPending}
                       aria-label="Delete"
-                      className="size-8 text-muted-foreground transition-all duration-200 hover:bg-destructive/10 hover:text-destructive active:scale-[0.98] disabled:opacity-50"
+                      className="size-8 rounded-full text-muted-foreground transition-all duration-200 hover:bg-destructive/10 hover:text-destructive active:scale-[0.98] disabled:opacity-50"
                     >
                       <Trash2 className="h-3.5 w-3.5" />
                     </Button>
@@ -536,7 +537,7 @@ function ProjectCard({ project }: { project: Project }) {
                   <DialogContent className="sm:max-w-md">
                     <DialogHeader>
                       <div className="flex items-start gap-3">
-                        <span className="flex size-10 shrink-0 items-center justify-center rounded-xl border border-destructive/20 bg-destructive/10 text-destructive">
+                        <span className="flex size-10 shrink-0 items-center justify-center rounded-2xl border border-destructive/20 bg-destructive/10 text-destructive">
                           <Trash2 className="size-5" />
                         </span>
                         <div className="space-y-1 text-left">
@@ -548,7 +549,7 @@ function ProjectCard({ project }: { project: Project }) {
                         </div>
                       </div>
                     </DialogHeader>
-                    <div className="rounded-lg border bg-muted/30 p-3">
+                    <div className="rounded-2xl border border-border/60 bg-muted/60 p-3">
                       <div className="truncate text-sm font-semibold">{project.name}</div>
                       <div className="mt-1 truncate font-mono text-xs text-muted-foreground">
                         {project.rootPath}
@@ -569,7 +570,11 @@ function ProjectCard({ project }: { project: Project }) {
                     </div>
                     <DialogFooter>
                       <DialogClose asChild>
-                        <Button variant="outline" disabled={deleteMutation.isPending}>
+                        <Button
+                          variant="outline"
+                          disabled={deleteMutation.isPending}
+                          className="rounded-full transition-all duration-200 active:scale-[0.98]"
+                        >
                           Cancel
                         </Button>
                       </DialogClose>
@@ -577,6 +582,7 @@ function ProjectCard({ project }: { project: Project }) {
                         variant="destructive"
                         onClick={() => deleteMutation.mutate()}
                         disabled={deleteMutation.isPending || !canDelete}
+                        className="rounded-full transition-all duration-200 active:scale-[0.98]"
                       >
                         {deleteMutation.isPending ? (
                           <Loader2 className="size-4 animate-spin" />
@@ -594,7 +600,7 @@ function ProjectCard({ project }: { project: Project }) {
         </div>
       </CardHeader>
       {!editing && (
-        <CardContent className="mt-auto flex flex-wrap items-center justify-between gap-3 border-t bg-muted/20 px-4 py-2.5 pl-5">
+        <CardContent className="mt-auto flex flex-wrap items-center justify-between gap-3 border-t border-border/60 bg-muted/40 px-4 py-2.5 pl-5">
           <div className="flex flex-wrap gap-1.5">
             <HealthChip ok={project.hasSkills} label="Skills" />
             <HealthChip ok={project.hasMcp} label="MCP" />
@@ -609,7 +615,7 @@ function ProjectCard({ project }: { project: Project }) {
                     size="sm"
                     onClick={() => initMutation.mutate()}
                     disabled={initMutation.isPending}
-                    className="group/init relative gap-1.5 overflow-hidden border-primary/30 bg-gradient-to-r from-primary/10 to-primary/[0.02] text-primary transition-all duration-200 hover:border-primary/50 hover:from-primary hover:to-primary hover:text-primary-foreground hover:shadow-md hover:shadow-primary/25 active:scale-[0.98] disabled:opacity-70"
+                    className="group/init relative gap-1.5 overflow-hidden rounded-full border-border/60 bg-muted/60 text-primary transition-all duration-200 hover:border-primary hover:bg-primary hover:text-primary-foreground hover:shadow-sm active:scale-[0.98] disabled:opacity-70"
                   >
                     {/* sheen sweep on hover */}
                     <span
@@ -624,7 +630,7 @@ function ProjectCard({ project }: { project: Project }) {
                     {initMutation.isPending ? 'Initializing…' : 'Init'}
                   </Button>
                 </TooltipTrigger>
-                <TooltipContent side="top" className="max-w-none whitespace-nowrap">
+                <TooltipContent side="top" className="max-w-none rounded-xl whitespace-nowrap">
                   Scaffold the missing setup — CLAUDE.md, the qc-testing skill &amp; .mcp.json
                 </TooltipContent>
               </Tooltip>
@@ -639,7 +645,7 @@ function ProjectCard({ project }: { project: Project }) {
                 variant="secondary"
                 size="sm"
                 onClick={() => setActiveProjectId(project.id)}
-                className="group/btn gap-1.5 transition-all duration-200 hover:bg-primary hover:text-primary-foreground hover:shadow-md hover:shadow-primary/25 active:scale-[0.98]"
+                className="group/btn gap-1.5 rounded-full transition-all duration-200 hover:bg-primary hover:text-primary-foreground hover:shadow-sm active:scale-[0.98]"
               >
                 Switch
                 <ArrowRight className="h-3.5 w-3.5 transition-transform duration-200 group-hover/btn:translate-x-1" />
@@ -654,7 +660,7 @@ function ProjectCard({ project }: { project: Project }) {
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <div className="flex items-start gap-3">
-              <span className="flex size-10 shrink-0 items-center justify-center rounded-xl border border-amber-300/40 bg-amber-100 text-amber-700">
+              <span className="flex size-10 shrink-0 items-center justify-center rounded-2xl border border-amber-300/40 bg-amber-100 text-amber-700">
                 <FolderGit2 className="size-5" />
               </span>
               <div className="space-y-1 text-left">
@@ -666,7 +672,7 @@ function ProjectCard({ project }: { project: Project }) {
               </div>
             </div>
           </DialogHeader>
-          <div className="space-y-2 overflow-hidden rounded-lg border bg-muted/30 p-3 text-xs">
+          <div className="space-y-2 overflow-hidden rounded-2xl border border-border/60 bg-muted/60 p-3 text-xs">
             <div className="flex items-center gap-2">
               <span className="w-9 shrink-0 text-muted-foreground">From</span>
               <span className="min-w-0 flex-1 truncate font-mono text-muted-foreground line-through">
@@ -696,6 +702,7 @@ function ProjectCard({ project }: { project: Project }) {
               variant="outline"
               onClick={() => setRenameConfirmOpen(false)}
               disabled={updateMutation.isPending}
+              className="rounded-full transition-all duration-200 active:scale-[0.98]"
             >
               Cancel
             </Button>
@@ -705,7 +712,7 @@ function ProjectCard({ project }: { project: Project }) {
                 updateMutation.mutate()
               }}
               disabled={updateMutation.isPending}
-              className="bg-amber-600 text-white hover:bg-amber-700"
+              className="rounded-full bg-amber-600 text-white transition-all duration-200 hover:bg-amber-700 active:scale-[0.98]"
             >
               {updateMutation.isPending ? (
                 <Loader2 className="size-4 animate-spin" />
@@ -805,7 +812,7 @@ function AddProjectForm({ onDone }: { onDone: () => void }) {
         <Button
           type="submit"
           disabled={mutation.isPending || !canSubmit}
-          className="group h-11 px-6 text-sm font-semibold shadow-sm transition-all hover:shadow-md active:scale-[0.98]"
+          className="group h-11 rounded-full px-6 text-sm font-semibold shadow-none transition-all duration-200 hover:shadow-sm active:scale-[0.98]"
         >
           {mutation.isPending ? (
             <>
@@ -830,7 +837,7 @@ function AddProjectDialog() {
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
-        <Button className="h-11 shrink-0 px-5 font-semibold shadow-sm transition-all hover:shadow-md active:scale-[0.98]">
+        <Button className="h-11 shrink-0 rounded-full px-5 font-semibold shadow-none transition-all duration-200 hover:shadow-sm active:scale-[0.98]">
           <Plus className="size-4" />
           Add project
         </Button>
@@ -838,7 +845,7 @@ function AddProjectDialog() {
       <DialogContent className="sm:max-w-2xl">
         <DialogHeader>
           <div className="flex items-start gap-3">
-            <span className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-b from-primary to-primary/85 text-primary-foreground shadow-sm ring-1 ring-black/5">
+            <span className="flex size-10 shrink-0 items-center justify-center rounded-2xl bg-foreground text-background">
               <FolderPlus className="size-5" />
             </span>
             <div className="space-y-1 text-left">
@@ -891,9 +898,9 @@ function ClaudeUsageCard() {
   })
 
   return (
-    <Card className="overflow-hidden shadow-sm">
-      <div className="flex items-center gap-2 border-b bg-muted/30 px-4 py-2.5">
-        <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+    <Card className="overflow-hidden rounded-3xl border-border/60 shadow-none">
+      <div className="flex items-center gap-2 border-b border-border/60 bg-muted/60 px-4 py-2.5">
+        <span className="flex size-7 shrink-0 items-center justify-center rounded-xl border border-border/60 bg-muted/60 text-muted-foreground">
           <Gauge className="size-4" />
         </span>
         <div className="min-w-0 flex-1">
@@ -908,7 +915,7 @@ function ClaudeUsageCard() {
           onClick={() => refetch()}
           disabled={isFetching}
           aria-label="Refresh usage"
-          className="size-7 text-muted-foreground hover:text-foreground"
+          className="size-7 rounded-full text-muted-foreground hover:text-foreground"
         >
           <Loader2 className={cn('size-3.5', isFetching && 'animate-spin')} />
         </Button>
@@ -920,7 +927,7 @@ function ClaudeUsageCard() {
             Reading usage…
           </div>
         ) : isError || !data?.available ? (
-          <div className="flex items-start gap-2 rounded-lg border border-amber-200/70 bg-amber-50/50 px-3 py-2.5 text-[13px] text-amber-700">
+          <div className="flex items-start gap-2 rounded-xl border border-amber-200/70 bg-amber-50/50 px-3 py-2.5 text-[13px] text-amber-700">
             <AlertCircle className="mt-0.5 size-4 shrink-0 text-amber-600" />
             <span>
               {data?.error ??
@@ -937,7 +944,7 @@ function ClaudeUsageCard() {
                 <summary className="cursor-pointer text-[11px] font-medium text-muted-foreground hover:text-foreground">
                   What's contributing
                 </summary>
-                <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap rounded-lg border bg-muted/30 px-3 py-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
+                <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap rounded-xl border border-border/60 bg-muted/60 px-3 py-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
                   {data.details}
                 </pre>
               </details>
@@ -981,13 +988,13 @@ function AiRuntimeCard() {
   }
 
   return (
-    <Card className="overflow-hidden py-0 shadow-sm">
+    <Card className="overflow-hidden rounded-3xl border-border/60 py-0 shadow-none">
       <CardContent className="space-y-4 p-4">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
           <div className="flex min-w-0 items-start gap-3">
             <span
               className={cn(
-                'flex size-11 shrink-0 items-center justify-center rounded-xl border shadow-sm',
+                'flex size-11 shrink-0 items-center justify-center rounded-2xl border shadow-none',
                 data?.installed
                   ? 'border-emerald-200 bg-emerald-50 text-emerald-600'
                   : 'border-amber-200 bg-amber-50 text-amber-600',
@@ -1029,11 +1036,11 @@ function AiRuntimeCard() {
                     : 'Claude Code CLI is required before QC can test models.'}
               </p>
               <div className="flex flex-wrap gap-2">
-                <span className="inline-flex items-center gap-1.5 rounded-md border bg-muted/30 px-2 py-1 text-xs text-muted-foreground">
+                <span className="inline-flex items-center gap-1.5 rounded-full border border-border/60 bg-muted/60 px-2.5 py-1 text-xs text-muted-foreground">
                   <Terminal className="h-3.5 w-3.5" />
                   <span className="font-mono">{data?.binary ?? 'claude'}</span>
                 </span>
-                <span className="inline-flex items-center gap-1.5 rounded-md border bg-muted/30 px-2 py-1 text-xs text-muted-foreground">
+                <span className="inline-flex items-center gap-1.5 rounded-full border border-border/60 bg-muted/60 px-2.5 py-1 text-xs text-muted-foreground">
                   <Gauge className="h-3.5 w-3.5" />
                   <span className="font-mono">{data?.version ?? 'version pending'}</span>
                 </span>
@@ -1044,7 +1051,7 @@ function AiRuntimeCard() {
                 </p>
               )}
               {!isLoading && !data?.installed && data?.installCommand && (
-                <code className="block w-fit rounded-md bg-muted px-2 py-1 font-mono text-xs text-muted-foreground">
+                <code className="block w-fit rounded-xl border border-border/60 bg-muted/60 px-2.5 py-1 font-mono text-xs text-muted-foreground">
                   {data.installCommand}
                 </code>
               )}
@@ -1058,7 +1065,7 @@ function AiRuntimeCard() {
             return (
               <div
                 key={model.id}
-                className="flex items-center gap-3 rounded-lg border bg-muted/20 px-3 py-2 transition-colors hover:bg-muted/30"
+                className="flex items-center gap-3 rounded-2xl border border-border/60 bg-muted/60 px-3 py-2 transition-colors hover:border-border"
               >
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center justify-between gap-2">
@@ -1086,7 +1093,7 @@ function AiRuntimeCard() {
                   variant="outline"
                   disabled={!data?.installed || testing || testMutation.isPending}
                   onClick={() => testMutation.mutate(model.id)}
-                  className="h-8 shrink-0 px-3"
+                  className="h-8 shrink-0 rounded-full px-3 transition-all duration-200 active:scale-[0.98]"
                 >
                   {testing ? (
                     <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -1098,7 +1105,7 @@ function AiRuntimeCard() {
                 {results[model.id] && (
                   <div
                     className={cn(
-                      'max-w-28 shrink-0 truncate rounded-md px-2 py-1 text-[11px]',
+                      'max-w-28 shrink-0 truncate rounded-xl px-2 py-1 text-[11px]',
                       results[model.id].startsWith('OK')
                         ? 'bg-emerald-50 text-emerald-700'
                         : 'bg-red-50 text-destructive',
@@ -1113,7 +1120,7 @@ function AiRuntimeCard() {
           })}
           {isLoading &&
             Array.from({ length: 3 }).map((_, i) => (
-              <div key={i} className="h-[58px] animate-pulse rounded-lg bg-muted" />
+              <div key={i} className="h-[58px] animate-pulse rounded-2xl bg-muted" />
             ))}
         </div>
       </CardContent>
@@ -1164,12 +1171,17 @@ export default function ProjectsPage() {
   return (
     <div className="mx-auto max-w-6xl space-y-8">
       <header className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-        <div className="space-y-1">
-          <h1 className="text-3xl font-semibold tracking-tight">Settings</h1>
-          <p className="max-w-2xl text-sm text-muted-foreground">
-            Manage the repo folders QC runs against and the Claude Code models used for AI
-            workflows.
-          </p>
+        <div className="flex items-start gap-3">
+          <span className="mt-0.5 flex size-11 shrink-0 items-center justify-center rounded-2xl bg-foreground text-background">
+            <Settings className="size-5" />
+          </span>
+          <div className="space-y-1">
+            <h1 className="text-3xl font-semibold tracking-tight">Settings</h1>
+            <p className="max-w-2xl text-sm text-muted-foreground">
+              Manage the repo folders QC runs against and the Claude Code models used for AI
+              workflows.
+            </p>
+          </div>
         </div>
       </header>
 
@@ -1177,9 +1189,9 @@ export default function ProjectsPage() {
         <TabsList className="grid h-auto w-full grid-cols-1 gap-3 rounded-none bg-transparent p-0 sm:grid-cols-2">
           <TabsTrigger
             value="projects"
-            className="group h-auto justify-start gap-3 rounded-lg border bg-card px-4 py-3 text-left shadow-sm transition-all hover:-translate-y-0.5 hover:bg-muted/30 hover:shadow-md data-[state=active]:border-primary/40 data-[state=active]:bg-primary/5 data-[state=active]:text-foreground data-[state=active]:shadow-md"
+            className="group h-auto justify-start gap-3 rounded-2xl border border-border/60 bg-card px-4 py-3 text-left shadow-none transition-all duration-200 hover:-translate-y-0.5 hover:border-border hover:bg-muted/60 hover:shadow-sm data-[state=active]:border-foreground data-[state=active]:bg-muted/60 data-[state=active]:text-foreground data-[state=active]:shadow-none"
           >
-            <span className="flex size-10 shrink-0 items-center justify-center rounded-lg border bg-muted/40 text-muted-foreground transition-colors group-data-[state=active]:border-primary/20 group-data-[state=active]:bg-primary/10 group-data-[state=active]:text-primary">
+            <span className="flex size-10 shrink-0 items-center justify-center rounded-xl border border-border/60 bg-muted/60 text-muted-foreground transition-colors group-data-[state=active]:border-transparent group-data-[state=active]:bg-foreground group-data-[state=active]:text-background">
               <FolderGit2 className="size-5" />
             </span>
             <span className="min-w-0 flex-1 space-y-0.5">
@@ -1194,9 +1206,9 @@ export default function ProjectsPage() {
           </TabsTrigger>
           <TabsTrigger
             value="models"
-            className="group h-auto justify-start gap-3 rounded-lg border bg-card px-4 py-3 text-left shadow-sm transition-all hover:-translate-y-0.5 hover:bg-muted/30 hover:shadow-md data-[state=active]:border-primary/40 data-[state=active]:bg-primary/5 data-[state=active]:text-foreground data-[state=active]:shadow-md"
+            className="group h-auto justify-start gap-3 rounded-2xl border border-border/60 bg-card px-4 py-3 text-left shadow-none transition-all duration-200 hover:-translate-y-0.5 hover:border-border hover:bg-muted/60 hover:shadow-sm data-[state=active]:border-foreground data-[state=active]:bg-muted/60 data-[state=active]:text-foreground data-[state=active]:shadow-none"
           >
-            <span className="flex size-10 shrink-0 items-center justify-center rounded-lg border bg-muted/40 text-muted-foreground transition-colors group-data-[state=active]:border-primary/20 group-data-[state=active]:bg-primary/10 group-data-[state=active]:text-primary">
+            <span className="flex size-10 shrink-0 items-center justify-center rounded-xl border border-border/60 bg-muted/60 text-muted-foreground transition-colors group-data-[state=active]:border-transparent group-data-[state=active]:bg-foreground group-data-[state=active]:text-background">
               <Cpu className="size-5" />
             </span>
             <span className="min-w-0 flex-1 space-y-0.5">
@@ -1212,8 +1224,8 @@ export default function ProjectsPage() {
         </TabsList>
 
         <TabsContent value="projects" className="space-y-6">
-          <section className="overflow-hidden rounded-xl border bg-card shadow-sm">
-            <div className="flex flex-col gap-4 bg-muted/20 p-5 sm:flex-row sm:items-center sm:justify-between">
+          <section className="overflow-hidden rounded-3xl border border-border/60 bg-card shadow-none">
+            <div className="flex flex-col gap-4 bg-muted/40 p-5 sm:flex-row sm:items-center sm:justify-between">
               <div className="space-y-1">
                 <h2 className="text-lg font-semibold tracking-tight">Projects</h2>
                 <p className="max-w-2xl text-sm text-muted-foreground">
@@ -1242,7 +1254,7 @@ export default function ProjectsPage() {
             )}
 
             {hasProjects && data.length > 3 && (
-              <div className="flex flex-col gap-3 border-t bg-background/70 p-4 sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex flex-col gap-3 border-t border-border/60 bg-muted/40 p-4 sm:flex-row sm:items-center sm:justify-between">
                 <div className="relative w-full max-w-md">
                   <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
                   <Input
@@ -1268,7 +1280,7 @@ export default function ProjectsPage() {
           )}
 
           {isError && (
-            <div className="flex items-start gap-3 rounded-lg border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm text-destructive">
+            <div className="flex items-start gap-3 rounded-2xl border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm text-destructive">
               <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
               <span>{error instanceof Error ? error.message : 'Failed to load projects'}</span>
             </div>
@@ -1283,20 +1295,25 @@ export default function ProjectsPage() {
           )}
 
           {hasProjects && filtered.length === 0 && (
-            <div className="flex flex-col items-center justify-center gap-2 rounded-xl border border-dashed bg-muted/20 px-6 py-12 text-center">
+            <div className="flex flex-col items-center justify-center gap-2 rounded-3xl border border-dashed border-border/60 bg-muted/40 px-6 py-12 text-center">
               <Search className="h-6 w-6 text-muted-foreground" />
               <p className="text-sm text-muted-foreground">
                 No projects match <span className="font-medium text-foreground">“{query}”</span>.
               </p>
-              <Button variant="ghost" size="sm" onClick={() => setQuery('')}>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setQuery('')}
+                className="rounded-full transition-all duration-200 active:scale-[0.98]"
+              >
                 Clear filter
               </Button>
             </div>
           )}
 
           {!isLoading && !isError && data && data.length === 0 && (
-            <div className="flex flex-col items-center justify-center gap-3 rounded-xl border border-dashed bg-muted/20 px-6 py-14 text-center">
-              <span className="flex h-12 w-12 items-center justify-center rounded-full border bg-background text-muted-foreground shadow-sm">
+            <div className="flex flex-col items-center justify-center gap-3 rounded-3xl border border-dashed border-border/60 bg-muted/40 px-6 py-14 text-center">
+              <span className="flex h-12 w-12 items-center justify-center rounded-2xl border border-border/60 bg-muted/60 text-muted-foreground shadow-none">
                 <FolderGit2 className="h-6 w-6" />
               </span>
               <div className="space-y-1">
@@ -1311,7 +1328,7 @@ export default function ProjectsPage() {
         </TabsContent>
 
         <TabsContent value="models" className="space-y-6">
-          <section className="rounded-xl border bg-card p-5 shadow-sm">
+          <section className="rounded-3xl border border-border/60 bg-card p-5 shadow-none">
             <div className="space-y-1">
               <h2 className="text-lg font-semibold tracking-tight">AI models</h2>
               <p className="max-w-2xl text-sm text-muted-foreground">
@@ -1330,27 +1347,27 @@ export default function ProjectsPage() {
 
 function ProjectCardSkeleton() {
   return (
-    <Card className="overflow-hidden py-0 shadow-sm">
+    <Card className="overflow-hidden rounded-3xl border-border/60 py-0 shadow-none">
       <CardHeader className="flex flex-row items-start justify-between gap-3 space-y-0 p-5">
         <div className="flex-1 space-y-2">
           <div className="flex items-center gap-2">
-            <span className="h-8 w-8 animate-pulse rounded-lg bg-muted" />
+            <span className="h-8 w-8 animate-pulse rounded-xl bg-muted" />
             <span className="h-4 w-32 animate-pulse rounded bg-muted" />
           </div>
           <span className="ml-10 block h-3 w-48 animate-pulse rounded bg-muted" />
         </div>
         <div className="flex gap-1">
-          <span className="h-9 w-9 animate-pulse rounded-md bg-muted" />
-          <span className="h-9 w-9 animate-pulse rounded-md bg-muted" />
+          <span className="h-9 w-9 animate-pulse rounded-full bg-muted" />
+          <span className="h-9 w-9 animate-pulse rounded-full bg-muted" />
         </div>
       </CardHeader>
-      <CardContent className="flex items-center justify-between gap-3 border-t bg-muted/20 px-5 py-4">
+      <CardContent className="flex items-center justify-between gap-3 border-t border-border/60 bg-muted/40 px-5 py-4">
         <div className="flex gap-1.5">
           <span className="h-7 w-16 animate-pulse rounded-full bg-muted" />
           <span className="h-7 w-12 animate-pulse rounded-full bg-muted" />
           <span className="h-7 w-20 animate-pulse rounded-full bg-muted" />
         </div>
-        <span className="h-8 w-24 animate-pulse rounded-md bg-muted" />
+        <span className="h-8 w-24 animate-pulse rounded-full bg-muted" />
       </CardContent>
     </Card>
   )
