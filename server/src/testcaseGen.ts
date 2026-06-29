@@ -37,6 +37,43 @@ function stripCodeFence(s: string): string {
     .trim()
 }
 
+/** The comparable column names of a CSV header line, ignoring trailing empty padding cells. */
+function headerCols(line: string): string[] {
+  const cells = line.split(',').map((c) => c.trim().replace(/^"|"$/g, '').toLowerCase())
+  while (cells.length && cells[cells.length - 1] === '') cells.pop()
+  return cells
+}
+
+/**
+ * Clean raw CSV output from the model into a file that starts with the real header row.
+ * Despite the "output ONLY the CSV" rule, the model sometimes prefixes a sentence
+ * ("I now have all the details. Let me write the complete test case CSV.") and a blank
+ * line before the header — which corrupts the file when imported into a spreadsheet.
+ * Anchor on the template's own header line and drop everything before it; fall back to
+ * the first line that looks like CSV when the template header can't be located.
+ */
+export function extractCsv(raw: string, template: { content?: string } | null): string {
+  const s = stripCodeFence(raw)
+  const lines = s.split(/\r?\n/)
+  const wanted = headerCols(
+    (template?.content ?? '').split(/\r?\n/).find((l) => l.trim().length > 0) ?? '',
+  )
+  let start = -1
+  if (wanted.length >= 2) {
+    // Match the header by its column names (ignoring trailing empty padding cells), so
+    // a row that reproduces the columns counts even if the trailing commas differ.
+    start = lines.findIndex((l) => {
+      const cols = headerCols(l)
+      return cols.length >= 2 && cols.length === wanted.length && cols.every((c, i) => c === wanted[i])
+    })
+  }
+  if (start === -1) {
+    // No template header to anchor on — take the first line that looks like CSV data.
+    start = lines.findIndex((l) => (l.match(/,/g)?.length ?? 0) >= 2)
+  }
+  return (start > 0 ? lines.slice(start).join('\n') : s).trim()
+}
+
 export type TestcaseFormat = 'markdown' | 'csv'
 
 export interface TestcaseVersionMeta {
@@ -171,12 +208,14 @@ function testCasesPrompt(
     sourceRel && sourceRel !== '.'
       ? `under \`./${sourceRel}\` in the current working directory`
       : `in the current working directory`
-  const sourceBlock = `You are running INSIDE this project's source repository. The application's SOURCE CODE is ${where}. BEFORE writing the cases, investigate the real implementation so every case matches the actual app, not a guess from the ticket:
+  const sourceBlock = `You are running INSIDE this project's source repository. The application's SOURCE CODE is ${where}. BEFORE writing the cases, do a QUICK, FOCUSED investigation of the real implementation so every case matches the actual app, not a guess from the ticket:
 - Use Grep / Glob / Read to locate the code behind what the ticket describes — search for the screens, components, routes/endpoints, fields, and messages it mentions.
 - From the real code, take the true field/label names, validation rules, error/empty/loading states, conditional branches, and role/permission checks, and use them in the steps and expected results.
 - Reconcile the ticket against the code: cover what is actually implemented, and where the code and ticket differ, write a case (or an inline note) for the gap.
 - READ ONLY — never modify any file. If you cannot find the related source, fall back to the ticket and note that the implementation could not be located.
-- Also honor any guidance in the project's CLAUDE.md.`
+- Also honor any guidance in the project's CLAUDE.md.
+
+IMPORTANT — be efficient and finish: you are on a limited time budget. Read ONLY the handful of files you actually need (don't open the whole codebase), and do NOT write an architecture summary, a component map, or any analysis as your answer. As soon as you understand the feature, STOP reading and spend the rest of your effort WRITING the test cases. Your FINAL message must be the test cases themselves (and nothing else) — make sure you produce them before you run out of time.`
 
   // The output-shape instructions and the "output only X" rule both depend on the
   // target format so CSV templates produce a real, importable CSV (not Markdown).
@@ -372,7 +411,7 @@ export async function generateTestcaseVersion(opts: {
     : ['--allowedTools', 'Read', 'Grep', 'Glob', '--strict-mcp-config']
   // Reading source (and, with a live app, driving a browser) costs more than a plain
   // draft — give it more headroom before the cost cap cuts in.
-  const budget = appUrl ? '3.00' : format === 'csv' ? '2.50' : '1.50'
+  const budget = appUrl ? '3.50' : format === 'csv' ? '3.00' : '2.00'
   const result = await runClaudeStream(
     [
       ...baseArgs,
@@ -391,8 +430,9 @@ export async function generateTestcaseVersion(opts: {
       ),
     ],
     // Reading the source, writing a full CSV, or exploring a live app all take far
-    // longer to stream than a plain Markdown table; give it up to 8 min.
-    480000,
+    // longer to stream than a plain Markdown table; give it up to 12 min so the model
+    // can investigate AND still write the full set before the wall-clock cap.
+    720000,
     onLog,
     // Always run inside the project so the model can read its source + CLAUDE.md.
     { signal: opts.signal, usageSource: 'testcase', model, cwd: opts.rootPath },
@@ -404,8 +444,9 @@ export async function generateTestcaseVersion(opts: {
   if (result.isError || !testcases) {
     throw statusError('Claude did not return any test cases.', 502)
   }
-  // Defensively strip a stray ```csv / ``` fence the model may add despite the rule.
-  if (format === 'csv') testcases = stripCodeFence(testcases)
+  // Defensively strip a stray ```csv / ``` fence AND any prose preamble the model may
+  // emit before the header despite the rule, so the file starts with the real header row.
+  if (format === 'csv') testcases = extractCsv(testcases, template)
 
   // Save as the next version under <dir>/testcases/v<N>.<md|csv>.
   const ext = format === 'csv' ? 'csv' : 'md'
