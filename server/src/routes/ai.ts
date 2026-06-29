@@ -16,6 +16,7 @@ import { resolveProject } from '../projectScope.js'
 import { revealFolderNative } from '../folderPicker.js'
 import {
   deleteTestcaseVersion,
+  editTestcaseCell,
   generateTestcaseVersion,
   listTestcaseVersions,
 } from '../testcaseGen.js'
@@ -682,6 +683,54 @@ aiRouter.post('/testcases', async (req, res) => {
       instructions: typeof req.body?.instructions === 'string' ? req.body.instructions : '',
       model: typeof req.body?.model === 'string' ? req.body.model : undefined,
       appUrl: typeof req.body?.appUrl === 'string' ? req.body.appUrl : undefined,
+      sourcePath: project.sourcePath,
+      groundingCheck: project.groundingCheck,
+      groundingCheckModel: project.groundingCheckModel,
+    })
+    res.json(result)
+  } catch (err) {
+    const status = (err as { status?: number }).status ?? 500
+    res.status(status).json({ error: (err as Error).message })
+  }
+})
+
+/**
+ * Rewrite ONE cell of a stored CSV test-case version with AI, overwriting that same
+ * version in place. The /testcases preview lets a QC engineer click a cell, add an
+ * instruction, and regenerate just that cell. Body:
+ *   { projectId, folder, version, row, col, comment, model? }
+ *   - row: absolute row index in the CSV (0 = header), col: column index.
+ */
+aiRouter.post('/testcases/cell', async (req, res) => {
+  const project = resolveProject(req)
+  if (!project) return res.status(400).json({ error: 'project not found' })
+
+  const folder = typeof req.body?.folder === 'string' ? req.body.folder.trim() : ''
+  if (!folder) return res.status(400).json({ error: 'folder is required' })
+  const version = Number(req.body?.version)
+  if (!Number.isInteger(version)) return res.status(400).json({ error: 'version is required' })
+  const comment = typeof req.body?.comment === 'string' ? req.body.comment : ''
+  // A direct `value` (Undo) writes the cell without AI; otherwise a comment is required.
+  const value = typeof req.body?.value === 'string' ? req.body.value : undefined
+  if (value === undefined && !comment.trim()) {
+    return res.status(400).json({ error: 'comment is required' })
+  }
+  const projectName =
+    typeof req.body?.projectName === 'string' && req.body.projectName.trim()
+      ? req.body.projectName.trim()
+      : project.name || 'this project'
+
+  try {
+    const result = await editTestcaseCell({
+      rootPath: project.rootPath,
+      projectName,
+      folder,
+      version,
+      row: Number(req.body?.row),
+      col: Number(req.body?.col),
+      comment,
+      value,
+      model: typeof req.body?.model === 'string' ? req.body.model : undefined,
     })
     res.json(result)
   } catch (err) {
@@ -855,11 +904,16 @@ aiRouter.post('/testcases/jobs', (req, res) => {
     projectId: project.id,
     projectName,
     rootPath: project.rootPath,
+    sourcePath: project.sourcePath ?? '',
     folders,
     appUrls,
     template: parseTemplate(req.body?.template),
     instructions: typeof req.body?.instructions === 'string' ? req.body.instructions : '',
     model: typeof req.body?.model === 'string' ? req.body.model : '',
+    groundingCheck: project.groundingCheck,
+    groundingCheckModel: project.groundingCheckModel,
+    autoLearn: project.autoLearn,
+    autoLearnModel: project.autoLearnModel,
   })
   res.json({ jobId: job.id, job })
 })

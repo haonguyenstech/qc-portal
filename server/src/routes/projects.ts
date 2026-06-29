@@ -138,16 +138,40 @@ projectsRouter.put('/:id', (req, res) => {
   const existing = getProject(req.params.id)
   if (!existing) return res.status(404).json({ error: 'project not found' })
 
-  const { name, rootPath, description, diagram, pinned } = req.body ?? {}
+  const {
+    name,
+    rootPath,
+    description,
+    diagram,
+    pinned,
+    groundingCheck,
+    groundingCheckModel,
+    autoLearn,
+    autoLearnModel,
+  } = req.body ?? {}
   const partial: {
     name?: string
     rootPath?: string
     description?: string
     diagram?: string
     pinned?: boolean
+    groundingCheck?: boolean
+    groundingCheckModel?: string
+    autoLearn?: boolean
+    autoLearnModel?: string
   } = {}
   if (typeof name === 'string' && name.trim()) partial.name = name.trim()
   if (typeof pinned === 'boolean') partial.pinned = pinned
+  // Per-project AI post-step settings. Models are validated against the known aliases.
+  const KNOWN_MODELS = new Set(['haiku', 'sonnet', 'opus'])
+  if (typeof groundingCheck === 'boolean') partial.groundingCheck = groundingCheck
+  if (typeof groundingCheckModel === 'string' && KNOWN_MODELS.has(groundingCheckModel)) {
+    partial.groundingCheckModel = groundingCheckModel
+  }
+  if (typeof autoLearn === 'boolean') partial.autoLearn = autoLearn
+  if (typeof autoLearnModel === 'string' && KNOWN_MODELS.has(autoLearnModel)) {
+    partial.autoLearnModel = autoLearnModel
+  }
   if (typeof rootPath === 'string' && rootPath.trim()) {
     const resolved = path.resolve(rootPath.trim())
     if (!isDir(resolved)) {

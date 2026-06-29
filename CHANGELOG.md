@@ -3,6 +3,44 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.6.0 — 2026-06-29
+
+**Project knowledge, self-checking AI & in-app docs**
+
+Give each project a memory, let the AI ground its work in it (and check itself for
+hallucination), pull in your source repo, and learn the whole portal from a built-in manual.
+
+### Added
+
+- **Knowledge & Memory** — a new context hub on the **Instructions** page: upload project
+  docs (Word, PDF, Markdown, CSV, Excel — converted in the browser) as **Knowledge**, and
+  jot durable facts as **Memory** notes. Both are stored per project under `testing/`.
+- **Project context feeds the AI** — test-case generation now injects your Knowledge +
+  Memory straight into the prompt, so the AI uses your real screen/field names, roles, and
+  business rules instead of guessing; QC runs read them too.
+- **Test cases & runs read your source code** — test-case generation and QC runs now open
+  the project's repository and read the real implementation of the feature (true field names,
+  validation, states, roles, edge cases) before drafting or testing, so the output matches the
+  actual app — not just the ticket. Read-only; the repo is never modified.
+- **Grounding check (anti-hallucination)** — after the AI writes test cases or a QC report,
+  an independent, cheap second pass audits it and silently corrects invented content: cases
+  not supported by the ticket or your knowledge are dropped/fixed, and any unverified "Pass"
+  in a report is downgraded. Best-effort — it never blocks the run.
+- **AI auto-capture (auto-learn)** — after a run or generation, the portal can save durable
+  facts it learned into Memory/Knowledge, flagged with an **AI** badge you can review or edit.
+- **Per-project AI controls** — **Settings → Models** now has an *AI automation* card to turn
+  the grounding check and auto-learn on/off and pick their model, per project.
+- **Source Code page** — clone, adopt, or pull a GitHub/Bitbucket repo for a project as a
+  background job; access tokens are kept in a protected on-disk store, never in git or logs.
+- **Documentation page** — a built-in user manual (sidebar footer, below Release notes) with
+  one page per topic, a searchable nav, and prev/next — covering the whole portal.
+- **Generate from ClickUp** — draft a project Overview from crawled tickets and docs with AI.
+
+### Changed
+
+- **Instructions page** is now a three-tab hub — `CLAUDE.md` + Knowledge + Memory — with a
+  managed pointer block that keeps `CLAUDE.md` lean while still surfacing the split-out context.
+
 ## 0.5.0 — 2026-06-25
 
 **Terminal, live sessions & background Design Checks**

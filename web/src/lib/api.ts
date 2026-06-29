@@ -50,6 +50,14 @@ export function updateProject(
     pinned?: boolean
     /** When true, also rename the folder on disk to match `name`. */
     renameFolder?: boolean
+    /** Run the anti-hallucination grounding check after AI writes (per project). */
+    groundingCheck?: boolean
+    /** Model alias for the grounding check (haiku/sonnet/opus). */
+    groundingCheckModel?: string
+    /** Auto-capture durable facts into memory/knowledge after runs (per project). */
+    autoLearn?: boolean
+    /** Model alias for the auto-learn reflection. */
+    autoLearnModel?: string
   },
 ): Promise<Project> {
   return request(`/api/projects/${encodeURIComponent(id)}`, {
@@ -550,6 +558,95 @@ export function listCrawlJobs(projectId: string): Promise<{ jobs: CrawlJob[] }> 
   return request(`/api/clickup/crawl/jobs?projectId=${encodeURIComponent(projectId)}`)
 }
 
+// ---- Source code (connect a GitHub/Bitbucket repo) ----
+
+export interface SourceInfo {
+  connected: boolean
+  repoUrl: string
+  provider: string // 'github' | 'bitbucket' | 'other' | ''
+  branch: string
+  sourcePath: string // absolute local folder of the source
+  rootPath: string
+  lastSync: string // ISO
+  lastCommit: string // "<shortSha> <subject>"
+  hasToken: boolean // a private-repo token is stored (never returned)
+  live: { isRepo: boolean; branch: string; lastCommit: string; remoteUrl: string } | null
+}
+
+export type SourceJobKind = 'clone' | 'sync'
+
+export interface SourceLogLine {
+  time: string
+  level: 'info' | 'success' | 'error'
+  text: string
+}
+
+export interface SourceJob {
+  id: string
+  kind: SourceJobKind
+  projectId: string
+  status: 'running' | 'done' | 'error'
+  error?: string
+  branch: string
+  logs: SourceLogLine[]
+  result?: { sourcePath: string; branch: string; lastCommit: string }
+  createdAt: string
+  updatedAt: string
+}
+
+/** Read the project's connected source repo + live on-disk status. */
+export function getSource(projectId: string): Promise<SourceInfo> {
+  return request(`/api/source?projectId=${encodeURIComponent(projectId)}`)
+}
+
+/** Connect (clone/adopt) a repo. Runs as a background job — poll getSourceJob. */
+export function connectSource(body: {
+  projectId: string
+  url: string
+  branch?: string
+  token?: string
+  username?: string
+}): Promise<{ jobId: string; job: SourceJob }> {
+  return request(`/api/source/connect?projectId=${encodeURIComponent(body.projectId)}`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+}
+
+/** Refresh the connected repo (git pull). Runs as a background job. */
+export function syncSource(projectId: string): Promise<{ jobId: string; job: SourceJob }> {
+  return request(`/api/source/sync?projectId=${encodeURIComponent(projectId)}`, {
+    method: 'POST',
+    body: JSON.stringify({ projectId }),
+  })
+}
+
+/** Forget the connection (the files on disk are left alone). */
+export function disconnectSource(projectId: string): Promise<{ ok: true }> {
+  return request(`/api/source/disconnect?projectId=${encodeURIComponent(projectId)}`, {
+    method: 'POST',
+    body: JSON.stringify({ projectId }),
+  })
+}
+
+export function getSourceJob(jobId: string, projectId: string): Promise<{ job: SourceJob }> {
+  return request(
+    `/api/source/jobs/${encodeURIComponent(jobId)}?projectId=${encodeURIComponent(projectId)}`,
+  )
+}
+
+export function listSourceJobs(projectId: string): Promise<{ jobs: SourceJob[] }> {
+  return request(`/api/source/jobs?projectId=${encodeURIComponent(projectId)}`)
+}
+
+/** Reveal the source folder (or project root) in the OS file explorer. */
+export function openSourceFolder(projectId: string): Promise<{ ok: true; path: string }> {
+  return request(`/api/source/open?projectId=${encodeURIComponent(projectId)}`, {
+    method: 'POST',
+    body: JSON.stringify({ projectId }),
+  })
+}
+
 export interface CrawledTicket {
   name: string // folder name under testing/tickets/ (sanitized displayId)
   crawledAt: string | null // ISO time of the last crawl
@@ -754,6 +851,110 @@ export function openTemplatesFolder(projectId: string): Promise<{ ok: true; path
   })
 }
 
+// ---- Project knowledge docs (uploaded Docs/PDF/Markdown, converted to .md) ----
+
+export interface KnowledgeDoc {
+  name: string // file base name (no extension)
+  source?: string // provenance: '' for uploads; 'ai · …' for AI-captured docs
+  size: number // bytes on disk
+  savedAt: string // ISO mtime
+}
+
+/** List the project's uploaded knowledge docs (metadata only, newest first). */
+export function listKnowledge(projectId: string): Promise<KnowledgeDoc[]> {
+  return request(`/api/knowledge?projectId=${encodeURIComponent(projectId)}`)
+}
+
+/** Fetch one doc's full converted Markdown (for the preview dialog). */
+export function getKnowledgeDoc(
+  name: string,
+  projectId: string,
+): Promise<KnowledgeDoc & { content: string }> {
+  return request(
+    `/api/knowledge/${encodeURIComponent(name)}?projectId=${encodeURIComponent(projectId)}`,
+  )
+}
+
+/** Create or overwrite a knowledge doc with its converted Markdown. */
+export function saveKnowledgeDoc(
+  name: string,
+  content: string,
+  projectId: string,
+): Promise<KnowledgeDoc> {
+  return request(
+    `/api/knowledge/${encodeURIComponent(name)}?projectId=${encodeURIComponent(projectId)}`,
+    { method: 'PUT', body: JSON.stringify({ content }) },
+  )
+}
+
+/** Delete a stored knowledge doc. */
+export function deleteKnowledgeDoc(name: string, projectId: string): Promise<{ ok: true }> {
+  return request(
+    `/api/knowledge/${encodeURIComponent(name)}?projectId=${encodeURIComponent(projectId)}`,
+    { method: 'DELETE' },
+  )
+}
+
+/** Reveal the project's testing/knowledge folder in the OS file explorer. */
+export function openKnowledgeFolder(projectId: string): Promise<{ ok: true; path: string }> {
+  return request(`/api/knowledge/open?projectId=${encodeURIComponent(projectId)}`, {
+    method: 'POST',
+  })
+}
+
+// ---- Project memory (in-portal-authored fact notes, testing/memory/*.md) ----
+
+export interface MemoryNote {
+  name: string // file base name (no extension)
+  description: string // one-line summary (frontmatter) — shown in the list + index
+  source?: string // provenance: '' for hand-authored; 'ai · …' for AI-captured notes
+  size: number // bytes on disk
+  savedAt: string // ISO mtime
+}
+
+/** List the project's memory notes (metadata only, newest first). */
+export function listMemory(projectId: string): Promise<MemoryNote[]> {
+  return request(`/api/memory?projectId=${encodeURIComponent(projectId)}`)
+}
+
+/** Fetch one note's description + markdown body (for the editor). */
+export function getMemoryNote(
+  name: string,
+  projectId: string,
+): Promise<MemoryNote & { content: string }> {
+  return request(
+    `/api/memory/${encodeURIComponent(name)}?projectId=${encodeURIComponent(projectId)}`,
+  )
+}
+
+/** Create or overwrite a memory note. */
+export function saveMemoryNote(
+  name: string,
+  description: string,
+  content: string,
+  projectId: string,
+): Promise<MemoryNote> {
+  return request(
+    `/api/memory/${encodeURIComponent(name)}?projectId=${encodeURIComponent(projectId)}`,
+    { method: 'PUT', body: JSON.stringify({ description, content }) },
+  )
+}
+
+/** Delete a stored memory note. */
+export function deleteMemoryNote(name: string, projectId: string): Promise<{ ok: true }> {
+  return request(
+    `/api/memory/${encodeURIComponent(name)}?projectId=${encodeURIComponent(projectId)}`,
+    { method: 'DELETE' },
+  )
+}
+
+/** Reveal the project's testing/memory folder in the OS file explorer. */
+export function openMemoryFolder(projectId: string): Promise<{ ok: true; path: string }> {
+  return request(`/api/memory/open?projectId=${encodeURIComponent(projectId)}`, {
+    method: 'POST',
+  })
+}
+
 // ---- Test cases ----
 
 /** Output shape of a generated test-case version — CSV (template-driven) or Markdown. */
@@ -831,6 +1032,37 @@ export function deleteTestCaseVersion(
     `/api/ai/testcases?folder=${encodeURIComponent(folder)}&version=${encodeURIComponent(version)}&projectId=${encodeURIComponent(projectId)}`,
     { method: 'DELETE' },
   )
+}
+
+/** Result of an AI single-cell edit on a CSV test-case version. */
+export interface EditTestcaseCellResult {
+  testcases: string // the full updated CSV
+  version: number
+  format: 'csv'
+  row: number
+  col: number
+  column: string
+  oldValue: string
+  newValue: string
+}
+
+/**
+ * Rewrite one cell of a CSV test-case version (overwrites that version).
+ * Pass `comment` to have AI rewrite the cell, or `value` to write an exact value
+ * without AI (used for Undo).
+ */
+export function editTestcaseCell(body: {
+  projectId: string
+  folder: string
+  version: number
+  row: number
+  col: number
+  comment?: string
+  value?: string
+  model?: string
+  projectName?: string
+}): Promise<EditTestcaseCellResult> {
+  return request('/api/ai/testcases/cell', { method: 'POST', body: JSON.stringify(body) })
 }
 
 // ---- Test-case background jobs ----
@@ -1082,6 +1314,22 @@ export function getVersion(): Promise<{ current: string | null }> {
 /** Fetch latest upstream and report whether `qc-portal --update` would move HEAD forward. */
 export function checkForUpdate(): Promise<UpdateCheck> {
   return request('/api/version/check', { method: 'POST' })
+}
+
+export interface UpdateTrigger {
+  ok: boolean
+  current: string | null
+  error?: string
+  alreadyRunning?: boolean
+}
+
+/**
+ * Kick off a self-update (git pull + npm install + build + restart) in a detached
+ * process on the server. Returns immediately; the server will go down and come
+ * back up on its own — the caller should poll {@link getVersion} until it's back.
+ */
+export function triggerUpdate(): Promise<UpdateTrigger> {
+  return request('/api/version/update', { method: 'POST' })
 }
 
 /** The portal's own release notes (CHANGELOG.md) for the Release Notes page. */

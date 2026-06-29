@@ -1,4 +1,7 @@
 import { randomUUID } from 'node:crypto'
+import fs from 'node:fs'
+import path from 'node:path'
+import { runKnowledgeUpdate } from './learn.js'
 import { generateTestcaseVersion } from './testcaseGen.js'
 
 // In-memory background jobs for test-case generation. A job runs server-side, so
@@ -38,9 +41,15 @@ interface TestcaseJob {
   projectId: string
   projectName: string
   rootPath: string
+  sourcePath: string
   template: { name?: string; content?: string } | null
   instructions: string
   model: string
+  // Per-project AI post-step settings, captured when the job starts.
+  groundingCheck: boolean
+  groundingCheckModel: string
+  autoLearn: boolean
+  autoLearnModel: string
   items: TestcaseJobItem[]
   logs: TestcaseLogLine[]
   total: number
@@ -175,6 +184,9 @@ async function runJob(job: TestcaseJob): Promise<void> {
         instructions: job.instructions,
         model: job.model,
         appUrl: item.appUrl,
+        sourcePath: job.sourcePath,
+        groundingCheck: job.groundingCheck,
+        groundingCheckModel: job.groundingCheckModel,
         signal: ac.signal,
         onLog: (l) => pushLog(job, l.level, l.text, item.folder),
       })
@@ -198,7 +210,46 @@ async function runJob(job: TestcaseJob): Promise<void> {
     recountDone(job)
     job.updatedAt = nowIso()
   }
+  // On natural completion (not pause/cancel), reflect on the generated cases and
+  // auto-capture durable facts. Best-effort; never blocks finalize on failure.
+  if (!job.cancelRequested && !job.pauseRequested && job.autoLearn) {
+    await learnFromTestcases(job)
+  }
   finalize(job)
+}
+
+/** AI auto-capture from the test cases this job generated (see learn.ts). */
+async function learnFromTestcases(job: TestcaseJob): Promise<void> {
+  const done = job.items.filter((i) => i.status === 'done' && i.savedTo)
+  if (!done.length) return
+  const parts: string[] = []
+  for (const it of done) {
+    try {
+      const content = fs.readFileSync(path.join(job.rootPath, it.savedTo!), 'utf8').slice(0, 6_000)
+      parts.push(`### Test cases for ${it.folder} (v${it.version})\n${content}`)
+    } catch {
+      /* skip unreadable item */
+    }
+  }
+  if (!parts.length) return
+  pushLog(job, 'info', 'AI reflecting on the generated test cases to update project knowledge…')
+  try {
+    const learned = await runKnowledgeUpdate({
+      rootPath: job.rootPath,
+      projectName: job.projectName,
+      source: `ai · test cases · ${nowIso().slice(0, 10)}`,
+      context: `Manual test cases were generated for ${done.length} ticket(s).\n\n${parts.join('\n\n')}`,
+      model: job.autoLearnModel,
+    })
+    const names = [...learned.memory, ...learned.knowledge]
+    if (names.length) {
+      pushLog(job, 'success', `AI updated project knowledge: ${names.length} note${names.length === 1 ? '' : 's'} (${names.join(', ')})`)
+    } else {
+      pushLog(job, 'info', `AI found nothing new to remember${learned.skipped ? ` (${learned.skipped})` : ''}`)
+    }
+  } catch {
+    /* best-effort — auto-learn failures are silent */
+  }
 }
 
 /** Guard runJob so an unexpected throw can't crash the process or wedge the job. */
@@ -221,21 +272,31 @@ export function startTestcaseJob(opts: {
   projectId: string
   projectName: string
   rootPath: string
+  sourcePath: string
   folders: string[]
   /** Optional per-folder live app URL (folder → url) to ground that ticket's cases. */
   appUrls?: Record<string, string>
   template: { name?: string; content?: string } | null
   instructions: string
   model: string
+  groundingCheck: boolean
+  groundingCheckModel: string
+  autoLearn: boolean
+  autoLearnModel: string
 }): PublicTestcaseJob {
   const job: TestcaseJob = {
     id: randomUUID(),
     projectId: opts.projectId,
     projectName: opts.projectName,
     rootPath: opts.rootPath,
+    sourcePath: opts.sourcePath,
     template: opts.template,
     instructions: opts.instructions,
     model: opts.model,
+    groundingCheck: opts.groundingCheck,
+    groundingCheckModel: opts.groundingCheckModel,
+    autoLearn: opts.autoLearn,
+    autoLearnModel: opts.autoLearnModel,
     items: opts.folders.map((folder) => ({
       folder,
       status: 'pending' as const,

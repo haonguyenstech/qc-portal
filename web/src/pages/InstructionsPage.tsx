@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import ReactMarkdown from 'react-markdown'
@@ -19,6 +20,10 @@ import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { Textarea } from '@/components/ui/textarea'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { BrainCircuit, BrainCog } from 'lucide-react'
+import { KnowledgeDocs } from '@/components/KnowledgeDocs'
+import { MemoryNotes } from '@/components/MemoryNotes'
 import {
   getProjectClaudeMd,
   openMcpFolder,
@@ -259,8 +264,23 @@ function OpenFolderButton({ projectId }: { projectId: string }) {
   )
 }
 
+const TABS = ['instructions', 'knowledge', 'memory'] as const
+type TabValue = (typeof TABS)[number]
+
 export default function InstructionsPage() {
   const { activeProjectId, activeProject } = useProjects()
+  const [searchParams, setSearchParams] = useSearchParams()
+  const tabParam = searchParams.get('tab')
+  const activeTab: TabValue = TABS.includes(tabParam as TabValue)
+    ? (tabParam as TabValue)
+    : 'instructions'
+
+  function onTabChange(value: string) {
+    if (!TABS.includes(value as TabValue)) return
+    const next = new URLSearchParams(searchParams)
+    next.set('tab', value)
+    setSearchParams(next)
+  }
 
   if (!activeProjectId) {
     return (
@@ -303,14 +323,17 @@ export default function InstructionsPage() {
           <div className="space-y-1">
             <h1 className="text-3xl font-semibold tracking-tight">Instructions</h1>
             <p className="text-sm text-muted-foreground">
-              The project's root <span className="font-mono text-foreground">CLAUDE.md</span> — the
-              standing guidance Claude Code reads on every QC run
-              {activeProject ? ` in ${activeProject.name}` : ''}. View, edit and save it here.
+              Everything Claude Code reads on every QC run
+              {activeProject ? ` in ${activeProject.name}` : ''} — the lean{' '}
+              <span className="font-mono text-foreground">CLAUDE.md</span>, uploaded{' '}
+              <span className="text-foreground">Knowledge</span> docs, and durable{' '}
+              <span className="text-foreground">Memory</span> facts. Split context across these
+              instead of cramming it all into one file.
             </p>
           </div>
         </div>
 
-        {/* Per-project context: makes it unmistakable which CLAUDE.md is being edited. */}
+        {/* Per-project context: makes it unmistakable which project's context is being edited. */}
         {activeProject && (
           <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-2xl border border-border/60 bg-card px-4 py-3 shadow-none">
             <span className="flex items-center gap-2">
@@ -319,7 +342,7 @@ export default function InstructionsPage() {
               </span>
               <span className="leading-tight">
                 <span className="block text-[11px] uppercase tracking-wide text-muted-foreground">
-                  Editing instructions for
+                  Editing context for
                 </span>
                 <span className="block text-sm font-semibold tracking-tight">
                   {activeProject.name}
@@ -329,20 +352,10 @@ export default function InstructionsPage() {
             <div className="ml-auto flex min-w-0 items-center gap-2">
               <span
                 className="flex min-w-0 items-center gap-1.5 rounded-full border border-border/60 bg-muted/50 px-3 py-1.5 font-mono text-xs text-muted-foreground"
-                title={`${activeProject.rootPath}/CLAUDE.md`}
+                title={activeProject.rootPath}
               >
                 <FolderTree className="h-3.5 w-3.5 shrink-0 text-primary/70" />
-                <span className="truncate">{activeProject.rootPath}/CLAUDE.md</span>
-                <span
-                  className={cn(
-                    'ml-1 shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium',
-                    activeProject.hasClaudeMd
-                      ? 'bg-emerald-50 text-emerald-700'
-                      : 'bg-amber-50 text-amber-700',
-                  )}
-                >
-                  {activeProject.hasClaudeMd ? 'exists' : 'new'}
-                </span>
+                <span className="truncate">{activeProject.rootPath}</span>
               </span>
               <OpenFolderButton projectId={activeProjectId} />
             </div>
@@ -350,7 +363,42 @@ export default function InstructionsPage() {
         )}
       </header>
 
-      <ClaudeMdCard projectId={activeProjectId} />
+      <Tabs value={activeTab} onValueChange={onTabChange} className="space-y-5">
+        <TabsList className="rounded-full">
+          <TabsTrigger value="instructions" className="gap-1.5 rounded-full">
+            <FileText className="size-3.5" /> Instructions
+          </TabsTrigger>
+          <TabsTrigger value="knowledge" className="gap-1.5 rounded-full">
+            <BrainCircuit className="size-3.5" /> Knowledge
+          </TabsTrigger>
+          <TabsTrigger value="memory" className="gap-1.5 rounded-full">
+            <BrainCog className="size-3.5" /> Memory
+          </TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="instructions" className="space-y-3">
+          <p className="flex items-start gap-1.5 text-xs text-muted-foreground">
+            <FileText className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            The project's root{' '}
+            <code className="rounded bg-muted px-1 py-0.5 font-mono text-[10px]">CLAUDE.md</code>.
+            Keep it lean — a managed pointer block here links Claude to the Knowledge and Memory
+            folders automatically.
+          </p>
+          <ClaudeMdCard projectId={activeProjectId} />
+        </TabsContent>
+
+        <TabsContent value="knowledge">
+          {activeProject && (
+            <KnowledgeDocs projectId={activeProjectId} projectName={activeProject.name} />
+          )}
+        </TabsContent>
+
+        <TabsContent value="memory">
+          {activeProject && (
+            <MemoryNotes projectId={activeProjectId} projectName={activeProject.name} />
+          )}
+        </TabsContent>
+      </Tabs>
     </div>
   )
 }

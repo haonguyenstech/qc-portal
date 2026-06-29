@@ -4,6 +4,7 @@ dist/
 data/*.db
 data/*.db-*
 data/server.pid
+data/source-credentials.json
 runtime/
 .playwright-mcp/
 .env

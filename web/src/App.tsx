@@ -1,14 +1,17 @@
 import { useEffect, useState } from 'react'
-import { NavLink, Navigate, Route, Routes } from 'react-router-dom'
+import { NavLink, Navigate, Route, Routes, useLocation } from 'react-router-dom'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import {
   ArrowUpCircle,
   BookOpen,
+  BookText,
   ClipboardList,
+  Code2,
   FileText,
   FolderGit2,
   History,
+  Loader2,
   PanelLeftClose,
   PanelLeftOpen,
   PlayCircle,
@@ -32,13 +35,14 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
-import { checkForUpdate, getVersion } from '@/lib/api'
+import { checkForUpdate, getVersion, triggerUpdate } from '@/lib/api'
 import { listRuns } from '@/lib/api'
 import { useProjects } from '@/lib/project-context'
 import NotificationBell from '@/components/NotificationBell'
 import TestCaseJobWatcher from '@/components/TestCaseJobWatcher'
 import CrawlJobWatcher from '@/components/CrawlJobWatcher'
 import VerifyJobWatcher from '@/components/VerifyJobWatcher'
+import SourceJobWatcher from '@/components/SourceJobWatcher'
 import RunPage from '@/pages/RunPage'
 import RunningPage from '@/pages/RunningPage'
 import HistoryPage from '@/pages/HistoryPage'
@@ -51,10 +55,13 @@ import ProjectsPage from '@/pages/ProjectsPage'
 import ProjectSettingsPage from '@/pages/ProjectSettingsPage'
 import InstructionsPage from '@/pages/InstructionsPage'
 import OverviewPage from '@/pages/OverviewPage'
+import SourceCodePage from '@/pages/SourceCodePage'
+import DiagramsPage from '@/pages/DiagramsPage'
 import VerifyDesignPage from '@/pages/VerifyDesignPage'
 import TerminalPage from '@/pages/TerminalPage'
 import NotificationsPage from '@/pages/NotificationsPage'
 import ReleaseNotesPage from '@/pages/ReleaseNotesPage'
+import DocumentPage from '@/pages/DocumentPage'
 
 interface NavItemDef {
   to: string
@@ -66,7 +73,12 @@ interface NavItemDef {
 const navGroups: { label: string; items: NavItemDef[] }[] = [
   {
     label: 'Project',
-    items: [{ to: '/overview', label: 'Overview', icon: BookOpen, end: false }],
+    items: [
+      { to: '/overview', label: 'Overview', icon: BookOpen, end: false },
+      { to: '/source', label: 'Source Code', icon: Code2, end: false },
+      // Diagrams hidden temporarily — restore this entry to bring it back.
+      // { to: '/diagrams', label: 'Diagrams', icon: Workflow, end: false },
+    ],
   },
   {
     label: 'Testing',
@@ -146,44 +158,47 @@ function NavItem({
 }) {
   const { to, label, icon: Icon, end } = item
   const showRunning = to === '/running' && liveCount > 0
+  const { pathname } = useLocation()
+  // Compute active state ourselves rather than via NavLink's className/children
+  // render-props: when collapsed the link is wrapped in <TooltipTrigger asChild>,
+  // whose Radix Slot stringifies a function className. A plain string is Slot-safe.
+  const isActive = end ? pathname === to : pathname === to || pathname.startsWith(`${to}/`)
 
   const link = (
     <NavLink
       to={to}
       end={end}
-      className={({ isActive }) =>
-        cn(
-          'group relative flex items-center rounded-lg text-sm font-medium transition-all duration-200 active:scale-[0.98]',
-          collapsed ? 'h-10 w-10 justify-center' : 'gap-3 px-3 py-2',
-          isActive
-            ? 'bg-gradient-to-r from-primary/15 to-primary/5 text-primary shadow-sm'
-            : 'text-muted-foreground hover:bg-muted hover:text-foreground',
-        )
-      }
+      className={cn(
+        'group relative flex items-center text-sm font-medium transition-all duration-200 active:scale-[0.98]',
+        collapsed ? 'h-10 w-10 justify-center rounded-xl' : 'gap-3 rounded-lg px-3 py-2',
+        isActive
+          ? collapsed
+            ? 'bg-primary/12 text-primary ring-1 ring-inset ring-primary/25'
+            : 'bg-gradient-to-r from-primary/15 to-primary/5 text-primary shadow-sm'
+          : 'text-muted-foreground hover:bg-muted hover:text-foreground',
+      )}
     >
-      {({ isActive }) => (
-        <>
-          <span
-            className={cn(
-              'absolute left-0 top-1/2 w-0.5 -translate-y-1/2 rounded-full bg-primary transition-all duration-300',
-              isActive ? 'h-5 opacity-100' : 'h-0 opacity-0',
-            )}
-          />
-          <Icon
-            className={cn(
-              'h-4 w-4 shrink-0 transition-transform duration-200 group-hover:scale-110',
-              isActive && 'scale-110',
-            )}
-          />
-          {!collapsed && label}
-          {!collapsed && showRunning && <RunningBadge count={liveCount} active={isActive} />}
-          {collapsed && showRunning && (
-            <span className="absolute right-1 top-1 flex size-2">
-              <span className="absolute inline-flex size-full animate-ping rounded-full bg-sky-500 opacity-75" />
-              <span className="relative inline-flex size-2 rounded-full bg-sky-500" />
-            </span>
+      {!collapsed && (
+        <span
+          className={cn(
+            'absolute left-0 top-1/2 w-0.5 -translate-y-1/2 rounded-full bg-primary transition-all duration-300',
+            isActive ? 'h-5 opacity-100' : 'h-0 opacity-0',
           )}
-        </>
+        />
+      )}
+      <Icon
+        className={cn(
+          'h-4 w-4 shrink-0 transition-transform duration-200 group-hover:scale-110',
+          isActive && 'scale-110',
+        )}
+      />
+      {!collapsed && label}
+      {!collapsed && showRunning && <RunningBadge count={liveCount} active={isActive} />}
+      {collapsed && showRunning && (
+        <span className="absolute right-1 top-1 flex size-2">
+          <span className="absolute inline-flex size-full animate-ping rounded-full bg-sky-500 opacity-75" />
+          <span className="relative inline-flex size-2 rounded-full bg-sky-500" />
+        </span>
       )}
     </NavLink>
   )
@@ -221,7 +236,7 @@ function ProjectSwitcher({ collapsed, onExpand }: { collapsed: boolean; onExpand
               type="button"
               onClick={onExpand}
               aria-label="Switch project"
-              className="relative flex h-10 w-10 items-center justify-center rounded-lg border border-sidebar-border/70 bg-muted/50 text-sm font-semibold text-foreground transition-all duration-200 hover:bg-muted active:scale-95"
+              className="relative flex h-10 w-10 items-center justify-center rounded-xl border border-sidebar-border/70 bg-muted/50 text-sm font-semibold text-foreground transition-all duration-200 hover:-translate-y-0.5 hover:border-border hover:bg-muted active:scale-95"
             >
               {activeProject?.exists === false && (
                 <span className="absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full border-2 border-sidebar bg-destructive" />
@@ -290,6 +305,37 @@ function ProjectSwitcher({ collapsed, onExpand }: { collapsed: boolean; onExpand
   )
 }
 
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+
+/** True when the server answers a cheap request; false while it's mid-restart. */
+async function serverReachable(): Promise<boolean> {
+  try {
+    await getVersion()
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Wait out a self-update: the server is stopped, rebuilt, and restarted. We first
+ * watch it go down (it stops almost immediately), then wait for it to answer again.
+ * The build step (npm install + build) is why the "up" budget is generous.
+ */
+async function waitForRestart(): Promise<boolean> {
+  const downDeadline = Date.now() + 90_000
+  while (Date.now() < downDeadline) {
+    if (!(await serverReachable())) break
+    await sleep(1500)
+  }
+  const upDeadline = Date.now() + 5 * 60_000
+  while (Date.now() < upDeadline) {
+    await sleep(2000)
+    if (await serverReachable()) return true
+  }
+  return false
+}
+
 function VersionFooter({ collapsed }: { collapsed: boolean }) {
   const { data: versionData } = useQuery({ queryKey: ['app-version'], queryFn: getVersion })
   const version = versionData?.current ?? __APP_VERSION__
@@ -301,7 +347,7 @@ function VersionFooter({ collapsed }: { collapsed: boolean }) {
         toast.error('Update check failed', { description: r.error })
       } else if (r.updateAvailable) {
         toast.info(`Update available: v${r.current} → v${r.latest}`, {
-          description: 'Run `qc-portal --update` in the install folder to upgrade.',
+          description: 'Click “Update now” in the sidebar to upgrade and reload.',
           duration: 8000,
         })
       } else {
@@ -311,9 +357,43 @@ function VersionFooter({ collapsed }: { collapsed: boolean }) {
     onError: (e) => toast.error('Update check failed', { description: String(e) }),
   })
 
+  const update = useMutation({
+    mutationFn: triggerUpdate,
+    onSuccess: async (r) => {
+      if (!r.ok) {
+        toast.error('Update failed to start', { description: r.error })
+        return
+      }
+      toast.loading('Updating QC Portal…', {
+        id: 'qc-update',
+        description: 'Pulling, rebuilding, and restarting the server.',
+        duration: Infinity,
+      })
+      const back = await waitForRestart()
+      if (back) {
+        toast.success('Update complete — reloading…', { id: 'qc-update', duration: 2000 })
+        await sleep(600)
+        window.location.reload()
+      } else {
+        toast.error('Update timed out', {
+          id: 'qc-update',
+          description: 'The server did not come back. Check data/update.log in the install folder.',
+          duration: Infinity,
+        })
+      }
+    },
+    onError: (e) => toast.error('Update failed to start', { description: String(e) }),
+  })
+
   const updateAvailable = check.data?.updateAvailable && !check.data.error
+  const latest = check.data?.latest
+  const updating = update.isPending || (update.isSuccess && update.data?.ok)
+  const { pathname } = useLocation()
 
   if (collapsed) {
+    // Plain string className (not a render-prop) so the Radix Slot from
+    // <TooltipTrigger asChild> doesn't stringify a className function.
+    const releasesActive = pathname === '/releases'
     return (
       <div className="mt-auto flex flex-col items-center gap-1.5 border-t border-sidebar-border/60 px-2 py-4">
         <Tooltip>
@@ -321,12 +401,10 @@ function VersionFooter({ collapsed }: { collapsed: boolean }) {
             <NavLink
               to="/releases"
               aria-label="Release notes"
-              className={({ isActive }) =>
-                cn(
-                  'flex size-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground',
-                  isActive && 'bg-muted text-foreground',
-                )
-              }
+              className={cn(
+                'flex size-9 items-center justify-center rounded-xl text-muted-foreground transition-all duration-200 hover:bg-muted hover:text-foreground active:scale-95',
+                releasesActive && 'bg-muted text-foreground',
+              )}
             >
               <ScrollText className="size-4" />
             </NavLink>
@@ -337,12 +415,29 @@ function VersionFooter({ collapsed }: { collapsed: boolean }) {
         </Tooltip>
         <Tooltip>
           <TooltipTrigger asChild>
+            <NavLink
+              to="/document"
+              aria-label="Documentation"
+              className={cn(
+                'flex size-9 items-center justify-center rounded-xl text-muted-foreground transition-all duration-200 hover:bg-muted hover:text-foreground active:scale-95',
+                pathname.startsWith('/document') && 'bg-muted text-foreground',
+              )}
+            >
+              <BookText className="size-4" />
+            </NavLink>
+          </TooltipTrigger>
+          <TooltipContent side="right" className="font-medium">
+            Documentation
+          </TooltipContent>
+        </Tooltip>
+        <Tooltip>
+          <TooltipTrigger asChild>
             <button
               type="button"
               onClick={() => check.mutate()}
               disabled={check.isPending}
               aria-label="Check for updates"
-              className="inline-flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-all duration-200 hover:bg-muted hover:text-foreground active:scale-95 disabled:opacity-50"
+              className="inline-flex size-9 shrink-0 items-center justify-center rounded-xl text-muted-foreground transition-all duration-200 hover:bg-muted hover:text-foreground active:scale-95 disabled:opacity-50"
             >
               {updateAvailable ? (
                 <ArrowUpCircle className="h-4 w-4 text-amber-500" />
@@ -355,14 +450,73 @@ function VersionFooter({ collapsed }: { collapsed: boolean }) {
             {updateAvailable ? `Update available: v${check.data?.latest}` : 'Check for updates'}
           </TooltipContent>
         </Tooltip>
+        {updateAvailable && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                onClick={() => update.mutate()}
+                disabled={updating}
+                aria-label="Update now"
+                className="inline-flex size-9 shrink-0 items-center justify-center rounded-xl bg-amber-500/15 text-amber-600 transition-all duration-200 hover:bg-amber-500/25 active:scale-95 disabled:opacity-50 dark:text-amber-400"
+              >
+                {updating ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <ArrowUpCircle className="h-4 w-4" />
+                )}
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="right" className="font-medium">
+              {updating ? 'Updating…' : `Update now → v${latest}`}
+            </TooltipContent>
+          </Tooltip>
+        )}
       </div>
     )
   }
 
   return (
-    <div className="mt-auto flex items-center gap-1.5 border-t border-sidebar-border/60 px-4 py-4 text-xs text-muted-foreground/70">
+    <div className="mt-auto flex flex-col gap-2 border-t border-sidebar-border/60 px-4 py-4 text-xs text-muted-foreground/70">
+      <div className="flex items-center gap-1.5">
+        <NavLink
+          to="/releases"
+          className={({ isActive }) =>
+            cn(
+              'flex min-w-0 items-center gap-1.5 rounded-md px-2 py-1 font-medium transition-colors hover:bg-muted hover:text-foreground',
+              isActive && 'bg-muted text-foreground',
+            )
+          }
+        >
+          <ScrollText className="size-3.5 shrink-0" />
+          Release notes
+        </NavLink>
+        <span
+          className={cn(
+            'ml-auto shrink-0 rounded-full px-1.5 py-0.5 font-mono text-[10px] tracking-tight',
+            updateAvailable ? 'bg-amber-500/15 text-amber-600 dark:text-amber-400' : 'bg-muted',
+          )}
+          title={updateAvailable ? `Update available: v${check.data?.latest}` : `Version ${version}`}
+        >
+          v{version}
+        </span>
+        <button
+          type="button"
+          onClick={() => check.mutate()}
+          disabled={check.isPending || updating}
+          title={updateAvailable ? 'Update available — click to re-check' : 'Check for updates'}
+          aria-label="Check for updates"
+          className="inline-flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-all duration-200 hover:bg-muted hover:text-foreground active:scale-95 disabled:opacity-50"
+        >
+          {updateAvailable ? (
+            <ArrowUpCircle className="h-3.5 w-3.5 text-amber-500" />
+          ) : (
+            <RefreshCw className={cn('h-3.5 w-3.5', check.isPending && 'animate-spin')} />
+          )}
+        </button>
+      </div>
       <NavLink
-        to="/releases"
+        to="/document"
         className={({ isActive }) =>
           cn(
             'flex min-w-0 items-center gap-1.5 rounded-md px-2 py-1 font-medium transition-colors hover:bg-muted hover:text-foreground',
@@ -370,32 +524,29 @@ function VersionFooter({ collapsed }: { collapsed: boolean }) {
           )
         }
       >
-        <ScrollText className="size-3.5 shrink-0" />
-        Release notes
+        <BookText className="size-3.5 shrink-0" />
+        Documentation
       </NavLink>
-      <span
-        className={cn(
-          'ml-auto shrink-0 rounded-full px-1.5 py-0.5 font-mono text-[10px] tracking-tight',
-          updateAvailable ? 'bg-amber-500/15 text-amber-600 dark:text-amber-400' : 'bg-muted',
-        )}
-        title={updateAvailable ? `Update available: v${check.data?.latest}` : `Version ${version}`}
-      >
-        v{version}
-      </span>
-      <button
-        type="button"
-        onClick={() => check.mutate()}
-        disabled={check.isPending}
-        title={updateAvailable ? 'Update available — click to re-check' : 'Check for updates'}
-        aria-label="Check for updates"
-        className="inline-flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-all duration-200 hover:bg-muted hover:text-foreground active:scale-95 disabled:opacity-50"
-      >
-        {updateAvailable ? (
-          <ArrowUpCircle className="h-3.5 w-3.5 text-amber-500" />
-        ) : (
-          <RefreshCw className={cn('h-3.5 w-3.5', check.isPending && 'animate-spin')} />
-        )}
-      </button>
+      {updateAvailable && (
+        <button
+          type="button"
+          onClick={() => update.mutate()}
+          disabled={updating}
+          className="inline-flex items-center justify-center gap-1.5 rounded-full bg-amber-500/15 px-3 py-1.5 text-xs font-medium text-amber-600 transition-all duration-200 hover:bg-amber-500/25 active:scale-[0.98] disabled:opacity-60 dark:text-amber-400"
+        >
+          {updating ? (
+            <>
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              Updating…
+            </>
+          ) : (
+            <>
+              <ArrowUpCircle className="h-3.5 w-3.5" />
+              Update now → v{latest}
+            </>
+          )}
+        </button>
+      )}
     </div>
   )
 }
@@ -442,6 +593,7 @@ function App() {
       <TestCaseJobWatcher />
       <CrawlJobWatcher />
       <VerifyJobWatcher />
+      <SourceJobWatcher />
       <NotificationBell />
       <aside
         className={cn(
@@ -474,14 +626,19 @@ function App() {
 
         <ProjectSwitcher collapsed={collapsed} onExpand={() => setCollapsed(false)} />
 
-        <nav className={cn('flex flex-col gap-5 py-3', collapsed ? 'items-center px-2' : 'px-3')}>
+        <nav
+          className={cn(
+            'flex flex-col py-3',
+            collapsed ? 'items-center gap-3 px-2' : 'gap-5 px-3',
+          )}
+        >
           {navGroups.map((group, gi) => (
             <div
               key={group.label}
-              className={cn('flex flex-col gap-0.5', collapsed && 'items-center')}
+              className={cn('flex flex-col', collapsed ? 'items-center gap-1.5' : 'gap-0.5')}
             >
               {collapsed
-                ? gi > 0 && <span className="mb-1 h-px w-6 rounded-full bg-sidebar-border/70" />
+                ? gi > 0 && <span className="mb-1.5 h-px w-6 rounded-full bg-sidebar-border/70" />
                 : (
                   <div className="px-3 pb-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/55">
                     {group.label}
@@ -507,6 +664,8 @@ function App() {
           <Routes>
             <Route path="/" element={<RunPage />} />
             <Route path="/overview" element={<OverviewPage />} />
+            <Route path="/source" element={<SourceCodePage />} />
+            <Route path="/diagrams" element={<DiagramsPage />} />
             <Route path="/running" element={<RunningPage />} />
             <Route path="/history" element={<HistoryPage />} />
             <Route path="/run/:id" element={<RunDetailPage />} />
@@ -518,6 +677,8 @@ function App() {
             <Route path="/mcp" element={<McpPage />} />
             <Route path="/notifications" element={<NotificationsPage />} />
             <Route path="/releases" element={<ReleaseNotesPage />} />
+            <Route path="/document" element={<Navigate to="/document/overview" replace />} />
+            <Route path="/document/:slug" element={<DocumentPage />} />
             <Route path="/instructions" element={<InstructionsPage />} />
             <Route path="/templates" element={<ProjectSettingsPage />} />
             <Route path="/settings" element={<ProjectsPage />} />

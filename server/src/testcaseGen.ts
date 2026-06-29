@@ -1,7 +1,15 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { ticketsDirFor } from './config.js'
-import { CRAWL_SUMMARY_MODELS, runClaudeStream, type StreamLog } from './claudeExec.js'
+import {
+  CRAWL_SUMMARY_MODELS,
+  parseClaudeJsonResult,
+  runClaude,
+  runClaudeStream,
+  type StreamLog,
+} from './claudeExec.js'
+import { groundTestcases } from './groundingCheck.js'
+import { readProjectContext } from './projectContext.js'
 
 const DEFAULT_MODEL = 'sonnet'
 
@@ -153,7 +161,23 @@ function testCasesPrompt(
   instructions: string,
   format: TestcaseFormat,
   appUrl: string | null,
+  knowledgeBlock: string,
+  sourceRel: string,
 ): string {
+  // The run executes inside the project repo, so the model should READ the feature's
+  // real implementation before drafting — this is what makes cases match the app
+  // (true field names, validation, states, branches) instead of guesses from the ticket.
+  const where =
+    sourceRel && sourceRel !== '.'
+      ? `under \`./${sourceRel}\` in the current working directory`
+      : `in the current working directory`
+  const sourceBlock = `You are running INSIDE this project's source repository. The application's SOURCE CODE is ${where}. BEFORE writing the cases, investigate the real implementation so every case matches the actual app, not a guess from the ticket:
+- Use Grep / Glob / Read to locate the code behind what the ticket describes — search for the screens, components, routes/endpoints, fields, and messages it mentions.
+- From the real code, take the true field/label names, validation rules, error/empty/loading states, conditional branches, and role/permission checks, and use them in the steps and expected results.
+- Reconcile the ticket against the code: cover what is actually implemented, and where the code and ticket differ, write a case (or an inline note) for the gap.
+- READ ONLY — never modify any file. If you cannot find the related source, fall back to the ticket and note that the implementation could not be located.
+- Also honor any guidance in the project's CLAUDE.md.`
+
   // The output-shape instructions and the "output only X" rule both depend on the
   // target format so CSV templates produce a real, importable CSV (not Markdown).
   const formatBlock =
@@ -179,6 +203,8 @@ function testCasesPrompt(
     ? `\nAdditional instructions from the QC engineer — follow these closely:\n${instructions}\n`
     : ''
 
+  const knowledge = knowledgeBlock ? `\n${knowledgeBlock}\n` : ''
+
   // When the QC engineer supplies a live app URL, ground the cases in the REAL UI:
   // open it with the browser/Playwright tools and reconcile it against the ticket.
   const appBlock = appUrl
@@ -194,14 +220,17 @@ Use your browser/Playwright tool to OPEN this URL and explore the actual running
 
 Below is a ClickUp ticket (its details and comments). Read it and produce a thorough, executable set of test cases a QC engineer can run to verify this ticket is correctly implemented.
 
+${sourceBlock}
+
 ${formatBlock}
-${appBlock}${instructionBlock}
+${appBlock}${instructionBlock}${knowledge}
 Coverage:
 - Happy paths, edge cases, validation/negative cases, and any error states the ticket implies.
 - Where the ticket is ambiguous, still write a case and note the assumption inline.
 
 Rules:
-- Base everything on the ticket; do not invent unrelated features.
+- Ground every case in what you actually saw — the ticket plus the real SOURCE CODE you read (real names, validation, states, branches). Use the ticket for scope and intent; use the code for the concrete details. Do not invent unrelated features or acceptance criteria that neither the ticket nor the code supports.
+- When PROJECT KNOWLEDGE & MEMORY is provided, use it for this project's real screen/field/button names, roles, terminology, and business rules instead of guessing — but it is background context, NOT scope: only add a case for something it mentions if THIS ticket requires it.
 - Be specific and executable — real steps and expected results, never placeholders like "TBD".
 - ${outputRule}
 
@@ -258,6 +287,12 @@ export async function generateTestcaseVersion(opts: {
   model?: string
   /** Optional live app URL — when set, Claude opens it (browser tools) to ground the cases. */
   appUrl?: string | null
+  /** Where the project's source code lives (project.sourcePath). Defaults to rootPath. */
+  sourcePath?: string | null
+  /** Run the post-write grounding check (anti-hallucination). Defaults on. */
+  groundingCheck?: boolean
+  /** Model alias for the grounding check (haiku/sonnet/opus). */
+  groundingCheckModel?: string
   /** Called with each streamed log line so callers can surface progress live. */
   onLog?: (log: StreamLog) => void
   /** Fires to cancel an in-flight generation (pause/cancel of a job). */
@@ -297,15 +332,32 @@ export async function generateTestcaseVersion(opts: {
   const appUrl = normalizeAppUrl(opts.appUrl)
   // A CSV template yields a real .csv (importable into a spreadsheet); otherwise Markdown.
   const format = detectTemplateFormat(template)
+  // Pull the project's standing Knowledge + Memory into the prompt (reliable even
+  // before the model reads any files). The run now executes inside the project (cwd
+  // = rootPath) so the model can also READ the feature's source and the CLAUDE.md.
+  const ctx = readProjectContext(opts.rootPath)
+  // Where the source lives relative to the cwd, so the prompt can point the model at
+  // it. '.' = the project root itself; otherwise a subdir like 'source'.
+  const sourceRel = (() => {
+    const sp = (opts.sourcePath ?? '').trim()
+    if (!sp) return '.'
+    const rel = path.relative(opts.rootPath, sp)
+    return !rel || rel.startsWith('..') ? '.' : rel
+  })()
   onLog({
     level: 'info',
-    text: `Reading ticket (${ticketContent.length.toLocaleString()} chars)… output: ${format.toUpperCase()}${
-      appUrl ? ` · checking live app ${appUrl}` : ''
-    }`,
+    text: `Reading ticket (${ticketContent.length.toLocaleString()} chars)… output: ${format.toUpperCase()} · reading source code${
+      ctx.hasContent
+        ? ` · using project context (${ctx.noteCount} memory, ${ctx.docCount} knowledge)`
+        : ''
+    }${appUrl ? ` · checking live app ${appUrl}` : ''}`,
   })
-  // With a live app URL the model opens it via the project's MCP browser tools, so
-  // run inside the project folder with permissions bypassed (mirrors verifyDesign),
-  // and give it a bigger budget — driving a browser costs more than a plain draft.
+  // The model now reads the feature's source from disk before drafting. With a live
+  // app URL it ALSO needs the project's MCP browser tools, so allow all tools (and
+  // load .mcp.json). Otherwise restrict to read-only file tools and skip MCP entirely
+  // (faster startup, and the draft must never modify the repo). --allowedTools is
+  // variadic, so it MUST be followed by another flag (--strict-mcp-config) before the
+  // trailing prompt positional, or the prompt would be swallowed as a tool name.
   const baseArgs = [
     '-p',
     '--model',
@@ -315,24 +367,35 @@ export async function generateTestcaseVersion(opts: {
     '--verbose',
     '--no-session-persistence',
   ]
-  const appArgs = appUrl ? ['--permission-mode', 'bypassPermissions'] : []
-  // CSV output mirrors a detailed template; checking a live app drives a browser —
-  // both need more headroom than a plain Markdown table before the cost cap cuts in.
-  const budget = appUrl ? '3.00' : format === 'csv' ? '2.00' : '0.50'
+  const toolArgs = appUrl
+    ? ['--permission-mode', 'bypassPermissions']
+    : ['--allowedTools', 'Read', 'Grep', 'Glob', '--strict-mcp-config']
+  // Reading source (and, with a live app, driving a browser) costs more than a plain
+  // draft — give it more headroom before the cost cap cuts in.
+  const budget = appUrl ? '3.00' : format === 'csv' ? '2.50' : '1.50'
   const result = await runClaudeStream(
     [
       ...baseArgs,
-      ...appArgs,
+      ...toolArgs,
       '--max-budget-usd',
       budget,
-      testCasesPrompt(ticketContent, opts.projectName, template, instructions, format, appUrl),
+      testCasesPrompt(
+        ticketContent,
+        opts.projectName,
+        template,
+        instructions,
+        format,
+        appUrl,
+        ctx.block,
+        sourceRel,
+      ),
     ],
-    // A full CSV (many multi-line cases) — or opening and exploring a live app —
-    // takes far longer to stream than a Markdown table; give it up to 8 min.
+    // Reading the source, writing a full CSV, or exploring a live app all take far
+    // longer to stream than a plain Markdown table; give it up to 8 min.
     480000,
     onLog,
-    // Only load the project's MCP servers (cwd) when we actually need the browser.
-    { signal: opts.signal, usageSource: 'testcase', model, cwd: appUrl ? opts.rootPath : undefined },
+    // Always run inside the project so the model can read its source + CLAUDE.md.
+    { signal: opts.signal, usageSource: 'testcase', model, cwd: opts.rootPath },
   )
   if (result.aborted) throw statusError('Generation stopped.', 499)
   if (result.timedOut) throw statusError('Timed out while generating test cases.', 504)
@@ -357,11 +420,259 @@ export async function generateTestcaseVersion(opts: {
   }
   onLog({ level: 'success', text: `Saved ${rel} (${testcases.length.toLocaleString()} chars)` })
 
+  // Grounding check — an independent cheap pass re-audits the cases against the
+  // ticket and silently rewrites the saved version to drop any invented content.
+  // Best-effort: a failure (or a suspicious rewrite) keeps the original as-is.
+  if (opts.groundingCheck !== false && !opts.signal?.aborted) {
+    onLog({ level: 'info', text: 'Grounding check — auditing the cases against the ticket…' })
+    try {
+      const g = await groundTestcases({
+        rootPath: opts.rootPath,
+        projectName: opts.projectName,
+        ticketContent,
+        output: testcases,
+        format,
+        model: opts.groundingCheckModel,
+        // Same context the cases were written against, so a case grounded in
+        // project knowledge (not the ticket) isn't flagged as invented.
+        knowledge: ctx.block,
+        // The author read the real source while drafting, so don't strip a case just
+        // because a detail isn't restated in the ticket — only fix contradictions.
+        sourceAware: true,
+      })
+      if (g.changed && g.corrected) {
+        testcases = g.corrected
+        fs.writeFileSync(path.join(dir, rel), testcases + '\n', 'utf8')
+        onLog({
+          level: 'success',
+          text: `Grounding check revised ${rel} to remove ungrounded content.`,
+        })
+      } else if (g.skipped) {
+        onLog({ level: 'info', text: `Grounding check skipped (${g.skipped}).` })
+      } else {
+        onLog({ level: 'success', text: 'Grounding check: all cases grounded in the ticket.' })
+      }
+    } catch {
+      /* best-effort — grounding failures never sink a successful generation */
+    }
+  }
+
   return {
     testcases,
     savedTo: path.join(path.relative(opts.rootPath, dir), rel),
     version: nextVersion,
     usedTemplate: !!template,
     format,
+  }
+}
+
+// --- Single-cell AI edit -----------------------------------------------------
+// The /testcases preview renders a CSV version as a table; a QC engineer can click
+// one cell, add an instruction, and have Claude rewrite just that cell in place
+// (overwriting the same version). Only CSV versions are cell-editable — Markdown
+// versions render as prose, not an addressable grid.
+
+const MAX_CELL_COMMENT_CHARS = 2_000
+const MAX_CELL_VALUE_CHARS = 8_000
+
+/** Parse RFC-4180-ish CSV into rows of cells (mirrors the web parser exactly). */
+function parseCsvRows(text: string): string[][] {
+  const s = text.replace(/\r\n?/g, '\n')
+  const rows: string[][] = []
+  let row: string[] = []
+  let field = ''
+  let inQuotes = false
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i]
+    if (inQuotes) {
+      if (c === '"') {
+        if (s[i + 1] === '"') {
+          field += '"'
+          i++
+        } else inQuotes = false
+      } else field += c
+    } else if (c === '"') {
+      inQuotes = true
+    } else if (c === ',') {
+      row.push(field)
+      field = ''
+    } else if (c === '\n') {
+      row.push(field)
+      rows.push(row)
+      row = []
+      field = ''
+    } else field += c
+  }
+  row.push(field)
+  rows.push(row)
+  while (rows.length && rows[rows.length - 1].every((c) => c.trim() === '')) rows.pop()
+  return rows
+}
+
+/** Quote a CSV field only when it contains a comma, quote, or newline. */
+function csvField(s: string): string {
+  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
+}
+
+/** Serialize rows back to CSV text (no trailing newline; the caller adds one). */
+function serializeCsv(rows: string[][]): string {
+  return rows.map((r) => r.map(csvField).join(',')).join('\n')
+}
+
+function editCellPrompt(
+  projectName: string,
+  column: string,
+  currentValue: string,
+  rowContext: string,
+  comment: string,
+): string {
+  return `You are a senior QC engineer refining ONE cell of a manual test case for the project "${projectName}".
+
+A test case is one row of a table. Here is the full row for context (column: value):
+--- ROW START ---
+${rowContext}
+--- ROW END ---
+
+You must rewrite ONLY the value of the "${column}" column.
+
+Current value of "${column}":
+--- CURRENT VALUE START ---
+${currentValue || '(empty)'}
+--- CURRENT VALUE END ---
+
+The QC engineer's instruction for this cell:
+--- INSTRUCTION START ---
+${comment}
+--- INSTRUCTION END ---
+
+Rules:
+- Output ONLY the new value for the "${column}" cell — no column name, no preamble, no explanation, no surrounding quotes or code fence.
+- Keep it consistent with the rest of the row and the conventions of the existing value (numbering like 1., 2., a., b.; <angle-bracket> placeholders; phrasing style).
+- Be specific and executable — never placeholders like "TBD".
+- Preserve real line breaks where the value naturally spans multiple lines (e.g. numbered steps).`
+}
+
+export interface EditCellResult {
+  testcases: string // the full updated CSV (so the UI can re-render the table)
+  version: number
+  format: TestcaseFormat // always 'csv'
+  row: number // absolute row index that changed (0 = header)
+  col: number
+  column: string // the column header that was edited
+  oldValue: string
+  newValue: string
+}
+
+/**
+ * Rewrite a single cell of a stored CSV test-case version with Claude, overwriting
+ * the same version file in place. `row` is the absolute row index in the parsed CSV
+ * (0 = header, so the first data row is 1) and `col` is the column index. Throws an
+ * Error (with `.status`) on any failure so the route can map it.
+ */
+export async function editTestcaseCell(opts: {
+  rootPath: string
+  projectName: string
+  folder: string
+  version: number
+  row: number
+  col: number
+  comment: string
+  model?: string
+  /** When set, write this exact value WITHOUT calling AI (used for Undo). */
+  value?: string
+}): Promise<EditCellResult> {
+  const folder = opts.folder.trim()
+  if (!folder) throw statusError('folder is required', 400)
+  // A direct value (Undo) skips AI; otherwise a comment drives the AI rewrite.
+  const directValue = typeof opts.value === 'string' ? opts.value : null
+  const comment =
+    typeof opts.comment === 'string' ? opts.comment.trim().slice(0, MAX_CELL_COMMENT_CHARS) : ''
+  if (directValue === null && !comment) throw statusError('comment is required', 400)
+  if (!Number.isInteger(opts.version)) throw statusError('invalid version', 400)
+
+  const dir = ticketDir(opts.rootPath, folder)
+  const meta = listTestcaseVersions(dir).find((v) => v.version === opts.version)
+  if (!meta) throw statusError('test-case version not found', 404)
+  if (meta.format !== 'csv') {
+    throw statusError('Cell editing is only available for CSV test cases.', 422)
+  }
+
+  const filePath = path.join(dir, meta.file)
+  let raw: string
+  try {
+    raw = fs.readFileSync(filePath, 'utf8')
+  } catch (err) {
+    throw statusError(`Could not read version: ${(err as Error).message}`, 500)
+  }
+
+  const rows = parseCsvRows(raw)
+  if (rows.length === 0) throw statusError('This version is empty.', 422)
+  const header = rows[0]
+  if (!Number.isInteger(opts.row) || opts.row < 1 || opts.row >= rows.length) {
+    throw statusError('invalid row', 400)
+  }
+  if (!Number.isInteger(opts.col) || opts.col < 0 || opts.col >= header.length) {
+    throw statusError('invalid column', 400)
+  }
+
+  const column = (header[opts.col] ?? '').trim() || `Column ${opts.col + 1}`
+  const targetRow = rows[opts.row]
+  while (targetRow.length < header.length) targetRow.push('') // pad short rows
+  const oldValue = (targetRow[opts.col] ?? '').slice(0, MAX_CELL_VALUE_CHARS)
+
+  // Give the model the whole row (labeled) so the rewritten cell stays coherent.
+  const rowContext = header
+    .map(
+      (h, i) =>
+        `${(h ?? '').trim() || `Column ${i + 1}`}: ${(targetRow[i] ?? '').trim() || '(empty)'}`,
+    )
+    .join('\n')
+
+  let newValue: string
+  if (directValue !== null) {
+    // Undo / direct write — restore the given value verbatim, no AI call.
+    newValue = directValue
+  } else {
+    const model = normalizeModel(opts.model)
+    const result = await runClaude(
+      [
+        '-p',
+        '--model',
+        model,
+        '--output-format',
+        'json',
+        '--no-session-persistence',
+        '--max-budget-usd',
+        '0.20',
+        editCellPrompt(opts.projectName, column, oldValue, rowContext, comment),
+      ],
+      120_000,
+      { usageSource: 'testcase-cell', model },
+    )
+    if (result.timedOut) throw statusError('Timed out while editing the cell.', 504)
+    const { text, isError } = parseClaudeJsonResult(result.stdout || result.stderr)
+    if (result.code !== 0 || isError || !text) {
+      throw statusError('Claude did not return an updated cell.', 502)
+    }
+    newValue = stripCodeFence(text).trim()
+  }
+
+  targetRow[opts.col] = newValue
+  const updated = serializeCsv(rows)
+  try {
+    fs.writeFileSync(filePath, updated + '\n', 'utf8')
+  } catch (err) {
+    throw statusError(`Updated, but could not save: ${(err as Error).message}`, 500)
+  }
+
+  return {
+    testcases: updated,
+    version: opts.version,
+    format: 'csv',
+    row: opts.row,
+    col: opts.col,
+    column,
+    oldValue,
+    newValue,
   }
 }

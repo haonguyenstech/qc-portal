@@ -2,7 +2,14 @@ import { DatabaseSync } from 'node:sqlite'
 import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
-import { DB_PATH, DEFAULT_PROJECT_ROOT } from './config.js'
+import {
+  AUTO_LEARN,
+  AUTO_LEARN_MODEL,
+  DB_PATH,
+  DEFAULT_PROJECT_ROOT,
+  GROUNDING_CHECK,
+  GROUNDING_CHECK_MODEL,
+} from './config.js'
 import type { LogEvent, Project, RunSummary } from './types.js'
 
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true })
@@ -98,6 +105,38 @@ db.exec(`
   }
 }
 
+// Migration: add connected-source-repo columns to projects (the /source page).
+// The access token is NOT stored in the DB — it lives in data/source-credentials.json.
+{
+  const cols = db.prepare(`PRAGMA table_info(projects)`).all() as { name: string }[]
+  const add = (name: string) => {
+    if (!cols.some((c) => c.name === name)) {
+      db.exec(`ALTER TABLE projects ADD COLUMN ${name} TEXT`)
+    }
+  }
+  add('sourceRepoUrl')
+  add('sourceProvider')
+  add('sourceBranch')
+  add('sourcePath')
+  add('sourceLastSync')
+  add('sourceLastCommit')
+}
+
+// Migration: per-project AI post-step settings (Settings → Models). These control
+// the grounding check (anti-hallucination auto-revise) and AI auto-learn that run
+// after test-case generation / a QC run. They default ON with the haiku model so
+// existing projects keep current behavior; the UI edits them per project.
+{
+  const cols = db.prepare(`PRAGMA table_info(projects)`).all() as { name: string }[]
+  const addCol = (name: string, ddl: string) => {
+    if (!cols.some((c) => c.name === name)) db.exec(`ALTER TABLE projects ADD COLUMN ${name} ${ddl}`)
+  }
+  addCol('groundingCheck', `INTEGER NOT NULL DEFAULT 1`)
+  addCol('groundingCheckModel', `TEXT NOT NULL DEFAULT 'haiku'`)
+  addCol('autoLearn', `INTEGER NOT NULL DEFAULT 1`)
+  addCol('autoLearnModel', `TEXT NOT NULL DEFAULT 'haiku'`)
+}
+
 db.exec(`CREATE INDEX IF NOT EXISTS idx_runs_projectId ON runs(projectId)`)
 
 // Multiple named Mermaid diagrams per project (the Overview page lets the user
@@ -171,7 +210,9 @@ export function newRunId(): string {
 // ---------------- projects ----------------
 
 const insertProjectStmt = db.prepare(`
-  INSERT INTO projects (id, name, rootPath, isDefault, createdAt) VALUES (?, ?, ?, ?, ?)
+  INSERT INTO projects
+    (id, name, rootPath, isDefault, createdAt, groundingCheck, groundingCheckModel, autoLearn, autoLearnModel)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 `)
 const listProjectsStmt = db.prepare(`SELECT * FROM projects ORDER BY pinned DESC, createdAt ASC`)
 const getProjectStmt = db.prepare(`SELECT * FROM projects WHERE id = ?`)
@@ -188,6 +229,16 @@ function rowToProject(row: Record<string, unknown>): Project {
     createdAt: row.createdAt as string,
     description: (row.description as string | null) ?? '',
     diagram: (row.diagram as string | null) ?? '',
+    sourceRepoUrl: (row.sourceRepoUrl as string | null) ?? '',
+    sourceProvider: (row.sourceProvider as string | null) ?? '',
+    sourceBranch: (row.sourceBranch as string | null) ?? '',
+    sourcePath: (row.sourcePath as string | null) ?? '',
+    sourceLastSync: (row.sourceLastSync as string | null) ?? '',
+    sourceLastCommit: (row.sourceLastCommit as string | null) ?? '',
+    groundingCheck: Number(row.groundingCheck ?? 1) === 1,
+    groundingCheckModel: (row.groundingCheckModel as string | null) || 'haiku',
+    autoLearn: Number(row.autoLearn ?? 1) === 1,
+    autoLearnModel: (row.autoLearnModel as string | null) || 'haiku',
   }
 }
 
@@ -215,6 +266,17 @@ export function createProject(name: string, rootPath: string, isDefault = false)
     createdAt: now(),
     description: '',
     diagram: '',
+    sourceRepoUrl: '',
+    sourceProvider: '',
+    sourceBranch: '',
+    sourcePath: '',
+    sourceLastSync: '',
+    sourceLastCommit: '',
+    // New projects inherit the env-var defaults; the UI edits them per project after.
+    groundingCheck: GROUNDING_CHECK,
+    groundingCheckModel: GROUNDING_CHECK_MODEL,
+    autoLearn: AUTO_LEARN,
+    autoLearnModel: AUTO_LEARN_MODEL,
   }
   insertProjectStmt.run(
     project.id,
@@ -222,27 +284,94 @@ export function createProject(name: string, rootPath: string, isDefault = false)
     project.rootPath,
     project.isDefault ? 1 : 0,
     project.createdAt,
+    project.groundingCheck ? 1 : 0,
+    project.groundingCheckModel,
+    project.autoLearn ? 1 : 0,
+    project.autoLearnModel,
   )
   return project
 }
 
 export function updateProject(
   id: string,
-  partial: Partial<Pick<Project, 'name' | 'rootPath' | 'description' | 'diagram' | 'pinned'>>,
+  partial: Partial<
+    Pick<
+      Project,
+      | 'name'
+      | 'rootPath'
+      | 'description'
+      | 'diagram'
+      | 'pinned'
+      | 'groundingCheck'
+      | 'groundingCheckModel'
+      | 'autoLearn'
+      | 'autoLearnModel'
+    >
+  >,
 ): void {
-  const keys = (['name', 'rootPath', 'description', 'diagram', 'pinned'] as const).filter(
-    (k) => k in partial,
-  )
+  const keys = (
+    [
+      'name',
+      'rootPath',
+      'description',
+      'diagram',
+      'pinned',
+      'groundingCheck',
+      'groundingCheckModel',
+      'autoLearn',
+      'autoLearnModel',
+    ] as const
+  ).filter((k) => k in partial)
   if (keys.length === 0) return
+  const boolCols = new Set(['pinned', 'groundingCheck', 'autoLearn'])
   const setClause = keys.map((k) => `${k} = ?`).join(', ')
   const values = keys.map((k) =>
-    k === 'pinned' ? (partial.pinned ? 1 : 0) : (partial[k] as string),
+    boolCols.has(k) ? (partial[k as keyof typeof partial] ? 1 : 0) : (partial[k] as string),
   )
   db.prepare(`UPDATE projects SET ${setClause} WHERE id = ?`).run(...values, id)
 }
 
 export function deleteProject(id: string): void {
   deleteProjectStmt.run(id)
+}
+
+/** Connected-source-repo fields for a project (no token — that lives on disk). */
+export type ProjectSource = Pick<
+  Project,
+  | 'sourceRepoUrl'
+  | 'sourceProvider'
+  | 'sourceBranch'
+  | 'sourcePath'
+  | 'sourceLastSync'
+  | 'sourceLastCommit'
+>
+
+/** Persist the connected source repo for a project (after a clone/sync). */
+export function setProjectSource(id: string, source: ProjectSource): void {
+  db.prepare(
+    `UPDATE projects SET sourceRepoUrl = ?, sourceProvider = ?, sourceBranch = ?,
+       sourcePath = ?, sourceLastSync = ?, sourceLastCommit = ? WHERE id = ?`,
+  ).run(
+    source.sourceRepoUrl,
+    source.sourceProvider,
+    source.sourceBranch,
+    source.sourcePath,
+    source.sourceLastSync,
+    source.sourceLastCommit,
+    id,
+  )
+}
+
+/** Forget a project's connected source repo (the files on disk are left alone). */
+export function clearProjectSource(id: string): void {
+  setProjectSource(id, {
+    sourceRepoUrl: '',
+    sourceProvider: '',
+    sourceBranch: '',
+    sourcePath: '',
+    sourceLastSync: '',
+    sourceLastCommit: '',
+  })
 }
 
 /**

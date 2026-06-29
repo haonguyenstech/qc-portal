@@ -3,6 +3,8 @@ import path from 'node:path'
 import { testResultDirFor } from './config.js'
 import { runQc } from './claude.js'
 import type { RunHandle } from './claude.js'
+import { groundReport } from './groundingCheck.js'
+import { runKnowledgeUpdate } from './learn.js'
 import {
   appendEvent,
   getProject,
@@ -14,7 +16,7 @@ import {
   updateRun,
 } from './db.js'
 import * as hub from './hub.js'
-import type { CreateRunBody, LogEvent, RunSummary } from './types.js'
+import type { CreateRunBody, LogEvent, Project, RunSummary } from './types.js'
 
 const active = new Map<string, RunHandle>()
 
@@ -122,7 +124,7 @@ function record(id: string, event: LogEvent) {
  */
 function spawnRun(
   id: string,
-  project: { id: string; rootPath: string },
+  project: Project,
   body: {
     ticketId: string
     appUrl: string
@@ -151,7 +153,7 @@ function spawnRun(
     {
       onSession: (sessionId) => setRunSession(id, sessionId),
       onEvent: (event) => record(id, event),
-      onDone: ({ success }) => {
+      onDone: async ({ success }) => {
         // Pause/cancel both kill the child; if either status is already set,
         // keep the user's action from being overwritten by the process exit.
         const currentStatus = getRun(id)?.status
@@ -160,7 +162,52 @@ function spawnRun(
           return
         }
         const slug = resolveSlug(testingDir, body.ticketId)
-        const reportMd = slug ? readIfExists(path.join(testingDir, slug, 'report.md')) : null
+        let reportMd = slug ? readIfExists(path.join(testingDir, slug, 'report.md')) : null
+
+        // Grounding check — before counting Pass/Fail, an independent cheap pass
+        // audits the report and downgrades any verdict not backed by documented
+        // evidence, rewriting report.md in place (the pre-audit copy is kept as
+        // report.pre-grounding.md). Best-effort: a failure leaves the report as-is,
+        // so the counts below always reflect the grounded report.
+        if (project.groundingCheck && success && reportMd && slug) {
+          record(id, {
+            ts: now(),
+            kind: 'system',
+            text: 'Grounding check — auditing the report for unsupported results…',
+          })
+          try {
+            const g = await groundReport({
+              rootPath: project.rootPath,
+              projectName: project.name,
+              report: reportMd,
+              model: project.groundingCheckModel,
+            })
+            if (g.changed && g.corrected) {
+              const reportPath = path.join(testingDir, slug, 'report.md')
+              try {
+                fs.writeFileSync(path.join(testingDir, slug, 'report.pre-grounding.md'), reportMd)
+              } catch {
+                /* backup is best-effort */
+              }
+              fs.writeFileSync(reportPath, g.corrected)
+              reportMd = g.corrected
+              record(id, {
+                ts: now(),
+                kind: 'system',
+                text: 'Grounding check corrected the report — downgraded unsupported verdicts.',
+              })
+            } else {
+              record(id, {
+                ts: now(),
+                kind: 'system',
+                text: 'Grounding check: all results supported by evidence.',
+              })
+            }
+          } catch {
+            /* best-effort — grounding never sinks a finished run */
+          }
+        }
+
         const { passCount, failCount, totalAcs } = parseReport(reportMd ?? '')
 
         let status: RunSummary['status']
@@ -182,6 +229,41 @@ function spawnRun(
         }
         appendEvent(id, final)
         hub.broadcast(id, { runId: id, event: final })
+
+        // AI auto-capture: reflect on the finished run and persist durable facts into
+        // testing/memory (+ knowledge). Best-effort, fire-and-forget — never blocks or
+        // fails the run; results are surfaced as a follow-up event on the run's stream.
+        if (project.autoLearn && success && reportMd && status !== 'error') {
+          const context = [
+            `QC run for ticket ${body.ticketId} on ${body.appUrl}.`,
+            `Outcome: ${status} — ${passCount} pass, ${failCount} fail of ${totalAcs} ACs.`,
+            '',
+            'Report (report.md):',
+            reportMd,
+          ].join('\n')
+          void runKnowledgeUpdate({
+            rootPath: project.rootPath,
+            projectName: project.name,
+            source: `ai · QC run ${body.ticketId} · ${finishedAt.slice(0, 10)}`,
+            context,
+            model: project.autoLearnModel,
+          })
+            .then((learned) => {
+              const total = learned.memory.length + learned.knowledge.length
+              if (total === 0) return
+              const names = [...learned.memory, ...learned.knowledge].join(', ')
+              const ev: LogEvent = {
+                ts: now(),
+                kind: 'system',
+                text: `AI updated project knowledge: ${total} note${total === 1 ? '' : 's'} (${names})`,
+              }
+              appendEvent(id, ev)
+              hub.broadcast(id, { runId: id, event: ev })
+            })
+            .catch(() => {
+              /* best-effort — auto-learn failures are silent */
+            })
+        }
 
         active.delete(id)
       },

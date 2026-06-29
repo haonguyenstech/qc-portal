@@ -41,6 +41,25 @@ export const DEFAULT_PROJECT_ROOT: string | null = resolveDefaultRoot()
 
 export const PORT = Number(process.env.QC_PORT ?? 5174)
 
+// After a QC run or test-case generation finishes, an AI "learn" step reflects on
+// what happened and auto-captures durable facts into testing/memory (and longer
+// write-ups into testing/knowledge). On by default; set QC_AUTO_LEARN=0 (or false)
+// to disable globally. QC_AUTO_LEARN_MODEL picks the model for that cheap reflection.
+export const AUTO_LEARN = !['0', 'false', 'no', 'off'].includes(
+  (process.env.QC_AUTO_LEARN ?? '').trim().toLowerCase(),
+)
+export const AUTO_LEARN_MODEL = process.env.QC_AUTO_LEARN_MODEL?.trim() || 'haiku'
+
+// After test cases are generated or a QC report is written, an independent "grounding
+// check" re-audits the artifact against its source (ticket / documented evidence) and
+// silently rewrites it to drop hallucinated content — invented test steps, or Pass/Fail
+// verdicts with no supporting evidence. Best-effort; on by default. Set QC_GROUNDING_CHECK=0
+// (or false) to disable. QC_GROUNDING_CHECK_MODEL picks the model for that cheap audit.
+export const GROUNDING_CHECK = !['0', 'false', 'no', 'off'].includes(
+  (process.env.QC_GROUNDING_CHECK ?? '').trim().toLowerCase(),
+)
+export const GROUNDING_CHECK_MODEL = process.env.QC_GROUNDING_CHECK_MODEL?.trim() || 'haiku'
+
 // The `claude` binary. Override with QC_CLAUDE_BIN if not on PATH.
 //
 // On Windows the portal server is launched detached by the `qc-portal` command,

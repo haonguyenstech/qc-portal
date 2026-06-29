@@ -20,6 +20,20 @@ export interface Project {
   createdAt: string // ISO
   description: string // free-text project intro shown on the Overview page
   diagram: string // AI-generated Mermaid diagram of the project, shown on the Overview page
+  // Connected source-code repo (GitHub/Bitbucket), cloned locally so Claude can read
+  // it. Empty strings mean "not connected". The access token is NEVER stored here —
+  // it lives in data/source-credentials.json (see sourceRepo.ts).
+  sourceRepoUrl: string // tokenless https remote URL
+  sourceProvider: string // 'github' | 'bitbucket' | 'other' | '' (derived from host)
+  sourceBranch: string // checked-out branch
+  sourcePath: string // absolute local folder of the source (== rootPath or <root>/source)
+  sourceLastSync: string // ISO time of the last successful clone/pull
+  sourceLastCommit: string // short sha + subject of HEAD at last sync
+  // Per-project AI post-step settings (Settings → Models). Default ON / haiku.
+  groundingCheck: boolean // run the anti-hallucination grounding check after AI writes
+  groundingCheckModel: string // model alias for that audit (haiku/sonnet/opus)
+  autoLearn: boolean // auto-capture durable facts into memory/knowledge after runs
+  autoLearnModel: string // model alias for that reflection
 }
 
 export interface RunSummary {

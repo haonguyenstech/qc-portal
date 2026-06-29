@@ -86,6 +86,9 @@ export default function TestCaseJobWatcher() {
       // have completed before a cancel).
       queryClient.invalidateQueries({ queryKey: ['crawled', w.projectId] })
       queryClient.invalidateQueries({ queryKey: ['testcase-job', job.id] })
+      // The AI auto-capture step may have written memory/knowledge notes on completion.
+      queryClient.invalidateQueries({ queryKey: ['memory', w.projectId] })
+      queryClient.invalidateQueries({ queryKey: ['knowledge', w.projectId] })
       for (const it of job.items) {
         if (it.status === 'done') {
           queryClient.invalidateQueries({

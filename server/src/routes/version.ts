@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process'
+import { execFile, spawn } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -101,4 +101,61 @@ versionRouter.post('/check', async (_req, res) => {
       error: err instanceof Error ? err.message : 'Failed to check for updates.',
     })
   }
+})
+
+// Guards against firing the updater twice within the same process lifetime.
+// (It resets naturally — the updater restarts the server, giving a fresh process.)
+let updateStarted = false
+
+// Trigger a self-update. Spawns `qc-portal --update` in a DETACHED process so it
+// outlives our own death: the launcher stops this server, runs git pull + npm
+// install + npm run build, then restarts it. The browser polls /api/health and
+// reloads once the server is back. Same code path as the `qc-portal --update` CLI.
+versionRouter.post('/update', (_req, res) => {
+  const current = readCurrentVersion()
+
+  if (!fs.existsSync(path.join(INSTALL_ROOT, '.git'))) {
+    return res.status(400).json({
+      ok: false,
+      current,
+      error: 'Not a git checkout — update via your install script.',
+    })
+  }
+
+  const launcher = path.join(INSTALL_ROOT, 'bin', 'qc-portal.mjs')
+  if (!fs.existsSync(launcher)) {
+    return res.status(400).json({
+      ok: false,
+      current,
+      error: 'Launcher not found — run `qc-portal --update` manually.',
+    })
+  }
+
+  if (updateStarted) {
+    return res.json({ ok: true, current, alreadyRunning: true })
+  }
+  updateStarted = true
+
+  try {
+    const dataDir = path.join(INSTALL_ROOT, 'data')
+    fs.mkdirSync(dataDir, { recursive: true })
+    const out = fs.openSync(path.join(dataDir, 'update.log'), 'a')
+    const child = spawn(process.execPath, [launcher, '--update'], {
+      cwd: INSTALL_ROOT,
+      detached: true,
+      stdio: ['ignore', out, out],
+      windowsHide: true,
+      env: { ...process.env },
+    })
+    child.unref()
+  } catch (err) {
+    updateStarted = false
+    return res.status(500).json({
+      ok: false,
+      current,
+      error: err instanceof Error ? err.message : 'Failed to start the update.',
+    })
+  }
+
+  return res.json({ ok: true, current })
 })

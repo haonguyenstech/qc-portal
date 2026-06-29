@@ -411,7 +411,15 @@ function HistoryCountChips({ counts }: { counts: DesignCheckRecord['counts'] }) 
 }
 
 /** Saved Design Check history — one row per recorded run (DB + on-disk report). */
-function HistoryCard({ records, projectId }: { records: DesignCheckRecord[]; projectId: string }) {
+function HistoryCard({
+  records,
+  projectId,
+  onSelect,
+}: {
+  records: DesignCheckRecord[]
+  projectId: string
+  onSelect: (record: DesignCheckRecord) => void
+}) {
   if (records.length === 0) return null
   return (
     <Card className="overflow-hidden rounded-3xl border-border/60 shadow-none">
@@ -425,35 +433,100 @@ function HistoryCard({ records, projectId }: { records: DesignCheckRecord[]; pro
       </div>
       <ul className="divide-y">
         {records.map((r) => (
-          <li key={r.id} className="space-y-1.5 px-4 py-3">
-            <div className="flex items-center gap-2">
-              <Ticket className="size-3.5 shrink-0 text-muted-foreground" />
-              <span className="min-w-0 flex-1 truncate font-mono text-xs font-medium">
-                {r.folder}
-              </span>
-              <span className="flex shrink-0 items-center gap-1 text-[11px] text-muted-foreground">
-                <Clock className="size-3" />
-                {new Date(r.createdAt).toLocaleString()}
-              </span>
-            </div>
-            {r.summary && (
-              <p className="line-clamp-2 text-[13px] leading-snug text-muted-foreground">
-                {r.summary}
-              </p>
-            )}
-            <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-              <HistoryCountChips counts={r.counts} />
-              {r.filePath && (
-                <span className="inline-flex min-w-0 items-center gap-1 font-mono text-[10px] text-muted-foreground/70">
-                  <FileText className="size-3 shrink-0" />
-                  <span className="truncate">{r.filePath}</span>
+          <li key={r.id}>
+            <button
+              type="button"
+              onClick={() => onSelect(r)}
+              className="flex w-full flex-col gap-1.5 px-4 py-3 text-left transition-colors hover:bg-muted/40"
+              title="View report"
+            >
+              <div className="flex w-full items-center gap-2">
+                <Ticket className="size-3.5 shrink-0 text-muted-foreground" />
+                <span className="min-w-0 flex-1 truncate font-mono text-xs font-medium">
+                  {r.folder}
                 </span>
+                <span className="flex shrink-0 items-center gap-1 text-[11px] text-muted-foreground">
+                  <Clock className="size-3" />
+                  {new Date(r.createdAt).toLocaleString()}
+                </span>
+                <Eye className="size-3.5 shrink-0 text-muted-foreground" />
+              </div>
+              {r.summary && (
+                <p className="line-clamp-2 text-[13px] leading-snug text-muted-foreground">
+                  {r.summary}
+                </p>
               )}
-            </div>
+              <div className="flex w-full flex-wrap items-center gap-x-3 gap-y-1">
+                <HistoryCountChips counts={r.counts} />
+                {r.filePath && (
+                  <span className="inline-flex min-w-0 items-center gap-1 font-mono text-[10px] text-muted-foreground/70">
+                    <FileText className="size-3 shrink-0" />
+                    <span className="truncate">{r.filePath}</span>
+                  </span>
+                )}
+              </div>
+            </button>
           </li>
         ))}
       </ul>
     </Card>
+  )
+}
+
+/** Read-only dialog that previews a saved Design Check report (reuses Results). */
+function ReportPreviewDialog({
+  record,
+  onOpenChange,
+}: {
+  record: DesignCheckRecord | null
+  onOpenChange: (open: boolean) => void
+}) {
+  return (
+    <Dialog open={!!record} onOpenChange={onOpenChange}>
+      <DialogContent className="flex max-h-[92vh] w-[97vw] flex-col gap-0 overflow-hidden p-0 sm:max-w-[60rem]">
+        <DialogHeader className="shrink-0 space-y-2 border-b border-border/60 bg-muted/30 px-5 py-3">
+          <DialogTitle className="flex items-center gap-2 text-base">
+            <ScanSearch className="h-4 w-4 text-muted-foreground" />
+            <span className="truncate font-mono text-sm">{record?.folder}</span>
+          </DialogTitle>
+          <DialogDescription className="flex flex-wrap items-center gap-x-3 gap-y-1">
+            {record && (
+              <>
+                <span className="inline-flex items-center gap-1">
+                  <Clock className="size-3" />
+                  {new Date(record.createdAt).toLocaleString()}
+                </span>
+                {record.figmaUrl && (
+                  <a
+                    href={record.figmaUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex min-w-0 items-center gap-1 text-primary underline-offset-2 hover:underline"
+                  >
+                    <FileText className="size-3 shrink-0" />
+                    <span className="truncate">Figma design</span>
+                  </a>
+                )}
+              </>
+            )}
+          </DialogDescription>
+        </DialogHeader>
+        <div className="min-h-0 flex-1 overflow-auto px-6 py-5">
+          {record && (
+            <Results
+              result={{
+                summary: record.summary,
+                findings: record.findings,
+                model: record.model,
+                savedPath: record.filePath,
+                savedAt: record.createdAt,
+                recordId: record.id,
+              }}
+            />
+          )}
+        </div>
+      </DialogContent>
+    </Dialog>
   )
 }
 
@@ -698,6 +771,8 @@ export default function VerifyDesignPage() {
   const [previewTemplate, setPreviewTemplate] = useState<{ name: string; content: string } | null>(
     null,
   )
+  // Saved Design Check report opened from the history list (read-only preview).
+  const [previewRecord, setPreviewRecord] = useState<DesignCheckRecord | null>(null)
   const fileInput = useRef<HTMLInputElement>(null)
 
   function onPickTemplate(e: React.ChangeEvent<HTMLInputElement>) {
@@ -1178,11 +1253,20 @@ export default function VerifyDesignPage() {
 
       {job?.status === 'done' && job.result && <Results result={job.result} />}
 
-      <HistoryCard records={history ?? []} projectId={activeProjectId} />
+      <HistoryCard
+        records={history ?? []}
+        projectId={activeProjectId}
+        onSelect={setPreviewRecord}
+      />
 
       <TemplatePreviewDialog
         template={previewTemplate}
         onOpenChange={(open) => !open && setPreviewTemplate(null)}
+      />
+
+      <ReportPreviewDialog
+        record={previewRecord}
+        onOpenChange={(open) => !open && setPreviewRecord(null)}
       />
     </div>
   )

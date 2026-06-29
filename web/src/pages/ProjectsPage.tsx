@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useMemo, useState, type ReactNode } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
@@ -23,6 +23,7 @@ import {
   Plus,
   Search,
   Settings,
+  ShieldCheck,
   Sparkles,
   Terminal,
   Trash2,
@@ -44,6 +45,13 @@ import {
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Badge } from '@/components/ui/badge'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
@@ -1128,6 +1136,158 @@ function AiRuntimeCard() {
   )
 }
 
+const AUTOMATION_MODELS = [
+  { id: 'haiku', label: 'Haiku' },
+  { id: 'sonnet', label: 'Sonnet' },
+  { id: 'opus', label: 'Opus' },
+] as const
+
+type AutomationPatch = {
+  groundingCheck?: boolean
+  groundingCheckModel?: string
+  autoLearn?: boolean
+  autoLearnModel?: string
+}
+
+/**
+ * Per-project AI post-step automation — the grounding check (anti-hallucination
+ * auto-revise) and AI auto-learn that run after test-case generation and QC runs.
+ * Scoped to the ACTIVE project; each control auto-saves on change.
+ */
+function AiAutomationCard() {
+  const { projects, activeProjectId } = useProjects()
+  const queryClient = useQueryClient()
+  const project = projects.find((p) => p.id === activeProjectId)
+
+  const save = useMutation({
+    mutationFn: (patch: AutomationPatch) => updateProject(project!.id, patch),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['projects'] })
+      toast.success('AI automation updated')
+    },
+    onError: (err) =>
+      toast.error('Could not save', {
+        description: err instanceof Error ? err.message : 'Update failed',
+      }),
+  })
+
+  return (
+    <Card className="overflow-hidden rounded-3xl border-border/60 py-0 shadow-none">
+      <CardContent className="space-y-4 p-4">
+        <div className="flex min-w-0 items-start gap-3">
+          <span className="flex size-11 shrink-0 items-center justify-center rounded-2xl bg-foreground text-background shadow-none">
+            <ShieldCheck className="h-5 w-5" />
+          </span>
+          <div className="min-w-0 space-y-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <h2 className="text-base font-semibold tracking-tight">AI automation</h2>
+              {project && (
+                <Badge variant="secondary" className="gap-1 font-medium">
+                  {project.name}
+                </Badge>
+              )}
+            </div>
+            <p className="max-w-xl text-sm text-muted-foreground">
+              Post-step AI that runs after test-case generation and QC runs, per project. Disable a
+              step or pick a cheaper/stronger model for it.
+            </p>
+          </div>
+        </div>
+
+        {!project ? (
+          <p className="rounded-2xl border border-border/60 bg-muted/60 px-3 py-3 text-sm text-muted-foreground">
+            Select a project in the sidebar to configure its AI automation.
+          </p>
+        ) : (
+          <div className="flex flex-col gap-2">
+            <AutomationRow
+              icon={<ShieldCheck className="h-4 w-4" />}
+              title="Grounding check"
+              description="Independent audit re-checks generated test cases against the ticket, and QC report verdicts against the documented evidence — silently revising to drop hallucinated content."
+              enabled={project.groundingCheck ?? true}
+              model={project.groundingCheckModel ?? 'haiku'}
+              busy={save.isPending}
+              onToggle={(v) => save.mutate({ groundingCheck: v })}
+              onModel={(m) => save.mutate({ groundingCheckModel: m })}
+            />
+            <AutomationRow
+              icon={<Sparkles className="h-4 w-4" />}
+              title="Auto-learn"
+              description="After a run, reflects on what happened and captures durable facts into the project's Memory / Knowledge so future QC work is better informed."
+              enabled={project.autoLearn ?? true}
+              model={project.autoLearnModel ?? 'haiku'}
+              busy={save.isPending}
+              onToggle={(v) => save.mutate({ autoLearn: v })}
+              onModel={(m) => save.mutate({ autoLearnModel: m })}
+            />
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
+function AutomationRow(props: {
+  icon: ReactNode
+  title: string
+  description: string
+  enabled: boolean
+  model: string
+  busy: boolean
+  onToggle: (v: boolean) => void
+  onModel: (m: string) => void
+}) {
+  return (
+    <div className="flex items-start gap-3 rounded-2xl border border-border/60 bg-muted/60 px-3 py-3">
+      <span className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-xl bg-background text-muted-foreground">
+        {props.icon}
+      </span>
+      <div className="min-w-0 flex-1">
+        <div className="text-sm font-semibold tracking-tight">{props.title}</div>
+        <p className="mt-0.5 text-[11px] leading-snug text-muted-foreground">{props.description}</p>
+      </div>
+      <div className="flex shrink-0 items-center gap-2">
+        <Select
+          value={props.model}
+          onValueChange={props.onModel}
+          disabled={!props.enabled || props.busy}
+        >
+          <SelectTrigger className="h-8 w-[104px] rounded-full text-xs">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {AUTOMATION_MODELS.map((m) => (
+              <SelectItem key={m.id} value={m.id} className="text-xs">
+                {m.label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={props.busy}
+          onClick={() => props.onToggle(!props.enabled)}
+          className={cn(
+            'h-8 w-[68px] shrink-0 rounded-full px-3 text-xs transition-all duration-200 active:scale-[0.98]',
+            props.enabled
+              ? 'border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100'
+              : 'text-muted-foreground',
+          )}
+        >
+          {props.busy ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : props.enabled ? (
+            'On'
+          ) : (
+            'Off'
+          )}
+        </Button>
+      </div>
+    </div>
+  )
+}
+
 export default function ProjectsPage() {
   const [searchParams, setSearchParams] = useSearchParams()
   const { data, isLoading, isError, error } = useQuery({
@@ -1339,6 +1499,7 @@ export default function ProjectsPage() {
           </section>
           <ClaudeUsageCard />
           <AiRuntimeCard />
+          <AiAutomationCard />
         </TabsContent>
       </Tabs>
     </div>

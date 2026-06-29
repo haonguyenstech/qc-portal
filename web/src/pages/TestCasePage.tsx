@@ -28,6 +28,7 @@ import {
   Terminal,
   Ticket,
   Trash2,
+  Undo2,
   Wand2,
   X,
 } from 'lucide-react'
@@ -56,6 +57,7 @@ import { ManageRulesDialog } from '@/components/ManageRulesDialog'
 import {
   cancelTestCaseJob,
   deleteTestCaseVersion,
+  editTestcaseCell,
   getTestCaseJob,
   getTestCaseVersion,
   listCrawledTickets,
@@ -66,6 +68,7 @@ import {
   resumeTestCaseJob,
   startTestCaseJob,
   type CrawledTicket,
+  type EditTestcaseCellResult,
   type TestCaseLogLine,
 } from '@/lib/api'
 import { OpenFolderButton } from '@/components/OpenFolderButton'
@@ -230,8 +233,28 @@ function parseCsv(text: string): string[][] {
   return rows
 }
 
-/** Renders CSV test cases as a scrollable table, trimming fully-empty trailing columns. */
-function CsvTable({ csv }: { csv: string }) {
+/** A cell the user clicked to refine: absolute CSV row (0 = header), column index. */
+interface CellRef {
+  row: number
+  col: number
+  value: string
+  column: string
+}
+
+/**
+ * Renders CSV test cases as a scrollable table, trimming fully-empty trailing columns.
+ * When `onCellClick` is supplied, body cells become interactive (hover + selectable)
+ * so a QC engineer can pick one cell to refine with AI.
+ */
+function CsvTable({
+  csv,
+  onCellClick,
+  selectedCell,
+}: {
+  csv: string
+  onCellClick?: (cell: CellRef) => void
+  selectedCell?: { row: number; col: number } | null
+}) {
   const rows = parseCsv(csv)
   if (rows.length === 0) {
     return <p className="py-12 text-center text-sm text-muted-foreground">Empty CSV.</p>
@@ -249,6 +272,7 @@ function CsvTable({ csv }: { csv: string }) {
   }
   const [head, ...body] = rows
   const idx = Array.from({ length: cols }, (_, i) => i)
+  const interactive = !!onCellClick
   return (
     // w-max lets the table grow past the dialog width so overflow-x-auto gives a
     // real horizontal scrollbar; min-w-full keeps it filling narrow tables.
@@ -267,18 +291,41 @@ function CsvTable({ csv }: { csv: string }) {
           </tr>
         </thead>
         <tbody>
-          {body.map((r, ri) => (
-            <tr key={ri} className="even:bg-muted/20">
-              {idx.map((ci) => (
-                <td
-                  key={ci}
-                  className="min-w-[12rem] max-w-[34rem] whitespace-pre-wrap break-words border px-3 py-2 align-top text-muted-foreground"
-                >
-                  {r[ci] ?? ''}
-                </td>
-              ))}
-            </tr>
-          ))}
+          {body.map((r, ri) => {
+            const absRow = ri + 1 // header is row 0 in the parsed CSV
+            return (
+              <tr key={ri} className="even:bg-muted/20">
+                {idx.map((ci) => {
+                  const isSel =
+                    !!selectedCell && selectedCell.row === absRow && selectedCell.col === ci
+                  return (
+                    <td
+                      key={ci}
+                      onClick={
+                        interactive
+                          ? () =>
+                              onCellClick?.({
+                                row: absRow,
+                                col: ci,
+                                value: r[ci] ?? '',
+                                column: (head[ci] ?? '').trim() || `Column ${ci + 1}`,
+                              })
+                          : undefined
+                      }
+                      title={interactive ? 'Click to refine this cell with AI' : undefined}
+                      className={cn(
+                        'min-w-[12rem] max-w-[34rem] whitespace-pre-wrap break-words border px-3 py-2 align-top text-muted-foreground',
+                        interactive && 'cursor-pointer transition-colors hover:bg-primary/5',
+                        isSel && 'bg-primary/10 text-foreground ring-2 ring-inset ring-primary',
+                      )}
+                    >
+                      {r[ci] ?? ''}
+                    </td>
+                  )
+                })}
+              </tr>
+            )
+          })}
         </tbody>
       </table>
     </div>
@@ -658,6 +705,20 @@ function TestCasePreviewDialog({
   const versions = list?.versions ?? []
   const latest = versions[0]?.version ?? null
 
+  // The cell the user clicked to refine with AI (CSV versions only), plus the
+  // comment box state. Reset whenever the version/folder changes (below).
+  const [selectedCell, setSelectedCell] = useState<CellRef | null>(null)
+  const [aiOpen, setAiOpen] = useState(false)
+  const [comment, setComment] = useState('')
+  // The last successful regen for the selected cell — drives the inline Undo button.
+  const [lastEdit, setLastEdit] = useState<EditTestcaseCellResult | null>(null)
+  function resetCell() {
+    setSelectedCell(null)
+    setAiOpen(false)
+    setComment('')
+    setLastEdit(null)
+  }
+
   // Default the selected version to the latest; re-default when the folder or the
   // latest version changes (e.g. a new version was just generated).
   const [selectedVersion, setSelectedVersion] = useState<number | null>(null)
@@ -666,6 +727,7 @@ function TestCasePreviewDialog({
   if (seenKey !== key) {
     setSeenKey(key)
     setSelectedVersion(latest)
+    resetCell()
   }
 
   const { data, isFetching } = useQuery({
@@ -676,6 +738,64 @@ function TestCasePreviewDialog({
 
   // Delete the selected version. Two-step confirm (inline) to avoid a nested modal.
   const queryClient = useQueryClient()
+
+  // Restore a cell to a previous value WITHOUT AI (Undo). Writes the exact value
+  // back to the same version, then refetches it.
+  const undo = useMutation({
+    mutationFn: (v: { version: number; row: number; col: number; value: string }) =>
+      editTestcaseCell({
+        projectId,
+        folder: folder as string,
+        version: v.version,
+        row: v.row,
+        col: v.col,
+        value: v.value,
+      }),
+    onSuccess: (res) => {
+      queryClient.invalidateQueries({
+        queryKey: ['testcase-version', projectId, folder, res.version],
+      })
+      queryClient.invalidateQueries({ queryKey: ['testcase-versions', projectId, folder] })
+      // Reflect the restored value in the panel and drop the Undo button.
+      setSelectedCell((prev) => (prev ? { ...prev, value: res.newValue } : prev))
+      setLastEdit(null)
+      toast.success(`Reverted "${res.column}" (row ${res.row})`)
+    },
+    onError: (err) =>
+      toast.error('Could not undo', {
+        description: err instanceof Error ? err.message : 'Unknown error',
+      }),
+  })
+
+  // Refine ONE cell with AI — overwrites the same version on disk, then refetches it.
+  const editCell = useMutation({
+    mutationFn: () =>
+      editTestcaseCell({
+        projectId,
+        folder: folder as string,
+        version: selectedVersion as number,
+        row: (selectedCell as CellRef).row,
+        col: (selectedCell as CellRef).col,
+        comment: comment.trim(),
+      }),
+    onSuccess: (res) => {
+      queryClient.invalidateQueries({
+        queryKey: ['testcase-version', projectId, folder, selectedVersion],
+      })
+      // The version's saved time changed; refresh the list so the dropdown updates.
+      queryClient.invalidateQueries({ queryKey: ['testcase-versions', projectId, folder] })
+      // Keep the panel open showing the new value, with an inline Undo button next
+      // to Regenerate (drops the comment so they can refine again or revert).
+      setSelectedCell((prev) => (prev ? { ...prev, value: res.newValue } : prev))
+      setLastEdit(res)
+      setComment('')
+      toast.success(`Updated "${res.column}" (row ${res.row})`)
+    },
+    onError: (err) =>
+      toast.error('Could not update cell', {
+        description: err instanceof Error ? err.message : 'Unknown error',
+      }),
+  })
   const [confirmDelete, setConfirmDelete] = useState(false)
   const del = useMutation({
     mutationFn: () => deleteTestCaseVersion(folder as string, selectedVersion as number, projectId),
@@ -720,6 +840,7 @@ function TestCasePreviewDialog({
                   onValueChange={(v) => {
                     setSelectedVersion(Number(v))
                     setConfirmDelete(false)
+                    resetCell()
                   }}
                 >
                   <SelectTrigger size="sm" className="h-7 w-44 rounded-full">
@@ -805,7 +926,24 @@ function TestCasePreviewDialog({
             </p>
           ) : data?.testcases ? (
             data.format === 'csv' ? (
-              <CsvTable csv={data.testcases} />
+              <div className="space-y-2.5">
+                <p className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                  <Sparkles className="size-3 text-primary/70" />
+                  Click any cell to refine just that value with AI.
+                </p>
+                <CsvTable
+                  csv={data.testcases}
+                  onCellClick={(cell) => {
+                    setSelectedCell(cell)
+                    setAiOpen(false)
+                    setComment('')
+                    setLastEdit(null)
+                  }}
+                  selectedCell={
+                    selectedCell ? { row: selectedCell.row, col: selectedCell.col } : null
+                  }
+                />
+              </div>
             ) : (
               <div className={MD_CLASS}>
                 <ReactMarkdown remarkPlugins={[remarkGfm]}>{data.testcases}</ReactMarkdown>
@@ -817,6 +955,115 @@ function TestCasePreviewDialog({
             </p>
           )}
         </div>
+
+        {/* AI cell-refine panel — appears when a CSV cell is selected. Click a cell,
+            then "Add AI" to open the comment box and regenerate just that cell. */}
+        {selectedCell && data?.format === 'csv' && (
+          <div className="shrink-0 space-y-2 border-t border-border/60 bg-muted/30 px-5 py-3">
+            <div className="flex items-center gap-2 text-xs">
+              <Sparkles className="size-3.5 shrink-0 text-primary" />
+              <span className="font-medium">Refine cell</span>
+              <span className="rounded-full bg-background px-2 py-0.5 font-mono text-[10px] text-muted-foreground">
+                row {selectedCell.row} · {selectedCell.column}
+              </span>
+              <button
+                type="button"
+                onClick={resetCell}
+                className="ml-auto rounded-lg p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                aria-label="Cancel cell refine"
+              >
+                <X className="size-3.5" />
+              </button>
+            </div>
+            <p className="line-clamp-2 whitespace-pre-wrap rounded-lg border border-border/60 bg-background px-2.5 py-1.5 text-[11px] text-muted-foreground">
+              {selectedCell.value.trim() || '(empty)'}
+            </p>
+            {!aiOpen ? (
+              <Button
+                type="button"
+                size="sm"
+                onClick={() => setAiOpen(true)}
+                className="rounded-full transition-all duration-200 active:scale-[0.98]"
+              >
+                <Sparkles className="size-3.5" />
+                Add AI
+              </Button>
+            ) : (
+              <div className="space-y-2">
+                <Textarea
+                  autoFocus
+                  value={comment}
+                  onChange={(e) => setComment(e.target.value)}
+                  placeholder={`Tell the AI how to change this cell, e.g. “make the expected result specific and measurable”.`}
+                  className="min-h-16 resize-y text-[13px]"
+                  onKeyDown={(e) => {
+                    // Cmd/Ctrl+Enter submits, mirroring common chat affordances.
+                    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter' && comment.trim()) {
+                      e.preventDefault()
+                      editCell.mutate()
+                    }
+                  }}
+                />
+                <div className="flex items-center justify-end gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={resetCell}
+                    disabled={editCell.isPending || undo.isPending}
+                    className="rounded-full"
+                  >
+                    Cancel
+                  </Button>
+                  {/* Undo the last regen for this cell — restores the prior value (no AI).
+                      Sits right next to Regenerate so it's easy to revert in place. */}
+                  {lastEdit &&
+                    selectedCell &&
+                    lastEdit.row === selectedCell.row &&
+                    lastEdit.col === selectedCell.col && (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() =>
+                          undo.mutate({
+                            version: lastEdit.version,
+                            row: lastEdit.row,
+                            col: lastEdit.col,
+                            value: lastEdit.oldValue,
+                          })
+                        }
+                        disabled={undo.isPending || editCell.isPending}
+                        className="rounded-full"
+                        title="Undo this regeneration"
+                      >
+                        {undo.isPending ? (
+                          <Loader2 className="size-3.5 animate-spin" />
+                        ) : (
+                          <Undo2 className="size-3.5" />
+                        )}
+                        Undo
+                      </Button>
+                    )}
+                  <Button
+                    type="button"
+                    size="sm"
+                    onClick={() => editCell.mutate()}
+                    disabled={!comment.trim() || editCell.isPending || undo.isPending}
+                    className="rounded-full transition-all duration-200 active:scale-[0.98]"
+                  >
+                    {editCell.isPending ? (
+                      <Loader2 className="size-3.5 animate-spin" />
+                    ) : (
+                      <Wand2 className="size-3.5" />
+                    )}
+                    Regenerate cell
+                  </Button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
       </DialogContent>
     </Dialog>
   )

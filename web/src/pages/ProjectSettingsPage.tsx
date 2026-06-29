@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import {
   ClipboardList,
+  Eye,
   FileSpreadsheet,
   FileText,
   FileUp,
@@ -19,6 +20,13 @@ import {
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 import {
   deleteTemplate,
   listTemplates,
@@ -98,6 +106,7 @@ function TemplateCard({
   // A freshly uploaded-and-parsed file awaiting save (null once saved/cleared).
   const [pending, setPending] = useState<{ name: string; content: string } | null>(null)
   const [reading, setReading] = useState(false)
+  const [showPreview, setShowPreview] = useState(false)
 
   const save = useMutation({
     mutationFn: (content: string) => saveTemplate(kind.key, content, projectId),
@@ -189,26 +198,30 @@ function TemplateCard({
         <input ref={fileInput} type="file" accept={ACCEPT} onChange={onPick} className="hidden" />
 
         {previewName ? (
-          <div className="space-y-2">
-            <div className="flex items-center gap-2 rounded-xl border border-border/60 bg-muted/60 px-3 py-2">
-              <FileText className="size-4 shrink-0 text-muted-foreground" />
-              <span className="min-w-0 flex-1 truncate text-sm">{previewName}</span>
-              {pending && (
-                <button
-                  type="button"
-                  onClick={() => setPending(null)}
-                  disabled={busy}
-                  className="shrink-0 rounded-xl p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-                  aria-label="Discard upload"
-                >
-                  <X className="size-3.5" />
-                </button>
-              )}
-            </div>
-            {/* Read-only preview of what will be / is stored. */}
-            <pre className="max-h-56 overflow-auto rounded-xl border border-border/60 bg-muted/60 px-3 py-2 font-mono text-[12px] leading-relaxed whitespace-pre">
-              {previewContent}
-            </pre>
+          <div className="flex items-center gap-2 rounded-xl border border-border/60 bg-muted/60 px-3 py-2">
+            <FileText className="size-4 shrink-0 text-muted-foreground" />
+            <span className="min-w-0 flex-1 truncate text-sm">{previewName}</span>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={() => setShowPreview(true)}
+              disabled={!previewContent}
+              className="h-7 shrink-0 gap-1.5 rounded-full px-2.5 text-xs"
+            >
+              <Eye className="size-3.5" /> Preview
+            </Button>
+            {pending && (
+              <button
+                type="button"
+                onClick={() => setPending(null)}
+                disabled={busy}
+                className="shrink-0 rounded-xl p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                aria-label="Discard upload"
+              >
+                <X className="size-3.5" />
+              </button>
+            )}
           </div>
         ) : (
           <button
@@ -281,6 +294,26 @@ function TemplateCard({
           )}
         </div>
       </CardContent>
+
+      <Dialog open={showPreview} onOpenChange={setShowPreview}>
+        <DialogContent className="flex max-h-[92vh] w-[97vw] flex-col gap-0 overflow-hidden p-0 sm:max-w-[60rem]">
+          <DialogHeader className="shrink-0 space-y-1 border-b border-border/60 bg-muted/30 px-5 py-3">
+            <DialogTitle className="flex items-center gap-2 text-base">
+              <Icon className="h-4 w-4 text-muted-foreground" />
+              {kind.label}
+            </DialogTitle>
+            <DialogDescription className="text-xs">
+              {previewName ?? `${kind.key}.md`}
+              {pending ? ' · unsaved upload' : saved ? ` · testing/templates/${kind.key}.md` : ''}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="min-h-0 flex-1 overflow-auto px-5 py-4">
+            <pre className="font-mono text-[12px] leading-relaxed whitespace-pre">
+              {previewContent}
+            </pre>
+          </div>
+        </DialogContent>
+      </Dialog>
     </Card>
   )
 }

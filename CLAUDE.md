@@ -57,6 +57,9 @@ server/src/
   testcaseJobs.ts   in-memory background-job registry for test-case generation (logs + per-item status)
   crawl.ts          core single-ticket crawl: download detail+comments+attachments (+ optional summary.md)
   crawlJobs.ts      in-memory background-job registry for ticket crawling (logs + per-item status)
+  sourceRepo.ts     git plumbing for the Source Code page: clone/adopt/pull a GitHub/Bitbucket
+                    repo, provider detection, token-scrubbing, + the on-disk credential store
+  sourceJobs.ts     in-memory background-job registry for source clone/sync (logs + status)
   runManager.ts     in-flight run lifecycle (spawn, stream, shutdown)
   terminal.ts       device pseudo-terminal: node-pty shell bridged over /ws/terminal (one shell per socket)
   hub.ts            WebSocket pub/sub by runId (replays persisted events to late subscribers)
@@ -64,21 +67,45 @@ server/src/
   clickup.ts        ClickUp ticket lookup + crawl
   folderPicker.ts   native OS dialogs: pickFolderNative (choose-folder picker, used by skill
                     import) + revealFolderNative (open a folder in Finder/Explorer/xdg-open)
-  routes/           projects, qc, files, skills, mcp, clickup, templates, ai
+  contextPointer.ts managed CLAUDE.md pointer block linking Knowledge + Memory (keeps CLAUDE.md lean)
+  memoryStore.ts    storage primitives for testing/memory notes (frontmatter description + source,
+                    MEMORY.md index) — shared by routes/memory.ts + learn.ts
+  knowledgeStore.ts storage primitives for testing/knowledge docs (provenance marker) — shared
+                    by routes/knowledge.ts + learn.ts
+  projectContext.ts readProjectContext(root): packs testing/memory/*.md + testing/knowledge/*.md
+                    into one capped block injected into prompts (test-case gen + grounding) so the
+                    model uses real project terms/rules even when there's no project cwd
+  learn.ts          AI auto-capture: reflect on a finished QC run / test-case gen and persist
+                    durable facts into memory (+ knowledge), tagged with a source provenance
+  groundingCheck.ts independent post-write audit (anti-hallucination): groundTestcases (cases vs
+                    ticket) + groundReport (report verdicts vs documented evidence); auto-revises
+                    in place. Cheap (haiku), best-effort, never throws — see section below
+  routes/           projects, qc, files, skills, mcp, clickup, source, ai, templates,
+                    knowledge, memory, diagrams, version
 
 web/src/
   App.tsx           sidebar nav + React Router routes + ProjectSwitcher + always-mounted
                     NotificationBell + TestCaseJobWatcher + CrawlJobWatcher
   main.tsx          React Query + Project + Notification providers + Toaster mount
   index.css         Tailwind v4 theme — oklch design tokens (light + .dark)
-  pages/            OverviewPage, TicketsPage, TestCasePage, RunPage, RunningPage, HistoryPage,
+  pages/            OverviewPage, DiagramsPage (at /diagrams), SourceCodePage (at /source),
+                    TicketsPage, TestCasePage, RunPage, RunningPage, HistoryPage,
                     RunDetailPage, SkillsPage, McpPage, NotificationsPage, TerminalPage (at /terminal),
+                    InstructionsPage (at /instructions — CLAUDE.md + Knowledge + Memory hub),
                     ReleaseNotesPage
-                    (at /releases — renders CHANGELOG.md + check-for-updates), ProjectsPage (at /settings)
+                    (at /releases — renders CHANGELOG.md + check-for-updates),
+                    DocumentPage (at /document/:slug — self-contained in-app user manual, ONE page per
+                    topic: /document redirects to /document/overview, a left docs nav (searchable) +
+                    prev/next switch between pages; sidebar link in the footer below Release notes;
+                    content authored inline as SECTIONS[] rendered via react-markdown — keep in step
+                    with this file),
+                    ProjectsPage (at /settings)
   components/ui/    shadcn primitives (button, card, dialog, select, tabs, table, scroll-area, …)
   components/       feature pieces: NotificationBell, TestCaseJobWatcher, CrawlJobWatcher, ManageRulesDialog,
                     ContinueSessionPanel (resume a finished run's session in a terminal, see "Continue session" below),
-                    MermaidDiagram (lazy mermaid render, used by OverviewPage),
+                    GenerateFromClickUp (shared ClickUp source picker for Overview + Diagrams),
+                    KnowledgeDocs (Instructions → Knowledge tab) + MemoryNotes (Instructions → Memory tab),
+                    MermaidDiagram (lazy mermaid render, used by DiagramsPage),
                     OpenFolderButton (reveals a project folder in the OS file explorer),
                     dialogs (RunPresetsDialog, ManageHintsDialog, TicketPicker, …)
   lib/
@@ -95,7 +122,9 @@ web/src/
 
 `/settings` renders `ProjectsPage.tsx` (the file name predates the rename). It has two tabs driven
 by the `?tab=` query param: `?tab=projects` (default) and `?tab=models`. `/projects` redirects to
-`/settings`. When editing "the settings page," edit `web/src/pages/ProjectsPage.tsx`.
+`/settings`. When editing "the settings page," edit `web/src/pages/ProjectsPage.tsx`. The `models` tab
+holds `ClaudeUsageCard` + `AiRuntimeCard` (global) and `AiAutomationCard` (the active project's
+per-project grounding-check / auto-learn toggles — see "Per-project control" below).
 
 ## "Open folder" buttons
 
@@ -118,8 +147,118 @@ Each resource router owns its own `POST …/open` route, which resolves the proj
 | `/mcp` | project root (where `.mcp.json` lives) | `POST /api/mcp/open` | `openMcpFolder` |
 | `/templates` (`/settings`→ProjectSettingsPage) | `testing/templates` | `POST /api/templates/open` | `openTemplatesFolder` |
 | `/tickets` and `/testcases` | `testing/tickets` (test cases nest under each ticket folder) | `POST /api/clickup/open` | `openTicketsFolder` |
+| `/instructions` (Knowledge tab) | `testing/knowledge` | `POST /api/knowledge/open` | `openKnowledgeFolder` |
+| `/instructions` (Memory tab) | `testing/memory` | `POST /api/memory/open` | `openMemoryFolder` |
 
 The MCP `/open` route does NOT `mkdir` — the project root always exists.
+
+## Instructions page — the project context hub (CLAUDE.md + Knowledge + Memory)
+
+**`/instructions` (`InstructionsPage.tsx`)** is the single place for *everything Claude reads on
+every QC run*, kept as three tabs so standing guidance is **split into structured folders instead
+of crammed into one big CLAUDE.md**:
+
+1. **Instructions** — the lean root `CLAUDE.md` editor (`ClaudeMdCard`/`ClaudeMdEditor`, Edit⇄Preview
+   + Save, via `GET/PUT /api/projects/:id/claude-md`).
+2. **Knowledge** — `web/src/components/KnowledgeDocs.tsx` (moved here from Overview).
+3. **Memory** — `web/src/components/MemoryNotes.tsx` (new).
+
+**Knowledge** — a QC engineer uploads project docs — **Word (.docx), PDF, Markdown/TXT, CSV, Excel** —
+to supplement the project's AI knowledge. **Conversion happens in the browser** (`web/src/lib/docConvert.ts`,
+mirroring the existing xlsx-in-browser pattern): `.docx` via `mammoth` + `turndown` (+`turndown-plugin-gfm`),
+`.pdf` via `pdfjs-dist` text extraction, spreadsheets → GFM tables via `xlsx`, Markdown/TXT passthrough.
+All converters are **dynamically imported** so they stay out of the main bundle. The resulting Markdown
+is POSTed to `routes/knowledge.ts`, which stores it under `<root>/testing/knowledge/<name>.md` (plain-text,
+path-guarded filenames — mirrors `routes/templates.ts`, no DB). Routes: `GET /api/knowledge` (metadata
+list), `GET /:name` (full md for preview), `PUT /:name` (save converted md), `DELETE /:name`, `POST /open`.
+Scanned/image-only PDFs yield no text and surface a clear error (no OCR).
+
+**Memory** — small, **in-portal-authored** markdown notes, one durable fact each (decisions, gotchas,
+conventions). Unlike Knowledge (uploaded + converted docs), notes are written directly in the portal
+(name + one-line description + body). Stored by `routes/memory.ts` under `<root>/testing/memory/<name>.md`
+with the description in YAML frontmatter; `testing/memory/MEMORY.md` is an **auto-regenerated index**
+(one line per note, rebuilt on every save/delete, removed when the folder empties). Routes:
+`GET /api/memory`, `GET /:name` (description + body), `PUT /:name` (`{description, content}`),
+`DELETE /:name`, `POST /open`. The editor remounts via `key` to seed form state (no setState-in-effect,
+mirroring `ClaudeMdEditor`); `MEMORY.md` is reserved and can't be used as a note name.
+
+**AI auto-capture (knowledge updates itself after runs)** — `server/src/learn.ts` (`runKnowledgeUpdate`)
+runs a cheap Claude reflection after a QC run **and** after test-case generation, then persists durable
+facts it learned: small facts → `testing/memory/`, longer reference write-ups → `testing/knowledge/`
+(the model decides, and is told to *update* an existing note rather than duplicate). It's **best-effort
+and never blocks/fails the run** — failures are silent. Captured items are stamped with a `source`
+provenance (memory: a `source:` frontmatter field; knowledge: a leading `<!-- qc-portal:source: … -->`
+comment, invisible when rendered) so the UI flags them with an **"AI" badge** and the engineer can
+review/edit/delete them — *editing a note via the UI drops the AI tag, claiming it as the user's*. This
+is the "AI updates its own knowledge, and the user can correct it" loop. Hooks: `runManager.ts` `onDone`
+(QC runs, broadcasts a follow-up `system` event listing what was captured) and `testcaseJobs.ts` (after
+the batch finalizes, before `finalize()`, logging into the job's `logs[]`). Toggled **per project** in
+Settings → Models (see "Per-project control" under the grounding-check section); `QC_AUTO_LEARN`
+(default on) and `QC_AUTO_LEARN_MODEL` (default `haiku`) now only seed new projects. The `TestCaseJobWatcher` invalidates
+`['memory', …]` / `['knowledge', …]` on completion so new notes appear. Storage goes through the shared
+`memoryStore.ts` / `knowledgeStore.ts` so the format stays identical to the manual editors.
+
+**Grounding check (anti-hallucination, auto-revise after every AI write)** — `server/src/groundingCheck.ts`
+runs an **independent, cheap second pass** (default `haiku`) right after the portal writes an AI artifact,
+to catch and silently correct hallucination. Two entry points, both **best-effort and `never-throw`**:
+- `groundTestcases()` — audits generated cases against the **ticket _and_ the project's Knowledge/Memory**
+  (passed in via the `knowledge` opt — the same `readProjectContext` block the cases were written against, so a
+  case grounded in documented project rules counts as grounded, ticket **OR** knowledge) and drops/fixes anything
+  ungrounded (invented fields/screens/messages, contradicted or fabricated acceptance criteria), keeping
+  legitimate edge/negative coverage. Called at the end of `generateTestcaseVersion` (`testcaseGen.ts`); when it
+  changes anything it **overwrites the same `v<N>` file** (no new version) and logs into the run/job log.
+- `groundReport()` — audits a finished QC **`report.md`** so any Pass/Fail verdict **not backed by a
+  documented observation** is downgraded to Fail/Partial with an `(unverified — no supporting evidence…)`
+  note. Called in `runManager.ts` `onDone` **before `parseReport`**, so the Pass/Fail counts reflect the
+  grounded report. The pre-audit copy is kept on disk as `report.pre-grounding.md`; a `system` event marks
+  whether it corrected anything.
+
+To stay robust without a fragile JSON-wrapped document, the model emits **either the literal sentinel
+`GROUNDED_OK`** (nothing to fix → no rewrite) **or the full corrected document** in the same format. The
+result is only applied through safety guards — non-empty, ≥50% of the original length (rejects a truncated
+rewrite), and (CSV) an unchanged header row — otherwise the original is kept. This complements
+**AI auto-capture** above: auto-capture *learns* from a finished artifact, grounding-check *corrects* it first.
+
+**Per-project control (Settings → Models)** — both grounding-check and auto-learn are stored **per project**
+on `projects.groundingCheck` / `groundingCheckModel` / `autoLearn` / `autoLearnModel` and edited in the
+`AiAutomationCard` on `/settings?tab=models` (scoped to the *active* project; each control auto-saves via
+`PUT /api/projects/:id`). The resolution path reads the project's values — `runManager.ts` (`project.*`),
+`testcaseGen.generateTestcaseVersion` (`opts.groundingCheck`/`groundingCheckModel`), and `testcaseJobs.ts`
+(captured onto the job at start). The `QC_GROUNDING_CHECK` / `QC_AUTO_LEARN` env vars are now only the
+**default for newly-created projects** (seeded in `createProject`); migrated/existing projects default ON
+with `haiku`.
+
+**How Knowledge/Memory reach the model — two paths, by run shape:**
+
+1. **In-process runs (project cwd) — the context pointer.** `server/src/contextPointer.ts` maintains a
+   managed block in the project's `CLAUDE.md`, delimited by `<!-- qc-portal:context (auto) -->` …
+   `<!-- /qc-portal:context -->`, that tells Claude to consult `testing/knowledge/*.md` and
+   `testing/memory/*.md`. `syncContextPointer(root)` is **idempotent** and is called from the knowledge +
+   memory `PUT`/`DELETE` routes: it appends/updates the block when either folder has content, strips it
+   (preserving the engineer's prose) when both go empty, and never writes when the file is already correct.
+   **QC runs** spawn `claude` in the project root, so the pointer is what makes the split-out Knowledge/Memory
+   get read there; `runQc` (`claude.ts`) also adds explicit one-line reminders to read them — **and to read
+   the feature's SOURCE CODE** (Grep/Glob/Read the codebase for the screens/endpoints/fields named in the
+   ticket) — before testing.
+2. **Direct injection via `projectContext.ts` (test-case generation).** `readProjectContext(root)` packs
+   `testing/memory/*.md` (description + body, MEMORY.md excluded) then `testing/knowledge/*.md` (provenance
+   marker stripped) into one capped block (16 KB total / 6 KB per item, memory first), which `testcaseGen.ts`
+   injects **into the prompt itself** (reliable regardless of what files the model opens) — and passes the
+   **same block to `groundTestcases`**. Empty folders → empty block (no-op).
+
+**Test-case generation reads the SOURCE CODE.** `generateTestcaseVersion` now ALWAYS runs `claude -p` with
+`cwd = project.rootPath` so the model can read the project (and its `CLAUDE.md`). Tooling by mode:
+- **no live app** → `--allowedTools Read Grep Glob --strict-mcp-config` (read-only file tools, MCP skipped for
+  fast startup; the draft can't modify the repo). `--allowedTools` is variadic, so it MUST be followed by a
+  flag (`--strict-mcp-config`) before the trailing prompt positional, or the prompt is swallowed as a tool name.
+- **live app URL** → `--permission-mode bypassPermissions` (loads `.mcp.json` for the Playwright browser; can
+  also read source). Budgets bumped (reading source costs more): md `1.50` / csv `2.50` / live-app `3.00`.
+The prompt tells the model to locate & read the real implementation first (true field names, validation,
+states, branches, roles) and reconcile ticket-vs-code; `project.sourcePath` (root itself, or `<root>/source`)
+is surfaced as a relative hint and threaded through `routes/ai.ts` + `testcaseJobs.ts` (`job.sourcePath`).
+Because the cases are now grounded in real code the auditor can't see, `groundTestcases` is called with
+`sourceAware: true` — it then only fixes clear contradictions/fabrications and never strips a detail merely
+because the ticket doesn't restate it.
 
 ## Tickets page (crawl) & Overview page
 
@@ -150,12 +289,23 @@ map lives in `crawl.ts` and is re-imported by `routes/clickup.ts`). Notable beha
   a violet "N test cases" row badge and an **amber warning in the delete dialog** (deleting the folder
   also removes its `testcases/`, which a re-crawl won't restore).
 
-**`/overview` (`OverviewPage.tsx`)** — project summary plus an AI-generated **Mermaid project
-diagram**. The diagram source (a `flowchart TD`) is generated from ClickUp sources via
-`POST /api/ai/diagram-from-sources`, persisted on the project row (`projects.diagram` column, exposed
-on the `Project` type), editable inline, and rendered by `MermaidDiagram` (lazy dynamic `import` of
-`mermaid`, `securityLevel: 'strict'`). The ticket section here shows **only crawled tickets** (joined
-against `GET /api/clickup/crawled` by `safeSegment(displayId)`), since only those have local data.
+**`/overview` (`OverviewPage.tsx`)** — the project's free-text **intro** (markdown, persisted on
+`projects.description`) and an AI **"Generate from ClickUp"** picker (overview mode). Editing the
+intro hides the generator; a generated draft lands in the editor for review before saving. (The AI
+**knowledge documents** section moved to `/instructions` → Knowledge tab — see that section above.)
+
+**`/diagrams` (`DiagramsPage.tsx`)** — multiple named **Mermaid diagrams** per project (sidebar
+"Diagrams", under Source Code in the Project group). Diagrams are generated from ClickUp sources via
+`POST /api/ai/diagram-from-sources`, stored as rows (`routes/diagrams.ts`, keyed by project), picked
+from a dropdown, edited inline with a live `MermaidDiagram` preview (lazy dynamic `import` of
+`mermaid`, `securityLevel: 'strict'`), or hand-written. **This page was split out of Overview** — if
+you're looking for "the project diagram," it lives here now.
+
+**`web/src/components/GenerateFromClickUp.tsx`** — the shared ClickUp source picker (docs + crawled
+tickets, multi-select, per-project list binding) used by **both** pages, parameterized by
+`mode: 'overview' | 'diagram'` so each surfaces its one action (overview → `GenerateOverviewDialog`;
+diagram → `GenerateDiagramDialog`). The ticket tab shows **only crawled tickets** (joined against
+`GET /api/clickup/crawled` by `safeSegment(displayId)`), since only those have local data.
 
 ## Test-case generation, background jobs & notifications
 
@@ -337,3 +487,7 @@ holds the actionable recipe; `web/src/pages/McpPage.tsx` is the canonical implem
 | `QC_REPO_ROOT` | _(unset)_ | absolute path to auto-seed as the default project on first run only |
 | `QC_CLAUDE_BIN` | `claude` | path to the Claude CLI |
 | `QC_DB_PATH` | `data/qc-portal.db` | SQLite file (projects + run history persist here) |
+| `QC_AUTO_LEARN` | `1` (on) | **default for new projects** — AI auto-captures memory/knowledge after runs (per-project toggle in Settings → Models) |
+| `QC_AUTO_LEARN_MODEL` | `haiku` | default auto-learn model for new projects (`learn.ts`) |
+| `QC_GROUNDING_CHECK` | `1` (on) | **default for new projects** — post-write audit auto-revises test cases/reports to drop hallucination (per-project toggle in Settings → Models) |
+| `QC_GROUNDING_CHECK_MODEL` | `haiku` | default grounding-check model for new projects (`groundingCheck.ts`) |
