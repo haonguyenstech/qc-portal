@@ -3,6 +3,24 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.6.1 — 2026-06-29
+
+**Cleaner CSV test cases**
+
+A reliability fix for test-case generation against CSV templates.
+
+### Fixed
+
+- **Generated CSV test cases no longer start with stray AI prose.** The model sometimes
+  prefixed a sentence (e.g. "Let me write the complete test case CSV.") before the header
+  row; that line was saved verbatim, corrupting the file on spreadsheet import. The output
+  is now cleaned so it always starts with the template's real header row.
+
+### Changed
+
+- Test-case generation does a quicker, more focused source scan and gets more time/budget
+  to finish writing the full set of cases.
+
 ## 0.6.0 — 2026-06-29
 
 **Project knowledge, self-checking AI & in-app docs**
