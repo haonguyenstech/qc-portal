@@ -3,6 +3,21 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.6.3 — 2026-06-30
+
+**`--update` no longer gets stuck**
+
+A fix for `qc-portal --update` silently staying on the old version.
+
+### Fixed
+
+- **`qc-portal --update` now always advances to the latest version.** It previously ran
+  `git pull --ff-only`, which aborts the moment any tracked file is locally modified — and
+  `npm install` routinely rewrites the tracked `package-lock.json` (different npm version /
+  platform-specific optional dependencies, especially on Windows). That dirty lockfile blocked
+  every subsequent update. Update now does `git fetch` + `git reset --hard` to the upstream
+  branch, discarding such local edits so the update always lands.
+
 ## 0.6.2 — 2026-06-30
 
 **More thorough test cases**

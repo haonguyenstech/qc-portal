@@ -164,6 +164,17 @@ function run(cmd, args) {
   }
 }
 
+// The branch this checkout tracks (the installer clones `main`); fall back to it.
+function currentBranch() {
+  const r = spawnSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
+    cwd: ROOT,
+    encoding: 'utf8',
+    shell: isWin,
+  })
+  const name = (r.stdout ?? '').trim()
+  return name && name !== 'HEAD' ? name : 'main'
+}
+
 async function update() {
   const wasRunning = await ping()
   if (wasRunning) {
@@ -172,7 +183,14 @@ async function update() {
   }
   if (fs.existsSync(path.join(ROOT, '.git'))) {
     console.log('Pulling latest…')
-    run('git', ['pull', '--ff-only'])
+    const branch = currentBranch()
+    run('git', ['fetch', 'origin', branch])
+    // Force the checkout to match the remote. A plain `git pull --ff-only` aborts
+    // the moment a tracked file is dirty, and `npm install` routinely rewrites the
+    // tracked package-lock.json (different npm version / platform-specific optional
+    // deps, esp. on Windows) — which silently blocked every subsequent update. A
+    // hard reset to the upstream tip discards those local edits and always advances.
+    run('git', ['reset', '--hard', `origin/${branch}`])
   } else {
     console.warn('Not a git checkout — skipping pull. Re-run the install script to update the source.')
   }
