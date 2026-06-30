@@ -151,9 +151,14 @@ export function runQc(
     prompt = lines.join('\n')
   }
 
+  // The prompt goes over stdin, NOT as an argv positional. On Windows `claude` is a
+  // `claude.cmd` batch shim, and cmd.exe truncates a multi-line argument at the first
+  // newline — so a positional prompt would arrive as only its first line (the ticket
+  // ID, App URL, and instructions silently dropped, leaving the model stuck in intake).
+  // stdin also sidesteps the OS command-line length cap. `claude -p` reads the prompt
+  // from stdin when no positional is given.
   const args = [
     '-p',
-    prompt,
     '--output-format',
     'stream-json',
     '--verbose',
@@ -172,7 +177,7 @@ export function runQc(
   const child = spawn(CLAUDE_BIN, args, {
     cwd: opts.cwd ?? process.cwd(),
     env: { ...process.env },
-    stdio: ['ignore', 'pipe', 'pipe'],
+    stdio: ['pipe', 'pipe', 'pipe'],
     // Own process group so we can signal the *whole* tree (claude + its MCP
     // servers + the Playwright browser) at once, instead of just the lead
     // process — otherwise killing claude leaves the browser orphaned. POSIX
@@ -182,6 +187,11 @@ export function runQc(
     // Never flash a cmd window when launching claude(.cmd) on Windows.
     windowsHide: true,
   })
+  // Deliver the prompt, then close stdin so the CLI sees EOF and starts immediately.
+  if (child.stdin) {
+    child.stdin.on('error', () => {}) // a broken pipe (child died early) must not crash us
+    child.stdin.end(prompt)
+  }
 
   cb.onEvent({ ts: now(), kind: 'system', text: `Started QC run for ${opts.ticketId}` })
 

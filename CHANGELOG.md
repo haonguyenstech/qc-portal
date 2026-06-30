@@ -3,6 +3,20 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.6.6 — 2026-06-30
+
+**Fix QC runs stuck at intake on Windows**
+
+### Fixed
+
+- **QC runs on Windows no longer start by asking for the ticket and App URL they were already
+  given** (then finishing with `0 pass, 0 fail of 0 ACs`). The run prompt is multi-line, and on
+  Windows `claude` is a `.cmd` batch shim — passing a multi-line string as a command-line argument
+  let `cmd.exe` truncate it at the first newline, so only the opening "run a QC test" line reached
+  the model and the ticket ID, App URL, and instructions were silently dropped. The QC-run prompt
+  is now delivered over **stdin** (same fix as 0.6.5 for the other AI steps), so the model receives
+  it intact.
+
 ## 0.6.5 — 2026-06-30
 
 **Fix `spawn ENAMETOOLONG` on Windows**
