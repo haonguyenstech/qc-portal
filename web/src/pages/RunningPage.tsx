@@ -446,7 +446,7 @@ export default function RunningPage() {
           </div>
         </div>
         <Button asChild variant="outline" size="sm" className="rounded-full">
-          <Link to="/">
+          <Link to="/qc-run">
             <RadioTower className="size-4" />
             Start a run
           </Link>
@@ -485,7 +485,7 @@ export default function RunningPage() {
               </p>
             </div>
             <Button asChild size="sm" className="mt-1 rounded-full">
-              <Link to="/">
+              <Link to="/qc-run">
                 Start a run
                 <ArrowRight className="size-4" />
               </Link>

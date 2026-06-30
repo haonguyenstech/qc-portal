@@ -1,10 +1,11 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {
   BookOpen,
+  Eye,
   FileText,
   FolderGit2,
   Info,
@@ -12,6 +13,7 @@ import {
   Pencil,
   Save,
   Sparkles,
+  Upload,
   X,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -20,7 +22,7 @@ import { Card, CardContent } from '@/components/ui/card'
 import { Textarea } from '@/components/ui/textarea'
 import { openMcpFolder, updateProject } from '@/lib/api'
 import { OpenFolderButton } from '@/components/OpenFolderButton'
-import { GenerateFromClickUp } from '@/components/GenerateFromClickUp'
+import { convertFileToMarkdown, KNOWLEDGE_ACCEPT } from '@/lib/docConvert'
 import { useProjects } from '@/lib/project-context'
 
 // Shared markdown styling — mirrors the Skills editor preview so intros render
@@ -59,6 +61,10 @@ export default function OverviewPage() {
   const queryClient = useQueryClient()
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState('')
+  const inputRef = useRef<HTMLInputElement>(null)
+  const [dragOver, setDragOver] = useState(false)
+  const [converting, setConverting] = useState(false)
+  const [mode, setMode] = useState<'edit' | 'preview'>('edit')
 
   const description = activeProject?.description ?? ''
 
@@ -106,11 +112,31 @@ export default function OverviewPage() {
 
   const startEditing = (seed?: string) => {
     setDraft(seed ?? description)
+    setMode('edit')
     setEditing(true)
   }
 
-  // A ClickUp-generated overview lands in its editor for review before saving.
-  const onGenerated = (markdown: string) => startEditing(markdown)
+  // Upload a doc (.md, .docx, .pdf, spreadsheet) — convert it to Markdown in the
+  // browser and load it into the editor for review before saving as the intro.
+  async function handleFile(files: FileList | File[]) {
+    const file = Array.from(files)[0]
+    if (!file) return
+    setConverting(true)
+    try {
+      const { markdown } = await convertFileToMarkdown(file)
+      startEditing(markdown)
+      toast.success('File converted', {
+        description: 'Review the Markdown, then Save to set it as the overview.',
+      })
+    } catch (e) {
+      toast.error(`Couldn't import ${file.name}`, {
+        description: e instanceof Error ? e.message : 'Conversion failed',
+      })
+    } finally {
+      setConverting(false)
+      if (inputRef.current) inputRef.current.value = ''
+    }
+  }
 
   return (
     <div className="mx-auto max-w-6xl space-y-8">
@@ -128,17 +154,6 @@ export default function OverviewPage() {
             </p>
           </div>
         </div>
-        {!editing && description && (
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => startEditing()}
-            className="shrink-0 rounded-full transition-all duration-200 active:scale-[0.98]"
-          >
-            <Pencil className="h-3.5 w-3.5" />
-            Edit
-          </Button>
-        )}
       </header>
 
       {/* Project context chip — which repo this intro belongs to. */}
@@ -166,24 +181,90 @@ export default function OverviewPage() {
       </div>
 
       {!editing && (
-        <GenerateFromClickUp
-          projectId={activeProjectId}
-          projectName={activeProject.name}
-          mode="overview"
-          existingOverview={description}
-          onGenerated={onGenerated}
-        />
+        <section className="space-y-2">
+          <input
+            ref={inputRef}
+            type="file"
+            accept={KNOWLEDGE_ACCEPT}
+            className="hidden"
+            onChange={(e) => e.target.files && handleFile(e.target.files)}
+          />
+          <button
+            type="button"
+            onClick={() => !converting && inputRef.current?.click()}
+            onDragOver={(e) => {
+              e.preventDefault()
+              setDragOver(true)
+            }}
+            onDragLeave={() => setDragOver(false)}
+            onDrop={(e) => {
+              e.preventDefault()
+              setDragOver(false)
+              if (!converting && e.dataTransfer.files.length) handleFile(e.dataTransfer.files)
+            }}
+            disabled={converting}
+            className={cn(
+              'flex w-full flex-col items-center gap-2 rounded-3xl border border-dashed border-border/60 bg-muted/40 px-6 py-8 text-center transition-all duration-200',
+              'hover:border-border hover:bg-muted/60 disabled:pointer-events-none',
+              dragOver && 'border-primary bg-primary/5',
+            )}
+          >
+            <span className="flex size-11 items-center justify-center rounded-2xl bg-foreground text-background">
+              {converting ? (
+                <Loader2 className="size-5 animate-spin" />
+              ) : (
+                <Upload className="size-5" />
+              )}
+            </span>
+            <span className="text-sm font-medium tracking-tight">
+              {converting ? 'Converting…' : 'Upload a file as the overview'}
+            </span>
+            <span className="text-[11px] text-muted-foreground">
+              Word, PDF, Markdown, or spreadsheet — converted to Markdown in your browser and loaded
+              into the editor for review.
+            </span>
+          </button>
+        </section>
       )}
 
       {editing ? (
         <Card className="overflow-hidden rounded-3xl border-border/60 shadow-none">
-          <div className="flex items-center justify-between gap-2 border-b border-border/60 bg-muted/60 px-4 py-2.5">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/60 bg-muted/60 px-4 py-2.5">
             <span className="flex items-center gap-2 text-sm font-medium">
               <FileText className="h-4 w-4 text-muted-foreground" />
               Editing intro
               <span className="text-xs font-normal text-muted-foreground">Markdown supported</span>
             </span>
-            <div className="flex items-center gap-1.5">
+            <div className="flex items-center gap-2">
+              {/* Edit ⇄ Preview toggle, mirroring the Skills editor. */}
+              <div className="flex rounded-xl border border-border/60 bg-background p-0.5">
+                <button
+                  type="button"
+                  onClick={() => setMode('edit')}
+                  className={cn(
+                    'flex items-center gap-1 rounded px-2 py-1 text-[11px] font-medium transition-colors',
+                    mode === 'edit'
+                      ? 'bg-primary/10 text-primary'
+                      : 'text-muted-foreground hover:text-foreground',
+                  )}
+                >
+                  <Pencil className="size-3" />
+                  Edit
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setMode('preview')}
+                  className={cn(
+                    'flex items-center gap-1 rounded px-2 py-1 text-[11px] font-medium transition-colors',
+                    mode === 'preview'
+                      ? 'bg-primary/10 text-primary'
+                      : 'text-muted-foreground hover:text-foreground',
+                  )}
+                >
+                  <Eye className="size-3" />
+                  Preview
+                </button>
+              </div>
               <Button
                 size="sm"
                 variant="ghost"
@@ -212,16 +293,43 @@ export default function OverviewPage() {
               </Button>
             </div>
           </div>
-          <Textarea
-            autoFocus
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            placeholder={PLACEHOLDER}
-            className="min-h-[420px] resize-y rounded-none border-0 font-mono text-sm leading-relaxed focus-visible:ring-0"
-          />
+          {mode === 'preview' ? (
+            <div className="min-h-[420px] overflow-auto px-6 py-5">
+              {draft.trim() ? (
+                <div className={MD_CLASS}>
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{draft}</ReactMarkdown>
+                </div>
+              ) : (
+                <p className="text-sm italic text-muted-foreground">Nothing to preview yet.</p>
+              )}
+            </div>
+          ) : (
+            <Textarea
+              autoFocus
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              placeholder={PLACEHOLDER}
+              className="min-h-[420px] resize-y rounded-none border-0 font-mono text-sm leading-relaxed focus-visible:ring-0"
+            />
+          )}
         </Card>
       ) : description ? (
-        <Card className="rounded-3xl border-border/60 shadow-none">
+        <Card className="overflow-hidden rounded-3xl border-border/60 shadow-none">
+          <div className="flex items-center justify-between gap-2 border-b border-border/60 bg-muted/60 px-4 py-2.5">
+            <span className="flex items-center gap-2 text-sm font-medium">
+              <FileText className="h-4 w-4 text-muted-foreground" />
+              Overview
+            </span>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => startEditing()}
+              className="shrink-0 rounded-full transition-all duration-200 active:scale-[0.98]"
+            >
+              <Pencil className="h-3.5 w-3.5" />
+              Edit
+            </Button>
+          </div>
           <CardContent className="px-6 py-5">
             <div className={MD_CLASS}>
               <ReactMarkdown remarkPlugins={[remarkGfm]}>{description}</ReactMarkdown>

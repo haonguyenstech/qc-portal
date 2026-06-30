@@ -1,8 +1,9 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import {
   AlertCircle,
+  AlertTriangle,
   Check,
   CheckCircle2,
   Clock,
@@ -13,12 +14,14 @@ import {
   FolderGit2,
   FolderOpen,
   FlaskConical,
+  Info,
   KeyRound,
   ListChecks,
   Loader2,
   MousePointerClick,
   Plug,
   PlugZap,
+  Smartphone,
   Unplug,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -33,6 +36,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import {
   addMcp,
   listMcp,
@@ -66,6 +70,41 @@ const OAUTH_META: Record<
   },
 }
 
+// One-line "what is this server for?" copy, surfaced via the header info tooltip
+// on each card so a QC engineer knows why a server matters before connecting it.
+const SERVER_PURPOSE: Record<string, string> = {
+  clickup:
+    'Pulls QC tickets, tasks, and comments straight from ClickUp so runs and ticket crawls read requirements from the source.',
+  figma:
+    'Opens Figma design files so Design Check can compare the built UI against the intended design.',
+  playwright:
+    'Drives a real browser — navigating, clicking, typing, screenshotting — so QC runs can exercise and verify the web app.',
+  'mobile-mcp':
+    'Drives a connected iOS/Android device or simulator so QC runs can test the mobile app.',
+}
+
+/** Small info glyph with a hover/focus tooltip explaining a server's purpose. */
+function PurposeTip({ name, label }: { name: string; label: string }) {
+  const text = SERVER_PURPOSE[name]
+  if (!text) return null
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          type="button"
+          aria-label={`What ${label} is used for`}
+          className="inline-flex size-4 shrink-0 items-center justify-center rounded-full text-muted-foreground/70 transition-colors hover:text-foreground focus-visible:outline-none focus-visible:text-foreground"
+        >
+          <Info className="size-3.5" />
+        </button>
+      </TooltipTrigger>
+      <TooltipContent className="w-fit max-w-none whitespace-nowrap leading-relaxed">
+        {text}
+      </TooltipContent>
+    </Tooltip>
+  )
+}
+
 // Functional ("does it actually work?") test per known server: a real action run
 // through the MCP via Claude. Mirrors the server's CAPABILITY_TESTS.
 const CAPABILITY: Record<
@@ -89,6 +128,12 @@ const CAPABILITY: Record<
     inputLabel: '',
     placeholder: '',
     action: 'Open Google & close',
+  },
+  'mobile-mcp': {
+    needsInput: false,
+    inputLabel: '',
+    placeholder: '',
+    action: 'List devices',
   },
 }
 
@@ -156,6 +201,184 @@ function CardStatusBadge({
   )
 }
 
+/** Colored result line shared by the functional-test surfaces (green / amber / red). */
+function ResultLine({ result }: { result: { ok: boolean; warn?: boolean; detail: string } }) {
+  const Icon = !result.ok ? AlertCircle : result.warn ? AlertTriangle : CheckCircle2
+  return (
+    <p
+      className={cn(
+        'flex items-start gap-1.5 rounded-md px-2.5 py-2 text-xs leading-snug',
+        !result.ok
+          ? 'bg-red-50 text-red-700'
+          : result.warn
+            ? 'bg-amber-50 text-amber-700'
+            : 'bg-emerald-50 text-emerald-700',
+      )}
+    >
+      <Icon className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+      <span className="min-w-0 break-words">{result.detail}</span>
+    </p>
+  )
+}
+
+/**
+ * Mobile functional test — a two-step dialog. On open it auto-detects connected
+ * devices/simulators (empty-input capability test); if any are found it shows a
+ * device picker + an enabled "Run test" that actually drives the selected device.
+ * No devices → amber notice, test stays disabled.
+ */
+function MobileFunctionalTest({
+  projectId,
+  onClose,
+}: {
+  projectId: string
+  onClose: () => void
+}) {
+  const [device, setDevice] = useState('')
+  const detect = useMutation({ mutationFn: () => runMcpTest('mobile-mcp', projectId, '') })
+  const runTest = useMutation({ mutationFn: (dev: string) => runMcpTest('mobile-mcp', projectId, dev) })
+
+  // The component is freshly mounted each time the dialog opens (parent gates it),
+  // so a bare mount-time detect is enough — no state to reset.
+  useEffect(() => {
+    detect.mutate()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  const detectResult = detect.data
+  const devices =
+    detectResult && Array.isArray(detectResult.data?.devices)
+      ? (detectResult.data!.devices as unknown[]).map(String)
+      : []
+  const selected = device || devices[0] || ''
+  const detecting = detect.isPending
+  const testing = runTest.isPending
+  const detectError = detect.isError
+    ? { ok: false, detail: detect.error instanceof Error ? detect.error.message : 'Detection failed' }
+    : null
+
+  return (
+    <Dialog
+      open
+      onOpenChange={(o) => {
+        if (!o && !detecting && !testing) onClose()
+      }}
+    >
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Smartphone className="h-4 w-4" />
+            Functional test — Mobile
+          </DialogTitle>
+          <DialogDescription>
+            Detects connected devices/simulators, then drives the one you pick to confirm the server
+            actually works — not just that it's configured.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-3">
+          {detecting ? (
+            <p className="flex items-center gap-2 rounded-md bg-muted/60 px-2.5 py-2 text-xs text-muted-foreground">
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              Detecting devices…
+            </p>
+          ) : detectError ? (
+            <ResultLine result={detectError} />
+          ) : detectResult && devices.length === 0 ? (
+            // Detection succeeded but nothing to drive (amber), or a real failure (red).
+            <ResultLine result={detectResult} />
+          ) : detectResult ? (
+            <div className="space-y-2">
+              <label className="text-xs font-medium text-muted-foreground">
+                {devices.length} device{devices.length > 1 ? 's' : ''} detected · pick one to test
+              </label>
+              <div className="space-y-1.5">
+                {devices.map((d) => {
+                  const active = selected === d
+                  const ios = /iphone|ipad|ipod/i.test(d)
+                  return (
+                    <button
+                      key={d}
+                      type="button"
+                      onClick={() => setDevice(d)}
+                      disabled={testing}
+                      aria-pressed={active}
+                      className={cn(
+                        'flex w-full items-center gap-3 rounded-xl border px-3 py-2.5 text-left transition-all duration-200 active:scale-[0.99] disabled:opacity-60',
+                        active
+                          ? 'border-primary/40 bg-primary/5'
+                          : 'border-border/60 bg-muted/40 hover:border-border hover:bg-muted/70',
+                      )}
+                    >
+                      <span
+                        className={cn(
+                          'flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border bg-background',
+                          active ? 'border-primary/30 text-primary' : 'border-border/60 text-muted-foreground',
+                        )}
+                      >
+                        <Smartphone className="h-4 w-4" />
+                      </span>
+                      <span className="min-w-0 flex-1 leading-tight">
+                        <span className="block truncate text-sm font-medium">{d}</span>
+                        <span className="block text-[11px] text-muted-foreground">
+                          {ios ? 'iOS' : 'Android'}
+                        </span>
+                      </span>
+                      {active && <CheckCircle2 className="h-4 w-4 shrink-0 text-primary" />}
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+          ) : null}
+
+          {runTest.data && <ResultLine result={runTest.data} />}
+          {runTest.isError && (
+            <ResultLine
+              result={{
+                ok: false,
+                detail: runTest.error instanceof Error ? runTest.error.message : 'Test failed',
+              }}
+            />
+          )}
+        </div>
+
+        <DialogFooter>
+          <Button variant="ghost" onClick={onClose} disabled={detecting || testing}>
+            Close
+          </Button>
+          <Button
+            variant="secondary"
+            onClick={() => detect.mutate()}
+            disabled={detecting || testing}
+            className="rounded-full transition-all duration-200 active:scale-[0.98]"
+          >
+            {detecting ? <Loader2 className="h-4 w-4 animate-spin" /> : <PlugZap className="h-4 w-4" />}
+            Re-scan
+          </Button>
+          <Button
+            onClick={() => selected && runTest.mutate(selected)}
+            disabled={detecting || testing || !selected}
+            className="rounded-full transition-all duration-200 active:scale-[0.98]"
+          >
+            {testing ? (
+              <>
+                <Loader2 className="h-4 w-4 animate-spin" />
+                Testing…
+              </>
+            ) : (
+              <>
+                <FlaskConical className="h-4 w-4" />
+                Run test
+              </>
+            )}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 /** Token-connect cards for ClickUp/Figma (paste a personal token) + a no-auth Playwright add. */
 function ConnectServices({
   projectId,
@@ -182,9 +405,15 @@ function ConnectServices({
   // the checkbox below still lets them opt into headless before connecting.
   const [playwrightHeadless, setPlaywrightHeadless] = useState(false)
 
+  // Returns a promise that resolves once the (slow, live-health) MCP list has
+  // refetched. Mutations `return refresh()` from onSuccess so their `isPending`
+  // spans the refetch — the button keeps spinning until the card flips to its
+  // connected state instead of going dead for the 5-10s health check.
   function refresh() {
-    queryClient.invalidateQueries({ queryKey: ['mcp', projectId] })
-    queryClient.invalidateQueries({ queryKey: ['mcp-oauth', projectId] })
+    return Promise.all([
+      queryClient.invalidateQueries({ queryKey: ['mcp', projectId] }),
+      queryClient.invalidateQueries({ queryKey: ['mcp-oauth', projectId] }),
+    ])
   }
 
   function tokenUrlFor(provider: McpOauthProvider): string {
@@ -207,7 +436,7 @@ function ConnectServices({
       })
       setOpenProvider(null)
       setToken('')
-      refresh()
+      return refresh()
     },
     onError: (err) =>
       toast.error('Failed to save token', {
@@ -222,7 +451,7 @@ function ConnectServices({
       toast.success(`${name} disconnected`, {
         description: "Removed from this project's .mcp.json.",
       })
-      refresh()
+      return refresh()
     },
     onError: (err) =>
       toast.error('Failed to disconnect', {
@@ -273,6 +502,7 @@ function ConnectServices({
 
   function serverLabel(name: string): string {
     if (name === 'playwright') return 'Playwright'
+    if (name === 'mobile-mcp') return 'Mobile'
     return OAUTH_META[name as McpOauthProvider]?.label ?? name
   }
 
@@ -297,6 +527,8 @@ function ConnectServices({
     const name = capDialogName
     const spec = name ? CAPABILITY[name] : null
     if (!name || !spec) return null
+    // Mobile has its own auto-detect → pick device → run dialog (rendered separately).
+    if (name === 'mobile-mcp') return null
     const running = capTestingName === name
     const result = capResults[name]
     const input = capInputs[name] ?? ''
@@ -343,13 +575,19 @@ function ConnectServices({
               <p
                 className={cn(
                   'flex items-start gap-1.5 rounded-md px-2.5 py-2 text-xs leading-snug',
-                  result.ok ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-700',
+                  !result.ok
+                    ? 'bg-red-50 text-red-700'
+                    : result.warn
+                      ? 'bg-amber-50 text-amber-700'
+                      : 'bg-emerald-50 text-emerald-700',
                 )}
               >
-                {result.ok ? (
-                  <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                ) : (
+                {!result.ok ? (
                   <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                ) : result.warn ? (
+                  <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                ) : (
+                  <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0" />
                 )}
                 <span className="min-w-0 break-words">{result.detail}</span>
               </p>
@@ -396,10 +634,34 @@ function ConnectServices({
       ),
     onSuccess: () => {
       toast.success('Playwright added', { description: 'No authentication required.' })
-      refresh()
+      return refresh()
     },
     onError: (err) =>
       toast.error('Failed to add Playwright', {
+        description: err instanceof Error ? err.message : 'Unknown error',
+      }),
+  })
+
+  const mobileAdded = existingNames.includes('mobile-mcp')
+  const addMobile = useMutation({
+    mutationFn: () =>
+      addMcp(
+        {
+          name: 'mobile-mcp',
+          command: 'npx',
+          args: ['-y', '@mobilenext/mobile-mcp@latest'],
+          type: 'stdio',
+        },
+        projectId,
+      ),
+    onSuccess: () => {
+      toast.success('Mobile added', {
+        description: 'Connect a device/simulator, then test.',
+      })
+      return refresh()
+    },
+    onError: (err) =>
+      toast.error('Failed to add Mobile', {
         description: err instanceof Error ? err.message : 'Unknown error',
       }),
   })
@@ -534,7 +796,10 @@ function ConnectServices({
                   <Icon className="h-4 w-4" />
                 </span>
                 <div className="min-w-0 leading-tight">
-                  <div className="text-sm font-semibold tracking-tight">{meta.label}</div>
+                  <div className="flex items-center gap-1.5 text-sm font-semibold tracking-tight">
+                    <span className="truncate">{meta.label}</span>
+                    <PurposeTip name={provider} label={meta.label} />
+                  </div>
                   <div className="truncate text-xs text-muted-foreground">{meta.blurb}</div>
                 </div>
                 <CardStatusBadge
@@ -623,7 +888,10 @@ function ConnectServices({
               <MousePointerClick className="h-4 w-4" />
             </span>
             <div className="min-w-0 leading-tight">
-              <div className="text-sm font-semibold tracking-tight">Playwright</div>
+              <div className="flex items-center gap-1.5 text-sm font-semibold tracking-tight">
+                <span className="truncate">Playwright</span>
+                <PurposeTip name="playwright" label="Playwright" />
+              </div>
               <div className="truncate text-xs text-muted-foreground">Browser driver</div>
             </div>
             <CardStatusBadge
@@ -666,8 +934,54 @@ function ConnectServices({
             </div>
           )}
         </Card>
+
+        {/* Mobile (mobile-next/mobile-mcp) needs no token — one-click project setup. */}
+        <Card className="flex h-full flex-col gap-3 rounded-3xl border-border/60 p-5 shadow-none transition-all duration-200 hover:-translate-y-0.5 hover:border-border hover:shadow-sm">
+          <div className="flex items-center gap-3">
+            <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl border border-border/60 bg-muted/60 text-muted-foreground">
+              <Smartphone className="h-4 w-4" />
+            </span>
+            <div className="min-w-0 leading-tight">
+              <div className="flex items-center gap-1.5 text-sm font-semibold tracking-tight">
+                <span className="truncate">Mobile</span>
+                <PurposeTip name="mobile-mcp" label="Mobile" />
+              </div>
+              <div className="truncate text-xs text-muted-foreground">iOS / Android driver</div>
+            </div>
+            <CardStatusBadge
+              configured={mobileAdded}
+              status={statusByName['mobile-mcp']}
+              checking={checkingStatus}
+            />
+          </div>
+          {checkingStatus ? (
+            <Button size="sm" disabled className="mt-auto w-full rounded-full">
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              Checking status…
+            </Button>
+          ) : mobileAdded ? (
+            connectedActions('mobile-mcp')
+          ) : (
+            <Button
+              size="sm"
+              onClick={() => addMobile.mutate()}
+              disabled={addMobile.isPending}
+              className="mt-auto w-full rounded-full transition-all duration-200 active:scale-[0.98]"
+            >
+              {addMobile.isPending ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Plug className="h-3.5 w-3.5" />
+              )}
+              Connect
+            </Button>
+          )}
+        </Card>
       </div>
       {functionalTestDialog()}
+      {capDialogName === 'mobile-mcp' && (
+        <MobileFunctionalTest projectId={projectId} onClose={() => setCapDialogName(null)} />
+      )}
     </section>
   )
 }

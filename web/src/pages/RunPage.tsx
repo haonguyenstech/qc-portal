@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import {
@@ -11,6 +11,7 @@ import {
   Boxes,
   Brain,
   Check,
+  ChevronDown,
   ChevronRight,
   Clock,
   Cpu,
@@ -26,22 +27,17 @@ import {
   Plus,
   Search,
   Settings2,
+  Smartphone,
   Sparkles,
+  TabletSmartphone,
   Ticket,
   TriangleAlert,
-  Wand2,
   Workflow,
   X,
   Zap,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from '@/components/ui/card'
+import { Card, CardContent } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
@@ -74,11 +70,13 @@ import { CrawledTicketPicker } from '@/components/CrawledTicketPicker'
 import { CrawledStatusHeader, CrawledTicketRow } from '@/components/CrawledTicketRow'
 import { groupCrawledByStatus } from '@/lib/crawled-tickets'
 import { TicketTestCasePicker, testcaseRelPath } from '@/components/TicketTestCasePicker'
+import { McpRequiredNotice } from '@/components/McpRequiredNotice'
 
-// Which Claude model drives the QC run. `auto` sends no --model flag, so the
-// project's configured default is used (this is the historical behavior).
-// The others map to --model haiku/sonnet/opus on the headless claude spawn.
+// Which Claude model drives the QC run. Each maps to --model haiku/sonnet/opus
+// on the headless claude spawn. Sonnet is the default — the best all-round
+// balance of coverage and cost for most QC runs.
 const RUN_MODEL_KEY = 'qc.runModel'
+const DEFAULT_RUN_MODEL = 'sonnet'
 type QcModel = {
   value: string
   label: string
@@ -87,14 +85,6 @@ type QcModel = {
   description: string
 }
 const QC_MODELS: QcModel[] = [
-  {
-    value: 'auto',
-    label: 'Auto',
-    tag: 'project default',
-    icon: Wand2,
-    description:
-      "Uses Claude's configured default model — pick this if you're not sure which to choose.",
-  },
   {
     value: 'haiku',
     label: 'Haiku',
@@ -128,7 +118,7 @@ function loadRunModel(): string {
   } catch {
     /* storage unavailable */
   }
-  return 'auto'
+  return DEFAULT_RUN_MODEL
 }
 
 // Simple = one ticket, one run (the original flow). Advanced = pick several
@@ -143,6 +133,42 @@ function loadRunMode(): RunMode {
   } catch {
     return 'simple'
   }
+}
+
+// Where the QC run executes:
+//  web        — desktop browser (Playwright), the App URL
+//  web-mobile — the App URL opened in a mobile device's browser via Mobile MCP
+//  app-mobile — a native app driven on a mobile device via Mobile MCP (App URL optional)
+type TestTarget = 'web' | 'web-mobile' | 'app-mobile'
+const TEST_TARGET_KEY = 'qc.runTestTarget'
+const TEST_TARGETS: TestTarget[] = ['web', 'web-mobile', 'app-mobile']
+
+function loadTestTarget(): TestTarget {
+  try {
+    const v = localStorage.getItem(TEST_TARGET_KEY)
+    return TEST_TARGETS.includes(v as TestTarget) ? (v as TestTarget) : 'web'
+  } catch {
+    return 'web'
+  }
+}
+
+const TARGET_META: Record<TestTarget, { label: string; hint: string; Icon: typeof Globe }> = {
+  web: { label: 'Web', hint: 'Desktop browser', Icon: Globe },
+  'web-mobile': { label: 'Web on mobile', hint: 'Mobile browser', Icon: Smartphone },
+  'app-mobile': { label: 'App on device', hint: 'Native app', Icon: TabletSmartphone },
+}
+
+/** Numbered step header that splits the run form into clear, scannable sections. */
+function StepHeader({ n, title, hint }: { n: number; title: string; hint?: string }) {
+  return (
+    <div className="flex items-center gap-2">
+      <span className="flex size-6 shrink-0 items-center justify-center rounded-lg bg-foreground text-[11px] font-semibold text-background">
+        {n}
+      </span>
+      <h3 className="text-sm font-semibold tracking-tight">{title}</h3>
+      {hint && <span className="text-xs text-muted-foreground">· {hint}</span>}
+    </div>
+  )
 }
 
 const ticketIdOf = (t: CrawledTicket) => t.displayId ?? t.name
@@ -397,13 +423,20 @@ function WorkflowStepsEditor({
 export default function RunPage() {
   const queryClient = useQueryClient()
   const navigate = useNavigate()
+  const [searchParams, setSearchParams] = useSearchParams()
   const { activeProject } = useProjects()
   const [ticketId, setTicketId] = useState('')
   const [appUrl, setAppUrl] = useState('')
+  const [testTarget, setTestTarget] = useState<TestTarget>(loadTestTarget)
   const [skill, setSkill] = useState('')
   const [model, setModel] = useState<string>(loadRunModel)
   const [instructions, setInstructions] = useState('')
-  const [mode, setMode] = useState<RunMode>(loadRunMode)
+  // The Single/Feature tab lives in the URL (?mode=simple|advanced) so it's
+  // shareable/bookmarkable and survives reload; localStorage is the fallback default.
+  const modeParam = searchParams.get('mode')
+  const mode: RunMode =
+    modeParam === 'advanced' ? 'advanced' : modeParam === 'simple' ? 'simple' : loadRunMode()
+  const [showOptions, setShowOptions] = useState(false)
   const [featureTickets, setFeatureTickets] = useState<string[]>([])
   const [workflowSteps, setWorkflowSteps] = useState<string[]>([''])
   const [testcaseVersion, setTestcaseVersion] = useState<number | null>(null)
@@ -455,27 +488,43 @@ export default function RunPage() {
     setTicketId(saved?.ticketId ?? '')
     setAppUrl(saved?.appUrl ?? '')
     setInstructions(saved?.instructions ?? '')
-    setSkill(saved?.skill ?? '') // reconciled against the skills list below
+    // The project's default skill (set on the Skills page) wins on load; otherwise
+    // restore the last-used skill. Reconciled against the skills list below.
+    setSkill(activeProject.defaultSkill || saved?.skill || '')
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeProject?.id])
 
-  const appUrlInvalid = appUrl.trim().length > 0 && !isValidHttpUrl(appUrl)
+  // app-mobile drives a native app already installed on the device — there's no URL,
+  // so the URL field is hidden and never required/validated in that mode.
+  const isAppTarget = testTarget === 'app-mobile'
+  const appUrlInvalid =
+    !isAppTarget && appUrl.trim().length > 0 && !isValidHttpUrl(appUrl)
+  const appUrlHelp =
+    testTarget === 'web-mobile'
+      ? 'The deployed page Claude opens in the mobile browser.'
+      : 'The deployed page Claude should open and test.'
 
-  // Default to qc-testing when present, otherwise the first available skill.
+  // Reconcile the chosen skill against the available list: keep a still-valid
+  // selection, otherwise fall back to the project's default skill (set on the
+  // Skills page), then qc-testing, then the first available skill.
+  const defaultSkill = activeProject?.defaultSkill
   useEffect(() => {
     if (!skills || skills.length === 0) return
     setSkill((prev) => {
       if (prev && skills.some((s) => s.name === prev)) return prev
+      if (defaultSkill && skills.some((s) => s.name === defaultSkill)) return defaultSkill
       return skills.find((s) => s.name === 'qc-testing')?.name ?? skills[0].name
     })
-  }, [skills])
+  }, [skills, defaultSkill])
 
   const activeSkill = useMemo(
     () => skills?.find((s) => s.name === skill),
     [skills, skill],
   )
 
-  const modelInfo = QC_MODELS.find((m) => m.value === model) ?? QC_MODELS[0]
+  const modelInfo =
+    QC_MODELS.find((m) => m.value === model) ??
+    QC_MODELS.find((m) => m.value === DEFAULT_RUN_MODEL)!
   function chooseModel(value: string) {
     setModel(value)
     try {
@@ -483,6 +532,18 @@ export default function RunPage() {
     } catch {
       /* storage unavailable */
     }
+  }
+
+  // Persist the mode to the URL (?mode=) + localStorage default.
+  function writeMode(next: RunMode) {
+    try {
+      localStorage.setItem(RUN_MODE_KEY, next)
+    } catch {
+      /* storage unavailable */
+    }
+    const params = new URLSearchParams(searchParams)
+    params.set('mode', next)
+    setSearchParams(params, { replace: true })
   }
 
   function chooseMode(next: RunMode) {
@@ -494,12 +555,7 @@ export default function RunPage() {
     } else if (next === 'simple' && !ticketId.trim() && featureTickets.length > 0) {
       setTicketId(featureTickets[0])
     }
-    setMode(next)
-    try {
-      localStorage.setItem(RUN_MODE_KEY, next)
-    } catch {
-      /* storage unavailable */
-    }
+    writeMode(next)
   }
 
   // Load a saved template into the form. Switches mode and fills the matching
@@ -507,16 +563,13 @@ export default function RunPage() {
   // never carry a ticket, so the ticket field is left as-is).
   function applyPreset(p: RunPreset) {
     const nextMode: RunMode = p.mode === 'advanced' ? 'advanced' : 'simple'
-    setMode(nextMode)
-    try {
-      localStorage.setItem(RUN_MODE_KEY, nextMode)
-    } catch {
-      /* storage unavailable */
-    }
+    writeMode(nextMode)
     setAppUrl(p.appUrl)
     if (p.skill) setSkill(p.skill)
     setInstructions(p.instructions)
-    chooseModel(p.model && QC_MODELS.some((m) => m.value === p.model) ? p.model : 'auto')
+    chooseModel(
+      p.model && QC_MODELS.some((m) => m.value === p.model) ? p.model : DEFAULT_RUN_MODEL,
+    )
     if (nextMode === 'advanced') {
       setFeatureTickets((p.tickets ?? []).slice(0, MAX_FEATURE_TICKETS))
       setWorkflowSteps(p.workflowSteps && p.workflowSteps.length ? p.workflowSteps : [''])
@@ -545,8 +598,9 @@ export default function RunPage() {
     mode === 'advanced' ? featureTickets : ticketId.trim() ? [ticketId.trim()] : []
   const leadTicket = runTickets[0] ?? ''
   const cleanSteps = workflowSteps.map((s) => s.trim()).filter(Boolean)
+  const appUrlReady = isAppTarget || !!appUrl.trim()
   const canSubmit =
-    !submitting && !!leadTicket && !!appUrl.trim() && !appUrlInvalid && !!activeProject
+    !submitting && !!leadTicket && appUrlReady && !appUrlInvalid && !!activeProject
   const recent = recentRuns ?? []
   const liveRuns = recent.filter((run) => run.status === 'running' || run.status === 'queued').length
   const completedRuns = recent.filter((run) => run.status === 'passed' || run.status === 'failed').length
@@ -555,14 +609,24 @@ export default function RunPage() {
   const readyChecks = [
     { label: 'Project', ok: !!activeProject, value: activeProject?.name ?? 'Select one' },
     { label: mode === 'advanced' ? 'Lead ticket' : 'Ticket', ok: !!leadTicket, value: leadTicket || 'Choose ticket' },
-    { label: 'App URL', ok: !!appUrl.trim() && !appUrlInvalid, value: appUrlInvalid ? 'Invalid URL' : appUrl.trim() ? 'Ready' : 'Required' },
+    {
+      label: isAppTarget ? 'App' : 'App URL',
+      ok: appUrlReady && !appUrlInvalid,
+      value: isAppTarget
+        ? 'On device'
+        : appUrlInvalid
+          ? 'Invalid URL'
+          : appUrl.trim()
+            ? 'Ready'
+            : 'Required',
+    },
     { label: 'Skill', ok: !!skill, value: skill || 'Choose skill' },
   ]
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault()
-    if (!leadTicket || !appUrl.trim() || !activeProject) return
-    if (!isValidHttpUrl(appUrl)) {
+    if (!leadTicket || !activeProject || (!isAppTarget && !appUrl.trim())) return
+    if (!isAppTarget && !isValidHttpUrl(appUrl)) {
       toast.error('Invalid App URL', { description: 'Enter a full http:// or https:// address.' })
       return
     }
@@ -580,13 +644,14 @@ export default function RunPage() {
       await createRun({
         projectId: activeProject.id,
         ticketId: leadTicket,
-        appUrl: appUrl.trim(),
+        appUrl: isAppTarget ? '' : appUrl.trim(),
         skill: skill || undefined,
         instructions: finalInstructions || undefined,
-        model: model === 'auto' ? undefined : model,
+        model,
         relatedTickets:
           mode === 'advanced' && runTickets.length > 1 ? runTickets.slice(1) : undefined,
         workflowSteps: mode === 'advanced' && cleanSteps.length ? cleanSteps : undefined,
+        testTarget,
       })
       saveLastInputs(activeProject.id, {
         ticketId: leadTicket,
@@ -660,33 +725,14 @@ export default function RunPage() {
         </div>
       </header>
 
-      <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_21rem]">
-        <Card className="overflow-hidden rounded-3xl border-border/60 py-0 shadow-none">
-          <CardHeader className="gap-3 border-b border-border/60 bg-muted/60 py-5">
-            <div className="flex items-start gap-3">
-              <span className="flex size-10 shrink-0 items-center justify-center rounded-2xl bg-foreground text-background">
-              <Sparkles className="size-5" />
-            </span>
-            <div className="space-y-1">
-              <CardTitle className="flex flex-wrap items-center gap-2 text-lg">
-                New run
-                {activeProject && (
-                  <Badge variant="secondary" className="gap-1 font-normal">
-                    <span className="size-1.5 rounded-full bg-emerald-500" />
-                    {activeProject.name}
-                  </Badge>
-                )}
-              </CardTitle>
-              <CardDescription>
-                {activeProject
-                  ? 'Point Claude at a ticket and a live URL — when you start, it opens the Running page to track progress.'
-                  : 'Select a project in the sidebar to start a run.'}
-              </CardDescription>
-            </div>
-          </div>
-        </CardHeader>
+      <McpRequiredNotice
+        required={testTarget === 'web' ? ['playwright'] : ['mobile-mcp']}
+        feature="run QC tests"
+      />
 
-        <CardContent className="pt-6">
+      <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_18rem]">
+        <Card className="overflow-hidden rounded-3xl border-border/60 py-0 shadow-none">
+          <CardContent className="p-6">
           <form
             onSubmit={onSubmit}
             onKeyDown={(e) => {
@@ -758,9 +804,15 @@ export default function RunPage() {
               </div>
             )}
 
-            <div className="space-y-5">
+            {/* 1 — what to test */}
+            <section className="space-y-3">
+              <StepHeader
+                n={1}
+                title="What to test"
+                hint={mode === 'advanced' ? 'a feature across tickets' : 'a crawled ticket'}
+              />
               {mode === 'simple' ? (
-                <>
+                <div className="space-y-4">
                   <CrawledTicketPicker
                     value={ticketId}
                     onChange={setTicketId}
@@ -781,9 +833,9 @@ export default function RunPage() {
                       disabled={!activeProject}
                     />
                   )}
-                </>
+                </div>
               ) : (
-                <>
+                <div className="space-y-4">
                   <FeatureTicketsPicker
                     tickets={crawledTickets ?? []}
                     value={featureTickets}
@@ -795,38 +847,134 @@ export default function RunPage() {
                     onChange={setWorkflowSteps}
                     disabled={!activeProject}
                   />
-                </>
-              )}
-
-              <div className="space-y-2">
-                <Label htmlFor="appUrl" className="flex items-center gap-1.5">
-                  <Globe className="size-3.5 text-muted-foreground" />
-                  App URL
-                </Label>
-                <div className="group relative">
-                  <Globe className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground transition-colors group-focus-within:text-primary" />
-                  <Input
-                    id="appUrl"
-                    type="url"
-                    placeholder="https://staging.example.com/page"
-                    value={appUrl}
-                    onChange={(e) => setAppUrl(e.target.value)}
-                    disabled={!activeProject}
-                    aria-invalid={appUrlInvalid}
-                    className="h-11 pl-9 font-mono text-sm shadow-xs transition-shadow focus-visible:shadow-sm"
-                  />
                 </div>
-                {appUrlInvalid ? (
-                  <p className="flex items-center gap-1.5 text-xs font-medium text-destructive">
-                    <TriangleAlert className="size-3.5" />
-                    Enter a full http:// or https:// URL.
+              )}
+            </section>
+
+            {/* 2 — where to run */}
+            <section className="space-y-3">
+              <StepHeader n={2} title="Where to run" hint="device or browser" />
+              {/* Test target — web (Playwright), the web app on a mobile device, or a native app on a device (Mobile MCP). */}
+              <div className="space-y-2">
+                <Label className="sr-only">Test target</Label>
+                <div className="grid grid-cols-3 gap-1.5">
+                  {TEST_TARGETS.map((t) => {
+                    const meta = TARGET_META[t]
+                    const active = testTarget === t
+                    return (
+                      <button
+                        key={t}
+                        type="button"
+                        onClick={() => {
+                          setTestTarget(t)
+                          try {
+                            localStorage.setItem(TEST_TARGET_KEY, t)
+                          } catch {
+                            /* ignore */
+                          }
+                        }}
+                        disabled={!activeProject}
+                        aria-pressed={active}
+                        className={cn(
+                          'flex flex-col items-center gap-1 rounded-xl border px-2 py-3 text-center transition-all duration-200 active:scale-[0.98] disabled:opacity-60',
+                          active
+                            ? 'border-primary/40 bg-primary/5'
+                            : 'border-border/60 bg-muted/40 hover:border-border hover:bg-muted/70',
+                        )}
+                      >
+                        <meta.Icon
+                          className={cn('size-4', active ? 'text-primary' : 'text-muted-foreground')}
+                        />
+                        <span className="text-xs font-medium leading-tight">{meta.label}</span>
+                        <span className="text-[10px] leading-tight text-muted-foreground">
+                          {meta.hint}
+                        </span>
+                      </button>
+                    )
+                  })}
+                </div>
+                {testTarget === 'web-mobile' && (
+                  <p className="text-[11px] text-muted-foreground">
+                    Opens the App URL on a booted device via the{' '}
+                    <Link to="/mcp" className="font-medium text-primary hover:underline">
+                      Mobile MCP
+                    </Link>{' '}
+                    — connect the Mobile server and boot a device first.
                   </p>
-                ) : (
-                  <p className="text-xs text-muted-foreground">The deployed page Claude should open and test.</p>
                 )}
               </div>
-            </div>
 
+              {isAppTarget ? (
+                // Native app: no URL — the app must already be installed on the device.
+                <div className="flex items-start gap-2.5 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-800">
+                  <TriangleAlert className="mt-0.5 size-4 shrink-0" />
+                  <div className="space-y-0.5 leading-snug">
+                    <p className="font-medium">No App URL needed — Claude drives the installed app.</p>
+                    <p>
+                      Install the app on the booted device first and connect the{' '}
+                      <Link to="/mcp" className="font-medium underline">
+                        Mobile MCP
+                      </Link>{' '}
+                      server. Claude launches the already-installed app on the device — it won't
+                      install it for you.
+                    </p>
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  <Label htmlFor="appUrl" className="flex items-center gap-1.5">
+                    <Globe className="size-3.5 text-muted-foreground" />
+                    App URL
+                  </Label>
+                  <div className="group relative">
+                    <Globe className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground transition-colors group-focus-within:text-primary" />
+                    <Input
+                      id="appUrl"
+                      type="url"
+                      placeholder="https://staging.example.com/page"
+                      value={appUrl}
+                      onChange={(e) => setAppUrl(e.target.value)}
+                      disabled={!activeProject}
+                      aria-invalid={appUrlInvalid}
+                      className="h-11 pl-9 font-mono text-sm shadow-xs transition-shadow focus-visible:shadow-sm"
+                    />
+                  </div>
+                  {appUrlInvalid ? (
+                    <p className="flex items-center gap-1.5 text-xs font-medium text-destructive">
+                      <TriangleAlert className="size-3.5" />
+                      Enter a full http:// or https:// URL.
+                    </p>
+                  ) : (
+                    <p className="text-xs text-muted-foreground">{appUrlHelp}</p>
+                  )}
+                </div>
+              )}
+            </section>
+
+            {/* 3 — options (collapsible: skill, model, instructions — sensible defaults, open only if needed) */}
+            <section className="space-y-3">
+              <button
+                type="button"
+                onClick={() => setShowOptions((v) => !v)}
+                aria-expanded={showOptions}
+                className="flex w-full items-center gap-2 text-left"
+              >
+                <span className="flex size-6 shrink-0 items-center justify-center rounded-lg bg-foreground text-[11px] font-semibold text-background">
+                  3
+                </span>
+                <span className="text-sm font-semibold tracking-tight">Options</span>
+                <span className="ml-auto flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
+                  <span className="hidden truncate sm:inline">
+                    {skill || 'qc-testing'} · {modelInfo.label}
+                    {instructions.trim() ? ' · notes' : ''}
+                  </span>
+                  <ChevronDown
+                    className={cn('size-4 shrink-0 transition-transform', showOptions && 'rotate-180')}
+                  />
+                </span>
+              </button>
+              {showOptions && (
+                <div className="space-y-5 rounded-2xl border border-border/60 bg-muted/30 p-4">
             {/* skill picker */}
             <div className="space-y-2">
               <div className="flex items-center justify-between">
@@ -910,20 +1058,9 @@ export default function RunPage() {
               </Select>
               <p className="text-xs text-muted-foreground">
                 <span className="font-medium text-foreground">{modelInfo.label}:</span>{' '}
-                {modelInfo.description}
+                {modelInfo.description} <span className="text-muted-foreground/80">Opus for tricky
+                tickets, Haiku for small ones, Sonnet for the best balance.</span>
               </p>
-              {/* why-to-choose guidance: best result vs. best fee */}
-              <div className="flex items-start gap-2 rounded-2xl border border-border/60 bg-muted/60 px-3 py-2 text-xs leading-relaxed text-muted-foreground">
-                <Lightbulb className="mt-0.5 size-3.5 shrink-0 text-amber-500" />
-                <span>
-                  <span className="font-medium text-foreground">Choosing a model:</span> for the
-                  best result on a long or tricky ticket pick{' '}
-                  <span className="font-medium text-foreground">Opus</span>; for the lowest fee on a
-                  small, clear ticket pick <span className="font-medium text-foreground">Haiku</span>
-                  ; <span className="font-medium text-foreground">Sonnet</span> is the recommended
-                  balance of quality and cost for most runs.
-                </span>
-              </div>
             </div>
 
             {/* free-form AI instructions */}
@@ -971,6 +1108,9 @@ export default function RunPage() {
                 </button>
               </div>
             </div>
+                </div>
+              )}
+            </section>
 
             {/* action band */}
             <div className="-mx-6 mt-2 flex flex-col gap-3 border-t border-border/60 bg-muted/60 px-6 py-4 sm:flex-row sm:items-center sm:justify-between">
@@ -1011,105 +1151,86 @@ export default function RunPage() {
         </CardContent>
         </Card>
 
-        <aside className="space-y-4">
-          <Card className="overflow-hidden rounded-3xl border-border/60 py-0 shadow-none">
-            <CardHeader className="border-b border-border/60 bg-muted/60 py-4">
-              <CardTitle className="flex items-center gap-2 text-base">
-                <Check className="size-4 text-muted-foreground" />
-                Run readiness
-              </CardTitle>
-              <CardDescription>Everything needed before Claude can start testing.</CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-3 p-4">
-              {readyChecks.map((item) => (
-                <div key={item.label} className="flex items-center gap-3 rounded-2xl border border-border/60 bg-muted/60 p-3">
-                  <span
-                    className={cn(
-                      'flex size-7 shrink-0 items-center justify-center rounded-full',
-                      item.ok ? 'bg-emerald-100 text-emerald-700' : 'bg-muted text-muted-foreground',
-                    )}
-                  >
-                    {item.ok ? <Check className="size-4" /> : <Clock className="size-4" />}
-                  </span>
-                  <div className="min-w-0">
-                    <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                      {item.label}
-                    </div>
-                    <div className="truncate text-sm font-medium">{item.value}</div>
-                  </div>
-                </div>
-              ))}
-              <div className="rounded-2xl border border-border/60 bg-muted/60 p-3">
-                <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                  Run mode
-                </div>
-                <div className="mt-1 flex items-center justify-between gap-3">
-                  <span className="text-sm font-medium">
-                    {mode === 'advanced' ? 'Feature workflow' : 'Single ticket'}
-                  </span>
-                  <span className="rounded-full bg-background px-2 py-1 text-xs font-medium text-muted-foreground">
-                    {selectedTestcaseLabel}
-                  </span>
-                </div>
+        <aside className="space-y-3">
+          {/* Readiness — compact checklist (no big tiles), run mode folded into the footer. */}
+          <Card className="rounded-3xl border-border/60 shadow-none">
+            <CardContent className="space-y-2.5 p-4">
+              <div className="flex items-center justify-between">
+                <span className="flex items-center gap-2 text-sm font-semibold tracking-tight">
+                  <Check className="size-4 text-muted-foreground" />
+                  Run readiness
+                </span>
+                <span className="rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium tabular-nums text-muted-foreground">
+                  {readyChecks.filter((c) => c.ok).length}/{readyChecks.length}
+                </span>
+              </div>
+              <ul className="space-y-1.5">
+                {readyChecks.map((item) => (
+                  <li key={item.label} className="flex items-center gap-2.5 text-sm">
+                    <span
+                      className={cn(
+                        'flex size-5 shrink-0 items-center justify-center rounded-full',
+                        item.ok
+                          ? 'bg-emerald-100 text-emerald-700'
+                          : 'bg-muted text-muted-foreground',
+                      )}
+                    >
+                      {item.ok ? <Check className="size-3" /> : <Clock className="size-3" />}
+                    </span>
+                    <span className="shrink-0 text-muted-foreground">{item.label}</span>
+                    <span className="ml-auto min-w-0 truncate font-medium">{item.value}</span>
+                  </li>
+                ))}
+              </ul>
+              <div className="flex items-center justify-between border-t border-border/60 pt-2.5 text-xs">
+                <span className="text-muted-foreground">
+                  {mode === 'advanced' ? 'Feature workflow' : 'Single ticket'}
+                </span>
+                <span className="rounded-full bg-muted px-2 py-0.5 font-medium text-muted-foreground">
+                  {selectedTestcaseLabel}
+                </span>
               </div>
             </CardContent>
           </Card>
 
-          <Card className="overflow-hidden rounded-3xl border-border/60 py-0 shadow-none">
-            <CardHeader className="flex flex-row items-center justify-between gap-4 space-y-0 border-b border-border/60 py-4">
-              <CardTitle className="flex items-center gap-2 text-base">
-                <Clock className="size-4 text-muted-foreground" />
-                Recent runs
-              </CardTitle>
-              <Link
-                to="/history"
-                className="inline-flex items-center gap-1 text-xs font-medium text-muted-foreground transition-colors hover:text-primary"
-              >
-                View all
-                <ChevronRight className="size-3" />
-              </Link>
-            </CardHeader>
-            <CardContent className="p-0">
+          {/* Recent runs — slim rows, status dot inline. */}
+          <Card className="rounded-3xl border-border/60 shadow-none">
+            <CardContent className="space-y-1 p-3">
+              <div className="flex items-center justify-between px-1">
+                <span className="flex items-center gap-2 text-sm font-semibold tracking-tight">
+                  <Clock className="size-4 text-muted-foreground" />
+                  Recent runs
+                </span>
+                <Link
+                  to="/history"
+                  className="inline-flex items-center gap-0.5 text-xs font-medium text-muted-foreground transition-colors hover:text-primary"
+                >
+                  All
+                  <ChevronRight className="size-3" />
+                </Link>
+              </div>
               {recent.length === 0 ? (
-                <div className="p-4 text-sm text-muted-foreground">
-                  No runs yet. Start one and it will appear here.
-                </div>
+                <p className="px-1 py-1.5 text-xs text-muted-foreground">No runs yet.</p>
               ) : (
-                <ul className="divide-y divide-border/60">
-                  {recent.slice(0, 5).map((run) => (
+                <ul>
+                  {recent.slice(0, 4).map((run) => (
                     <li key={run.id}>
                       <Link
                         to={`/run/${run.id}`}
-                        className="group flex items-center gap-3 px-4 py-3 transition-colors hover:bg-muted/40"
+                        className="group flex items-center gap-2 rounded-xl px-1.5 py-1.5 transition-colors hover:bg-muted/50"
                       >
-                        <div className="min-w-0 flex-1">
-                          <div className="truncate font-mono text-sm font-medium">{run.ticketId}</div>
-                          <div className="mt-1 flex items-center gap-2">
-                            <StatusBadge status={run.status} />
-                            <span className="text-xs tabular-nums text-muted-foreground">
-                              {relativeTime(run.createdAt)}
-                            </span>
-                          </div>
-                        </div>
-                        <ChevronRight className="size-4 shrink-0 text-muted-foreground/40 transition-transform group-hover:translate-x-0.5 group-hover:text-muted-foreground" />
+                        <StatusBadge status={run.status} compact />
+                        <span className="min-w-0 flex-1 truncate font-mono text-xs font-medium">
+                          {run.ticketId}
+                        </span>
+                        <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">
+                          {relativeTime(run.createdAt)}
+                        </span>
                       </Link>
                     </li>
                   ))}
                 </ul>
               )}
-            </CardContent>
-          </Card>
-
-          <Card className="rounded-3xl border-border/60 bg-primary text-primary-foreground shadow-none">
-            <CardContent className="space-y-2 p-4">
-              <div className="flex items-center gap-2 text-sm font-semibold">
-                <Lightbulb className="size-4" />
-                Tip
-              </div>
-              <p className="text-sm leading-6 text-primary-foreground/80">
-                Use Sonnet for most QC runs. Switch to Opus when the ticket is broad, ambiguous,
-                or spans multiple related workflows.
-              </p>
             </CardContent>
           </Card>
         </aside>

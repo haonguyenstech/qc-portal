@@ -335,13 +335,24 @@ function parseUsageText(text: string): { windows: UsageLine[]; details: string }
   return { windows, details }
 }
 
-let usageCache: { at: number; payload: unknown } | null = null
-const USAGE_TTL_MS = 60_000
+interface UsagePayload {
+  available: boolean
+  windows: UsageLine[]
+  details: string
+  raw: string
+  error: string | null
+  generatedAt: string
+  stale?: boolean
+}
 
-aiRouter.get('/usage', async (_req, res) => {
-  if (usageCache && Date.now() - usageCache.at < USAGE_TTL_MS) {
-    return res.json(usageCache.payload)
-  }
+let usageCache: { at: number; payload: UsagePayload } | null = null
+let lastGood: UsagePayload | null = null
+let refreshing: Promise<UsagePayload> | null = null
+// Reading `/usage` spawns a `claude -p` process (up to 30s). Cache it for 10
+// minutes and refresh in the background so the UI never blocks or flashes.
+const USAGE_TTL_MS = 10 * 60_000
+
+async function readUsage(): Promise<UsagePayload> {
   const result = await runCommand(['-p', '/usage', '--output-format', 'json'], 30000)
   const raw = (result.stdout || result.stderr).trim()
   let text = ''
@@ -351,7 +362,7 @@ aiRouter.get('/usage', async (_req, res) => {
     /* non-json CLI error */
   }
   const parsed = parseUsageText(text)
-  const payload = {
+  return {
     available: parsed.windows.length > 0,
     windows: parsed.windows,
     details: parsed.details,
@@ -364,8 +375,41 @@ aiRouter.get('/usage', async (_req, res) => {
           : 'Could not read Claude usage. Make sure you are signed in with a Claude subscription.',
     generatedAt: new Date().toISOString(),
   }
-  usageCache = { at: Date.now(), payload }
-  res.json(payload)
+}
+
+// Single-flight refresh: never spawn more than one `/usage` process at a time.
+// A failed read falls back to the last good reading (marked stale) rather than
+// poisoning the cache with an error.
+function refreshUsage(): Promise<UsagePayload> {
+  if (refreshing) return refreshing
+  refreshing = (async () => {
+    try {
+      const payload = await readUsage()
+      if (payload.available) {
+        lastGood = payload
+        usageCache = { at: Date.now(), payload }
+      } else if (lastGood) {
+        usageCache = { at: Date.now(), payload: { ...lastGood, stale: true } }
+      } else {
+        usageCache = { at: Date.now(), payload }
+      }
+      return usageCache.payload
+    } finally {
+      refreshing = null
+    }
+  })()
+  return refreshing
+}
+
+aiRouter.get('/usage', async (_req, res) => {
+  const cached = usageCache
+  if (cached) {
+    // Serve the cached payload immediately; refresh in the background when stale.
+    if (Date.now() - cached.at >= USAGE_TTL_MS) void refreshUsage()
+    return res.json(cached.payload)
+  }
+  // Cold start: nothing cached yet, so wait for the first read.
+  res.json(await refreshUsage())
 })
 
 aiRouter.post('/claude/test', async (req, res) => {

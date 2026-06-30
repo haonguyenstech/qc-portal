@@ -35,6 +35,7 @@ export interface TestcaseLogLine {
 }
 
 const MAX_LOG_LINES = 800 // keep the per-job log bounded
+const MAX_PARALLEL = 3 // how many tickets a single job generates at once
 
 interface TestcaseJob {
   id: string
@@ -58,8 +59,8 @@ interface TestcaseJob {
   createdAt: string
   updatedAt: string
   // --- control (server-only) ---
-  /** Aborts the item currently generating, so pause/cancel takes effect promptly. */
-  abort: AbortController | null
+  /** Aborts every item currently generating, so pause/cancel takes effect promptly. */
+  aborts: Set<AbortController>
   pauseRequested: boolean
   cancelRequested: boolean
 }
@@ -155,61 +156,89 @@ function finalize(job: TestcaseJob): void {
   job.updatedAt = nowIso()
 }
 
+/** Generate one ticket. Never throws — outcome is recorded on the item. */
+async function processItem(job: TestcaseJob, item: TestcaseJobItem, i: number): Promise<void> {
+  item.status = 'running'
+  item.error = undefined
+  const ac = new AbortController()
+  job.aborts.add(ac)
+  pushLog(job, 'info', `▶ [${i + 1}/${job.total}] ${item.folder} — generating…`, item.folder)
+  try {
+    const r = await generateTestcaseVersion({
+      rootPath: job.rootPath,
+      projectName: job.projectName,
+      folder: item.folder,
+      template: job.template,
+      instructions: job.instructions,
+      model: job.model,
+      appUrl: item.appUrl,
+      sourcePath: job.sourcePath,
+      groundingCheck: job.groundingCheck,
+      groundingCheckModel: job.groundingCheckModel,
+      signal: ac.signal,
+      onLog: (l) => pushLog(job, l.level, l.text, item.folder),
+    })
+    item.status = 'done'
+    item.version = r.version
+    item.savedTo = r.savedTo
+    pushLog(job, 'success', `✓ ${item.folder} — saved v${r.version}`, item.folder)
+  } catch (err) {
+    if (ac.signal.aborted) {
+      // Interrupted by pause/cancel — keep it pending so a resume regenerates it.
+      item.status = 'pending'
+      pushLog(job, 'info', `■ ${item.folder} — stopped`, item.folder)
+    } else {
+      item.status = 'error'
+      item.error = (err as Error).message || 'Generation failed'
+      pushLog(job, 'error', `✗ ${item.folder} — ${item.error}`, item.folder)
+    }
+  } finally {
+    job.aborts.delete(ac)
+  }
+  recountDone(job)
+  job.updatedAt = nowIso()
+}
+
 /**
- * Process pending items sequentially. Resumable: already-done items are skipped,
- * and the loop stops cleanly when a pause/cancel is requested. Never throws —
- * failures are recorded per item.
+ * Process pending items with up to MAX_PARALLEL running at once. Resumable:
+ * already-done items are skipped, and the pool stops claiming new work the moment
+ * a pause/cancel is requested (in-flight items are aborted by pause/cancel). Never
+ * throws — failures are recorded per item.
  */
 async function runJob(job: TestcaseJob): Promise<void> {
   job.status = 'running'
   job.pauseRequested = false
   const pending = job.items.filter((i) => i.status === 'pending').length
-  pushLog(job, 'info', `Processing ${pending} ticket${pending === 1 ? '' : 's'} · model ${job.model}`)
-  for (let i = 0; i < job.items.length; i++) {
-    const item = job.items[i]
-    if (item.status === 'done') continue // resume: don't regenerate finished tickets
-    if (job.cancelRequested || job.pauseRequested) break
+  pushLog(
+    job,
+    'info',
+    `Processing ${pending} ticket${pending === 1 ? '' : 's'} · model ${job.model} · up to ${MAX_PARALLEL} at once`,
+  )
 
-    item.status = 'running'
-    item.error = undefined
-    const ac = new AbortController()
-    job.abort = ac
-    pushLog(job, 'info', `▶ [${i + 1}/${job.total}] ${item.folder} — generating…`, item.folder)
-    try {
-      const r = await generateTestcaseVersion({
-        rootPath: job.rootPath,
-        projectName: job.projectName,
-        folder: item.folder,
-        template: job.template,
-        instructions: job.instructions,
-        model: job.model,
-        appUrl: item.appUrl,
-        sourcePath: job.sourcePath,
-        groundingCheck: job.groundingCheck,
-        groundingCheckModel: job.groundingCheckModel,
-        signal: ac.signal,
-        onLog: (l) => pushLog(job, l.level, l.text, item.folder),
-      })
-      item.status = 'done'
-      item.version = r.version
-      item.savedTo = r.savedTo
-      pushLog(job, 'success', `✓ ${item.folder} — saved v${r.version}`, item.folder)
-    } catch (err) {
-      if (ac.signal.aborted) {
-        // Interrupted by pause/cancel — keep it pending so a resume regenerates it.
-        item.status = 'pending'
-        pushLog(job, 'info', `■ ${item.folder} — stopped`, item.folder)
-      } else {
-        item.status = 'error'
-        item.error = (err as Error).message || 'Generation failed'
-        pushLog(job, 'error', `✗ ${item.folder} — ${item.error}`, item.folder)
+  // Shared cursor across workers: each worker claims the next pending item until
+  // the list is exhausted or a pause/cancel is requested.
+  let cursor = 0
+  async function worker(): Promise<void> {
+    for (;;) {
+      if (job.cancelRequested || job.pauseRequested) return
+      let item: TestcaseJobItem | null = null
+      let idx = -1
+      while (cursor < job.items.length) {
+        const i = cursor++
+        if (job.items[i].status === 'pending') {
+          item = job.items[i]
+          idx = i
+          break
+        }
       }
-    } finally {
-      job.abort = null
+      if (!item) return // no more pending work
+      await processItem(job, item, idx)
     }
-    recountDone(job)
-    job.updatedAt = nowIso()
   }
+
+  const workers = Math.min(MAX_PARALLEL, Math.max(1, pending))
+  await Promise.all(Array.from({ length: workers }, () => worker()))
+
   // On natural completion (not pause/cancel), reflect on the generated cases and
   // auto-capture durable facts. Best-effort; never blocks finalize on failure.
   if (!job.cancelRequested && !job.pauseRequested && job.autoLearn) {
@@ -262,7 +291,7 @@ function runJobSafely(job: TestcaseJob): void {
       }
     }
     recountDone(job)
-    job.abort = null
+    job.aborts.clear()
     job.status = 'done'
     pushLog(job, 'error', `Job aborted — ${(err as Error).message || 'unexpected error'}`)
   })
@@ -308,7 +337,7 @@ export function startTestcaseJob(opts: {
     status: 'running',
     createdAt: nowIso(),
     updatedAt: nowIso(),
-    abort: null,
+    aborts: new Set(),
     pauseRequested: false,
     cancelRequested: false,
   }
@@ -335,7 +364,7 @@ export function pauseTestcaseJob(id: string): PublicTestcaseJob | undefined {
   if (!j) return undefined
   if (j.status === 'running') {
     j.pauseRequested = true
-    j.abort?.abort() // interrupt the current item so the pause lands promptly
+    for (const ac of j.aborts) ac.abort() // interrupt in-flight items so the pause lands promptly
   }
   return toPublic(j)
 }
@@ -361,7 +390,7 @@ export function cancelTestcaseJob(id: string): PublicTestcaseJob | undefined {
   if (!j) return undefined
   if (j.status === 'running') {
     j.cancelRequested = true
-    j.abort?.abort()
+    for (const ac of j.aborts) ac.abort()
   } else if (j.status === 'paused') {
     j.cancelRequested = true
     finalize(j) // loop isn't running — settle it now

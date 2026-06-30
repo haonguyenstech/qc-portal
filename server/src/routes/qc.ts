@@ -2,7 +2,7 @@ import { Router } from 'express'
 import fs from 'node:fs'
 import path from 'node:path'
 import { testResultDirFor } from '../config.js'
-import { getEvents, getProject, getRun, getRunSession, listRuns } from '../db.js'
+import { deleteRun, getEvents, getProject, getRun, getRunSession, listRuns } from '../db.js'
 import { cancelRun, pauseRun, resumeRun, resolveSlug, startRun } from '../runManager.js'
 import { revealFolderNative } from '../folderPicker.js'
 import { CRAWL_SUMMARY_MODELS } from '../claudeExec.js'
@@ -85,18 +85,30 @@ function walkRunFiles(baseDir: string, rel = '', acc: RunFileInfo[] = [], depth 
 }
 
 qcRouter.post('/run', (req, res) => {
-  const { projectId, ticketId, appUrl, skill, instructions, model, relatedTickets, workflowSteps } =
-    req.body ?? {}
+  const {
+    projectId,
+    ticketId,
+    appUrl,
+    skill,
+    instructions,
+    model,
+    relatedTickets,
+    workflowSteps,
+    testTarget,
+  } = req.body ?? {}
   if (typeof projectId !== 'string' || !projectId.trim()) {
     return res.status(400).json({ error: 'projectId is required' })
   }
-  if (
-    typeof ticketId !== 'string' ||
-    !ticketId.trim() ||
-    typeof appUrl !== 'string' ||
-    !appUrl.trim()
-  ) {
-    return res.status(400).json({ error: 'ticketId and appUrl are required' })
+  // web/web-mobile open a URL → appUrl required; app-mobile drives a native app
+  // on the device → appUrl is an OPTIONAL package/bundle id.
+  const target: 'web' | 'web-mobile' | 'app-mobile' =
+    testTarget === 'web-mobile' ? 'web-mobile' : testTarget === 'app-mobile' ? 'app-mobile' : 'web'
+  const appUrlClean = typeof appUrl === 'string' ? appUrl.trim() : ''
+  if (typeof ticketId !== 'string' || !ticketId.trim()) {
+    return res.status(400).json({ error: 'ticketId is required' })
+  }
+  if (target !== 'app-mobile' && !appUrlClean) {
+    return res.status(400).json({ error: 'appUrl is required' })
   }
   if (skill != null && typeof skill !== 'string') {
     return res.status(400).json({ error: 'skill must be a string' })
@@ -122,16 +134,19 @@ qcRouter.post('/run', (req, res) => {
       : []
   const relatedClean = sanitizeList(relatedTickets, 5, 200)
   const stepsClean = sanitizeList(workflowSteps, 30, 500)
+  // app-mobile may have no id — store a readable label so history/messages aren't blank.
+  const appUrlValue = appUrlClean || (target === 'app-mobile' ? 'Mobile app' : '')
   try {
     const summary = startRun({
       projectId: projectId.trim(),
       ticketId: ticketId.trim(),
-      appUrl: appUrl.trim(),
+      appUrl: appUrlValue,
       skill: typeof skill === 'string' ? skill.trim() : undefined,
       instructions: typeof instructions === 'string' ? instructions.slice(0, 4000) : undefined,
       model: pinnedModel,
       relatedTickets: relatedClean.length ? relatedClean : undefined,
       workflowSteps: stepsClean.length ? stepsClean : undefined,
+      testTarget: target,
     })
     return res.status(201).json({ runId: summary.id, ...summary })
   } catch (err) {
@@ -198,6 +213,32 @@ qcRouter.post('/runs/:id/open', async (req, res) => {
   const result = await revealFolderNative(dir)
   if (!result.ok) return res.status(500).json({ error: result.error ?? 'failed to open folder' })
   return res.json({ ok: true, path: dir })
+})
+
+/** Delete a finished run: its DB record + event log, and its on-disk output folder. */
+qcRouter.delete('/runs/:id', (req, res) => {
+  const run = getRun(req.params.id)
+  if (!run) return res.status(404).json({ error: 'run not found' })
+
+  // An active run is still using its session/output — make the user cancel first.
+  if (run.status === 'running' || run.status === 'queued' || run.status === 'paused') {
+    return res.status(409).json({ error: 'cancel the run before deleting it' })
+  }
+
+  // Remove the on-disk test-result folder (report, issues, screenshots, evidence).
+  const project = run.projectId ? getProject(run.projectId) : undefined
+  const testingDir = project ? testResultDirFor(project.rootPath) : null
+  const slug = outputSlugForRun(testingDir, run)
+  if (testingDir && slug) {
+    try {
+      fs.rmSync(path.join(testingDir, slug), { recursive: true, force: true })
+    } catch {
+      // Best-effort — a missing/locked folder shouldn't block removing the record.
+    }
+  }
+
+  deleteRun(run.id)
+  return res.json({ ok: true })
 })
 
 qcRouter.post('/runs/:id/cancel', (req, res) => {

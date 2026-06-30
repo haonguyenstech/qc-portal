@@ -167,6 +167,9 @@ Everything the Portal reads and writes for a project lives under \`<project>/tes
 - \`testing/knowledge/*.md\` — reference docs (specs, domain notes).
 - \`testing/memory/*.md\` — durable fact notes (+ \`MEMORY.md\` index).
 - \`testing/templates/*.md\` — test-case + design-check templates.
+
+Two more folders sit at the **project root** (not under \`testing/\`): \`design-check/\` holds saved Design
+Check reports, and \`source/\` holds the repo cloned from the **Source Code** page.
 `,
   },
   {
@@ -179,14 +182,16 @@ The typical end-to-end flow, in order:
 
 1. **Register a project** — Settings → Projects → add the absolute path to your repo. Select it in
    the sidebar workspace switcher.
-2. **Connect ClickUp** — add your ClickUp token (Settings) so the Portal can read tickets.
-3. **Connect tools (MCP)** — on the **MCP** page, enable Playwright (to drive a browser) and any
-   others (e.g. Figma for Design Check).
+2. **Connect ClickUp** — add your ClickUp token on the **MCP** page (or in the project's Settings) so
+   the Portal can read tickets.
+3. **Connect tools (MCP)** — on the **MCP** page, enable Playwright (to drive a browser), Mobile (for
+   native-app testing), and any others (e.g. Figma for Design Check).
 4. **Add project context** — on **Instructions**, write a short \`CLAUDE.md\`, upload **Knowledge**
    docs, and jot **Memory** facts. This is what makes the AI use your real terms and rules.
 5. **Crawl tickets** — on **Tickets**, pick the tickets you'll work on and crawl them locally.
 6. **Generate test cases** — on **TestCase**, pick crawled tickets and let the AI draft them.
-7. **Run the QC test** — on **Run**, enter the ticket + app URL and start. Watch it live on **Running**.
+7. **Run the QC test** — on **Run**, pick the ticket, choose where to test (web, mobile web, or a native
+   app), enter the app URL, and start. Watch it live on **Running**.
 8. **Review** — open the run in **History** to read the report, issues, and screenshots — or
    **continue the session** in a terminal to keep working.
 9. *(Optional)* **Design Check** — on **Design Check**, compare a ticket's build against its Figma design.
@@ -202,33 +207,41 @@ The sidebar is grouped by purpose. Here's what each page does.
 
 ### Project
 - **Overview** — the project's free-text intro (Markdown), plus an AI "Generate from ClickUp" draft.
-- **Source Code** — clone/adopt/pull a GitHub or Bitbucket repo for the project (tokens stored
-  securely on disk, never in git or logs).
+- **Source Code** — connect the project's Git repo: clone a GitHub / Bitbucket / Git repo into
+  \`source/\`, sync (re-pull), or disconnect. Access tokens are stored locally only — never in git or logs.
 
 ### Testing
 - **Tickets** — browse a ClickUp workspace/list, multi-select tickets, and **crawl** them to disk
-  (optionally with an AI summary). Crawled tickets are highlighted.
+  (optionally with an AI \`summary.md\`). Crawled tickets are highlighted and show their test-case count.
 - **TestCase** — pick crawled tickets and have the AI **draft manual test cases** (Markdown or CSV),
-  versioned per ticket. Supports a template + reusable rules.
+  versioned per ticket. Supports a template, reusable rules, and an optional live App URL per ticket.
 - **Design Check** — pick a crawled ticket + paste its Figma link; the AI compares the design against
-  the build and reports match / mismatch / concern findings.
-- **Run** — start a QC acceptance test for a ticket + app URL (with optional advanced multi-ticket /
-  workflow-step mode).
-- **Running** — live view of in-flight runs with streaming phase/log progress.
-- **History** — past runs with pass/fail counts; open one for the full report, issues, evidence, and
-  the **Continue session** terminal.
+  the build and reports findings (match / mismatch / concern / not sure / discuss). Past checks are saved.
+- **Run** — start a QC run for a ticket; choose **where to test** (web, web-on-mobile, or a native app
+  on a device) and the model. Advanced **Feature** mode covers multiple related tickets as one workflow.
+- **Running** — live view of in-flight runs with the streaming 7-phase timeline and log
+  (Stop / Resume / Discard).
+- **History** — past runs grouped by ticket with pass/fail rates; open one for the full report, issues,
+  evidence, and the **Continue session** terminal.
 
 ### Configure
 - **Instructions** — the project context hub: edit \`CLAUDE.md\`, manage **Knowledge** docs, and write
   **Memory** notes.
-- **Skills** — view/edit the project's \`.claude/skills\` (including \`qc-testing\`); import skills.
-- **MCP** — manage \`.mcp.json\` servers (Playwright, Figma, ClickUp, …) and test their health.
-- **Settings** — **Projects** (register/edit/remove) + **Models** (Claude usage, AI runtime, and the
-  per-project AI automation toggles) + project **templates**.
+- **Skills** — view/edit the project's \`.claude/skills\` (including \`qc-testing\`); import skills and set a
+  **default skill** that auto-selects on the Run page.
+- **MCP** — manage \`.mcp.json\` servers (Playwright, Figma, ClickUp, Mobile) and test their live health.
+- **Templates** — the project's reusable **test-case** and **design-check** templates.
 
 ### Tools
 - **Terminal** — a real pseudo-terminal on your machine, opened in the active project's folder
-  (interactive TUIs work — you can even type \`claude\`).
+  (it drops straight into a \`claude\` session).
+
+### System
+- **Settings** — **Projects** (register / edit / pin / remove, plus **export & import** a project as a
+  \`.zip\`) and **Models** (Claude usage, AI runtime, and the per-project AI automation toggles).
+
+> The footer also links to **Release notes** (changelog + check-for-updates) and this **Documentation**;
+> the **bell** (top-right) opens **Notifications**.
 `,
   },
   {
@@ -238,27 +251,33 @@ The sidebar is grouped by purpose. Here's what each page does.
     blurb: 'ClickUp, MCP tools, and source repos.',
     body: `
 ### ClickUp
-The Portal reads tickets via a ClickUp API token, set per project in **Settings**. Once connected,
-**Tickets** lists your workspace/list and lets you crawl tickets locally. Tokens are scoped per
-project and never logged.
+The Portal reads tickets via a ClickUp API token. Connect it on the **MCP** page (paste a personal
+token) or set it per project in **Settings**. Once connected, **Tickets** lists your workspace/list and
+lets you crawl tickets locally. Tokens are scoped per project and never logged.
 
 ### MCP servers (tools the AI uses)
-On the **MCP** page you manage the project's \`.mcp.json\` — the external tools a run can use:
+On the **MCP** page you manage the project's \`.mcp.json\` — the external tools a run can use. Each card
+has an **info tooltip** explaining its purpose:
 
 - **Playwright** — drives a real browser so the AI can open your app, click, and screenshot. Required
-  for QC runs that exercise a live app and for grounding test cases against a live URL.
+  for QC runs that exercise a live web app and for grounding test cases against a live URL.
 - **Figma** — lets **Design Check** open a design file.
 - **ClickUp** — ticket access from inside a run.
+- **Mobile** — drives a connected iOS/Android device or simulator, for native-app QC runs.
 
-Each server shows **live health** (a real test call), not just whether it's in the config. Use
-**Open folder** to jump to where \`.mcp.json\` lives.
+Each server shows **live health** (a real test call), not just whether it's in the config — and a
+**Functional test** runs a real action through it (fetch a ticket, read a design, open a browser, list
+devices). Use **Open folder** to jump to where \`.mcp.json\` lives.
 
 > Some MCP args are machine-specific (e.g. a Playwright \`--user-data-dir\` profile path). Adjust them
 > on the MCP page to match your machine.
 
 ### Source repositories
-On **Source Code** you can clone a new repo, adopt an existing local checkout, or pull updates for a
-GitHub/Bitbucket repo. Access tokens are kept in a protected on-disk credential store (mode 0600) —
+On **Source Code** you connect the project's Git repo — paste the repository URL (with an optional
+branch and, for private repos, an access token; Bitbucket also takes a username), and it clones into
+\`source/\`. From there you can **Sync** (re-pull), **Change repository**, or **Disconnect** (files stay
+on disk). Giving the AI the real code helps QC runs, test-case generation, and Design Check reason about
+actual field names and behavior. Access tokens are kept in a protected on-disk credential store —
 **never** in the database, the git remote URL, or any log.
 `,
   },
@@ -269,9 +288,12 @@ GitHub/Bitbucket repo. Access tokens are kept in a protected on-disk credential 
     blurb: 'Phases, live progress, report, continue session.',
     body: `
 ### Starting a run
-On **Run**, enter the **ClickUp ticket** and the **app URL**, pick a model, and start. Advanced mode
-lets you cover **multiple related tickets** as one connected feature and define an ordered
-**workflow** of steps to exercise.
+On **Run**, pick the **ClickUp ticket**, choose **where to test** — a web app (Playwright), the web app
+in a mobile viewport, or a **native app on a connected device** (Mobile MCP) — enter the **app URL**
+(not needed for a native app), pick a model, and start. You can also pick a specific **test-case
+version** to verify against and save reusable form **presets**. Advanced **Feature** mode lets you cover
+**multiple related tickets** as one connected feature and define an ordered **workflow** of steps to
+exercise.
 
 The Portal spawns \`claude\` headless in the project folder with permissions bypassed (so it never
 blocks on a prompt) and runs the \`qc-testing\` skill through its **7 phases**: intake → plan → setup
@@ -311,8 +333,9 @@ an AI **summary.md** per ticket.
 ### Generating test cases
 On **TestCase**, pick up to **5 crawled tickets** (fewer is better — each is its own AI run) and
 generate. You can attach a **template** (the AI matches its columns/format — CSV templates yield a
-real importable CSV) and toggle **rules** (happy path, negative, boundary, security, …) that shape
-coverage.
+real importable CSV), toggle **rules** (happy path, negative, boundary, security, …) that shape
+coverage, and give each ticket an optional **live App URL** so the AI grounds the cases in the running
+app. The job runs in the background with **Pause / Resume / Cancel** and a live log.
 
 Output is **versioned** per ticket: \`testcases/v1.md\`, \`v2.csv\`, … Open the preview to switch
 versions. For CSV versions you can click a single cell and have the AI rewrite just that cell.
@@ -344,8 +367,9 @@ Figma/Playwright MCP tools) and the running app, then reports findings bucketed 
 - **concern** — something worth a closer look,
 - **unsure / discuss** — needs human judgment.
 
-You can attach a one-off **checklist**, or save a project-wide **design-check** checklist under
-**Settings → templates** that the check always applies. Findings render as grouped cards.
+You can attach a one-off **checklist**, or save a project-wide **design-check** checklist on the
+**Templates** page that the check always applies (the model reports a finding per checklist item).
+Findings render as grouped cards, and every check is saved to a **history** list you can reopen.
 `,
   },
   {
@@ -410,20 +434,28 @@ durable Memory/Knowledge.
     icon: SlidersHorizontal,
     blurb: 'Projects, models, and templates.',
     body: `
-**Settings** has tabs driven by the \`?tab=\` query param.
+**Settings** (under **System** in the sidebar) has two tabs driven by the \`?tab=\` query param.
 
 ### Projects (\`?tab=projects\`)
-Register a project (absolute repo path), edit its name/ClickUp token/source binding, pin it, or remove
-it. A red dot marks a project whose folder no longer exists.
+Register a project (absolute repo path, with a native folder picker), edit its name / ClickUp token /
+source binding, pin it to the top, or remove it (the folder on disk is left alone). A red dot marks a
+project whose folder no longer exists, and **Init** scaffolds any missing \`CLAUDE.md\` / \`qc-testing\`
+skill / \`.mcp.json\`. Each card shows health chips (Skills / MCP / CLAUDE.md) and a readiness pill.
+
+**Export & import (\`.zip\`).** Each project card has a **Download** button that exports the project's
+\`CLAUDE.md\`, \`.claude/skills\`, \`.mcp.json\`, and \`testing/\` folder as a single \`.zip\`. **Import project**
+restores such a zip into a destination folder you pick and registers it — handy for moving a configured
+project between machines.
 
 ### Models (\`?tab=models\`)
-- **Claude usage** — token/cost usage recorded across runs and AI helpers.
-- **AI runtime** — the global Claude binary/runtime status and model availability.
+- **Claude usage** — token/cost usage and live limits recorded across runs and AI helpers.
+- **AI runtime** — the global Claude install/binary status and per-model availability (a smoke test for
+  sonnet/opus/haiku).
 - **AI automation** — the active project's **Grounding check** and **Auto-learn** toggles + model
   pickers (see the AI automation page).
 
-### Templates (the **Settings** sidebar entry → project templates)
-Plain-text files under \`testing/templates/\`:
+### Templates (its own sidebar page)
+The **Templates** page (separate from Settings) manages plain-text files under \`testing/templates/\`:
 - **testcase** — the structure the AI matches when drafting test cases (a per-run upload still overrides it).
 - **design-check** — the project's standard Design Check checklist.
 `,
@@ -436,11 +468,11 @@ Plain-text files under \`testing/templates/\`:
     body: `
 The **Terminal** page is a real pseudo-terminal on the machine running the server, rendered in the
 browser. **Connect** opens your login shell with the working directory set to the **active project's
-root**; **Disconnect** (or closing the tab) kills the shell. One shell per connection — nothing
-persists across reconnects.
+root** and drops straight into a **\`claude\`** session there; **Disconnect** (or closing the tab) kills
+the shell. One shell per connection — nothing persists across reconnects.
 
-It behaves like a native terminal, so interactive TUIs work — for example, type \`claude\` to start a
-session right inside the project. The same engine powers **Continue session** on a run's detail page.
+It behaves like a native terminal, so interactive TUIs work. The same engine powers **Continue session**
+on a run's detail page.
 `,
   },
   {
@@ -449,9 +481,9 @@ session right inside the project. The same engine powers **Continue session** on
     icon: BellRing,
     blurb: 'Long tasks that survive navigation.',
     body: `
-Crawling, test-case generation, and Design Check all run as **server-side background jobs**. That
-means you can start one and freely navigate away or reload — the job keeps running and the page
-reconnects to its live progress when you return.
+Crawling, test-case generation, Design Check, and source clone/sync all run as **server-side background
+jobs**. That means you can start one and freely navigate away or reload — the job keeps running and the
+page reconnects to its live progress when you return.
 
 When a job finishes, an always-mounted watcher fires a **toast** and adds an entry to the **bell**
 (top-right) — even if you'd left the page that started it. The **Notifications** page is the full

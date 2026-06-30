@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -9,6 +9,7 @@ import {
   ChevronDown,
   Ban,
   ClipboardList,
+  Clock,
   ExternalLink,
   Eye,
   FileText,
@@ -69,11 +70,17 @@ import {
   startTestCaseJob,
   type CrawledTicket,
   type EditTestcaseCellResult,
+  type TestCaseJob,
   type TestCaseLogLine,
 } from '@/lib/api'
 import { OpenFolderButton } from '@/components/OpenFolderButton'
 import { buildInstructions, useTestRules } from '@/lib/testRules'
 import { useProjects } from '@/lib/project-context'
+import {
+  addActiveJobId,
+  loadActiveJobIds,
+  removeActiveJobId,
+} from '@/lib/activeTestcaseJobs'
 
 // Template formats we accept: Markdown, CSV, and Excel. Excel is binary — we parse
 // its first sheet to CSV in the browser (see onPickTemplate) before feeding Claude.
@@ -106,26 +113,13 @@ const TESTCASE_MODELS: { value: string; label: string; description: string }[] =
   },
 ]
 
-// The active background job id is remembered per project so a browser reload (or
-// navigating away and back) reconnects to the still-running server-side job.
-const ACTIVE_JOB_PREFIX = 'qc.testcaseJob.'
-function loadActiveJobId(projectId: string | null): string | null {
-  if (!projectId) return null
-  try {
-    return localStorage.getItem(ACTIVE_JOB_PREFIX + projectId)
-  } catch {
-    return null
-  }
-}
-function saveActiveJobId(projectId: string, jobId: string): void {
-  try {
-    localStorage.setItem(ACTIVE_JOB_PREFIX + projectId, jobId)
-  } catch {
-    /* storage unavailable */
-  }
-}
-// Note: the active-job key is cleared by the global TestCaseJobWatcher once a job
-// finishes — this page only writes it (on start) and reads it (to reconnect).
+// How many generation jobs a project can run at the same time. Each job is a
+// separate Claude run, so this lets a QC engineer fire off another ticket without
+// waiting for the first to finish.
+const MAX_PARALLEL_JOBS = 3
+// The active background job ids are remembered per project (a JSON array) so a
+// browser reload — or navigating away and back — reconnects to every still-running
+// server-side job. The global TestCaseJobWatcher drops each id as it finishes.
 
 /** A toggleable rule chip; hover shows the full instruction it adds. */
 function RuleChip({
@@ -178,6 +172,20 @@ function timeAgo(iso: string | null): string {
   const days = Math.round(hours / 24)
   if (days < 30) return `${days}d ago`
   return new Date(iso).toLocaleDateString()
+}
+
+/** Full, human date + time a version was generated, e.g. "Jul 1, 2026, 3:42 PM". */
+function formatDateTime(iso: string | null): string {
+  if (!iso) return ''
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return ''
+  return d.toLocaleString(undefined, {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  })
 }
 
 // Shared markdown styling — mirrors the Overview page so output renders consistently.
@@ -736,6 +744,10 @@ function TestCasePreviewDialog({
     enabled: !!folder && selectedVersion != null,
   })
 
+  // Metadata (incl. savedAt) for the currently-selected version — drives the
+  // "Generated <date time>" label in the header.
+  const selectedMeta = versions.find((v) => v.version === selectedVersion) ?? null
+
   // Delete the selected version. Two-step confirm (inline) to avoid a nested modal.
   const queryClient = useQueryClient()
 
@@ -852,11 +864,21 @@ function TestCasePreviewDialog({
                         {v.label}
                         {v.format === 'csv' ? ' · CSV' : ''}
                         {i === 0 ? ' · latest' : ''}
-                        {v.savedAt ? ` · ${timeAgo(v.savedAt)}` : ''}
+                        {v.savedAt ? ` · ${formatDateTime(v.savedAt)}` : ''}
                       </SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
+                {/* Full date + time the selected version was generated. */}
+                {selectedMeta?.savedAt && (
+                  <span
+                    className="inline-flex items-center gap-1 text-xs text-muted-foreground"
+                    title={`Generated ${formatDateTime(selectedMeta.savedAt)}`}
+                  >
+                    <Clock className="size-3.5" />
+                    Generated {formatDateTime(selectedMeta.savedAt)}
+                  </span>
+                )}
               </>
             ) : (
               <span>No versions yet</span>
@@ -1136,6 +1158,180 @@ function JobLogPanel({ logs, running }: { logs: TestCaseLogLine[]; running: bool
   )
 }
 
+/**
+ * One running/finished generation job — its progress, pause/resume/cancel controls,
+ * per-ticket results, and live logs. Several of these can be on screen at once (the
+ * page runs up to MAX_PARALLEL_JOBS jobs concurrently). Each card owns its own
+ * control mutations, writing the returned job straight into the poll cache so the
+ * UI reacts immediately.
+ */
+function JobCard({
+  job,
+  onPreview,
+}: {
+  job: TestCaseJob
+  onPreview: (folder: string) => void
+}) {
+  const queryClient = useQueryClient()
+  const jobId = job.id
+  const isRunning = job.status === 'running'
+  const isPaused = job.status === 'paused'
+  const isActive = isRunning || isPaused
+  const doneCount = job.items.filter((i) => i.status === 'done').length
+  const pendingCount = job.items.filter((i) => i.status === 'pending').length
+
+  const applyJob = (j: { job: TestCaseJob }) =>
+    queryClient.setQueryData(['testcase-job', jobId], j)
+  const pause = useMutation({
+    mutationFn: () => pauseTestCaseJob(jobId),
+    onSuccess: applyJob,
+    onError: (err) =>
+      toast.error('Could not pause', {
+        description: err instanceof Error ? err.message : 'Unknown error',
+      }),
+  })
+  const resume = useMutation({
+    mutationFn: () => resumeTestCaseJob(jobId),
+    onSuccess: (j) => {
+      applyJob(j)
+      queryClient.invalidateQueries({ queryKey: ['testcase-job', jobId] })
+    },
+    onError: (err) =>
+      toast.error('Could not resume', {
+        description: err instanceof Error ? err.message : 'Unknown error',
+      }),
+  })
+  const cancel = useMutation({
+    mutationFn: () => cancelTestCaseJob(jobId),
+    onSuccess: (j) => {
+      applyJob(j)
+      toast.info('Generation cancelled')
+    },
+    onError: (err) =>
+      toast.error('Could not cancel', {
+        description: err instanceof Error ? err.message : 'Unknown error',
+      }),
+  })
+  const controlPending = pause.isPending || resume.isPending || cancel.isPending
+
+  const title = job.items.length === 1 ? job.items[0].folder : `${job.items.length} tickets`
+  const summary = isRunning
+    ? `Generating ${doneCount}/${job.total}…`
+    : isPaused
+      ? `Paused · ${doneCount}/${job.total} done · ${pendingCount} left`
+      : job.status === 'cancelled'
+        ? `Cancelled · ${doneCount} generated`
+        : `${doneCount}/${job.items.length} succeeded`
+
+  return (
+    <Card className="overflow-hidden rounded-3xl border-border/60 shadow-none">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5 border-b border-border/60 bg-muted/30 px-4 py-2.5 text-sm font-medium">
+        {isRunning ? (
+          <Loader2 className="h-4 w-4 shrink-0 animate-spin text-primary" />
+        ) : isPaused ? (
+          <Pause className="h-4 w-4 shrink-0 text-amber-600" />
+        ) : job.status === 'cancelled' ? (
+          <Ban className="h-4 w-4 shrink-0 text-muted-foreground" />
+        ) : (
+          <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-600" />
+        )}
+        <span className="min-w-0 max-w-[16rem] truncate font-mono text-xs">{title}</span>
+        <span className="text-xs font-normal text-muted-foreground">{summary}</span>
+        <div className="ml-auto flex items-center gap-2">
+          {isRunning && (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => pause.mutate()}
+              disabled={controlPending}
+              className="rounded-full transition-all duration-200 active:scale-[0.98]"
+            >
+              <Pause className="h-3.5 w-3.5" />
+              Pause
+            </Button>
+          )}
+          {isPaused && (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => resume.mutate()}
+              disabled={controlPending}
+              className="rounded-full transition-all duration-200 active:scale-[0.98]"
+            >
+              <Play className="h-3.5 w-3.5" />
+              Resume
+            </Button>
+          )}
+          {isActive && (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => cancel.mutate()}
+              disabled={controlPending}
+              className="rounded-full text-destructive transition-all duration-200 hover:text-destructive active:scale-[0.98]"
+            >
+              <Ban className="h-3.5 w-3.5" />
+              Cancel
+            </Button>
+          )}
+        </div>
+      </div>
+
+      <ul className="divide-y">
+        {job.items.map((it) => (
+          <li key={it.folder} className="flex items-center gap-2.5 px-4 py-2 text-sm">
+            {it.status === 'done' ? (
+              <CheckCircle2 className="size-4 shrink-0 text-emerald-600" />
+            ) : it.status === 'error' ? (
+              <Info className="size-4 shrink-0 text-destructive" />
+            ) : it.status === 'running' ? (
+              <Loader2 className="size-4 shrink-0 animate-spin text-primary" />
+            ) : it.status === 'cancelled' ? (
+              <Ban className="size-4 shrink-0 text-muted-foreground" />
+            ) : (
+              <span className="size-4 shrink-0" aria-hidden />
+            )}
+            <span className="min-w-0 flex-1 truncate font-mono text-xs font-medium">
+              {it.folder}
+            </span>
+            {it.status === 'done' ? (
+              <button
+                type="button"
+                onClick={() => onPreview(it.folder)}
+                className="inline-flex shrink-0 items-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700 transition-colors hover:bg-emerald-100"
+              >
+                v{it.version}
+                <Eye className="size-3" />
+              </button>
+            ) : it.status === 'error' ? (
+              <span className="shrink-0 truncate text-xs text-destructive" title={it.error}>
+                {it.error}
+              </span>
+            ) : (
+              <span className="shrink-0 text-xs text-muted-foreground">
+                {it.status === 'running'
+                  ? 'Generating…'
+                  : it.status === 'cancelled'
+                    ? 'Cancelled'
+                    : 'Queued'}
+              </span>
+            )}
+          </li>
+        ))}
+      </ul>
+
+      {job.logs.length > 0 && (
+        <div className="border-t border-border/60 p-3">
+          <JobLogPanel logs={job.logs} running={isRunning} />
+        </div>
+      )}
+    </Card>
+  )
+}
+
 export default function TestCasePage() {
   const { activeProject, activeProjectId } = useProjects()
   const queryClient = useQueryClient()
@@ -1182,9 +1378,10 @@ export default function TestCasePage() {
     }
   }
   const modelInfo = TESTCASE_MODELS.find((m) => m.value === model) ?? TESTCASE_MODELS[1]
-  // The id of the background generation job we're tracking (server-side, survives
-  // reload). Initialized from the per-project stored id so a reload reconnects.
-  const [jobId, setJobId] = useState<string | null>(() => loadActiveJobId(activeProjectId))
+  // The background generation jobs we're tracking (server-side, survive reload). A
+  // project can run several at once, so this is a list — initialized from the stored
+  // ids so a reload reconnects to every still-running job.
+  const [jobIds, setJobIds] = useState<string[]>(() => loadActiveJobIds(activeProjectId))
   const { rules, addRule, updateRule, removeRule, resetRules } = useTestRules()
   // Reset everything when the active project changes (and reconnect to that
   // project's stored job, if any).
@@ -1200,7 +1397,7 @@ export default function TestCasePage() {
     setInstructions('')
     setAppUrls({})
     setGenOpen(false)
-    setJobId(loadActiveJobId(activeProjectId))
+    setJobIds(loadActiveJobIds(activeProjectId))
   }
 
   function toggleSelectTicket(name: string) {
@@ -1269,9 +1466,15 @@ export default function TestCasePage() {
         model,
       })
     },
-    onSuccess: ({ jobId: id }) => {
-      setJobId(id)
+    onSuccess: ({ jobId: id, job: started }) => {
+      setJobIds((prev) => (prev.includes(id) ? prev : [...prev, id]))
+      // Seed the poll cache so the new card renders immediately, before the first poll.
+      queryClient.setQueryData(['testcase-job', id], { job: started })
       setGenOpen(false)
+      // Clear the selection so the engineer can pick the next ticket and fire another
+      // generation right away (the previous one keeps running).
+      setSelectedFolders(new Set())
+      setAppUrls({})
       // Remember a used app URL to prefill next time (the first non-empty one).
       const firstUrl = [...selectedFolders]
         .map((f) => (appUrls[f] ?? '').trim())
@@ -1279,7 +1482,7 @@ export default function TestCasePage() {
       if (firstUrl) saveDefaultAppUrl(activeProjectId as string, firstUrl)
       // Persist so a reload reconnects, and so the global TestCaseJobWatcher will
       // announce completion even if we navigate away from this page.
-      saveActiveJobId(activeProjectId as string, id)
+      addActiveJobId(activeProjectId as string, id)
     },
     onError: (err) =>
       toast.error('Could not start generation', {
@@ -1287,63 +1490,38 @@ export default function TestCasePage() {
       }),
   })
 
-  // Poll the tracked job until it finishes. Stops polling once done.
-  const jobQuery = useQuery({
-    queryKey: ['testcase-job', jobId],
-    queryFn: () => getTestCaseJob(jobId as string),
-    enabled: !!jobId,
-    retry: false,
-    refetchInterval: (query) => {
-      const j = query.state.data?.job
-      return j && j.status === 'running' ? 1500 : false
-    },
+  // Poll every tracked job until it finishes. Each query stops polling once its job
+  // leaves `running`. Completion (toast + bell notification + cache invalidation +
+  // dropping the stored id) is handled globally by <TestCaseJobWatcher/>, so it
+  // fires even when this page isn't mounted; here we only render live progress.
+  const jobQueries = useQueries({
+    queries: jobIds.map((id) => ({
+      queryKey: ['testcase-job', id],
+      queryFn: () => getTestCaseJob(id),
+      retry: false,
+      refetchInterval: (query: { state: { data?: { job?: TestCaseJob } } }) => {
+        const j = query.state.data?.job
+        return j && j.status === 'running' ? 1500 : false
+      },
+    })),
   })
-  const job = jobQuery.data?.job ?? null
-  const isRunning = job?.status === 'running'
-  const isPaused = job?.status === 'paused'
-  const isActive = isRunning || isPaused // a job is in play (running or pausable/resumable)
-  // Completion (toast + bell notification + cache invalidation + clearing the
-  // stored job id) is handled globally by <TestCaseJobWatcher/>, so it fires even
-  // when this page isn't mounted. This page just renders live progress/results.
 
-  // Pause / resume / cancel the tracked job. Each writes the returned job straight
-  // into the poll cache so the UI (and the refetchInterval) reacts immediately —
-  // resuming restarts polling, pausing/cancelling stops it.
-  const applyJob = (j: { job: typeof job }) => {
-    if (jobId) queryClient.setQueryData(['testcase-job', jobId], j)
-  }
-  const pause = useMutation({
-    mutationFn: () => pauseTestCaseJob(jobId as string),
-    onSuccess: applyJob,
-    onError: (err) =>
-      toast.error('Could not pause', {
-        description: err instanceof Error ? err.message : 'Unknown error',
-      }),
-  })
-  const resume = useMutation({
-    mutationFn: () => resumeTestCaseJob(jobId as string),
-    onSuccess: (j) => {
-      applyJob(j)
-      // Re-arm polling immediately (don't wait for the next idle tick).
-      queryClient.invalidateQueries({ queryKey: ['testcase-job', jobId] })
-    },
-    onError: (err) =>
-      toast.error('Could not resume', {
-        description: err instanceof Error ? err.message : 'Unknown error',
-      }),
-  })
-  const cancel = useMutation({
-    mutationFn: () => cancelTestCaseJob(jobId as string),
-    onSuccess: (j) => {
-      applyJob(j)
-      toast.info('Generation cancelled')
-    },
-    onError: (err) =>
-      toast.error('Could not cancel', {
-        description: err instanceof Error ? err.message : 'Unknown error',
-      }),
-  })
-  const controlPending = pause.isPending || resume.isPending || cancel.isPending
+  // Drop ids whose job is gone (pruned / server restarted) so we stop polling them.
+  useEffect(() => {
+    const dead = jobIds.filter((_id, i) => jobQueries[i]?.isError)
+    if (!dead.length) return
+    setJobIds((prev) => prev.filter((id) => !dead.includes(id)))
+    if (activeProjectId) for (const id of dead) removeActiveJobId(activeProjectId, id)
+  }, [jobQueries, jobIds, activeProjectId])
+
+  // Newest job first. Pair each job with its id so the card keys stay stable.
+  const jobs = jobIds
+    .map((_id, i) => jobQueries[i]?.data?.job)
+    .filter((j): j is TestCaseJob => !!j)
+    .reverse()
+  const runningCount = jobs.filter((j) => j.status === 'running').length
+  // Cap concurrent *running* jobs — pausing one frees a slot to start another.
+  const atCap = runningCount >= MAX_PARALLEL_JOBS
 
   function onPickTemplate(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0]
@@ -1766,7 +1944,7 @@ export default function TestCasePage() {
             <Sparkles className="h-4 w-4 text-primary" />
             Model
           </div>
-          <Select value={model} onValueChange={chooseModel} disabled={isActive || start.isPending}>
+          <Select value={model} onValueChange={chooseModel} disabled={start.isPending}>
             <SelectTrigger size="sm" className="h-9 w-auto min-w-[10rem] gap-2 rounded-full" aria-label="Test-case generation model">
               <SelectValue aria-label={modelInfo.label}>
                 <span className="text-xs font-medium">{modelInfo.label}</span>
@@ -1793,18 +1971,13 @@ export default function TestCasePage() {
         <div className="flex gap-2">
           <Button
             onClick={() => setGenOpen(true)}
-            disabled={selectedFolders.size === 0 || isActive || start.isPending}
+            disabled={selectedFolders.size === 0 || start.isPending || atCap}
             className="flex-1 justify-center rounded-full transition-all duration-200 active:scale-[0.98]"
           >
-            {isRunning || start.isPending ? (
+            {start.isPending ? (
               <>
                 <Loader2 className="h-4 w-4 animate-spin" />
-                {isRunning && job ? `Generating… ${job.doneCount}/${job.total}` : 'Starting…'}
-              </>
-            ) : isPaused ? (
-              <>
-                <Pause className="h-4 w-4" />
-                Paused — {job ? job.items.filter((i) => i.status === 'pending').length : 0} remaining
+                Starting…
               </>
             ) : (
               <>
@@ -1814,118 +1987,25 @@ export default function TestCasePage() {
               </>
             )}
           </Button>
-
-          {isRunning && (
-            <Button
-              type="button"
-              variant="outline"
-              onClick={() => pause.mutate()}
-              disabled={controlPending}
-              className="shrink-0 rounded-full transition-all duration-200 active:scale-[0.98]"
-            >
-              <Pause className="h-4 w-4" />
-              Pause
-            </Button>
-          )}
-          {isPaused && (
-            <Button
-              type="button"
-              variant="outline"
-              onClick={() => resume.mutate()}
-              disabled={controlPending}
-              className="shrink-0 rounded-full transition-all duration-200 active:scale-[0.98]"
-            >
-              <Play className="h-4 w-4" />
-              Resume
-            </Button>
-          )}
-          {isActive && (
-            <Button
-              type="button"
-              variant="outline"
-              onClick={() => cancel.mutate()}
-              disabled={controlPending}
-              className="shrink-0 rounded-full text-destructive transition-all duration-200 hover:text-destructive active:scale-[0.98]"
-            >
-              <Ban className="h-4 w-4" />
-              Cancel
-            </Button>
-          )}
         </div>
 
-        {isActive && (
-          <p className="flex items-start gap-1.5 text-center text-xs text-muted-foreground">
-            <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-            {isPaused
-              ? 'Paused on the server — Resume to finish the remaining tickets, or Cancel to stop.'
-              : 'Running on the server — you can leave this page or reload; it keeps generating and you’ll see the results when you come back. Pause to stop after the current ticket.'}
-          </p>
-        )}
+        <p className="flex items-start gap-1.5 text-xs text-muted-foreground">
+          <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+          {atCap
+            ? `You can run up to ${MAX_PARALLEL_JOBS} generations at once — pause, cancel, or wait for one below to finish before starting another.`
+            : runningCount > 0
+              ? `${runningCount} generation${runningCount === 1 ? '' : 's'} running on the server. Pick more tickets and Generate to run another in parallel (up to ${MAX_PARALLEL_JOBS}). You can leave this page — they keep going.`
+              : `Each generation runs on the server, so you can start one, pick more tickets, and Generate again to run up to ${MAX_PARALLEL_JOBS} in parallel.`}
+        </p>
 
-        {/* Per-ticket results — hidden while actively generating (the button + live
-            logs already show progress); shown once the job is paused/cancelled/done. */}
-        {job && job.items.length > 0 && !isRunning && (
-          <Card className="overflow-hidden rounded-3xl border-border/60 shadow-none">
-            <div className="flex items-center gap-2 border-b border-border/60 bg-muted/30 px-4 py-2.5 text-sm font-medium">
-              <ClipboardList className="h-4 w-4 text-muted-foreground" />
-              Results
-              <span className="text-xs font-normal text-muted-foreground">
-                {job.status === 'running'
-                  ? `Generating ${job.doneCount}/${job.total}…`
-                  : job.status === 'paused'
-                    ? `Paused · ${job.items.filter((i) => i.status === 'done').length}/${job.total} done`
-                    : job.status === 'cancelled'
-                      ? `Cancelled · ${job.items.filter((i) => i.status === 'done').length} generated`
-                      : `${job.items.filter((i) => i.status === 'done').length}/${job.items.length} succeeded`}
-              </span>
-            </div>
-            <ul className="divide-y">
-              {job.items.map((it) => (
-                <li key={it.folder} className="flex items-center gap-2.5 px-4 py-2 text-sm">
-                  {it.status === 'done' ? (
-                    <CheckCircle2 className="size-4 shrink-0 text-emerald-600" />
-                  ) : it.status === 'error' ? (
-                    <Info className="size-4 shrink-0 text-destructive" />
-                  ) : it.status === 'running' ? (
-                    <Loader2 className="size-4 shrink-0 animate-spin text-primary" />
-                  ) : it.status === 'cancelled' ? (
-                    <Ban className="size-4 shrink-0 text-muted-foreground" />
-                  ) : (
-                    <span className="size-4 shrink-0" aria-hidden />
-                  )}
-                  <span className="min-w-0 flex-1 truncate font-mono text-xs font-medium">
-                    {it.folder}
-                  </span>
-                  {it.status === 'done' ? (
-                    <button
-                      type="button"
-                      onClick={() => setPreviewFolder(it.folder)}
-                      className="inline-flex shrink-0 items-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700 transition-colors hover:bg-emerald-100"
-                    >
-                      v{it.version}
-                      <Eye className="size-3" />
-                    </button>
-                  ) : it.status === 'error' ? (
-                    <span className="shrink-0 truncate text-xs text-destructive" title={it.error}>
-                      {it.error}
-                    </span>
-                  ) : (
-                    <span className="shrink-0 text-xs text-muted-foreground">
-                      {it.status === 'running'
-                        ? 'Generating…'
-                        : it.status === 'cancelled'
-                          ? 'Cancelled'
-                          : 'Queued'}
-                    </span>
-                  )}
-                </li>
-              ))}
-            </ul>
-          </Card>
+        {/* One card per tracked job (newest first) — progress, controls, results, logs. */}
+        {jobs.length > 0 && (
+          <div className="space-y-3">
+            {jobs.map((j) => (
+              <JobCard key={j.id} job={j} onPreview={setPreviewFolder} />
+            ))}
+          </div>
         )}
-
-        {/* Realtime generation logs (streamed from the server-side job). */}
-        {job && job.logs.length > 0 && <JobLogPanel logs={job.logs} running={isRunning} />}
       </div>
 
       <GenerateDialog

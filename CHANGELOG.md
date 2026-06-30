@@ -3,6 +3,72 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.8.0 — 2026-07-01
+
+**Mobile testing, portable projects & faster everyday flows**
+
+### Added
+
+- **Run QC on a mobile device.** The Run page now asks *where* to run: **Web** (desktop
+  browser, as before), **Web on mobile** (your App URL opened in a real device or simulator's
+  mobile browser), or **App on device** (a native iOS/Android app already installed on a
+  connected device). Mobile runs drive a booted device through the new **Mobile** MCP server
+  and capture mobile screenshots as evidence. "App on device" needs no App URL.
+- **One-click Mobile MCP setup.** The MCP page has a new **Mobile** server you can connect with
+  a single click (no token). Its **functional test** auto-detects connected devices/simulators,
+  lets you pick one, and then actually drives it to confirm it works — and reads "works, but no
+  device is booted" as a warning, not a failure.
+- **Export and import a whole project as a `.zip`.** Each project card has an **Export** button
+  that bundles just the QC setup — `CLAUDE.md`, skills, `.mcp.json`, and the `testing/` folder
+  (never `node_modules`/`.git`) — into one file. **Import project** re-creates a project from
+  such a zip on another machine: pick the file, a name, and a destination folder.
+- **Delete a finished run.** Run detail and History now have a **Delete** button that removes a
+  run's history entry, event log, and its entire on-disk output folder (report, issues,
+  screenshots) after a clear confirmation. Active runs can't be deleted until they finish.
+- **Set a default skill per project.** On the Skills page, star a skill as the project's
+  **default** — it's pinned to the top and auto-selected on the Run page for new runs.
+- **Run several test-case generations at once.** Start a generation, then immediately pick more
+  tickets and start another — up to 3 jobs run in parallel, each with its own progress, live
+  log, and Pause/Resume/Cancel. A browser reload reconnects to all of them.
+- **Clickable evidence in reports.** Screenshot and file names that appear in a report's tables
+  are now chips — click one to open the image/file in a popup without leaving the Report tab.
+- **"Configure MCP" prompts.** The Run and Design Check pages now warn (with a one-click link)
+  when the project is missing a server those features need, and the warning clears the moment
+  you add it. Each MCP server card also gained an info tooltip explaining what it's for.
+- **Build the Overview from a document.** Upload (or drag in) a Word/PDF/Markdown/spreadsheet
+  file on the Overview page and it's converted to Markdown in your browser for review before you
+  save it as the project intro.
+
+### Changed
+
+- **History is grouped by ticket.** Runs now fold into collapsible ticket cards showing the real
+  ticket title, a link back to ClickUp, an aggregate pass/fail bar, and a run count — with
+  Expand all / Collapse all. Much easier to find a ticket's runs than the old flat table.
+- **Cleaner Run page.** The form is now three clear steps (What to test → Where to run →
+  Options), with skill/model/instructions folded into a collapsible Options section. The model
+  default is now **Sonnet** (the all-round pick; Opus for tricky tickets, Haiku for small ones),
+  and the chosen mode is kept in the URL so a run link is shareable and survives reload.
+- **Redesigned run result.** The result summary leads with a pass-rate donut and a clear
+  "Ready for sign-off / Needs attention / Review required" headline; each tab is now linkable
+  (back/forward and bookmarks work).
+- **Terminal drops you straight into Claude.** Connecting on the Terminal page now launches a
+  `claude` session in the project folder instead of a bare shell, and the terminal fills the
+  window. The "Continue session" panel on a run starts collapsed.
+- **Navigation tidy-up.** New app logo, the home page moved to `/qc-run`, the old "Settings"
+  sidebar item is now **Templates**, and project/model settings live under a new **Settings**
+  entry. First launch with no projects shows a "Create a project to get started" screen.
+- **Richer new-project scaffold.** Brand-new projects get a fill-in-the-blanks `CLAUDE.md`
+  (Overview / Architecture / How to test / Conventions / Safety) instead of a near-empty file.
+
+### Fixed
+
+- **Claude usage no longer stalls or flickers.** The model-usage reading is cached and refreshed
+  in the background, falling back to the last good value (marked stale) instead of re-spawning a
+  slow process on every view.
+- **Report tables stay readable.** Wide report tables now keep fixed columns and scroll
+  horizontally instead of collapsing to one character per line or running off-screen.
+- **Native-app runs no longer demand an App URL** and show a readable label in history.
+
 ## 0.7.0 — 2026-06-30
 
 **Access keys, instant project setup & a cleaner look**

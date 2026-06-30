@@ -21,6 +21,7 @@ import {
   Plus,
   Save,
   Search,
+  Star,
   Trash2,
   Wrench,
 } from 'lucide-react'
@@ -50,6 +51,7 @@ import {
   listSkills,
   openSkillsFolder,
   saveSkillFile,
+  updateProject,
   updateSkill,
   uploadSkill,
 } from '@/lib/api'
@@ -861,6 +863,64 @@ function DeleteSkillDialog({
   )
 }
 
+/**
+ * Toggle whether this skill is the project's default QC skill — the one
+ * pre-selected on the Launch QC Run page. Persisted on the project
+ * (`defaultSkill`); clicking the current default clears it.
+ */
+function DefaultSkillButton({
+  skillName,
+  projectId,
+  isDefault,
+}: {
+  skillName: string
+  projectId: string
+  isDefault: boolean
+}) {
+  const queryClient = useQueryClient()
+  const mutation = useMutation({
+    mutationFn: () => updateProject(projectId, { defaultSkill: isDefault ? '' : skillName }),
+    onSuccess: () => {
+      toast.success(isDefault ? 'Default skill cleared' : 'Default skill set', {
+        description: isDefault
+          ? `${skillName} is no longer pre-selected for QC runs.`
+          : `${skillName} is now auto-selected on the Launch QC Run page.`,
+      })
+      queryClient.invalidateQueries({ queryKey: ['projects'] })
+    },
+    onError: (err) =>
+      toast.error('Failed to update default skill', {
+        description: err instanceof Error ? err.message : 'Unknown error',
+      }),
+  })
+  return (
+    <Button
+      variant="ghost"
+      size="sm"
+      onClick={() => mutation.mutate()}
+      disabled={mutation.isPending}
+      title={
+        isDefault
+          ? 'This skill is auto-selected for new QC runs — click to clear'
+          : 'Auto-select this skill on the Launch QC Run page'
+      }
+      className={cn(
+        'h-7 shrink-0 gap-1 px-2 text-[11px] active:scale-[0.98]',
+        isDefault
+          ? 'text-amber-600 hover:text-amber-700'
+          : 'text-muted-foreground hover:text-foreground',
+      )}
+    >
+      {mutation.isPending ? (
+        <Loader2 className="size-3.5 animate-spin" />
+      ) : (
+        <Star className={cn('size-3.5', isDefault && 'fill-amber-400 text-amber-500')} />
+      )}
+      {isDefault ? 'Default skill' : 'Set as default'}
+    </Button>
+  )
+}
+
 export default function SkillsPage() {
   const { activeProjectId, activeProject } = useProjects()
   const { data: skills, isLoading } = useQuery({
@@ -871,16 +931,26 @@ export default function SkillsPage() {
   const [selected, setSelected] = useState<string | null>(null)
   const [query, setQuery] = useState('')
 
-  const active = selected ?? skills?.[0]?.name ?? null
-  const activeSkill = skills?.find((s) => s.name === active) ?? null
+  // Pin the project's default skill to the top of the list (and select it first).
+  const defaultSkill = activeProject?.defaultSkill
+  const sortedSkills = skills
+    ? [...skills].sort((a, b) => {
+        if (a.name === defaultSkill) return -1
+        if (b.name === defaultSkill) return 1
+        return 0
+      })
+    : skills
+
+  const active = selected ?? sortedSkills?.[0]?.name ?? null
+  const activeSkill = sortedSkills?.find((s) => s.name === active) ?? null
   const q = query.trim().toLowerCase()
   const filtered = q
-    ? skills?.filter(
+    ? sortedSkills?.filter(
         (s) =>
           s.name.toLowerCase().includes(q) ||
           s.description.toLowerCase().includes(q),
       )
-    : skills
+    : sortedSkills
 
   if (!activeProjectId) {
     return (
@@ -981,18 +1051,18 @@ export default function SkillsPage() {
       {/* IDE-style workspace: one panel, list rail + editor pane */}
       <div className="flex min-h-[34rem] flex-col overflow-hidden rounded-3xl border border-border/60 bg-card shadow-none lg:h-[calc(100svh-13rem)] lg:flex-row">
         {/* ── skills rail ── */}
-        <aside className="flex w-full shrink-0 flex-col border-b lg:w-72 lg:border-b-0 lg:border-r">
-          <div className="flex items-center justify-between border-b px-4 py-3">
-            <span className="text-sm font-semibold">Available skills</span>
+        <aside className="flex w-full shrink-0 flex-col border-b border-border/60 lg:w-72 lg:border-b-0 lg:border-r">
+          <div className="flex items-center justify-between border-b border-border/60 px-4 py-3">
+            <span className="text-sm font-semibold tracking-tight">Available skills</span>
             {skills && (
-              <span className="rounded-full bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground">
+              <span className="rounded-full bg-muted px-2 py-0.5 text-xs font-medium tabular-nums text-muted-foreground">
                 {skills.length}
               </span>
             )}
           </div>
 
           {!isLoading && skills && skills.length > 0 && (
-            <div className="border-b p-2.5">
+            <div className="border-b border-border/60 p-2.5">
               <div className="group relative">
                 <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground transition-colors group-focus-within:text-primary" />
                 <Input
@@ -1031,6 +1101,7 @@ export default function SkillsPage() {
                 <ul className="space-y-1 p-2.5">
                   {filtered?.map((s) => {
                     const isActive = active === s.name
+                    const isDefault = activeProject?.defaultSkill === s.name
                     const fileCount = s.files.length
                     return (
                       <li key={s.name}>
@@ -1041,14 +1112,20 @@ export default function SkillsPage() {
                             'group relative w-full overflow-hidden rounded-xl border px-3 py-2.5 text-left transition-all duration-200 active:scale-[0.99]',
                             isActive
                               ? 'border-primary/20 bg-primary/10 ring-1 ring-primary/40'
-                              : 'border-transparent hover:-translate-y-0.5 hover:bg-muted/60',
+                              : isDefault
+                                ? 'border-amber-200/70 bg-amber-50/40 hover:-translate-y-0.5 hover:bg-amber-50/70'
+                                : 'border-transparent hover:-translate-y-0.5 hover:bg-muted/60',
                           )}
                         >
                           {/* left status accent rail */}
                           <span
                             className={cn(
                               'absolute inset-y-0 left-0 w-0.5 transition-colors duration-200',
-                              isActive ? 'bg-primary' : 'bg-transparent group-hover:bg-border',
+                              isActive
+                                ? 'bg-primary'
+                                : isDefault
+                                  ? 'bg-amber-400'
+                                  : 'bg-transparent group-hover:bg-border',
                             )}
                             aria-hidden
                           />
@@ -1062,6 +1139,15 @@ export default function SkillsPage() {
                             <span className="truncate font-mono text-sm font-medium">
                               {s.name}
                             </span>
+                            {isDefault && (
+                              <span
+                                title="Default skill — auto-selected for QC runs"
+                                className="ml-auto flex shrink-0 items-center gap-1 rounded-full bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-700"
+                              >
+                                <Star className="size-2.5 fill-amber-400 text-amber-500" />
+                                Default
+                              </span>
+                            )}
                           </div>
                           <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">
                             {s.description}
@@ -1084,10 +1170,48 @@ export default function SkillsPage() {
         <section className="flex min-h-[24rem] min-w-0 flex-1 flex-col bg-muted/20 lg:min-h-0">
           {active ? (
             <>
-              <div className="flex items-center gap-2 border-b bg-card px-4 py-2.5">
-                <Wrench className="size-4 shrink-0 text-primary" />
+              <div className="flex flex-wrap items-center gap-3 border-b border-border/60 bg-card px-4 py-3">
+                <span className="flex size-10 shrink-0 items-center justify-center rounded-2xl bg-foreground text-background">
+                  <Wrench className="size-4" />
+                </span>
+                <div className="min-w-0 flex-1 leading-tight">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="truncate font-mono text-sm font-semibold tracking-tight">
+                      {active}
+                    </span>
+                    {activeProject?.defaultSkill === active && (
+                      <span
+                        title="Default skill — auto-selected for QC runs"
+                        className="flex shrink-0 items-center gap-1 rounded-full bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-700"
+                      >
+                        <Star className="size-2.5 fill-amber-400 text-amber-500" />
+                        Default
+                      </span>
+                    )}
+                  </div>
+                  {activeSkill && (
+                    <div className="mt-0.5 flex items-center gap-2 text-xs text-muted-foreground">
+                      {activeSkill.description ? (
+                        <span className="truncate">{activeSkill.description}</span>
+                      ) : (
+                        <span className="italic text-muted-foreground/70">No description</span>
+                      )}
+                      <span className="shrink-0 text-muted-foreground/40">·</span>
+                      <span className="flex shrink-0 items-center gap-1">
+                        <FileCode className="size-3" />
+                        {activeSkill.files.length}{' '}
+                        {activeSkill.files.length === 1 ? 'file' : 'files'}
+                      </span>
+                    </div>
+                  )}
+                </div>
                 {activeSkill && (
                   <div className="ml-auto flex items-center gap-1">
+                    <DefaultSkillButton
+                      skillName={activeSkill.name}
+                      projectId={activeProjectId}
+                      isDefault={activeProject?.defaultSkill === activeSkill.name}
+                    />
                     <EditSkillDialog
                       skill={activeSkill}
                       projectId={activeProjectId}

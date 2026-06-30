@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
@@ -10,6 +10,8 @@ import {
   Clock,
   Copy,
   Cpu,
+  Download,
+  FileArchive,
   Gauge,
   FolderGit2,
   FolderOpen,
@@ -27,6 +29,7 @@ import {
   Sparkles,
   Terminal,
   Trash2,
+  Upload,
   Wand2,
   X,
 } from 'lucide-react'
@@ -60,6 +63,8 @@ import {
   claudeUsage,
   createProject,
   deleteProject,
+  exportProject,
+  importProject,
   initProject,
   listProjects,
   pickFolder,
@@ -322,6 +327,23 @@ function ProjectCard({ project }: { project: Project }) {
     }
   }
 
+  const [exporting, setExporting] = useState(false)
+  async function doExport() {
+    setExporting(true)
+    try {
+      await exportProject(project.id, project.name)
+      toast.success('Project exported', {
+        description: `Downloaded ${project.name}.zip (CLAUDE.md, skills, MCP & testing).`,
+      })
+    } catch (err) {
+      toast.error('Failed to export project', {
+        description: err instanceof Error ? err.message : 'Unknown error',
+      })
+    } finally {
+      setExporting(false)
+    }
+  }
+
   return (
     <Card
       className={cn(
@@ -512,6 +534,21 @@ function ProjectCard({ project }: { project: Project }) {
                   <PinOff className="h-3.5 w-3.5" />
                 ) : (
                   <Pin className="h-3.5 w-3.5" />
+                )}
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={doExport}
+                disabled={exporting || notFound}
+                aria-label="Export project as .zip"
+                title={notFound ? 'Folder not found on disk' : 'Export as .zip'}
+                className="size-8 rounded-full text-muted-foreground transition-all duration-200 hover:text-foreground active:scale-[0.98] disabled:opacity-50"
+              >
+                {exporting ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Download className="h-3.5 w-3.5" />
                 )}
               </Button>
               <Button
@@ -846,8 +883,20 @@ function AddProjectForm({ onDone }: { onDone: () => void }) {
   )
 }
 
-function AddProjectDialog() {
+function AddProjectDialog({ watchAddParam = false }: { watchAddParam?: boolean }) {
   const [open, setOpen] = useState(false)
+  const [searchParams, setSearchParams] = useSearchParams()
+
+  // Allow other surfaces (e.g. the sidebar project dropdown) to deep-link here and
+  // pop the dialog open via ?add=1 — consume the param so a reload doesn't re-open it.
+  useEffect(() => {
+    if (!watchAddParam || !searchParams.get('add')) return
+    setOpen(true)
+    const next = new URLSearchParams(searchParams)
+    next.delete('add')
+    setSearchParams(next, { replace: true })
+  }, [watchAddParam, searchParams, setSearchParams])
+
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
@@ -871,6 +920,219 @@ function AddProjectDialog() {
           </div>
         </DialogHeader>
         <AddProjectForm onDone={() => setOpen(false)} />
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+/** Read a File into a base64 string (without the `data:…;base64,` prefix). */
+function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => {
+      const result = reader.result as string
+      const comma = result.indexOf(',')
+      resolve(comma >= 0 ? result.slice(comma + 1) : result)
+    }
+    reader.onerror = () => reject(reader.error ?? new Error('Could not read file'))
+    reader.readAsDataURL(file)
+  })
+}
+
+/** Body of the "Import project" dialog — pick a .zip, a parent folder & name. */
+function ImportProjectForm({ onDone }: { onDone: () => void }) {
+  const queryClient = useQueryClient()
+  const { refetch: refetchContext } = useProjects()
+  const [file, setFile] = useState<File | null>(null)
+  const [name, setName] = useState('')
+  const [parentPath, setParentPath] = useState('')
+
+  const mutation = useMutation({
+    mutationFn: async () => {
+      const zipBase64 = await fileToBase64(file!)
+      return importProject({ name: name.trim(), parentPath: parentPath.trim(), zipBase64 })
+    },
+    onSuccess: (p) => {
+      toast.success('Project imported', { description: `${p.name} created at ${p.rootPath}.` })
+      setFile(null)
+      setName('')
+      setParentPath('')
+      queryClient.invalidateQueries({ queryKey: ['projects'] })
+      refetchContext()
+      onDone()
+    },
+    onError: (err) =>
+      toast.error('Failed to import project', {
+        description: err instanceof Error ? err.message : 'Unknown error',
+      }),
+  })
+
+  function chooseFile(f: File | null) {
+    setFile(f)
+    if (f && !name.trim()) setName(f.name.replace(/\.zip$/i, ''))
+  }
+
+  const trimmedParent = parentPath.trim().replace(/[/\\]+$/, '')
+  const destSep = trimmedParent.includes('\\') && !trimmedParent.includes('/') ? '\\' : '/'
+  const destPreview = trimmedParent
+    ? `${trimmedParent}${destSep}${safeFolderName(name) || '…'}`
+    : ''
+  const canSubmit = !!file && name.trim() && parentPath.trim() && !mutation.isPending
+
+  return (
+    <form
+      onSubmit={(e) => {
+        e.preventDefault()
+        if (canSubmit) mutation.mutate()
+      }}
+      className="space-y-5"
+    >
+      {/* .zip picker */}
+      <div className="space-y-2">
+        <Label className="flex items-center gap-1.5">
+          <FileArchive className="size-3.5 text-muted-foreground" />
+          Exported .zip
+        </Label>
+        <label
+          className={cn(
+            'flex cursor-pointer items-center gap-3 rounded-xl border-2 border-dashed px-4 py-4 text-left transition-colors',
+            file
+              ? 'border-primary/40 bg-primary/5'
+              : 'border-border hover:border-primary/40 hover:bg-muted/40',
+          )}
+        >
+          <span
+            className={cn(
+              'flex size-10 shrink-0 items-center justify-center rounded-xl transition-colors',
+              file ? 'bg-primary/15 text-primary' : 'bg-muted text-foreground',
+            )}
+          >
+            <FileArchive className="size-5" />
+          </span>
+          <span className="min-w-0 flex-1">
+            <span className="block truncate text-sm font-medium">
+              {file ? file.name : 'Choose a project .zip…'}
+            </span>
+            <span className="block text-xs text-muted-foreground">
+              {file
+                ? `${(file.size / 1024 / 1024).toFixed(2)} MB — click to replace`
+                : 'A file exported with the Export button on a project card'}
+            </span>
+          </span>
+          <input
+            type="file"
+            accept=".zip,application/zip"
+            className="sr-only"
+            onChange={(e) => chooseFile(e.target.files?.[0] ?? null)}
+          />
+        </label>
+      </div>
+
+      {/* name */}
+      <div className="space-y-2">
+        <Label htmlFor="import-project-name" className="flex items-center gap-1.5">
+          <FolderGit2 className="size-3.5 text-muted-foreground" />
+          Name
+        </Label>
+        <div className="group relative">
+          <FolderGit2 className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground transition-colors group-focus-within:text-primary" />
+          <Input
+            id="import-project-name"
+            placeholder="My App"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            className="h-11 pl-9 shadow-xs transition-shadow focus-visible:shadow-sm"
+          />
+        </div>
+      </div>
+
+      {/* destination parent folder */}
+      <div className="space-y-2">
+        <Label htmlFor="import-project-path" className="flex items-center gap-1.5">
+          <FolderOpen className="size-3.5 text-muted-foreground" />
+          Extract into
+        </Label>
+        <div className="flex gap-2">
+          <div className="group relative flex-1">
+            <FolderOpen className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground transition-colors group-focus-within:text-primary" />
+            <Input
+              id="import-project-path"
+              placeholder="/Users/you/code"
+              value={parentPath}
+              onChange={(e) => setParentPath(e.target.value)}
+              className="h-11 pl-9 font-mono text-sm shadow-xs transition-shadow focus-visible:shadow-sm"
+            />
+          </div>
+          <BrowseButton onPick={setParentPath} />
+        </div>
+        {destPreview ? (
+          <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            <ArrowRight className="size-3.5" />
+            Creates <span className="font-mono text-foreground">{destPreview}</span>
+          </p>
+        ) : (
+          <p className="text-xs text-muted-foreground">
+            The project folder is created inside this folder.
+          </p>
+        )}
+      </div>
+
+      <div className="flex flex-col gap-3 border-t pt-4 sm:flex-row sm:items-center sm:justify-between">
+        <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+          <Info className="size-3.5" />
+          Restores CLAUDE.md, skills, .mcp.json &amp; testing/ from the zip.
+        </p>
+        <Button
+          type="submit"
+          disabled={!canSubmit}
+          className="group h-11 rounded-full px-6 text-sm font-semibold shadow-none transition-all duration-200 hover:shadow-sm active:scale-[0.98]"
+        >
+          {mutation.isPending ? (
+            <>
+              <Loader2 className="size-4 animate-spin" />
+              Importing…
+            </>
+          ) : (
+            <>
+              <Upload className="size-4" />
+              Import project
+              <ArrowRight className="size-4 transition-transform group-hover:translate-x-0.5" />
+            </>
+          )}
+        </Button>
+      </div>
+    </form>
+  )
+}
+
+function ImportProjectDialog() {
+  const [open, setOpen] = useState(false)
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger asChild>
+        <Button
+          variant="outline"
+          className="h-11 shrink-0 rounded-full px-5 font-semibold shadow-none transition-all duration-200 hover:shadow-sm active:scale-[0.98]"
+        >
+          <Upload className="size-4" />
+          Import
+        </Button>
+      </DialogTrigger>
+      <DialogContent className="sm:max-w-2xl">
+        <DialogHeader>
+          <div className="flex items-start gap-3">
+            <span className="flex size-10 shrink-0 items-center justify-center rounded-2xl bg-foreground text-background">
+              <FileArchive className="size-5" />
+            </span>
+            <div className="space-y-1 text-left">
+              <DialogTitle>Import project</DialogTitle>
+              <DialogDescription>
+                Re-create a project from a .zip exported by QC Portal.
+              </DialogDescription>
+            </div>
+          </div>
+        </DialogHeader>
+        <ImportProjectForm onDone={() => setOpen(false)} />
       </DialogContent>
     </Dialog>
   )
@@ -908,7 +1170,11 @@ function ClaudeUsageCard() {
   const { data, isLoading, isError, refetch, isFetching } = useQuery({
     queryKey: ['claude-usage'],
     queryFn: claudeUsage,
-    refetchInterval: 60_000,
+    // The server caches /usage for 10 minutes; match it so navigating back to
+    // this tab serves the cache instead of re-spawning a `claude -p` read.
+    refetchInterval: 10 * 60_000,
+    staleTime: 10 * 60_000,
+    refetchOnMount: false,
   })
 
   return (
@@ -1398,7 +1664,10 @@ export default function ProjectsPage() {
                   Add repo folders, choose the active workspace, and track setup readiness.
                 </p>
               </div>
-              <AddProjectDialog />
+              <div className="flex shrink-0 items-center gap-2">
+                <ImportProjectDialog />
+                <AddProjectDialog watchAddParam />
+              </div>
             </div>
 
             {hasProjects && (
@@ -1438,8 +1707,8 @@ export default function ProjectsPage() {
           </section>
 
           {isLoading && (
-            <div className="grid gap-4">
-              {Array.from({ length: 4 }).map((_, i) => (
+            <div className="grid gap-3 sm:grid-cols-2 2xl:grid-cols-3">
+              {Array.from({ length: 6 }).map((_, i) => (
                 <ProjectCardSkeleton key={i} />
               ))}
             </div>
@@ -1453,7 +1722,7 @@ export default function ProjectsPage() {
           )}
 
           {hasProjects && filtered.length > 0 && (
-            <div className="grid gap-4">
+            <div className="grid gap-3 sm:grid-cols-2 2xl:grid-cols-3">
               {filtered.map((p) => (
                 <ProjectCard key={p.id} project={p} />
               ))}
@@ -1485,10 +1754,13 @@ export default function ProjectsPage() {
               <div className="space-y-1">
                 <h2 className="text-base font-medium tracking-tight">No projects yet</h2>
                 <p className="mx-auto max-w-sm text-sm text-muted-foreground">
-                  Register your first repo folder to start running QC against it.
+                  Register your first repo folder, or import one from a .zip.
                 </p>
               </div>
-              <AddProjectDialog />
+              <div className="flex items-center gap-2">
+                <ImportProjectDialog />
+                <AddProjectDialog />
+              </div>
             </div>
           )}
         </TabsContent>

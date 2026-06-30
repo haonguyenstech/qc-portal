@@ -2,6 +2,11 @@ import { useEffect } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { getTestCaseJob } from '@/lib/api'
+import {
+  ACTIVE_JOB_PREFIX,
+  loadActiveJobIds,
+  removeActiveJobId,
+} from '@/lib/activeTestcaseJobs'
 import type { Project } from '@/lib/types'
 import { useNotifications } from '@/lib/notifications'
 
@@ -11,10 +16,10 @@ import { useNotifications } from '@/lib/notifications'
 // away from /testcases, came back (remounting that page), or reloaded mid-job.
 //
 // Active jobs are discovered from the per-project keys TestCasePage writes:
-//   qc.testcaseJob.<projectId> = <jobId>
-// On completion (or if the job is gone) we clear that key so it isn't re-watched.
+//   qc.testcaseJob.<projectId> = ["<jobId>", …]   (a project can run several at once)
+// On completion (or if a job is gone) we drop just that id so the rest keep being
+// watched.
 
-const ACTIVE_JOB_PREFIX = 'qc.testcaseJob.'
 const POLL_MS = 2000
 
 // Module-level so it survives this component's remounts (incl. StrictMode's
@@ -32,21 +37,13 @@ function listWatchedJobs(): WatchedJob[] {
     for (let i = 0; i < localStorage.length; i++) {
       const key = localStorage.key(i)
       if (!key || !key.startsWith(ACTIVE_JOB_PREFIX)) continue
-      const jobId = localStorage.getItem(key)
-      if (jobId) out.push({ projectId: key.slice(ACTIVE_JOB_PREFIX.length), jobId })
+      const projectId = key.slice(ACTIVE_JOB_PREFIX.length)
+      for (const jobId of loadActiveJobIds(projectId)) out.push({ projectId, jobId })
     }
   } catch {
     /* storage unavailable */
   }
   return out
-}
-
-function clearWatched(projectId: string): void {
-  try {
-    localStorage.removeItem(ACTIVE_JOB_PREFIX + projectId)
-  } catch {
-    /* ignore */
-  }
 }
 
 export default function TestCaseJobWatcher() {
@@ -70,7 +67,7 @@ export default function TestCaseJobWatcher() {
       } catch {
         // 404 / network — job pruned or server restarted. Stop watching it.
         handled.add(w.jobId)
-        clearWatched(w.projectId)
+        removeActiveJobId(w.projectId, w.jobId)
         return
       }
       if (cancelled || handled.has(job.id)) return
@@ -80,7 +77,7 @@ export default function TestCaseJobWatcher() {
       if (job.status !== 'done' && job.status !== 'cancelled') return
 
       handled.add(job.id)
-      clearWatched(w.projectId)
+      removeActiveJobId(w.projectId, w.jobId)
 
       // Refresh the views that depend on the freshly written test cases (some may
       // have completed before a cancel).

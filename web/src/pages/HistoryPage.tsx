@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import {
@@ -6,27 +6,24 @@ import {
   ArrowUpRight,
   CalendarClock,
   CheckCircle2,
+  ChevronDown,
+  ChevronsDownUp,
+  ChevronsUpDown,
   Clock3,
+  ExternalLink,
   History as HistoryIcon,
   Inbox,
   Layers,
   Link2,
   Search,
   Sparkles,
+  Ticket as TicketIcon,
   XCircle,
 } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '@/components/ui/table'
-import { listRuns } from '@/lib/api'
+import { listCrawledTickets, listRuns } from '@/lib/api'
 import { StatusBadge } from '@/lib/status'
 import { useProjects } from '@/lib/project-context'
 import { cn } from '@/lib/utils'
@@ -37,6 +34,15 @@ type Filter = 'all' | 'passed' | 'failed' | 'active'
 function formatDate(iso: string): string {
   const d = new Date(iso)
   return Number.isNaN(d.getTime()) ? iso : d.toLocaleString()
+}
+
+/** Compact absolute date + time, e.g. "Jul 1, 2026 · 2:32 PM". */
+function formatDateTime(iso: string): string {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return iso
+  const date = d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
+  const time = d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', hour12: false })
+  return `${date} · ${time}`
 }
 
 function relativeTime(iso: string): string {
@@ -174,7 +180,7 @@ function ResultCell({ run }: { run: RunSummary }) {
   const { passCount, failCount, totalAcs } = run
   const known = totalAcs > 0
   return (
-    <div className="flex items-center justify-end gap-2">
+    <div className="flex items-center gap-2">
       <span className="inline-flex items-center gap-1 text-xs font-medium tabular-nums text-emerald-700">
         <CheckCircle2 className="size-3.5" />
         {passCount}
@@ -198,90 +204,196 @@ function ResultCell({ run }: { run: RunSummary }) {
           />
         </span>
       ) : (
-        <span className="w-16 text-right text-[11px] text-muted-foreground/60">—</span>
+        <span className="w-16 text-[11px] text-muted-foreground/60">—</span>
       )}
     </div>
   )
 }
 
-function HistoryRow({ run }: { run: RunSummary }) {
+/** A single run inside an expanded ticket group — a compact, clickable row. */
+function RunItem({ run }: { run: RunSummary }) {
   const to = `/run/${run.id}`
   const duration = formatDuration(run.createdAt, run.finishedAt)
-  const hasResults = run.totalAcs > 0
   return (
-    <TableRow className="group border-b transition-colors hover:bg-muted/35">
-      <TableCell className="py-4 pl-4">
-        <Link to={to} className="block min-w-0">
-          <span className="block font-mono text-[13px] font-medium text-foreground transition-colors group-hover:text-primary">
-            {run.ticketId.length > 28 ? `${run.ticketId.slice(0, 28)}…` : run.ticketId}
-          </span>
-          <span className="mt-1 block truncate text-[11px] text-muted-foreground">
-            {run.projectName ?? '—'}
-          </span>
-        </Link>
-      </TableCell>
-      <TableCell className="py-4">
-        <Link to={to} className="block">
-          <StatusBadge status={run.status} />
-        </Link>
-      </TableCell>
-      <TableCell className="py-4 text-right">
-        <Link to={to} className="block">
-          <ResultCell run={run} />
-          {hasResults && (
-            <span className="mt-1 block text-right text-[11px] text-muted-foreground">
-              {run.totalAcs} ACs
-            </span>
-          )}
-        </Link>
-      </TableCell>
-      <TableCell className="hidden max-w-[16rem] py-4 md:table-cell">
-        <Link
-          to={to}
-          className="flex items-center gap-1.5 truncate font-mono text-xs text-muted-foreground"
-          title={run.appUrl}
-        >
-          <Link2 className="size-3 shrink-0 opacity-60" />
-          <span className="truncate">{hostOf(run.appUrl)}</span>
-        </Link>
-      </TableCell>
-      <TableCell className="hidden py-4 lg:table-cell">
-        <Link to={to} className="block font-mono text-xs text-muted-foreground">
-          {duration ?? '—'}
-        </Link>
-      </TableCell>
-      <TableCell className="py-4">
-        <Link
-          to={to}
-          className="block whitespace-nowrap font-mono text-xs text-muted-foreground"
+    <Link
+      to={to}
+      className="group/run flex items-center gap-3 rounded-2xl border border-transparent px-3 py-2.5 transition-all hover:border-border/60 hover:bg-muted/40"
+    >
+      <StatusBadge status={run.status} compact />
+      <div className="flex min-w-0 flex-1 items-center gap-3">
+        <span
+          className="flex min-w-0 items-center gap-1.5 whitespace-nowrap font-mono text-xs text-foreground"
           title={formatDate(run.createdAt)}
         >
+          <CalendarClock className="size-3.5 shrink-0 text-muted-foreground/70" />
+          {formatDateTime(run.createdAt)}
+        </span>
+        <span className="hidden whitespace-nowrap font-mono text-[11px] text-muted-foreground/70 md:inline">
           {relativeTime(run.createdAt)}
-        </Link>
-      </TableCell>
-      <TableCell className="w-12 py-4 pr-4">
-        <Link
-          to={to}
-          aria-label={`Open report for ${run.ticketId}`}
-          className="ml-auto flex size-8 items-center justify-center rounded-xl text-muted-foreground transition-all group-hover:bg-background group-hover:text-foreground active:scale-[0.95]"
-        >
-          <ArrowUpRight className="size-4" />
-        </Link>
-      </TableCell>
-    </TableRow>
+        </span>
+        <span className="hidden items-center gap-1 font-mono text-[11px] text-muted-foreground/70 sm:inline-flex">
+          <Clock3 className="size-3 shrink-0 opacity-60" />
+          {duration ?? '—'}
+        </span>
+        <span className="hidden min-w-0 flex-1 items-center gap-1.5 truncate font-mono text-[11px] text-muted-foreground/70 lg:flex" title={run.appUrl}>
+          <Link2 className="size-3 shrink-0 opacity-60" />
+          <span className="truncate">{hostOf(run.appUrl)}</span>
+        </span>
+      </div>
+      <ResultCell run={run} />
+      <span className="ml-1 hidden w-[5.5rem] justify-end sm:flex">
+        <StatusBadge status={run.status} />
+      </span>
+      <ArrowUpRight className="size-4 shrink-0 text-muted-foreground/50 transition-all group-hover/run:text-foreground" />
+    </Link>
+  )
+}
+
+interface TicketGroup {
+  ticketId: string
+  /** Ticket title from the crawled ticket.json, when the ticket has been crawled. */
+  title: string | null
+  /** ClickUp ticket URL from the crawled ticket.json, when available. */
+  clickupUrl: string | null
+  projectName: string | null
+  runs: RunSummary[]
+  latest: RunSummary
+  passed: number
+  failed: number
+  active: number
+}
+
+/** A collapsible card grouping every run of one ticket. */
+function TicketGroupCard({
+  group,
+  open,
+  onToggle,
+}: {
+  group: TicketGroup
+  open: boolean
+  onToggle: () => void
+}) {
+  const { ticketId, title, clickupUrl, projectName, runs, latest, passed, failed, active } = group
+  const total = runs.length || 1
+  const segments = [
+    { key: 'passed', pct: (passed / total) * 100, cls: 'bg-emerald-500' },
+    { key: 'failed', pct: (failed / total) * 100, cls: 'bg-red-500' },
+    { key: 'active', pct: (active / total) * 100, cls: 'bg-sky-500' },
+  ]
+  return (
+    <div className="overflow-hidden rounded-3xl border border-border/60 bg-card shadow-none transition-colors hover:border-border">
+      {/* A div (not a button) so the ClickUp <a> can nest inside the full-row toggle. */}
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={onToggle}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault()
+            onToggle()
+          }
+        }}
+        aria-expanded={open}
+        className="flex w-full cursor-pointer items-center gap-3 px-4 py-3.5 text-left transition-colors hover:bg-muted/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      >
+        <span className="flex size-9 shrink-0 items-center justify-center rounded-2xl bg-foreground text-background">
+          <TicketIcon className="size-4" />
+        </span>
+
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <span className="shrink-0 font-mono text-sm font-medium text-foreground" title={ticketId}>
+              {ticketId}
+            </span>
+            {title && (
+              <span className="min-w-0 truncate text-sm text-foreground/80" title={title}>
+                {title}
+              </span>
+            )}
+            {clickupUrl && (
+              <a
+                href={clickupUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                onClick={(e) => e.stopPropagation()}
+                title="Open in ClickUp"
+                aria-label="Open ticket in ClickUp"
+                className="inline-flex size-6 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-primary"
+              >
+                <ExternalLink className="size-3.5" />
+              </a>
+            )}
+            <span className="ml-auto shrink-0 rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium tabular-nums text-muted-foreground">
+              {runs.length} {runs.length === 1 ? 'run' : 'runs'}
+            </span>
+          </div>
+          <div className="mt-1 flex items-center gap-2 text-[11px] text-muted-foreground">
+            <span className="truncate">{projectName ?? '—'}</span>
+            <span aria-hidden>·</span>
+            <span className="whitespace-nowrap" title={formatDate(latest.createdAt)}>
+              last {relativeTime(latest.createdAt)}
+            </span>
+          </div>
+        </div>
+
+        {/* Aggregate pass/fail across the ticket's runs. */}
+        <span className="hidden items-center gap-2 sm:flex">
+          <span className="inline-flex items-center gap-1 text-xs font-medium tabular-nums text-emerald-700">
+            <CheckCircle2 className="size-3.5" />
+            {passed}
+          </span>
+          <span className="inline-flex items-center gap-1 text-xs font-medium tabular-nums text-red-600">
+            <XCircle className="size-3.5" />
+            {failed}
+          </span>
+          <span
+            className="ml-1 flex h-1.5 w-20 overflow-hidden rounded-full bg-muted"
+            title={`${passed} passed · ${failed} failed · ${active} active`}
+          >
+            {segments.map((s) =>
+              s.pct > 0 ? (
+                <span key={s.key} className={cn('h-full', s.cls)} style={{ width: `${s.pct}%` }} />
+              ) : null,
+            )}
+          </span>
+        </span>
+
+        {/* Latest status — the headline outcome of the ticket. */}
+        <StatusBadge status={latest.status} />
+
+        <ChevronDown
+          className={cn(
+            'size-4 shrink-0 text-muted-foreground transition-transform duration-200',
+            open && 'rotate-180',
+          )}
+        />
+      </div>
+
+      {open && (
+        <div className="space-y-1 border-t border-border/60 bg-muted/20 p-2">
+          {runs.map((run) => (
+            <RunItem key={run.id} run={run} />
+          ))}
+        </div>
+      )}
+    </div>
   )
 }
 
 function LoadingSkeleton() {
   return (
-    <div className="divide-y">
-      {Array.from({ length: 6 }).map((_, i) => (
-        <div key={i} className="flex items-center gap-4 px-1 py-3.5">
-          <div className="h-8 w-32 animate-pulse rounded bg-muted" />
+    <div className="space-y-3">
+      {Array.from({ length: 5 }).map((_, i) => (
+        <div
+          key={i}
+          className="flex items-center gap-3 rounded-3xl border border-border/60 bg-card px-4 py-4"
+        >
+          <div className="size-9 animate-pulse rounded-2xl bg-muted" />
+          <div className="flex-1 space-y-2">
+            <div className="h-4 w-40 animate-pulse rounded bg-muted" />
+            <div className="h-3 w-28 animate-pulse rounded bg-muted" />
+          </div>
           <div className="h-5 w-16 animate-pulse rounded-full bg-muted" />
-          <div className="ml-auto h-4 w-20 animate-pulse rounded bg-muted" />
-          <div className="hidden h-4 w-40 animate-pulse rounded bg-muted md:block" />
-          <div className="h-4 w-12 animate-pulse rounded bg-muted" />
         </div>
       ))}
     </div>
@@ -295,8 +407,28 @@ export default function HistoryPage() {
     queryFn: () => listRuns(activeProjectId ?? undefined),
   })
 
+  // Crawled tickets carry the real title + ClickUp URL (from each ticket.json), keyed
+  // by displayId — which is what a run stores as its ticketId. Join them so history
+  // rows can show the ticket name and deep-link out to ClickUp.
+  const { data: crawled } = useQuery({
+    queryKey: ['crawled-tickets', activeProjectId],
+    queryFn: () => listCrawledTickets(activeProjectId as string),
+    enabled: !!activeProjectId,
+  })
+
+  const ticketMeta = useMemo(() => {
+    const map = new Map<string, { title: string | null; url: string | null }>()
+    for (const t of crawled ?? []) {
+      const info = { title: t.title, url: t.url }
+      if (t.displayId) map.set(t.displayId.toLowerCase(), info)
+      if (t.name) map.set(t.name.toLowerCase(), info)
+    }
+    return map
+  }, [crawled])
+
   const [filter, setFilter] = useState<Filter>('all')
   const [query, setQuery] = useState('')
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
 
   const runs = data ?? []
   const hasRuns = runs.length > 0
@@ -358,6 +490,53 @@ export default function HistoryPage() {
         (r.projectName ?? '').toLowerCase().includes(q)),
   )
 
+  // Group the visible runs by ticket. Each group keeps runs newest-first; groups
+  // are ordered by their most-recent run so freshly-active tickets float to the top.
+  const groups = useMemo<TicketGroup[]>(() => {
+    const byTicket = new Map<string, RunSummary[]>()
+    for (const run of visible) {
+      const list = byTicket.get(run.ticketId)
+      if (list) list.push(run)
+      else byTicket.set(run.ticketId, [run])
+    }
+    const result: TicketGroup[] = []
+    for (const [ticketId, list] of byTicket) {
+      const sorted = [...list].sort(
+        (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
+      )
+      const meta = ticketMeta.get(ticketId.toLowerCase())
+      result.push({
+        ticketId,
+        title: meta?.title ?? null,
+        clickupUrl: meta?.url ?? null,
+        projectName: sorted[0]?.projectName ?? null,
+        runs: sorted,
+        latest: sorted[0],
+        passed: sorted.filter((r) => r.status === 'passed').length,
+        failed: sorted.filter((r) => FAILED_STATUSES.includes(r.status)).length,
+        active: sorted.filter((r) => ACTIVE_STATUSES.includes(r.status)).length,
+      })
+    }
+    return result.sort(
+      (a, b) => new Date(b.latest.createdAt).getTime() - new Date(a.latest.createdAt).getTime(),
+    )
+  }, [visible, ticketMeta])
+
+  const allCollapsed = groups.length > 0 && groups.every((g) => collapsed.has(g.ticketId))
+
+  function toggleGroup(ticketId: string) {
+    setCollapsed((prev) => {
+      const next = new Set(prev)
+      if (next.has(ticketId)) next.delete(ticketId)
+      else next.add(ticketId)
+      return next
+    })
+  }
+
+  function toggleAll() {
+    setCollapsed(allCollapsed ? new Set() : new Set(groups.map((g) => g.ticketId)))
+  }
+
   return (
     <div className="mx-auto max-w-6xl space-y-8">
       <header className="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
@@ -379,14 +558,14 @@ export default function HistoryPage() {
               )}
             </div>
             <p className="max-w-2xl text-sm leading-6 text-muted-foreground">
-              Browse previous QC executions, compare pass/fail outcomes, and open the full evidence
-              report for any ticket.
+              QC executions grouped by ticket — expand a ticket to compare its runs over time and
+              open the full evidence report for any one.
             </p>
           </div>
         </div>
 
         <Button asChild size="sm" className="w-fit rounded-full transition-all duration-200 active:scale-[0.98]">
-          <Link to="/">
+          <Link to="/qc-run">
             <Sparkles className="size-4" />
             New run
           </Link>
@@ -408,6 +587,7 @@ export default function HistoryPage() {
                 </span>
               </div>
               <div className="flex flex-wrap items-center gap-2">
+                <MetricChip icon={TicketIcon} label="tickets" value={new Set(runs.map((r) => r.ticketId)).size} />
                 <MetricChip icon={Layers} label="runs" value={runs.length} />
                 <MetricChip icon={Clock3} label="avg" value={avgDuration ?? '—'} />
                 <MetricChip
@@ -447,7 +627,7 @@ export default function HistoryPage() {
             </div>
           </section>
 
-          {/* Toolbar — search + result count. */}
+          {/* Toolbar — search + expand/collapse + result count. */}
           <div className="rounded-3xl border border-border/60 bg-card p-3 shadow-none">
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <div className="group relative w-full sm:max-w-md">
@@ -459,7 +639,7 @@ export default function HistoryPage() {
                   className="h-11 rounded-full pl-9 shadow-none"
                 />
               </div>
-              <div className="flex items-center justify-between gap-3 sm:justify-end">
+              <div className="flex items-center justify-between gap-2 sm:justify-end">
                 {(filter !== 'all' || query) && (
                   <Button
                     variant="ghost"
@@ -473,10 +653,29 @@ export default function HistoryPage() {
                     Clear
                   </Button>
                 )}
+                {groups.length > 1 && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={toggleAll}
+                    className="rounded-full transition-all duration-200 active:scale-[0.98]"
+                  >
+                    {allCollapsed ? (
+                      <>
+                        <ChevronsUpDown className="size-4" />
+                        Expand all
+                      </>
+                    ) : (
+                      <>
+                        <ChevronsDownUp className="size-4" />
+                        Collapse all
+                      </>
+                    )}
+                  </Button>
+                )}
                 <span className="shrink-0 rounded-full bg-muted px-2.5 py-1 text-xs font-medium tabular-nums text-muted-foreground">
-                  {visible.length === runs.length
-                    ? `${runs.length} ${runs.length === 1 ? 'run' : 'runs'}`
-                    : `${visible.length} of ${runs.length}`}
+                  {groups.length} {groups.length === 1 ? 'ticket' : 'tickets'}
+                  {visible.length !== runs.length && ` · ${visible.length} runs`}
                 </span>
               </div>
             </div>
@@ -484,106 +683,83 @@ export default function HistoryPage() {
         </>
       )}
 
-      <Card className="overflow-hidden rounded-3xl border-border/60 py-0 shadow-none">
-        <CardContent className="p-0">
-          {isLoading && (
-            <div className="p-4">
-              <LoadingSkeleton />
-            </div>
-          )}
+      {isLoading && <LoadingSkeleton />}
 
-          {isError && (
-            <div className="m-4 flex flex-col items-center justify-center gap-3 rounded-2xl border border-destructive/30 bg-destructive/5 py-12 text-center">
-              <AlertCircle className="size-6 text-destructive" />
-              <div className="space-y-1">
-                <p className="text-sm font-medium text-destructive">Could not load runs</p>
-                <p className="text-sm text-muted-foreground">
-                  {error instanceof Error
-                    ? error.message
-                    : 'Something went wrong while fetching the history.'}
-                </p>
-              </div>
+      {isError && (
+        <Card className="rounded-3xl border-border/60 shadow-none">
+          <CardContent className="flex flex-col items-center justify-center gap-3 rounded-2xl border border-destructive/30 bg-destructive/5 py-12 text-center">
+            <AlertCircle className="size-6 text-destructive" />
+            <div className="space-y-1">
+              <p className="text-sm font-medium text-destructive">Could not load runs</p>
+              <p className="text-sm text-muted-foreground">
+                {error instanceof Error
+                  ? error.message
+                  : 'Something went wrong while fetching the history.'}
+              </p>
             </div>
-          )}
+          </CardContent>
+        </Card>
+      )}
 
-          {!isLoading && !isError && !hasRuns && (
-            <div className="flex flex-col items-center justify-center gap-4 py-20 text-center">
-              <div className="flex size-14 items-center justify-center rounded-2xl border border-border/60 bg-muted/60 text-muted-foreground">
-                <Inbox className="size-6" />
-              </div>
-              <div className="space-y-1.5">
-                <p className="text-base font-medium tracking-tight">No runs yet</p>
-                <p className="mx-auto max-w-sm text-sm text-muted-foreground">
-                  Once you run a QC check, it will show up here with its status and results.
-                </p>
-              </div>
-              <Button asChild className="rounded-full transition-all duration-200 active:scale-[0.98]">
-                <Link to="/">Start your first run</Link>
-              </Button>
+      {!isLoading && !isError && !hasRuns && (
+        <Card className="rounded-3xl border-border/60 shadow-none">
+          <CardContent className="flex flex-col items-center justify-center gap-4 py-20 text-center">
+            <div className="flex size-14 items-center justify-center rounded-2xl border border-border/60 bg-muted/60 text-muted-foreground">
+              <Inbox className="size-6" />
             </div>
-          )}
+            <div className="space-y-1.5">
+              <p className="text-base font-medium tracking-tight">No runs yet</p>
+              <p className="mx-auto max-w-sm text-sm text-muted-foreground">
+                Once you run a QC check, it will show up here grouped by ticket with its status and
+                results.
+              </p>
+            </div>
+            <Button asChild className="rounded-full transition-all duration-200 active:scale-[0.98]">
+              <Link to="/qc-run">Start your first run</Link>
+            </Button>
+          </CardContent>
+        </Card>
+      )}
 
-          {!isLoading && !isError && hasRuns && visible.length === 0 && (
-            <div className="flex flex-col items-center justify-center gap-3 py-16 text-center">
-              <div className="flex size-12 items-center justify-center rounded-2xl border border-border/60 bg-muted/60 text-muted-foreground">
-                <Search className="size-5" />
-              </div>
-              <div className="space-y-1">
-                <p className="text-sm font-medium">No matching runs</p>
-                <p className="text-sm text-muted-foreground">
-                  Try a different search or clear the filter.
-                </p>
-              </div>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => {
-                  setFilter('all')
-                  setQuery('')
-                }}
-                className="rounded-full transition-all duration-200 active:scale-[0.98]"
-              >
-                Clear filters
-              </Button>
+      {!isLoading && !isError && hasRuns && groups.length === 0 && (
+        <Card className="rounded-3xl border-border/60 shadow-none">
+          <CardContent className="flex flex-col items-center justify-center gap-3 py-16 text-center">
+            <div className="flex size-12 items-center justify-center rounded-2xl border border-border/60 bg-muted/60 text-muted-foreground">
+              <Search className="size-5" />
             </div>
-          )}
+            <div className="space-y-1">
+              <p className="text-sm font-medium">No matching tickets</p>
+              <p className="text-sm text-muted-foreground">
+                Try a different search or clear the filter.
+              </p>
+            </div>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                setFilter('all')
+                setQuery('')
+              }}
+              className="rounded-full transition-all duration-200 active:scale-[0.98]"
+            >
+              Clear filters
+            </Button>
+          </CardContent>
+        </Card>
+      )}
 
-          {!isLoading && !isError && hasRuns && visible.length > 0 && (
-            <div className="overflow-x-auto">
-              <Table>
-                <TableHeader className="bg-muted/50">
-                  <TableRow className="hover:bg-transparent">
-                    <TableHead className="h-11 pl-4 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-                      Ticket
-                    </TableHead>
-                    <TableHead className="h-11 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-                      Status
-                    </TableHead>
-                    <TableHead className="h-11 text-right text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-                      Pass / Fail
-                    </TableHead>
-                    <TableHead className="hidden h-11 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground md:table-cell">
-                      App URL
-                    </TableHead>
-                    <TableHead className="hidden h-11 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground lg:table-cell">
-                      Duration
-                    </TableHead>
-                    <TableHead className="h-11 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-                      When
-                    </TableHead>
-                    <TableHead className="w-10" />
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {visible.map((run) => (
-                    <HistoryRow key={run.id} run={run} />
-                  ))}
-                </TableBody>
-              </Table>
-            </div>
-          )}
-        </CardContent>
-      </Card>
+      {!isLoading && !isError && hasRuns && groups.length > 0 && (
+        <div className="space-y-3">
+          {groups.map((group) => (
+            <TicketGroupCard
+              key={group.ticketId}
+              group={group}
+              open={!collapsed.has(group.ticketId)}
+              onToggle={() => toggleGroup(group.ticketId)}
+            />
+          ))}
+        </div>
+      )}
     </div>
   )
 }

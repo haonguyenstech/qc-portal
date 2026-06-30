@@ -2,6 +2,8 @@ import { parseClaudeJsonResult, runClaude } from './claudeExec.js'
 
 export interface McpCapabilityResult {
   ok: boolean
+  /** ok, but with a caveat (e.g. the MCP works yet no devices are connected) — shown amber, not green. */
+  warn?: boolean
   detail: string
   data: Record<string, unknown> | null
   raw: string
@@ -29,6 +31,12 @@ export const CAPABILITY_TESTS: Record<
     inputLabel: '',
     inputPlaceholder: '',
     action: 'Open Google & close',
+  },
+  'mobile-mcp': {
+    needsInput: false,
+    inputLabel: '',
+    inputPlaceholder: '',
+    action: 'List devices',
   },
 }
 
@@ -64,6 +72,24 @@ No prose, no markdown, no code fence.`
       return `Using the Playwright MCP browser tools, do exactly this: open a browser to https://www.google.com , read the page <title>, then CLOSE the browser.
 Reply with ONLY a JSON object and nothing else:
 - on success: {"ok": true, "title": "<the page title you read>"}
+- on failure: {"ok": false, "error": "<short reason>"}
+No prose, no markdown, no code fence.`
+    case 'mobile-mcp':
+      // Two-step test. Empty input = DETECT: enumerate connected simulators/devices
+      // (app-free; an empty list still means the MCP WORKS — only a tool error fails).
+      // Non-empty input = DRIVE the named device: select it and read its screen to
+      // prove the MCP can actually control it.
+      if (!input) {
+        return `Using the Mobile MCP tools available to you, list the available mobile devices and simulators (use the device-listing tool ONCE).
+An empty list is a valid, successful result — it just means nothing is connected or booted.
+Reply with ONLY a JSON object and nothing else:
+- if the tool ran (even with zero devices): {"ok": true, "devices": ["<device or simulator name>", ...]}
+- only if the tool itself errored: {"ok": false, "error": "<short reason>"}
+No prose, no markdown, no code fence.`
+      }
+      return `Using the Mobile MCP tools available to you, select the device named "${input}", then read its screen ONCE (screen size or a screenshot) to confirm you can actually drive it. Do NOT install apps or tap anything.
+Reply with ONLY a JSON object and nothing else:
+- on success: {"ok": true, "device": "${input}", "info": "<short note, e.g. the screen size or 'screenshot captured'>"}
 - on failure: {"ok": false, "error": "<short reason>"}
 No prose, no markdown, no code fence.`
     default:
@@ -142,6 +168,7 @@ export async function runMcpCapabilityTest(opts: {
   }
   const ok = data.ok === true
   let detail: string
+  let warn = false
   if (!ok) {
     detail = `Failed: ${String(data.error ?? 'the MCP could not complete the action')}`
   } else if (opts.name === 'clickup') {
@@ -150,8 +177,24 @@ export async function runMcpCapabilityTest(opts: {
     detail = `Read design: ${String(data.summary ?? '(no summary)')}`
   } else if (opts.name === 'playwright') {
     detail = `Opened & closed browser · page title: ${String(data.title ?? '(none)')}`
+  } else if (opts.name === 'mobile-mcp') {
+    if (Array.isArray(data.devices)) {
+      // DETECT step (empty input) — report the device list.
+      const devices = data.devices.map(String)
+      if (devices.length) {
+        detail = `Found ${devices.length} device(s): ${devices.slice(0, 5).join(', ')}`
+      } else {
+        // The MCP works, but there's nothing to drive — surface it as a caveat (amber),
+        // not a clean green "success", so the engineer knows to boot a simulator/device.
+        detail = 'MCP works, but no devices/simulators are connected — boot one to run tests'
+        warn = true
+      }
+    } else {
+      // DRIVE step (a device was selected) — confirm we controlled it.
+      detail = `Drove ${String(data.device ?? 'device')}: ${String(data.info ?? 'screen read')}`
+    }
   } else {
     detail = 'MCP responded.'
   }
-  return { ok, detail, data, raw: text }
+  return { ok, warn, detail, data, raw: text }
 }

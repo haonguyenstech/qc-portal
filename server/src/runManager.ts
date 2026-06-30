@@ -133,6 +133,7 @@ function spawnRun(
     model?: string
     relatedTickets?: string[]
     workflowSteps?: string[]
+    testTarget?: 'web' | 'web-mobile' | 'app-mobile'
   },
   resumeSessionId?: string,
 ): void {
@@ -148,6 +149,7 @@ function spawnRun(
       model: body.model,
       relatedTickets: body.relatedTickets,
       workflowSteps: body.workflowSteps,
+      testTarget: body.testTarget,
       resumeSessionId,
     },
     {

@@ -359,7 +359,7 @@ export default function ProjectSettingsPage() {
     return (
       <div className="mx-auto max-w-6xl space-y-6">
         <header className="space-y-1">
-          <h1 className="text-3xl font-semibold tracking-tight">Settings</h1>
+          <h1 className="text-3xl font-semibold tracking-tight">Templates</h1>
           <p className="text-sm text-muted-foreground">Per-project file templates and preferences.</p>
         </header>
         <Card className="rounded-3xl border-dashed border-border/60 shadow-none">
@@ -390,7 +390,7 @@ export default function ProjectSettingsPage() {
             <Settings className="size-5" />
           </span>
           <div className="space-y-1">
-            <h1 className="text-3xl font-semibold tracking-tight">Settings</h1>
+            <h1 className="text-3xl font-semibold tracking-tight">Templates</h1>
             <p className="text-sm text-muted-foreground">
               Per-project file templates{activeProject ? ` for ${activeProject.name}` : ''}. Upload
               a file (no manual typing); it's stored under{' '}

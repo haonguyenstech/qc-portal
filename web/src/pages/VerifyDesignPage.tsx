@@ -64,6 +64,7 @@ import {
   type VerifyLogLine,
 } from '@/lib/api'
 import { OpenFolderButton } from '@/components/OpenFolderButton'
+import { McpRequiredNotice } from '@/components/McpRequiredNotice'
 import { useProjects } from '@/lib/project-context'
 
 const MODEL_KEY = 'qc.verifyModel'
@@ -992,6 +993,8 @@ export default function VerifyDesignPage() {
           </div>
         )}
       </header>
+
+      <McpRequiredNotice required={['figma', 'playwright']} feature="run a Design Check" />
 
       {/* No overflow-hidden here: the Crawled-ticket search popover is absolutely
           positioned inside this card and must be able to extend past its edges. */}

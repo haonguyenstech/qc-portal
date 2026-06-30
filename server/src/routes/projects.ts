@@ -1,6 +1,7 @@
 import { Router } from 'express'
 import fs from 'node:fs'
 import path from 'node:path'
+import JSZip from 'jszip'
 import {
   createProject,
   deleteProject,
@@ -96,19 +97,45 @@ function findTemplateProject(excludeId: string): Project | null {
   return candidates.find((p) => isClaudeReady(p.rootPath)) ?? null
 }
 
-/** Minimal CLAUDE.md used when no template project is available. */
+/**
+ * Starter CLAUDE.md written for a brand-new project when there's no existing
+ * project to clone guidance from. It's a fill-in-the-blanks scaffold (not just the
+ * name) so the Instructions page is useful immediately and the `qc-testing` skill
+ * has real structure to read. The engineer edits it on /instructions.
+ */
 function starterClaudeMd(name: string): string {
   return `# ${name}
 
-Project guidance for Claude Code.
+Guidance for Claude Code when running QC against **${name}**. Keep this short and
+high-signal — every QC run and the \`qc-testing\` skill read it before testing.
+Replace the prompts below with the real details.
 
 ## Overview
 
-Describe what this project is and how it is structured.
+What ${name} is, who uses it, and what it does — one or two sentences.
 
-## Conventions
+## Architecture & key areas
 
-- Add coding conventions, commands, and gotchas here so Claude follows them.
+- **Stack:** what the app is built with (e.g. React + Node + Postgres).
+- **Main flows:** the user journeys that matter most for QC (e.g. sign-up, checkout, search).
+- **Where things live:** the screens, endpoints, and modules a tester should know about.
+
+## How to test it
+
+- **App URL(s):** the staging/QA address QC should open (also chosen per run).
+- **Test accounts:** which roles/logins to use — never paste real secrets here (see Safety).
+- **Out of scope:** flows or environments QC must NOT touch (e.g. production, real payments).
+
+## Conventions & gotchas
+
+- Coding conventions, naming, commands, and known quirks so Claude follows them.
+- Anything that commonly breaks tests (flaky areas, slow pages, required setup steps).
+
+## Safety
+
+- This project may run on shared environments — Claude must not perform destructive or
+  irreversible actions (deleting data, sending real emails/payments) during a QC run.
+- Never store credentials or OTPs in this file. Provide them per run instead.
 `
 }
 
@@ -201,6 +228,135 @@ projectsRouter.post('/', (req, res) => {
   }
 })
 
+// ---- Export / import (ZIP) ----
+//
+// A QC Portal project is a folder of QC artifacts (CLAUDE.md, .claude, .mcp.json,
+// testing/). Export bundles just those into a portable .zip — never the whole repo
+// (no node_modules / .git) — plus a small manifest. Import re-creates the folder
+// from such a zip and registers it. The transfer is the QC setup, not source code.
+
+/** Top-level entries bundled into a project export (when present). */
+const EXPORT_ENTRIES = ['CLAUDE.md', '.claude', '.mcp.json', 'testing'] as const
+/** Names never written into / read out of an archive. */
+const ARCHIVE_SKIP = new Set(['.DS_Store', 'node_modules', '.git'])
+/** Manifest filename at the zip root (metadata, not part of the project files). */
+const EXPORT_MANIFEST = 'qc-portal.json'
+
+/** Recursively add a file or directory to the zip under `relPath` (POSIX slashes). */
+function addPathToZip(zip: JSZip, absPath: string, relPath: string): void {
+  const stat = fs.statSync(absPath)
+  if (stat.isDirectory()) {
+    for (const entry of fs.readdirSync(absPath)) {
+      if (ARCHIVE_SKIP.has(entry)) continue
+      addPathToZip(zip, path.join(absPath, entry), `${relPath}/${entry}`)
+    }
+  } else if (stat.isFile()) {
+    zip.file(relPath, fs.readFileSync(absPath))
+  }
+}
+
+/** Download a project's QC artifacts as a .zip. */
+projectsRouter.get('/:id/export', async (req, res) => {
+  const project = getProject(req.params.id)
+  if (!project) return res.status(404).json({ error: 'project not found' })
+  if (!isDir(project.rootPath)) {
+    return res.status(400).json({ error: 'project folder not found on disk' })
+  }
+
+  const zip = new JSZip()
+  zip.file(
+    EXPORT_MANIFEST,
+    JSON.stringify(
+      { name: project.name, exportedAt: new Date().toISOString(), format: 1 },
+      null,
+      2,
+    ),
+  )
+  for (const entry of EXPORT_ENTRIES) {
+    const abs = path.join(project.rootPath, entry)
+    if (fs.existsSync(abs)) addPathToZip(zip, abs, entry)
+  }
+
+  try {
+    const buf = await zip.generateAsync({
+      type: 'nodebuffer',
+      compression: 'DEFLATE',
+      compressionOptions: { level: 6 },
+    })
+    const safe = safeFolderName(project.name) || 'project'
+    res.setHeader('Content-Type', 'application/zip')
+    res.setHeader('Content-Disposition', `attachment; filename="${safe}.zip"`)
+    return res.send(buf)
+  } catch (err) {
+    return res
+      .status(500)
+      .json({ error: err instanceof Error ? err.message : 'failed to build export' })
+  }
+})
+
+/**
+ * Create a project from an exported .zip. The body carries the chosen display
+ * name, a parent folder to extract into, and the base64 zip (mirrors the skill
+ * upload pattern). The project folder is `<parentPath>/<safeName>`.
+ */
+projectsRouter.post('/import', async (req, res) => {
+  const { name, parentPath, zipBase64 } = req.body ?? {}
+  if (typeof name !== 'string' || !name.trim()) {
+    return res.status(400).json({ error: 'name is required' })
+  }
+  if (typeof parentPath !== 'string' || !parentPath.trim()) {
+    return res.status(400).json({ error: 'parentPath is required' })
+  }
+  if (typeof zipBase64 !== 'string' || !zipBase64) {
+    return res.status(400).json({ error: 'a .zip file is required' })
+  }
+
+  const parent = path.resolve(parentPath.trim())
+  if (!isDir(parent)) {
+    return res.status(400).json({ error: `not a folder: ${parent}` })
+  }
+  const safe = safeFolderName(name)
+  if (!safe) return res.status(400).json({ error: 'invalid project name' })
+  const dest = path.join(parent, safe)
+  if (fs.existsSync(dest)) {
+    return res.status(409).json({ error: `a folder named "${safe}" already exists here` })
+  }
+
+  let zip: JSZip
+  try {
+    zip = await JSZip.loadAsync(Buffer.from(zipBase64, 'base64'))
+  } catch {
+    return res.status(400).json({ error: 'could not read that .zip file' })
+  }
+  const files = Object.values(zip.files).filter((f) => !f.dir)
+  if (files.length === 0) return res.status(400).json({ error: 'the .zip is empty' })
+
+  try {
+    fs.mkdirSync(dest, { recursive: true })
+    for (const file of files) {
+      const rel = file.name.replace(/\\/g, '/').replace(/^\/+/, '')
+      if (rel === EXPORT_MANIFEST) continue // manifest is metadata, not a project file
+      if (!rel || rel.split('/').some((seg) => seg === '..' || seg === '')) {
+        throw new Error(`invalid path in zip: ${file.name}`)
+      }
+      const target = path.resolve(dest, rel)
+      if (target !== dest && !target.startsWith(dest + path.sep)) {
+        throw new Error(`path escapes project folder: ${file.name}`)
+      }
+      fs.mkdirSync(path.dirname(target), { recursive: true })
+      fs.writeFileSync(target, await file.async('nodebuffer'))
+    }
+  } catch (err) {
+    fs.rmSync(dest, { recursive: true, force: true }) // roll back a partial extract
+    return res
+      .status(500)
+      .json({ error: err instanceof Error ? err.message : 'failed to extract the zip' })
+  }
+
+  const project = createProject(name.trim(), dest, false)
+  return res.status(201).json({ ...project, ...rootInfo(project.rootPath) })
+})
+
 projectsRouter.put('/:id', (req, res) => {
   const existing = getProject(req.params.id)
   if (!existing) return res.status(404).json({ error: 'project not found' })
@@ -215,6 +371,7 @@ projectsRouter.put('/:id', (req, res) => {
     groundingCheckModel,
     autoLearn,
     autoLearnModel,
+    defaultSkill,
   } = req.body ?? {}
   const partial: {
     name?: string
@@ -226,6 +383,7 @@ projectsRouter.put('/:id', (req, res) => {
     groundingCheckModel?: string
     autoLearn?: boolean
     autoLearnModel?: string
+    defaultSkill?: string
   } = {}
   if (typeof name === 'string' && name.trim()) partial.name = name.trim()
   if (typeof pinned === 'boolean') partial.pinned = pinned
@@ -239,6 +397,9 @@ projectsRouter.put('/:id', (req, res) => {
   if (typeof autoLearnModel === 'string' && KNOWN_MODELS.has(autoLearnModel)) {
     partial.autoLearnModel = autoLearnModel
   }
+  // Default QC skill — empty string clears it. The skill folder is validated on the
+  // Skills page (it can only be set from a real skill); we just persist the name.
+  if (typeof defaultSkill === 'string') partial.defaultSkill = defaultSkill.trim()
   if (typeof rootPath === 'string' && rootPath.trim()) {
     const resolved = path.resolve(rootPath.trim())
     if (!isDir(resolved)) {

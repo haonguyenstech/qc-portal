@@ -60,6 +60,8 @@ export function updateProject(
     autoLearn?: boolean
     /** Model alias for the auto-learn reflection. */
     autoLearnModel?: string
+    /** Skill auto-selected on the Launch QC Run page ('' clears the default). */
+    defaultSkill?: string
   },
 ): Promise<Project> {
   return request(`/api/projects/${encodeURIComponent(id)}`, {
@@ -70,6 +72,37 @@ export function updateProject(
 
 export function deleteProject(id: string): Promise<{ ok: true }> {
   return request(`/api/projects/${encodeURIComponent(id)}`, { method: 'DELETE' })
+}
+
+/**
+ * Download a project's QC artifacts (CLAUDE.md, .claude, .mcp.json, testing/) as a
+ * .zip. Streams the response to a blob and triggers a browser save.
+ */
+export async function exportProject(id: string, name: string): Promise<void> {
+  const res = await fetch(`/api/projects/${encodeURIComponent(id)}/export`)
+  if (!res.ok) {
+    const text = await res.text().catch(() => '')
+    throw new Error(text || `${res.status} ${res.statusText}`)
+  }
+  const blob = await res.blob()
+  const safe = name.replace(/[/\\:*?"<>|]+/g, ' ').trim() || 'project'
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `${safe}.zip`
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  URL.revokeObjectURL(url)
+}
+
+/** Create a project by extracting an exported .zip into `<parentPath>/<name>`. */
+export function importProject(body: {
+  name: string
+  parentPath: string
+  zipBase64: string
+}): Promise<Project> {
+  return request('/api/projects/import', { method: 'POST', body: JSON.stringify(body) })
 }
 
 /**
@@ -119,6 +152,7 @@ export function createRun(body: {
   model?: string
   relatedTickets?: string[]
   workflowSteps?: string[]
+  testTarget?: 'web' | 'web-mobile' | 'app-mobile'
 }): Promise<{ runId: string } & RunSummary> {
   return request('/api/qc/run', { method: 'POST', body: JSON.stringify(body) })
 }
@@ -261,6 +295,7 @@ export interface UsageStatus {
   raw: string
   error: string | null
   generatedAt: string
+  stale?: boolean // true when a refresh failed and the last good reading is shown
 }
 
 /** Real Claude subscription usage, read live from Claude Code's `/usage`. */
@@ -1199,6 +1234,8 @@ export function revealMcpSecret(
 
 export interface McpCapabilityResult {
   ok: boolean
+  /** ok, but with a caveat (e.g. the MCP works yet no devices are connected) — shown amber, not green. */
+  warn?: boolean
   detail: string
   data: Record<string, unknown> | null
   raw: string
@@ -1305,6 +1342,11 @@ export function listRunFiles(id: string): Promise<{ slug: string | null; files: 
 /** Reveal a run's output folder in the OS file explorer. */
 export function openRunFolder(id: string): Promise<{ ok: true; path: string }> {
   return request(`/api/qc/runs/${encodeURIComponent(id)}/open`, { method: 'POST' })
+}
+
+/** Delete a finished run: its history record, event log, and on-disk output folder. */
+export function deleteRun(id: string): Promise<{ ok: true }> {
+  return request(`/api/qc/runs/${encodeURIComponent(id)}`, { method: 'DELETE' })
 }
 
 // ---- Version / updates ----

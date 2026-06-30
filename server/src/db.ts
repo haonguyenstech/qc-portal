@@ -137,6 +137,16 @@ db.exec(`
   addCol('autoLearnModel', `TEXT NOT NULL DEFAULT 'haiku'`)
 }
 
+// Migration: per-project default QC skill — the skill auto-selected on the Launch
+// QC Run page (set from the Skills page). Empty string means "no default" and the
+// run form falls back to qc-testing / the first available skill.
+{
+  const cols = db.prepare(`PRAGMA table_info(projects)`).all() as { name: string }[]
+  if (!cols.some((c) => c.name === 'defaultSkill')) {
+    db.exec(`ALTER TABLE projects ADD COLUMN defaultSkill TEXT NOT NULL DEFAULT ''`)
+  }
+}
+
 db.exec(`CREATE INDEX IF NOT EXISTS idx_runs_projectId ON runs(projectId)`)
 
 // Multiple named Mermaid diagrams per project (the Overview page lets the user
@@ -239,6 +249,7 @@ function rowToProject(row: Record<string, unknown>): Project {
     groundingCheckModel: (row.groundingCheckModel as string | null) || 'haiku',
     autoLearn: Number(row.autoLearn ?? 1) === 1,
     autoLearnModel: (row.autoLearnModel as string | null) || 'haiku',
+    defaultSkill: (row.defaultSkill as string | null) ?? '',
   }
 }
 
@@ -277,6 +288,7 @@ export function createProject(name: string, rootPath: string, isDefault = false)
     groundingCheckModel: GROUNDING_CHECK_MODEL,
     autoLearn: AUTO_LEARN,
     autoLearnModel: AUTO_LEARN_MODEL,
+    defaultSkill: '',
   }
   insertProjectStmt.run(
     project.id,
@@ -306,6 +318,7 @@ export function updateProject(
       | 'groundingCheckModel'
       | 'autoLearn'
       | 'autoLearnModel'
+      | 'defaultSkill'
     >
   >,
 ): void {
@@ -320,6 +333,7 @@ export function updateProject(
       'groundingCheckModel',
       'autoLearn',
       'autoLearnModel',
+      'defaultSkill',
     ] as const
   ).filter((k) => k in partial)
   if (keys.length === 0) return
@@ -691,6 +705,16 @@ export function listRuns(projectId?: string): RunSummary[] {
     projectId ? listRunsByProjectStmt.all(projectId) : listRunsStmt.all()
   ) as Record<string, unknown>[]
   return rows.map(rowToSummary)
+}
+
+const deleteRunStmt = db.prepare(`DELETE FROM runs WHERE id = ?`)
+const deleteRunEventsStmt = db.prepare(`DELETE FROM events WHERE runId = ?`)
+
+/** Remove a run and its event log from the database (the on-disk output folder,
+ * if any, is removed separately by the caller). */
+export function deleteRun(id: string): void {
+  deleteRunEventsStmt.run(id)
+  deleteRunStmt.run(id)
 }
 
 // ---------------- events ----------------

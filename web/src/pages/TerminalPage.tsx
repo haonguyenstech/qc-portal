@@ -24,24 +24,31 @@ export default function TerminalPage() {
     queryFn: terminalAvailable,
   })
 
-  const { hostRef, status, connect, disconnect } = useXtermSession(() =>
-    activeProjectId ? { projectId: activeProjectId } : ({} as Record<string, string>),
+  const { hostRef, status, connect, disconnect } = useXtermSession(
+    () => (activeProjectId ? { projectId: activeProjectId } : ({} as Record<string, string>)),
+    // Auto-launch Claude (skipping the per-action permission prompts) once the
+    // shell is connected, so Connect drops the user straight into a Claude session.
+    { initialCommand: 'claude --dangerously-skip-permissions' },
   )
 
   const unavailable = avail && !avail.ok
 
   return (
-    <div className="space-y-6">
-      <header className="flex flex-col gap-4 rounded-3xl border border-border/60 bg-muted/60 p-6">
-        <div className="flex items-start justify-between gap-4">
-          <div className="flex items-center gap-3">
-            <span className="flex h-11 w-11 items-center justify-center rounded-2xl bg-foreground text-background">
-              <TerminalSquare className="h-5 w-5" />
+    // Fill the viewport height (minus the main content's vertical padding) so the
+    // shell uses all available space; on short screens a min-height keeps it usable
+    // and the page scrolls instead of crushing the terminal.
+    <div className="flex h-[calc(100svh-2rem)] min-h-[32rem] flex-col gap-4 sm:h-[calc(100svh-3rem)] sm:gap-6 lg:h-[calc(100svh-4rem)]">
+      <header className="shrink-0 space-y-4">
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+          <div className="flex items-start gap-3">
+            <span className="flex size-11 shrink-0 items-center justify-center rounded-2xl bg-foreground text-background">
+              <TerminalSquare className="size-5" />
             </span>
-            <div>
-              <h1 className="text-xl font-semibold tracking-tight">Terminal</h1>
+            <div className="space-y-1">
+              <h1 className="text-3xl font-semibold tracking-tight">Terminal</h1>
               <p className="text-sm text-muted-foreground">
-                A real shell on this machine, running in your project folder.
+                A real shell on this machine, running in your project folder. Connect launches a
+                Claude session automatically.
               </p>
             </div>
           </div>
@@ -97,11 +104,22 @@ export default function TerminalPage() {
             )}
           </div>
         </div>
-        <div className="flex items-center gap-2 text-xs text-muted-foreground">
-          <FolderGit2 className="h-3.5 w-3.5 shrink-0" />
-          <span className="font-medium text-foreground">{activeProject?.name ?? 'No project'}</span>
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-2xl border border-border/60 bg-card px-4 py-3 shadow-none">
+          <span className="flex items-center gap-2">
+            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-border/60 bg-muted/60 text-muted-foreground">
+              <FolderGit2 className="h-4 w-4" />
+            </span>
+            <span className="leading-tight">
+              <span className="block text-[11px] uppercase tracking-wide text-muted-foreground">
+                Shell runs in
+              </span>
+              <span className="block text-sm font-semibold tracking-tight">
+                {activeProject?.name ?? 'No project'}
+              </span>
+            </span>
+          </span>
           {activeProject?.rootPath && (
-            <code className="truncate rounded-xl bg-background/60 px-2 py-0.5 font-mono text-[11px]">
+            <code className="ml-auto min-w-0 max-w-full truncate rounded-xl bg-muted/60 px-2 py-1 font-mono text-[11px] text-muted-foreground">
               {activeProject.rootPath}
             </code>
           )}
@@ -125,8 +143,8 @@ export default function TerminalPage() {
           </div>
         </div>
       ) : (
-        <div className="overflow-hidden rounded-3xl border border-border/60 bg-[#09090b]">
-          <div className="flex items-center gap-2 border-b border-white/5 px-4 py-2.5">
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-3xl border border-border/60 bg-[#09090b]">
+          <div className="flex shrink-0 items-center gap-2 border-b border-white/5 px-4 py-2.5">
             <PlugZap className="h-3.5 w-3.5 text-zinc-500" />
             <span className="font-mono text-[11px] text-zinc-400">
               {status === 'connected'
@@ -139,8 +157,8 @@ export default function TerminalPage() {
               <span className="size-2.5 rounded-full bg-emerald-500/70" />
             </div>
           </div>
-          <div className="relative">
-            <div ref={hostRef} className="h-[60vh] min-h-80 w-full px-3 py-2" />
+          <div className="relative min-h-0 flex-1">
+            <div ref={hostRef} className="h-full w-full px-3 py-2" />
             {status === 'idle' && (
               <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-2 text-center">
                 <TerminalSquare className="h-8 w-8 text-zinc-600" />

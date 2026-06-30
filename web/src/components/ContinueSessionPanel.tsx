@@ -1,7 +1,8 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   AlertCircle,
+  ChevronDown,
   Loader2,
   MessagesSquare,
   Plug,
@@ -36,6 +37,9 @@ export default function ContinueSessionPanel({
     queryFn: terminalAvailable,
   })
   const { hostRef, status, connect, disconnect } = useXtermSession(() => ({ runId }))
+  // Collapsed by default — the terminal is heavy and rarely the first thing the
+  // engineer wants. Click the header to expand and reveal the session.
+  const [expanded, setExpanded] = useState(false)
 
   // When the session ends (the user disconnects or quits Claude), refresh the run
   // detail + files — an interactive session may have rewritten report.md / evidence.
@@ -58,8 +62,18 @@ export default function ContinueSessionPanel({
 
   return (
     <section className="overflow-hidden rounded-3xl border border-border/60 bg-card shadow-none">
-      <div className="flex items-start justify-between gap-3 border-b border-border/60 bg-muted/60 px-5 py-4">
-        <div className="flex items-center gap-3">
+      <div
+        className={cn(
+          'flex items-start justify-between gap-3 bg-muted/60 px-5 py-4',
+          expanded && 'border-b border-border/60',
+        )}
+      >
+        <button
+          type="button"
+          onClick={() => setExpanded((v) => !v)}
+          className="flex flex-1 items-center gap-3 text-left"
+          aria-expanded={expanded}
+        >
           <span className="flex size-9 shrink-0 items-center justify-center rounded-2xl bg-foreground text-background">
             <MessagesSquare className="size-4" />
           </span>
@@ -69,8 +83,14 @@ export default function ContinueSessionPanel({
               The QC session is still open — Connect to keep working in it as a real terminal.
             </p>
           </div>
-        </div>
-        <div className="flex items-center gap-2">
+          <ChevronDown
+            className={cn(
+              'ml-1 size-4 shrink-0 text-muted-foreground transition-transform duration-200',
+              expanded && 'rotate-180',
+            )}
+          />
+        </button>
+        <div className={cn('flex items-center gap-2', !expanded && 'hidden')}>
           <span
             className={cn(
               'inline-flex items-center gap-1.5 rounded-xl px-2.5 py-1 text-xs font-medium',
@@ -130,7 +150,7 @@ export default function ContinueSessionPanel({
         </div>
       </div>
 
-      {unavailable ? (
+      {!expanded ? null : unavailable ? (
         <div className="flex items-start gap-3 px-5 py-6 text-sm">
           <AlertCircle className="mt-0.5 h-5 w-5 shrink-0 text-destructive" />
           <div>

@@ -34,6 +34,7 @@ export interface Project {
   groundingCheckModel: string // model alias for that audit (haiku/sonnet/opus)
   autoLearn: boolean // auto-capture durable facts into memory/knowledge after runs
   autoLearnModel: string // model alias for that reflection
+  defaultSkill: string // skill auto-selected on the Launch QC Run page ('' = no default)
 }
 
 export interface RunSummary {
@@ -93,6 +94,9 @@ export interface CreateRunBody {
   skill?: string // which .claude/skills/<name> to drive (defaults to qc-testing)
   instructions?: string // free-form notes from the QC engineer, fed to the AI
   model?: string // Claude model alias (haiku/sonnet/opus); omitted = Claude's configured default
+  // where to run: desktop browser (default), the web app on a mobile device, or a
+  // native app already installed on a mobile device — both mobile modes via Mobile MCP
+  testTarget?: 'web' | 'web-mobile' | 'app-mobile'
   // Advanced mode: a single run that covers a connected feature spanning several
   // tickets. `ticketId` is the lead ticket; `relatedTickets` are the rest, and
   // `workflowSteps` is the ordered end-to-end flow Claude should exercise.

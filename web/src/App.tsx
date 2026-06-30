@@ -1,13 +1,15 @@
 import { useEffect, useState } from 'react'
-import { NavLink, Navigate, Route, Routes, useLocation } from 'react-router-dom'
+import { NavLink, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import {
+  ArrowRight,
   ArrowUpCircle,
   BookOpen,
   BookText,
   ClipboardList,
   Code2,
+  FileCog,
   FileText,
   FolderGit2,
   History,
@@ -16,23 +18,25 @@ import {
   PanelLeftOpen,
   PlayCircle,
   Plug,
+  Plus,
   RadioTower,
   RefreshCw,
   ScanSearch,
   ScrollText,
   Settings,
-  ShieldCheck,
   TerminalSquare,
   Ticket,
+  Upload,
   Wrench,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { Button } from '@/components/ui/button'
 import {
   Select,
   SelectContent,
   SelectItem,
+  SelectSeparator,
   SelectTrigger,
-  SelectValue,
 } from '@/components/ui/select'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { checkForUpdate, getVersion, triggerUpdate } from '@/lib/api'
@@ -63,6 +67,38 @@ import NotificationsPage from '@/pages/NotificationsPage'
 import ReleaseNotesPage from '@/pages/ReleaseNotesPage'
 import DocumentPage from '@/pages/DocumentPage'
 
+/** Custom app mark: a "Q" ring + tail (quality control) framing a bold checkmark.
+ *  Strokes use currentColor so it inherits the badge's text color. */
+function AppLogo({ className }: { className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 32 32"
+      fill="none"
+      className={className}
+      aria-hidden="true"
+      focusable="false"
+    >
+      {/* Q ring + tail, dimmed so the check reads first */}
+      <circle cx="14.5" cy="14.5" r="8.4" stroke="currentColor" strokeWidth="2.3" strokeOpacity="0.5" />
+      <path
+        d="M19 19l5.6 5.6"
+        stroke="currentColor"
+        strokeWidth="2.6"
+        strokeLinecap="round"
+        strokeOpacity="0.5"
+      />
+      {/* bold check on top */}
+      <path
+        d="M10.8 14.8l3 3 6-6.7"
+        stroke="currentColor"
+        strokeWidth="2.7"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  )
+}
+
 interface NavItemDef {
   to: string
   label: string
@@ -86,7 +122,7 @@ const navGroups: { label: string; items: NavItemDef[] }[] = [
       { to: '/tickets', label: 'Tickets', icon: Ticket, end: false },
       { to: '/testcases', label: 'TestCase', icon: ClipboardList, end: false },
       { to: '/verify', label: 'Design Check', icon: ScanSearch, end: false },
-      { to: '/', label: 'Run', icon: PlayCircle, end: true },
+      { to: '/qc-run', label: 'Run', icon: PlayCircle, end: false },
       { to: '/running', label: 'Running', icon: RadioTower, end: false },
       { to: '/history', label: 'History', icon: History, end: false },
     ],
@@ -97,12 +133,16 @@ const navGroups: { label: string; items: NavItemDef[] }[] = [
       { to: '/instructions', label: 'Instructions', icon: FileText, end: false },
       { to: '/skills', label: 'Skills', icon: Wrench, end: false },
       { to: '/mcp', label: 'MCP', icon: Plug, end: false },
-      { to: '/templates', label: 'Settings', icon: Settings, end: false },
+      { to: '/templates', label: 'Templates', icon: FileCog, end: false },
     ],
   },
   {
     label: 'Tools',
     items: [{ to: '/terminal', label: 'Terminal', icon: TerminalSquare, end: false }],
+  },
+  {
+    label: 'System',
+    items: [{ to: '/settings', label: 'Settings', icon: Settings, end: false }],
   },
 ]
 
@@ -222,6 +262,8 @@ function NavItem({
 
 function ProjectSwitcher({ collapsed, onExpand }: { collapsed: boolean; onExpand: () => void }) {
   const { projects, activeProjectId, setActiveProjectId, isLoading } = useProjects()
+  const navigate = useNavigate()
+  const [open, setOpen] = useState(false)
   const activeProject = projects.find((p) => p.id === activeProjectId)
   const initial = (activeProject?.name ?? '?').trim().charAt(0).toUpperCase() || '?'
 
@@ -253,54 +295,75 @@ function ProjectSwitcher({ collapsed, onExpand }: { collapsed: boolean; onExpand
   }
 
   return (
-    <div className="mx-3 mb-2 shrink-0 border-b border-sidebar-border/60 px-0 pb-3">
+    <div className="mx-3 mb-2 shrink-0 border-b border-sidebar-border/60 pb-3">
       <div className="mb-1.5 flex items-center gap-1.5 px-0.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/70">
         <FolderGit2 className="h-3 w-3" />
         Workspace
       </div>
-      <div className="flex items-center gap-1.5">
-        <div className="min-w-0 flex-1">
-          <Select
-            value={activeProjectId ?? undefined}
-            onValueChange={setActiveProjectId}
-            disabled={isLoading || projects.length === 0}
-          >
-            <SelectTrigger className="w-full" size="sm">
-              <SelectValue placeholder={isLoading ? 'Loading…' : 'Select project'} />
-            </SelectTrigger>
-            <SelectContent>
-              {projects.map((p) => (
-                <SelectItem key={p.id} value={p.id}>
-                  <span className="flex items-center gap-2">
-                    {p.exists === false && (
-                      <span
-                        className="h-2 w-2 shrink-0 rounded-full bg-destructive"
-                        aria-label="Folder not found"
-                      />
-                    )}
-                    <span className="truncate">{p.name}</span>
+      <Select
+        open={open}
+        onOpenChange={setOpen}
+        value={activeProjectId ?? undefined}
+        onValueChange={setActiveProjectId}
+        disabled={isLoading}
+      >
+        <SelectTrigger className="h-auto! w-full gap-2 rounded-xl border-sidebar-border/70 bg-muted/50 py-2 pl-2 shadow-none transition-all duration-200 hover:border-border hover:bg-muted data-[state=open]:border-border data-[state=open]:bg-muted">
+          <span className="flex min-w-0 flex-1 items-center gap-2 text-left">
+            <span className="relative flex size-7 shrink-0 items-center justify-center rounded-lg bg-foreground text-xs font-semibold text-background">
+              {initial}
+              {activeProject?.exists === false && (
+                <span className="absolute -right-0.5 -top-0.5 size-2.5 rounded-full border-2 border-sidebar bg-destructive" />
+              )}
+            </span>
+            <span className="min-w-0 flex-1 leading-tight">
+              <span className="block truncate text-sm font-medium text-foreground">
+                {activeProject?.name ?? (isLoading ? 'Loading…' : 'Select project')}
+              </span>
+              <span className="block truncate text-[11px] text-muted-foreground">
+                {isLoading
+                  ? 'Loading projects…'
+                  : `${projects.length} project${projects.length === 1 ? '' : 's'}`}
+              </span>
+            </span>
+          </span>
+        </SelectTrigger>
+        <SelectContent className="min-w-[var(--radix-select-trigger-width)]">
+          {projects.length === 0 ? (
+            <div className="px-2 py-2 text-xs text-muted-foreground">No projects yet</div>
+          ) : (
+            projects.map((p) => (
+              <SelectItem key={p.id} value={p.id} className="rounded-lg py-1.5 pl-2">
+                <span className="flex items-center gap-2">
+                  <span className="flex size-6 shrink-0 items-center justify-center rounded-lg bg-muted text-[11px] font-semibold text-foreground">
+                    {(p.name ?? '?').trim().charAt(0).toUpperCase() || '?'}
                   </span>
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-        <NavLink
-          to="/settings"
-          title="Open settings"
-          aria-label="Open settings"
-          className={({ isActive }) =>
-            cn(
-              'flex h-8 w-8 shrink-0 items-center justify-center rounded-md border transition-all duration-200 hover:bg-muted hover:text-foreground active:scale-95',
-              isActive
-                ? 'border-primary/30 bg-primary/10 text-primary'
-                : 'text-muted-foreground',
-            )
-          }
-        >
-          <Settings className="h-4 w-4" />
-        </NavLink>
-      </div>
+                  <span className="min-w-0 truncate">{p.name}</span>
+                  {p.exists === false && (
+                    <span
+                      className="size-2 shrink-0 rounded-full bg-destructive"
+                      aria-label="Folder not found"
+                    />
+                  )}
+                </span>
+              </SelectItem>
+            ))
+          )}
+          <SelectSeparator />
+          <button
+            type="button"
+            onClick={() => {
+              setOpen(false)
+              navigate('/settings?tab=projects&add=1')
+            }}
+            className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-sm font-medium text-primary outline-none transition-colors hover:bg-accent focus-visible:bg-accent"
+          >
+            <span className="flex size-6 shrink-0 items-center justify-center rounded-lg border border-dashed border-primary/40 text-primary">
+              <Plus className="size-3.5" />
+            </span>
+            Add new project
+          </button>
+        </SelectContent>
+      </Select>
     </div>
   )
 }
@@ -575,8 +638,63 @@ function SidebarToggle({ collapsed, onToggle }: { collapsed: boolean; onToggle: 
   )
 }
 
+// Routes that work without a project — the user must still reach Settings to
+// create one, and the docs / release notes are project-agnostic reference.
+const PROJECT_AGNOSTIC_PREFIXES = ['/settings', '/projects', '/releases', '/document']
+function isProjectAgnostic(pathname: string): boolean {
+  return PROJECT_AGNOSTIC_PREFIXES.some(
+    (p) => pathname === p || pathname.startsWith(`${p}/`),
+  )
+}
+
+/**
+ * Shown in place of the routed pages when no projects exist yet — every feature
+ * needs a project, so we steer the user to create (or import) one first.
+ */
+function NoProjectsScreen() {
+  const navigate = useNavigate()
+  return (
+    <div className="mx-auto flex max-w-xl flex-col items-center justify-center gap-6 py-16 text-center sm:py-24">
+      <span className="flex size-16 items-center justify-center rounded-3xl bg-foreground text-background">
+        <FolderGit2 className="size-8" />
+      </span>
+      <div className="space-y-2">
+        <h1 className="text-2xl font-semibold tracking-tight">Create a project to get started</h1>
+        <p className="text-sm leading-relaxed text-muted-foreground">
+          QC Portal runs against a <span className="font-medium text-foreground">project</span> — a
+          repo folder with its own skills, MCP servers, and testing output. Register your first one,
+          or import a project <span className="font-mono">.zip</span>, to unlock the rest of the app.
+        </p>
+      </div>
+      <div className="flex flex-wrap items-center justify-center gap-2">
+        <Button
+          onClick={() => navigate('/settings?tab=projects&add=1')}
+          className="group h-11 rounded-full px-6 text-sm font-semibold shadow-none transition-all duration-200 hover:shadow-sm active:scale-[0.98]"
+        >
+          <Plus className="size-4" />
+          Create project
+          <ArrowRight className="size-4 transition-transform group-hover:translate-x-0.5" />
+        </Button>
+        <Button
+          variant="outline"
+          onClick={() => navigate('/settings?tab=projects')}
+          className="h-11 rounded-full px-5 text-sm font-semibold shadow-none transition-all duration-200 hover:shadow-sm active:scale-[0.98]"
+        >
+          <Upload className="size-4" />
+          Import a .zip
+        </Button>
+      </div>
+      <p className="text-xs text-muted-foreground">
+        You can manage projects any time from{' '}
+        <span className="font-medium text-foreground">Settings</span> in the sidebar.
+      </p>
+    </div>
+  )
+}
+
 function App() {
-  const { activeProjectId } = useProjects()
+  const { activeProjectId, projects, isLoading: projectsLoading } = useProjects()
+  const { pathname } = useLocation()
   const [collapsed, setCollapsed] = useSidebarCollapsed()
   const { data: runs } = useQuery({
     queryKey: ['runs', activeProjectId],
@@ -604,21 +722,34 @@ function App() {
         {/* Brand + collapse toggle */}
         {collapsed ? (
           <div className="flex shrink-0 flex-col items-center gap-2 px-3 py-5">
-            <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-primary text-primary-foreground shadow-sm ring-1 ring-black/5">
-              <ShieldCheck className="h-5 w-5" />
-            </span>
+            <NavLink to="/qc-run" end aria-label="QC Portal home" className="group">
+              <span className="flex h-10 w-10 items-center justify-center rounded-2xl bg-gradient-to-br from-primary to-primary/75 text-primary-foreground shadow-sm ring-1 ring-inset ring-white/15 transition-all duration-200 group-hover:-translate-y-0.5 group-hover:shadow-md group-active:scale-95">
+                <AppLogo className="h-6 w-6" />
+              </span>
+            </NavLink>
             <SidebarToggle collapsed={collapsed} onToggle={() => setCollapsed((c) => !c)} />
           </div>
         ) : (
-          <div className="flex shrink-0 items-center gap-2.5 px-6 py-5">
-            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-primary text-primary-foreground shadow-sm ring-1 ring-black/5">
-              <ShieldCheck className="h-5 w-5" />
-            </span>
-            <div className="min-w-0 leading-tight">
-              <div className="truncate text-base font-semibold tracking-tight">QC Portal</div>
-              <div className="truncate text-xs text-muted-foreground">Acceptance testing</div>
-            </div>
-            <div className="ml-auto">
+          <div className="flex shrink-0 items-center gap-2.5 py-5 pl-4 pr-2">
+            <NavLink
+              to="/qc-run"
+              end
+              aria-label="QC Portal home"
+              className="group flex min-w-0 flex-1 items-center gap-2.5"
+            >
+              <span className="relative flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br from-primary to-primary/75 text-primary-foreground shadow-sm ring-1 ring-inset ring-white/15 transition-all duration-200 group-hover:-translate-y-0.5 group-hover:shadow-md">
+                <AppLogo className="h-6 w-6" />
+              </span>
+              <span className="min-w-0 flex-1 leading-tight">
+                <span className="block truncate text-[15px] font-semibold tracking-tight text-foreground">
+                  QC Portal
+                </span>
+                <span className="block truncate text-[10px] font-semibold uppercase tracking-[0.05em] text-muted-foreground/80">
+                  Acceptance testing
+                </span>
+              </span>
+            </NavLink>
+            <div className="-mr-1 ml-auto">
               <SidebarToggle collapsed={collapsed} onToggle={() => setCollapsed((c) => !c)} />
             </div>
           </div>
@@ -661,8 +792,12 @@ function App() {
         )}
       >
         <div className="mx-auto max-w-6xl px-4 py-4 sm:px-6 sm:py-6 lg:px-8 lg:py-8">
+          {!projectsLoading && projects.length === 0 && !isProjectAgnostic(pathname) ? (
+            <NoProjectsScreen />
+          ) : (
           <Routes>
-            <Route path="/" element={<RunPage />} />
+            <Route path="/" element={<Navigate to="/qc-run" replace />} />
+            <Route path="/qc-run" element={<RunPage />} />
             <Route path="/overview" element={<OverviewPage />} />
             <Route path="/source" element={<SourceCodePage />} />
             <Route path="/diagrams" element={<DiagramsPage />} />
@@ -684,6 +819,7 @@ function App() {
             <Route path="/settings" element={<ProjectsPage />} />
             <Route path="/projects" element={<Navigate to="/settings" replace />} />
           </Routes>
+          )}
         </div>
       </main>
     </div>

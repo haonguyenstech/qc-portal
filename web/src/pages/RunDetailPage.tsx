@@ -1,6 +1,6 @@
-import { useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
-import { useMutation, useQuery } from '@tanstack/react-query'
+import { Children, cloneElement, isValidElement, useMemo, useState } from 'react'
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -9,28 +9,31 @@ import {
   ArrowUpRight,
   ArrowLeft,
   Ban,
-  BarChart3,
   CalendarClock,
-  CheckCircle2,
   File as FileIcon,
   FileCode2,
   FileText,
   Files,
   Folder,
-  FolderGit2,
   Globe,
-  Hash,
   Image as ImageIcon,
   ListChecks,
   Loader2,
-  PieChart,
   Send,
-  TrendingUp,
+  Terminal,
   Timer,
-  XCircle,
+  Trash2,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { ScrollArea } from '@/components/ui/scroll-area'
@@ -38,6 +41,7 @@ import { OpenFolderButton } from '@/components/OpenFolderButton'
 import ContinueSessionPanel from '@/components/ContinueSessionPanel'
 import {
   createClickupIssueSubtasks,
+  deleteRun,
   getRun,
   listRunFiles,
   openRunFolder,
@@ -66,7 +70,12 @@ const prose =
   '[&_hr]:my-6 [&_hr]:border-border ' +
   '[&_table]:my-5 [&_table]:block [&_table]:w-full [&_table]:overflow-x-auto [&_table]:border-separate [&_table]:border-spacing-0 [&_table]:text-sm ' +
   '[&_thead_tr]:bg-muted/70 [&_th]:border-y [&_th]:border-r [&_th]:border-border [&_th]:px-3 [&_th]:py-2.5 [&_th]:text-left [&_th]:text-xs [&_th]:font-semibold [&_th]:uppercase [&_th]:tracking-wide [&_th]:text-muted-foreground [&_th]:whitespace-nowrap first:[&_th]:rounded-l-lg first:[&_th]:border-l last:[&_th]:rounded-r-lg ' +
-  '[&_td]:border-b [&_td]:border-r [&_td]:px-3 [&_td]:py-2.5 [&_td]:align-top first:[&_td]:border-l [&_tbody_tr:hover]:bg-muted/30'
+  '[&_td]:border-b [&_td]:border-r [&_td]:px-3 [&_td]:py-2.5 [&_td]:align-top first:[&_td]:border-l [&_tbody_tr:hover]:bg-muted/30 ' +
+  // Fix the first column (the test-case number / ID) to a set width so it neither
+  // wraps to one char per line nor balloons to fit long content — wraps within 7rem.
+  '[&_th:first-child]:w-28 [&_th:first-child]:min-w-28 [&_th:first-child]:max-w-28 ' +
+  '[&_td:first-child]:w-28 [&_td:first-child]:min-w-28 [&_td:first-child]:max-w-28 ' +
+  '[&_td:first-child]:whitespace-normal [&_td:first-child]:break-words [&_td:first-child]:font-medium'
 
 function MarkdownView({ md, empty, icon }: { md: string | null; empty: string; icon: React.ReactNode }) {
   if (!md) {
@@ -83,6 +92,225 @@ function MarkdownView({ md, empty, icon }: { md: string | null; empty: string; i
     <div className={prose}>
       <Markdown remarkPlugins={[remarkGfm]}>{md}</Markdown>
     </div>
+  )
+}
+
+/**
+ * Report tables list evidence as bare filenames (e.g. `ac2-bell-popover.png`,
+ * `nc-main.md`). This renders the report markdown but turns any such filename that
+ * maps to a real run output file into a clickable chip that opens the file in a
+ * dialog viewer — so the engineer can inspect a screenshot/note without leaving
+ * the Report tab or hunting through the Files/Screenshots tabs.
+ */
+
+// Filename-shaped tokens we attempt to resolve against the run's output files.
+const EVIDENCE_TOKEN = /[\w.\-/]+\.(?:png|jpe?g|gif|webp|svg|md|txt|json|csv|log)/gi
+
+function evidenceLinkClass(kind: RunFile['kind']): string {
+  return cn(
+    'mx-0.5 inline-flex max-w-full items-center gap-1 rounded-md border px-1.5 py-0.5',
+    'align-middle font-mono text-[11px] leading-none transition-colors',
+    'border-primary/30 bg-primary/5 text-primary hover:border-primary/50 hover:bg-primary/10',
+    kind === 'image' && 'border-violet-500/30 bg-violet-500/5 text-violet-600 hover:bg-violet-500/10 dark:text-violet-400',
+  )
+}
+
+function EvidenceLink({ file, onOpen }: { file: RunFile; onOpen: (f: RunFile) => void }) {
+  const name = file.path.split('/').pop() ?? file.path
+  return (
+    <button type="button" onClick={() => onOpen(file)} className={evidenceLinkClass(file.kind)}>
+      <span className="shrink-0">{fileKindIcon(file.kind)}</span>
+      <span className="truncate">{name}</span>
+    </button>
+  )
+}
+
+/** Walk markdown-rendered children, swapping recognized evidence filenames for chips. */
+function linkifyEvidence(
+  node: React.ReactNode,
+  byName: Map<string, RunFile>,
+  onOpen: (f: RunFile) => void,
+  keyPrefix = 'ev',
+): React.ReactNode {
+  if (typeof node === 'string') {
+    if (!node.includes('.')) return node
+    const parts: React.ReactNode[] = []
+    let last = 0
+    let match: RegExpExecArray | null
+    EVIDENCE_TOKEN.lastIndex = 0
+    let i = 0
+    while ((match = EVIDENCE_TOKEN.exec(node)) !== null) {
+      const token = match[0]
+      const file = byName.get((token.split('/').pop() ?? token).toLowerCase())
+      if (!file) continue
+      if (match.index > last) parts.push(node.slice(last, match.index))
+      parts.push(<EvidenceLink key={`${keyPrefix}-${i++}`} file={file} onOpen={onOpen} />)
+      last = match.index + token.length
+    }
+    if (parts.length === 0) return node
+    if (last < node.length) parts.push(node.slice(last))
+    return parts
+  }
+  if (Array.isArray(node)) {
+    return node.map((child, idx) => linkifyEvidence(child, byName, onOpen, `${keyPrefix}-${idx}`))
+  }
+  if (isValidElement(node)) {
+    const el = node as React.ReactElement<{ children?: React.ReactNode }>
+    if (el.props?.children != null) {
+      return cloneElement(el, {
+        children: linkifyEvidence(el.props.children, byName, onOpen, keyPrefix),
+      })
+    }
+  }
+  return node
+}
+
+// Flatten any markdown-rendered node down to its plain text (for reading headers).
+function nodeText(node: React.ReactNode): string {
+  if (node == null || typeof node === 'boolean') return ''
+  if (typeof node === 'string' || typeof node === 'number') return String(node)
+  if (Array.isArray(node)) return node.map(nodeText).join('')
+  if (isValidElement(node)) {
+    return nodeText((node.props as { children?: React.ReactNode }).children)
+  }
+  return ''
+}
+
+// The header labels we pin to a fixed width (the long free-text "Case" / "Result"
+// columns that otherwise stretch the table). Each maps to its own width class.
+const FIXED_WIDTH_HEADERS: Record<string, string> = {
+  case: 'w-80 min-w-80 max-w-80',
+  result: 'w-72 min-w-72 max-w-72',
+}
+const FIXED_WIDTH_CELL = 'whitespace-normal break-words'
+
+// Read the <thead> row's labels so we can find which column index is "Case".
+function headerLabels(children: React.ReactNode): string[] {
+  let labels: string[] = []
+  Children.forEach(children, (section) => {
+    if (!isValidElement(section) || section.type !== 'thead') return
+    const thead = section as React.ReactElement<{ children?: React.ReactNode }>
+    Children.forEach(thead.props.children, (row) => {
+      if (labels.length || !isValidElement(row)) return
+      const tr = row as React.ReactElement<{ children?: React.ReactNode }>
+      const cells: string[] = []
+      Children.forEach(tr.props.children, (cell) => {
+        if (isValidElement(cell)) cells.push(nodeText(cell).trim().toLowerCase())
+      })
+      labels = cells
+    })
+  })
+  return labels
+}
+
+// Clone the table, stamping each target column's fixed-width class onto its cells.
+function withFixedColumns(
+  children: React.ReactNode,
+  targets: Map<number, string>,
+): React.ReactNode {
+  if (targets.size === 0) return children
+  return Children.map(children, (section) => {
+    if (!isValidElement(section)) return section
+    const sec = section as React.ReactElement<{ children?: React.ReactNode }>
+    const rows = Children.map(sec.props.children, (row) => {
+      if (!isValidElement(row)) return row
+      const tr = row as React.ReactElement<{ children?: React.ReactNode }>
+      let col = -1
+      const cells = Children.map(tr.props.children, (cell) => {
+        if (!isValidElement(cell)) return cell
+        col += 1
+        const widthClass = targets.get(col)
+        if (!widthClass) return cell
+        const c = cell as React.ReactElement<{ className?: string }>
+        return cloneElement(c, { className: cn(c.props.className, widthClass, FIXED_WIDTH_CELL) })
+      })
+      return cloneElement(tr, { children: cells })
+    })
+    return cloneElement(sec, { children: rows })
+  })
+}
+
+function EvidenceReport({
+  md,
+  empty,
+  icon,
+  projectId,
+  slug,
+  files,
+}: {
+  md: string | null
+  empty: string
+  icon: React.ReactNode
+  projectId: string
+  slug: string | null
+  files: RunFile[]
+}) {
+  const [active, setActive] = useState<RunFile | null>(null)
+  // basename → file, so a bare `nc-main.md` in a cell resolves to evidence/nc-main.md.
+  const byName = useMemo(() => {
+    const map = new Map<string, RunFile>()
+    for (const f of files) {
+      const name = f.path.split('/').pop()?.toLowerCase()
+      if (name && !map.has(name)) map.set(name, f)
+    }
+    return map
+  }, [files])
+
+  if (!md) {
+    return <MarkdownView md={md} empty={empty} icon={icon} />
+  }
+
+  return (
+    <>
+      <div className={prose}>
+        <Markdown
+          remarkPlugins={[remarkGfm]}
+          components={{
+            td: ({ children, ...props }) => (
+              <td {...props}>{linkifyEvidence(children, byName, setActive)}</td>
+            ),
+            table: ({ children, className, ...props }) => {
+              // Pin the long free-text "Case"/"Result" columns to fixed widths, leaving
+              // other tables (summary / AC) untouched since they lack those headers.
+              const targets = new Map<number, string>()
+              headerLabels(children).forEach((label, i) => {
+                const widthClass = FIXED_WIDTH_HEADERS[label]
+                if (widthClass) targets.set(i, widthClass)
+              })
+              // Wrap in a scroll container and let the table grow to its content
+              // (w-max) with a full-width floor (min-w-full): it fills the row when it
+              // fits and scrolls horizontally when the fixed columns make it wider.
+              return (
+                <div className="my-5 w-full overflow-x-auto">
+                  <table
+                    {...props}
+                    className={cn(className, '!my-0 !table !w-max !min-w-full !overflow-visible')}
+                  >
+                    {withFixedColumns(children, targets)}
+                  </table>
+                </div>
+              )
+            },
+          }}
+        >
+          {md}
+        </Markdown>
+      </div>
+
+      <Dialog open={!!active} onOpenChange={(open) => !open && setActive(null)}>
+        <DialogContent className="max-h-[88vh] max-w-4xl overflow-auto">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 font-mono text-sm">
+              {active && fileKindIcon(active.kind)}
+              {active?.path.split('/').pop()}
+            </DialogTitle>
+          </DialogHeader>
+          {active && slug && (
+            <FilePreview projectId={projectId} slug={slug} file={active} />
+          )}
+        </DialogContent>
+      </Dialog>
+    </>
   )
 }
 
@@ -202,30 +430,6 @@ function parseReportOutcomes(md: string | null, fallback: { passCount: number; f
   return { counts, data, total, passRate, attention }
 }
 
-function buildLogTrend(events: LogEvent[]) {
-  if (events.length === 0) return []
-  const times = events
-    .map((event) => new Date(event.ts).getTime())
-    .filter((time) => Number.isFinite(time))
-  if (times.length === 0) return []
-
-  const min = Math.min(...times)
-  const max = Math.max(...times)
-  const buckets = Array.from({ length: 8 }, (_, index) => ({
-    index,
-    value: 0,
-    label: `${index + 1}`,
-  }))
-  const span = Math.max(1, max - min)
-
-  for (const time of times) {
-    const index = Math.min(7, Math.floor(((time - min) / span) * 8))
-    buckets[index].value += 1
-  }
-
-  return buckets
-}
-
 type ParsedIssue = {
   id: string
   title: string
@@ -316,7 +520,8 @@ function parseIssues(md: string | null): ParsedIssue[] {
   ]
 }
 
-function MetaItem({
+/** A compact key/value pair for the run's meta strip (started, finished, output…). */
+function MetaInline({
   icon,
   label,
   children,
@@ -326,236 +531,95 @@ function MetaItem({
   children: React.ReactNode
 }) {
   return (
-    <div className="flex min-w-0 items-start gap-3 rounded-xl border border-border/60 bg-muted/60 p-3 shadow-none">
-      <span className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-xl border border-border/60 bg-muted/60 text-muted-foreground">
+    <div className="flex min-w-0 items-center gap-2.5">
+      <span className="flex size-8 shrink-0 items-center justify-center rounded-xl border border-border/60 bg-background text-muted-foreground">
         {icon}
       </span>
-      <div className="min-w-0 space-y-0.5">
-        <div className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground/70">
+      <div className="min-w-0">
+        <div className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground/70">
           {label}
         </div>
-        <div className="truncate text-sm font-medium">{children}</div>
+        <div className="truncate text-xs font-medium">{children}</div>
       </div>
     </div>
   )
 }
 
-function StatTile({
-  icon,
-  label,
-  value,
-  tone,
-}: {
-  icon: React.ReactNode
-  label: string
-  value: React.ReactNode
-  tone?: 'emerald' | 'red' | 'neutral'
-}) {
-  const toneClass =
-    tone === 'emerald'
-      ? 'bg-emerald-50 text-emerald-700 ring-emerald-200/70'
-      : tone === 'red'
-        ? 'bg-red-50 text-red-700 ring-red-200/70'
-        : 'bg-muted/70 text-foreground ring-border'
+/** Circular pass-rate gauge — the single headline metric for a run with results. */
+function PassRateDonut({ rate, color }: { rate: number | null; color: string }) {
+  const radius = 54
+  const circumference = 2 * Math.PI * radius
+  const dash = ((rate ?? 0) / 100) * circumference
 
   return (
-    <div className="rounded-2xl border border-border/60 bg-muted/60 px-4 py-3 shadow-none">
-      <div className="flex items-center justify-between gap-3">
-        <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-          {label}
-        </div>
-        <span className={cn('flex size-7 items-center justify-center rounded-xl ring-1', toneClass)}>
-          {icon}
+    <div className="relative flex size-40 shrink-0 items-center justify-center">
+      <svg viewBox="0 0 128 128" className="size-40 -rotate-90">
+        <circle
+          cx="64"
+          cy="64"
+          r={radius}
+          fill="none"
+          strokeWidth="12"
+          stroke="currentColor"
+          className="text-muted"
+        />
+        <circle
+          cx="64"
+          cy="64"
+          r={radius}
+          fill="none"
+          strokeWidth="12"
+          strokeLinecap="round"
+          stroke={color}
+          strokeDasharray={`${dash} ${circumference}`}
+          className="transition-[stroke-dasharray] duration-700"
+        />
+      </svg>
+      <div className="absolute flex flex-col items-center">
+        <span className="text-4xl font-semibold tabular-nums tracking-tight">
+          {rate === null ? '—' : `${rate}%`}
+        </span>
+        <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+          pass rate
         </span>
       </div>
-      <div className="mt-2 text-3xl font-semibold tracking-tight tabular-nums">{value}</div>
     </div>
   )
 }
 
-function OutcomePie({ data, total }: { data: OutcomeDatum[]; total: number }) {
-  const segments =
-    total > 0
-      ? data.reduce<{ color: string; start: number; end: number }[]>((items, item) => {
-          const start = items.length > 0 ? items[items.length - 1].end : 0
-          const end = start + (item.value / total) * 100
-          if (item.value > 0) items.push({ color: item.color, start, end })
-          return items
-        }, [])
-      : []
-  const background =
-    segments.length > 0
-      ? `conic-gradient(${segments
-          .map((segment) => `${segment.color} ${segment.start}% ${segment.end}%`)
-          .join(', ')})`
-      : undefined
-
+/** Outcome cards + a single segmented bar — the full pass/fail/partial/blocked split. */
+function OutcomeBreakdown({ data, total }: { data: OutcomeDatum[]; total: number }) {
   return (
-    <div className="flex items-center justify-center">
-      <div
-        className="relative flex size-44 items-center justify-center rounded-full border border-border/60 bg-muted shadow-inner"
-        style={{ background }}
-      >
-        <div className="flex size-28 flex-col items-center justify-center rounded-full border border-border/60 bg-card shadow-none">
-          <div className="text-3xl font-semibold tabular-nums">{total}</div>
-          <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-            Cases
-          </div>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-function OutcomeBars({ data, total }: { data: OutcomeDatum[]; total: number }) {
-  return (
-    <div className="space-y-3">
-      {data.map((item) => {
-        const pct = total > 0 ? Math.round((item.value / total) * 100) : 0
-        return (
-          <div key={item.key} className="space-y-1.5">
-            <div className="flex items-center justify-between gap-3 text-xs">
-              <span className="font-medium">{item.label}</span>
-              <span className="font-mono text-muted-foreground">
-                {item.value} / {pct}%
-              </span>
+    <div className="flex w-full flex-col justify-center gap-4">
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+        {data.map((item) => {
+          const pct = total > 0 ? Math.round((item.value / total) * 100) : 0
+          return (
+            <div key={item.key} className={cn('rounded-2xl px-3 py-2.5 ring-1', item.tone)}>
+              <div className="text-2xl font-semibold tabular-nums leading-none">{item.value}</div>
+              <div className="mt-1.5 flex items-center justify-between text-[10px] font-semibold uppercase tracking-wide">
+                <span>{item.label}</span>
+                <span className="tabular-nums opacity-70">{pct}%</span>
+              </div>
             </div>
-            <div className="h-2 overflow-hidden rounded-full bg-muted">
-              <div
-                className="h-full rounded-full transition-all"
-                style={{ width: `${pct}%`, backgroundColor: item.color }}
-              />
-            </div>
-          </div>
-        )
-      })}
-    </div>
-  )
-}
-
-function LogTrendChart({ buckets }: { buckets: { index: number; value: number; label: string }[] }) {
-  if (buckets.length === 0) {
-    return (
-      <div className="flex h-40 items-center justify-center rounded-2xl border border-border/60 bg-muted/30 text-sm text-muted-foreground">
-        No timeline data
-      </div>
-    )
-  }
-
-  const max = Math.max(...buckets.map((bucket) => bucket.value), 1)
-  const points = buckets
-    .map((bucket, index) => {
-      const x = 12 + (index / Math.max(1, buckets.length - 1)) * 276
-      const y = 128 - (bucket.value / max) * 96
-      return `${x},${y}`
-    })
-    .join(' ')
-  const area = `12,132 ${points} 288,132`
-
-  return (
-    <div className="rounded-2xl border border-border/60 bg-muted/20 p-3">
-      <svg viewBox="0 0 300 150" role="img" aria-label="Run log event trend" className="h-40 w-full">
-        <defs>
-          <linearGradient id="logTrendFill" x1="0" x2="0" y1="0" y2="1">
-            <stop offset="0%" stopColor="#0f172a" stopOpacity="0.18" />
-            <stop offset="100%" stopColor="#0f172a" stopOpacity="0.02" />
-          </linearGradient>
-        </defs>
-        {[32, 64, 96, 128].map((y) => (
-          <line key={y} x1="12" x2="288" y1={y} y2={y} stroke="currentColor" className="text-border" />
-        ))}
-        <polygon points={area} fill="url(#logTrendFill)" />
-        <polyline points={points} fill="none" stroke="#0f172a" strokeWidth="3" strokeLinecap="round" />
-        {buckets.map((bucket, index) => {
-          const x = 12 + (index / Math.max(1, buckets.length - 1)) * 276
-          const y = 128 - (bucket.value / max) * 96
-          return <circle key={bucket.index} cx={x} cy={y} r="4" fill="#0f172a" />
+          )
         })}
-      </svg>
-      <div className="mt-1 flex justify-between text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
-        <span>Start</span>
-        <span>Log density</span>
-        <span>Finish</span>
+      </div>
+      <div
+        className="flex h-2.5 overflow-hidden rounded-full bg-muted"
+        title={data.map((d) => `${d.label} ${d.value}`).join(' · ')}
+      >
+        {data.map((item) =>
+          item.value > 0 && total > 0 ? (
+            <span
+              key={item.key}
+              className="h-full transition-[width] duration-500"
+              style={{ width: `${(item.value / total) * 100}%`, backgroundColor: item.color }}
+            />
+          ) : null,
+        )}
       </div>
     </div>
-  )
-}
-
-function SummaryReport({
-  outcomes,
-  screenshots,
-  files,
-  logEvents,
-  duration,
-}: {
-  outcomes: ReturnType<typeof parseReportOutcomes>
-  screenshots: number
-  files: number
-  logEvents: LogEvent[]
-  duration: string | null
-}) {
-  const trend = buildLogTrend(logEvents)
-
-  return (
-    <section className="grid gap-4 xl:grid-cols-[1.15fr_0.85fr]">
-      <Card className="overflow-hidden rounded-3xl border-border/60 py-0 shadow-none">
-        <CardContent className="p-0">
-          <div className="border-b border-border/60 bg-muted/60 px-5 py-4">
-            <div className="flex items-start justify-between gap-3">
-              <div>
-                <div className="flex items-center gap-2 text-sm font-semibold">
-                  <PieChart className="size-4" />
-                  Summary report
-                </div>
-                <p className="mt-1 text-sm text-muted-foreground">
-                  Acceptance outcome breakdown parsed from the generated report.
-                </p>
-              </div>
-              <span className="rounded-full bg-muted px-2.5 py-1 text-xs font-semibold tabular-nums text-muted-foreground">
-                {outcomes.passRate ?? 0}% pass
-              </span>
-            </div>
-          </div>
-          <div className="grid gap-6 p-5 lg:grid-cols-[13rem_1fr]">
-            <OutcomePie data={outcomes.data} total={outcomes.total} />
-            <div className="space-y-5">
-              <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-                {outcomes.data.map((item) => (
-                  <div key={item.key} className={cn('rounded-xl px-3 py-2 ring-1', item.tone)}>
-                    <div className="text-2xl font-semibold tabular-nums">{item.value}</div>
-                    <div className="text-[10px] font-semibold uppercase tracking-wide">{item.label}</div>
-                  </div>
-                ))}
-              </div>
-              <OutcomeBars data={outcomes.data} total={outcomes.total} />
-            </div>
-          </div>
-        </CardContent>
-      </Card>
-
-      <Card className="overflow-hidden rounded-3xl border-border/60 py-0 shadow-none">
-        <CardContent className="p-0">
-          <div className="border-b border-border/60 bg-muted/40 px-5 py-4">
-            <div className="flex items-center gap-2 text-sm font-semibold">
-              <TrendingUp className="size-4" />
-              Run signal
-            </div>
-            <p className="mt-1 text-sm text-muted-foreground">
-              Execution volume and evidence captured for this run.
-            </p>
-          </div>
-          <div className="space-y-4 p-5">
-            <div className="grid grid-cols-2 gap-2">
-              <StatTile icon={<ImageIcon className="h-4 w-4" />} label="Shots" value={screenshots} />
-              <StatTile icon={<Files className="h-4 w-4" />} label="Files" value={files} />
-              <StatTile icon={<BarChart3 className="h-4 w-4" />} label="Events" value={logEvents.length} />
-              <StatTile icon={<Timer className="h-4 w-4" />} label="Duration" value={duration ?? '-'} />
-            </div>
-            <LogTrendChart buckets={trend} />
-          </div>
-        </CardContent>
-      </Card>
-    </section>
   )
 }
 
@@ -729,12 +793,16 @@ function IssueClickupPanel({
 }
 
 /** Numeric count badge shown on a tab trigger (e.g. Log 51). */
-function TabBadge({ n }: { n: number }) {
+function TabBadge({ n, active }: { n: number; active?: boolean }) {
   return (
     <span
       className={cn(
-        'ml-1.5 rounded-full px-1.5 py-0.5 text-[10px] font-medium tabular-nums',
-        n > 0 ? 'bg-muted text-muted-foreground' : 'bg-muted/50 text-muted-foreground/50',
+        'rounded-full px-1.5 py-0.5 text-[10px] font-semibold tabular-nums leading-none transition-colors',
+        n === 0
+          ? 'bg-muted/60 text-muted-foreground/50'
+          : active
+            ? 'bg-primary/15 text-primary'
+            : 'bg-muted-foreground/10 text-muted-foreground',
       )}
     >
       {n}
@@ -747,8 +815,49 @@ function PresenceDot({ on }: { on: boolean }) {
   return (
     <span
       aria-hidden
-      className={cn('ml-1.5 size-1.5 rounded-full', on ? 'bg-emerald-500' : 'bg-muted-foreground/30')}
+      className={cn(
+        'size-1.5 rounded-full transition-colors',
+        on ? 'bg-emerald-500' : 'bg-muted-foreground/30',
+      )}
     />
+  )
+}
+
+/** A single content tab: icon + label + a count badge or presence dot. */
+function TabItem({
+  value,
+  icon,
+  label,
+  count,
+  present,
+  active,
+}: {
+  value: TabValue
+  icon: React.ReactNode
+  label: string
+  count?: number
+  present?: boolean
+  active: boolean
+}) {
+  return (
+    <TabsTrigger
+      value={value}
+      className={cn(
+        'group min-h-9 flex-none gap-2 rounded-xl px-3.5 font-medium text-muted-foreground',
+        'data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm',
+        'hover:text-foreground',
+      )}
+    >
+      <span className="text-muted-foreground/70 transition-colors group-data-[state=active]:text-foreground">
+        {icon}
+      </span>
+      {label}
+      {count !== undefined ? (
+        <TabBadge n={count} active={active} />
+      ) : (
+        <PresenceDot on={!!present} />
+      )}
+    </TabsTrigger>
   )
 }
 
@@ -892,18 +1001,21 @@ function DetailSkeleton() {
         </div>
         <div className="h-4 w-64 rounded bg-muted" />
       </div>
-      <div className="grid gap-4 sm:grid-cols-3">
-        <div className="h-24 rounded-2xl bg-muted" />
-        <div className="h-24 rounded-2xl bg-muted" />
-        <div className="h-24 rounded-2xl bg-muted" />
-      </div>
+      <div className="h-56 rounded-3xl bg-muted" />
       <div className="h-72 rounded-3xl bg-muted" />
     </div>
   )
 }
 
+const TAB_VALUES = ['report', 'issues', 'screenshots', 'files', 'log'] as const
+type TabValue = (typeof TAB_VALUES)[number]
+
 export default function RunDetailPage() {
   const { id = '' } = useParams()
+  const navigate = useNavigate()
+  const queryClient = useQueryClient()
+  const [searchParams, setSearchParams] = useSearchParams()
+  const [confirmDelete, setConfirmDelete] = useState(false)
   const { data: run, isLoading, isError, error } = useQuery({
     queryKey: ['run', id],
     queryFn: () => getRun(id),
@@ -914,6 +1026,22 @@ export default function RunDetailPage() {
     queryKey: ['run-files', id],
     queryFn: () => listRunFiles(id),
     enabled: !!id,
+  })
+
+  // Delete the run (record + on-disk output) and return to history.
+  const deleteMutation = useMutation({
+    mutationFn: () => deleteRun(id),
+    onSuccess: () => {
+      toast.success('Test result deleted')
+      queryClient.invalidateQueries({ queryKey: ['runs'] })
+      setConfirmDelete(false)
+      navigate('/history')
+    },
+    onError: (err) => {
+      toast.error('Could not delete this run', {
+        description: err instanceof Error ? err.message : 'Delete failed.',
+      })
+    },
   })
 
   if (isLoading) {
@@ -952,13 +1080,16 @@ export default function RunDetailPage() {
   const duration = formatDuration(run.createdAt, run.finishedAt)
   const isFail = run.status === 'failed' || run.status === 'error'
   const isCanceled = run.status === 'canceled'
+  // A still-running run is using its session/output — deletion is blocked until it ends.
+  const isRunActive =
+    run.status === 'running' || run.status === 'queued' || run.status === 'paused'
   const outcomes = parseReportOutcomes(run.reportMd, run)
   const hasResults = outcomes.total > 0
   const passRate = outcomes.passRate
 
   // Land on the first tab that actually has content. A canceled/errored run often
   // has only a log, so defaulting to an empty "Report" tab hides the useful part.
-  const defaultTab = run.reportMd
+  const defaultTab: TabValue = run.reportMd
     ? 'report'
     : run.issuesMd
       ? 'issues'
@@ -966,13 +1097,31 @@ export default function RunDetailPage() {
         ? 'screenshots'
         : 'log'
 
-  // Tone the results band by outcome: green = passed, red = fail/error, neutral
-  // otherwise (canceled / no criteria). Never imply success for a stopped run.
-  const bandTone = isFail
-    ? 'border-red-200/70 bg-red-50/50'
-    : run.status === 'passed'
-      ? 'border-emerald-200/70 bg-emerald-50/40'
-      : 'border-border/60 bg-muted/60'
+  // The active tab lives in the URL (?tab=…) so each tab is linkable/back-able.
+  const tabParam = searchParams.get('tab')
+  const activeTab: TabValue =
+    tabParam && (TAB_VALUES as readonly string[]).includes(tabParam)
+      ? (tabParam as TabValue)
+      : defaultTab
+  const onTabChange = (value: string) => {
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev)
+        next.set('tab', value)
+        return next
+      },
+      { replace: true },
+    )
+  }
+
+  // Headline outcome accent: green = passed, red = fail/error, neutral otherwise.
+  const accentColor = isFail ? '#ef4444' : run.status === 'passed' ? '#10b981' : '#64748b'
+  const headline =
+    run.status === 'passed'
+      ? 'Ready for sign-off'
+      : isFail
+        ? 'Needs attention'
+        : 'Review required'
 
   // Files for the Files tab — exclude report/issues/screenshots (own tabs already).
   const filesSlug = filesData?.slug ?? run.slug
@@ -982,193 +1131,144 @@ export default function RunDetailPage() {
 
   return (
     <div className="space-y-6">
+      {/* Hero — identity, actions, and the single consolidated result summary. */}
       <section className="overflow-hidden rounded-3xl border border-border/60 bg-card shadow-none">
-        <div className="border-b border-border/60 bg-muted/60 px-6 py-5">
-          <div className="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
-            <div className="min-w-0 space-y-4">
+        <div className="space-y-5 px-6 pb-6 pt-5">
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+            <div className="min-w-0 space-y-3">
               <Button asChild variant="ghost" size="sm" className="-ml-3 h-8 rounded-full transition-all duration-200 active:scale-[0.98]">
                 <Link to="/history">
                   <ArrowLeft className="mr-2 h-4 w-4" />
                   History
                 </Link>
               </Button>
-              <div className="space-y-2">
-                <div className="flex flex-wrap items-center gap-3">
-                  <h1 className="font-mono text-3xl font-semibold tracking-tight sm:text-4xl">
-                    {run.ticketId}
-                  </h1>
-                  <StatusBadge status={run.status} />
-                </div>
-                <p className="max-w-2xl text-sm leading-6 text-muted-foreground">
-                  Acceptance test report
-                  {run.projectName && (
-                    <>
-                      {' '}
-                      for <span className="font-medium text-foreground">{run.projectName}</span>
-                    </>
-                  )}
-                  . Review the summary, evidence, generated files, and execution log from one
-                  workspace.
-                </p>
+              <div className="flex flex-wrap items-center gap-3">
+                <h1 className="font-mono text-3xl font-semibold tracking-tight sm:text-4xl">
+                  {run.ticketId}
+                </h1>
+                <StatusBadge status={run.status} />
               </div>
+              <p className="text-sm text-muted-foreground">
+                Acceptance test report
+                {run.projectName && (
+                  <>
+                    {' · '}
+                    <span className="font-medium text-foreground">{run.projectName}</span>
+                  </>
+                )}
+              </p>
             </div>
 
             <div className="flex shrink-0 flex-wrap items-center gap-2">
               <Button asChild variant="outline" size="sm" className="rounded-full transition-all duration-200 active:scale-[0.98]">
                 <a href={run.appUrl} target="_blank" rel="noreferrer">
-                  App URL
+                  Open app
                   <ArrowUpRight className="ml-2 h-4 w-4" />
                 </a>
               </Button>
               {filesSlug && <OpenFolderButton open={() => openRunFolder(run.id)} label="run output" />}
+              {!isRunActive && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setConfirmDelete(true)}
+                  className="rounded-full text-destructive transition-all duration-200 hover:border-destructive/40 hover:bg-destructive/10 hover:text-destructive active:scale-[0.98]"
+                >
+                  <Trash2 className="mr-2 h-4 w-4" />
+                  Delete
+                </Button>
+              )}
             </div>
           </div>
+
+          {/* Result summary — donut + breakdown when results exist, else an explainer. */}
+          {hasResults ? (
+            <div className="flex flex-col items-center gap-6 rounded-2xl border border-border/60 bg-muted/40 p-5 md:flex-row md:items-stretch md:gap-8">
+              <div className="flex flex-col items-center justify-center gap-2 md:border-r md:border-border/60 md:pr-8">
+                <PassRateDonut rate={passRate} color={accentColor} />
+                <div className="text-center">
+                  <div className="text-sm font-semibold tracking-tight">{headline}</div>
+                  <div className="text-xs text-muted-foreground">
+                    {outcomes.total} acceptance criteria
+                  </div>
+                </div>
+              </div>
+              <OutcomeBreakdown data={outcomes.data} total={outcomes.total} />
+            </div>
+          ) : (
+            // No pass/fail recorded — explain why instead of showing a row of zeros.
+            <div className="flex flex-col items-center justify-center gap-2 rounded-2xl border border-border/60 bg-muted/40 px-4 py-10 text-center">
+              <span
+                className={cn(
+                  'flex size-11 items-center justify-center rounded-full',
+                  isFail
+                    ? 'bg-red-100 text-red-600'
+                    : isCanceled
+                      ? 'bg-amber-100 text-amber-600'
+                      : 'bg-muted text-muted-foreground',
+                )}
+              >
+                {isFail ? (
+                  <AlertCircle className="size-5" />
+                ) : isCanceled ? (
+                  <Ban className="size-5" />
+                ) : (
+                  <ListChecks className="size-5" />
+                )}
+              </span>
+              <p className="text-sm font-medium">
+                {isCanceled
+                  ? 'Run was canceled'
+                  : isFail
+                    ? 'Run did not complete'
+                    : 'No acceptance criteria evaluated'}
+              </p>
+              <p className="max-w-md text-xs text-muted-foreground">
+                {isCanceled
+                  ? 'It was stopped before any acceptance criteria were checked. See the log for what ran.'
+                  : isFail
+                    ? 'The run ended early, so no pass/fail results were recorded. Check the log for details.'
+                    : 'This run recorded no acceptance criteria.'}
+              </p>
+            </div>
+          )}
         </div>
 
-        <div className="grid gap-0 lg:grid-cols-[1fr_22rem]">
-          <div className="grid gap-3 border-b border-border/60 p-5 sm:grid-cols-2 xl:grid-cols-3 lg:border-b-0 lg:border-r">
-            {run.projectName && (
-              <MetaItem icon={<FolderGit2 className="h-4 w-4" />} label="Project">
-                {run.projectName}
-              </MetaItem>
-            )}
-            <MetaItem icon={<Hash className="h-4 w-4" />} label="Ticket">
-              <span className="font-mono">{run.ticketId}</span>
-            </MetaItem>
-            <MetaItem icon={<Globe className="h-4 w-4" />} label="App URL">
-              <a
-                href={run.appUrl}
-                target="_blank"
-                rel="noreferrer"
-                className="font-mono text-primary underline-offset-2 hover:underline"
-              >
-                {run.appUrl}
-              </a>
-            </MetaItem>
-            <MetaItem icon={<CalendarClock className="h-4 w-4" />} label="Started">
-              <span className="font-mono">{formatDate(run.createdAt)}</span>
-            </MetaItem>
-            <MetaItem icon={<CalendarClock className="h-4 w-4" />} label="Finished">
-              <span className="font-mono">{formatDate(run.finishedAt)}</span>
-            </MetaItem>
-            {duration && (
-              <MetaItem icon={<Timer className="h-4 w-4" />} label="Duration">
-                <span className="font-mono">{duration}</span>
-              </MetaItem>
-            )}
-            {filesSlug && (
-              <MetaItem icon={<Folder className="h-4 w-4" />} label="Output">
-                <span className="font-mono" title={`testing/${filesSlug}`}>
-                  testing/{filesSlug}
-                </span>
-              </MetaItem>
-            )}
-          </div>
-
-          <div className={cn('flex min-h-72 flex-col justify-center gap-4 p-5', bandTone)}>
-            {hasResults ? (
-              <>
-                <div>
-                  <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-                    Execution Result
-                  </div>
-                  <div className="mt-1 text-2xl font-semibold tracking-tight">
-                    {run.status === 'passed'
-                      ? 'Ready for sign-off'
-                      : isFail
-                        ? 'Needs attention'
-                        : 'Review required'}
-                  </div>
-                  <p className="mt-1 text-sm text-muted-foreground">
-                    {passRate ?? 0}% pass rate across recorded acceptance criteria.
-                  </p>
-                </div>
-                <div className="grid grid-cols-3 gap-2">
-                  <StatTile
-                    icon={<CheckCircle2 className="h-4 w-4" />}
-                    label="Pass"
-                    value={outcomes.counts.passed}
-                    tone="emerald"
-                  />
-                  <StatTile
-                    icon={<XCircle className="h-4 w-4" />}
-                    label="Fail"
-                    value={outcomes.counts.failed}
-                    tone="red"
-                  />
-                  <StatTile
-                    icon={<ListChecks className="h-4 w-4" />}
-                    label="Total"
-                    value={outcomes.total}
-                    tone="neutral"
-                  />
-                </div>
-                {outcomes.total > 0 && (
-                  <div className="space-y-1.5">
-                    <div className="flex h-2 overflow-hidden rounded-full bg-muted">
-                      <div
-                        className="bg-emerald-500 transition-all"
-                        style={{ width: `${(outcomes.counts.passed / outcomes.total) * 100}%` }}
-                      />
-                      <div
-                        className="bg-red-500 transition-all"
-                        style={{ width: `${(outcomes.counts.failed / outcomes.total) * 100}%` }}
-                      />
-                    </div>
-                    <div className="text-center text-[11px] text-muted-foreground">
-                      {passRate}% of acceptance criteria passed
-                    </div>
-                  </div>
-                )}
-              </>
-            ) : (
-              // No pass/fail recorded, so explain why instead of showing a row of zeros.
-              <div className="flex flex-col items-center justify-center gap-2 py-2 text-center">
-                <span
-                  className={cn(
-                    'flex size-10 items-center justify-center rounded-full',
-                    isFail
-                      ? 'bg-red-100 text-red-600'
-                      : isCanceled
-                        ? 'bg-amber-100 text-amber-600'
-                        : 'bg-muted text-muted-foreground',
-                  )}
-                >
-                  {isFail ? (
-                    <AlertCircle className="size-5" />
-                  ) : isCanceled ? (
-                    <Ban className="size-5" />
-                  ) : (
-                    <ListChecks className="size-5" />
-                  )}
-                </span>
-                <p className="text-sm font-medium">
-                  {isCanceled
-                    ? 'Run was canceled'
-                    : isFail
-                      ? 'Run did not complete'
-                      : 'No acceptance criteria evaluated'}
-                </p>
-                <p className="max-w-xs text-xs text-muted-foreground">
-                  {isCanceled
-                    ? 'It was stopped before any acceptance criteria were checked. See the log for what ran.'
-                    : isFail
-                      ? 'The run ended early, so no pass/fail results were recorded. Check the log for details.'
-                      : 'This run recorded no acceptance criteria.'}
-                </p>
-              </div>
-            )}
-          </div>
+        {/* Meta strip — context that supports the result, kept low-key in the footer. */}
+        <div className="grid grid-cols-2 gap-x-6 gap-y-4 border-t border-border/60 bg-muted/30 px-6 py-4 sm:grid-cols-3 xl:grid-cols-5">
+          <MetaInline icon={<CalendarClock className="h-4 w-4" />} label="Started">
+            <span className="font-mono" title={formatDate(run.createdAt)}>
+              {formatDate(run.createdAt)}
+            </span>
+          </MetaInline>
+          <MetaInline icon={<CalendarClock className="h-4 w-4" />} label="Finished">
+            <span className="font-mono" title={formatDate(run.finishedAt)}>
+              {formatDate(run.finishedAt)}
+            </span>
+          </MetaInline>
+          <MetaInline icon={<Timer className="h-4 w-4" />} label="Duration">
+            <span className="font-mono">{duration ?? '—'}</span>
+          </MetaInline>
+          <MetaInline icon={<Globe className="h-4 w-4" />} label="App URL">
+            <a
+              href={run.appUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="font-mono text-primary underline-offset-2 hover:underline"
+              title={run.appUrl}
+            >
+              {run.appUrl}
+            </a>
+          </MetaInline>
+          {filesSlug && (
+            <MetaInline icon={<Folder className="h-4 w-4" />} label="Output">
+              <span className="font-mono" title={`testing/${filesSlug}`}>
+                testing/{filesSlug}
+              </span>
+            </MetaInline>
+          )}
         </div>
       </section>
-
-      <SummaryReport
-        outcomes={outcomes}
-        screenshots={run.screenshots.length}
-        files={evidenceFiles.length}
-        logEvents={run.logTail}
-        duration={duration}
-      />
 
       {run.hasSession && (
         <ContinueSessionPanel runId={run.id} runStatus={run.status} hasSession={run.hasSession} />
@@ -1177,37 +1277,55 @@ export default function RunDetailPage() {
       {/* Content tabs */}
       <Card className="overflow-hidden rounded-3xl border-border/60 py-0 shadow-none">
         <CardContent className="px-0">
-          <Tabs defaultValue={defaultTab}>
+          <Tabs value={activeTab} onValueChange={onTabChange}>
             <div className="sticky top-0 z-10 border-b border-border/60 bg-card/95 px-5 py-3 backdrop-blur">
-              <TabsList className="h-auto w-full justify-start overflow-x-auto rounded-2xl bg-muted/70 p-1">
-                <TabsTrigger value="report" className="min-h-8 flex-none px-3">
-                  Report
-                  <PresenceDot on={!!run.reportMd} />
-                </TabsTrigger>
-                <TabsTrigger value="issues" className="min-h-8 flex-none px-3">
-                  Issues
-                  <PresenceDot on={!!run.issuesMd} />
-                </TabsTrigger>
-                <TabsTrigger value="screenshots" className="min-h-8 flex-none px-3">
-                  Screenshots
-                  <TabBadge n={run.screenshots.length} />
-                </TabsTrigger>
-                <TabsTrigger value="files" className="min-h-8 flex-none px-3">
-                  Files
-                  <TabBadge n={evidenceFiles.length} />
-                </TabsTrigger>
-                <TabsTrigger value="log" className="min-h-8 flex-none px-3">
-                  Log
-                  <TabBadge n={run.logTail.length} />
-                </TabsTrigger>
+              <TabsList className="h-auto w-full justify-start gap-1 overflow-x-auto rounded-2xl bg-muted/70 p-1.5">
+                <TabItem
+                  value="report"
+                  icon={<FileText className="size-4" />}
+                  label="Report"
+                  present={!!run.reportMd}
+                  active={activeTab === 'report'}
+                />
+                <TabItem
+                  value="issues"
+                  icon={<AlertCircle className="size-4" />}
+                  label="Issues"
+                  present={!!run.issuesMd}
+                  active={activeTab === 'issues'}
+                />
+                <TabItem
+                  value="screenshots"
+                  icon={<ImageIcon className="size-4" />}
+                  label="Screenshots"
+                  count={run.screenshots.length}
+                  active={activeTab === 'screenshots'}
+                />
+                <TabItem
+                  value="files"
+                  icon={<Files className="size-4" />}
+                  label="Files"
+                  count={evidenceFiles.length}
+                  active={activeTab === 'files'}
+                />
+                <TabItem
+                  value="log"
+                  icon={<Terminal className="size-4" />}
+                  label="Log"
+                  count={run.logTail.length}
+                  active={activeTab === 'log'}
+                />
               </TabsList>
             </div>
 
             <TabsContent value="report" className="m-0 p-6">
-              <MarkdownView
+              <EvidenceReport
                 md={run.reportMd}
                 empty="No report was generated for this run."
                 icon={<FileText className="h-5 w-5" />}
+                projectId={run.projectId}
+                slug={filesSlug}
+                files={filesData?.files ?? []}
               />
             </TabsContent>
 
@@ -1309,6 +1427,58 @@ export default function RunDetailPage() {
           </Tabs>
         </CardContent>
       </Card>
+
+      {/* Delete confirmation — removes the run record AND its on-disk output folder. */}
+      <Dialog
+        open={confirmDelete}
+        onOpenChange={(open) => !deleteMutation.isPending && setConfirmDelete(open)}
+      >
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <span className="flex size-9 shrink-0 items-center justify-center rounded-2xl bg-destructive/10 text-destructive">
+                <Trash2 className="size-4" />
+              </span>
+              Delete test result?
+            </DialogTitle>
+            <DialogDescription className="pt-1">
+              This permanently deletes run{' '}
+              <span className="font-mono font-medium text-foreground">{run.ticketId}</span> — its
+              report, issues, screenshots, and evidence on disk
+              {filesSlug && (
+                <>
+                  {' '}
+                  (<span className="font-mono">testing/{filesSlug}</span>)
+                </>
+              )}
+              , plus its history entry and log. This can't be undone.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setConfirmDelete(false)}
+              disabled={deleteMutation.isPending}
+              className="rounded-full transition-all duration-200 active:scale-[0.98]"
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => deleteMutation.mutate()}
+              disabled={deleteMutation.isPending}
+              className="rounded-full transition-all duration-200 active:scale-[0.98]"
+            >
+              {deleteMutation.isPending ? (
+                <Loader2 className="mr-2 size-4 animate-spin" />
+              ) : (
+                <Trash2 className="mr-2 size-4" />
+              )}
+              Delete result
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

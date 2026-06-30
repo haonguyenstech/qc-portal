@@ -15,16 +15,21 @@ export type TerminalStatus = 'idle' | 'connecting' | 'connected'
  * Protocol: server→client frames are raw terminal bytes; client→server frames are
  * JSON control messages ({type:'input'} / {type:'resize'}).
  */
-export function useXtermSession(getParams: () => Record<string, string>) {
+export function useXtermSession(
+  getParams: () => Record<string, string>,
+  options?: { initialCommand?: string },
+) {
   const [status, setStatus] = useState<TerminalStatus>('idle')
   const hostRef = useRef<HTMLDivElement | null>(null)
   const termRef = useRef<Terminal | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
   const wsRef = useRef<WebSocket | null>(null)
-  // Keep the latest param-builder without making connect()'s identity churn.
+  // Keep the latest param-builder + options without making connect()'s identity churn.
   const paramsRef = useRef(getParams)
+  const optionsRef = useRef(options)
   useEffect(() => {
     paramsRef.current = getParams
+    optionsRef.current = options
   })
 
   const teardown = useCallback(() => {
@@ -89,6 +94,17 @@ export function useXtermSession(getParams: () => Record<string, string>) {
     ws.onopen = () => {
       setStatus('connected')
       term.focus()
+      // Optionally auto-run a command once the shell is up (e.g. launch Claude).
+      // A short delay lets the freshly-spawned login shell print its prompt first,
+      // so the command lands on a clean line. `\r` is what Enter sends in a TTY.
+      const cmd = optionsRef.current?.initialCommand
+      if (cmd) {
+        setTimeout(() => {
+          if (wsRef.current === ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'input', data: `${cmd}\r` }))
+          }
+        }, 500)
+      }
     }
     ws.onmessage = (e) => {
       term.write(typeof e.data === 'string' ? e.data : new Uint8Array(e.data as ArrayBuffer))
