@@ -3,6 +3,18 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.6.8 — 2026-06-30
+
+**Last console-window flash on Windows**
+
+### Fixed
+
+- **Starting the portal no longer flashes a console window when it opens your browser** on
+  Windows. The launcher used `cmd /c start` to open the browser without hiding its console.
+  Completes the Windows window-flash sweep from 0.6.7 — every background subprocess the portal
+  spawns now runs hidden (the in-app Terminal and the "Open folder" Explorer windows are
+  intentional and unchanged).
+
 ## 0.6.7 — 2026-06-30
 
 **No more console windows popping up on Windows**

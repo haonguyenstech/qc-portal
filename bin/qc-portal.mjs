@@ -90,7 +90,9 @@ async function waitForHealth(timeoutMs = 20000) {
 function openBrowser(url) {
   const cmd = isWin ? 'cmd' : process.platform === 'darwin' ? 'open' : 'xdg-open'
   const args = isWin ? ['/c', 'start', '""', url] : [url]
-  spawn(cmd, args, { stdio: 'ignore', detached: true }).unref()
+  // windowsHide: `cmd /c start` would otherwise flash a console window before the
+  // browser opens. The browser still launches.
+  spawn(cmd, args, { stdio: 'ignore', detached: true, windowsHide: true }).unref()
 }
 
 function ensureBuilt() {
