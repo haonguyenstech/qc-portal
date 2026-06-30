@@ -3,6 +3,17 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.6.4 — 2026-06-30
+
+**Sidebar scrolls on short screens**
+
+### Fixed
+
+- **The sidebar now scrolls when the window is too short to fit every nav item.** On small
+  screens the navigation list overflowed past the version footer with no way to reach the
+  lower links. The nav area is now a scrollable region while the brand header, workspace
+  switcher, and footer stay pinned in place.
+
 ## 0.6.3 — 2026-06-30
 
 **`--update` no longer gets stuck**

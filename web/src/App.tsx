@@ -229,7 +229,7 @@ function ProjectSwitcher({ collapsed, onExpand }: { collapsed: boolean; onExpand
   // sidebar so the full picker (and the settings gear) are reachable again.
   if (collapsed) {
     return (
-      <div className="mb-2 flex justify-center border-b border-sidebar-border/60 px-2 pb-3">
+      <div className="mb-2 flex shrink-0 justify-center border-b border-sidebar-border/60 px-2 pb-3">
         <Tooltip>
           <TooltipTrigger asChild>
             <button
@@ -253,7 +253,7 @@ function ProjectSwitcher({ collapsed, onExpand }: { collapsed: boolean; onExpand
   }
 
   return (
-    <div className="mx-3 mb-2 border-b border-sidebar-border/60 px-0 pb-3">
+    <div className="mx-3 mb-2 shrink-0 border-b border-sidebar-border/60 px-0 pb-3">
       <div className="mb-1.5 flex items-center gap-1.5 px-0.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/70">
         <FolderGit2 className="h-3 w-3" />
         Workspace
@@ -395,7 +395,7 @@ function VersionFooter({ collapsed }: { collapsed: boolean }) {
     // <TooltipTrigger asChild> doesn't stringify a className function.
     const releasesActive = pathname === '/releases'
     return (
-      <div className="mt-auto flex flex-col items-center gap-1.5 border-t border-sidebar-border/60 px-2 py-4">
+      <div className="mt-auto flex shrink-0 flex-col items-center gap-1.5 border-t border-sidebar-border/60 px-2 py-4">
         <Tooltip>
           <TooltipTrigger asChild>
             <NavLink
@@ -477,7 +477,7 @@ function VersionFooter({ collapsed }: { collapsed: boolean }) {
   }
 
   return (
-    <div className="mt-auto flex flex-col gap-2 border-t border-sidebar-border/60 px-4 py-4 text-xs text-muted-foreground/70">
+    <div className="mt-auto flex shrink-0 flex-col gap-2 border-t border-sidebar-border/60 px-4 py-4 text-xs text-muted-foreground/70">
       <div className="flex items-center gap-1.5">
         <NavLink
           to="/releases"
@@ -603,14 +603,14 @@ function App() {
       >
         {/* Brand + collapse toggle */}
         {collapsed ? (
-          <div className="flex flex-col items-center gap-2 px-3 py-5">
+          <div className="flex shrink-0 flex-col items-center gap-2 px-3 py-5">
             <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-primary text-primary-foreground shadow-sm ring-1 ring-black/5">
               <ShieldCheck className="h-5 w-5" />
             </span>
             <SidebarToggle collapsed={collapsed} onToggle={() => setCollapsed((c) => !c)} />
           </div>
         ) : (
-          <div className="flex items-center gap-2.5 px-6 py-5">
+          <div className="flex shrink-0 items-center gap-2.5 px-6 py-5">
             <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-primary text-primary-foreground shadow-sm ring-1 ring-black/5">
               <ShieldCheck className="h-5 w-5" />
             </span>
@@ -628,7 +628,7 @@ function App() {
 
         <nav
           className={cn(
-            'flex flex-col py-3',
+            'flex min-h-0 flex-1 flex-col overflow-y-auto py-3',
             collapsed ? 'items-center gap-3 px-2' : 'gap-5 px-3',
           )}
         >
