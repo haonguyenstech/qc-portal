@@ -3,6 +3,20 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.6.5 — 2026-06-30
+
+**Fix `spawn ENAMETOOLONG` on Windows**
+
+### Fixed
+
+- **Test-case generation (and the other AI steps) no longer crash with `spawn ENAMETOOLONG`
+  on Windows.** The full prompt — which embeds the whole ticket, project Knowledge/Memory, and
+  instructions — was passed as a command-line argument. Windows caps the entire command line at
+  ~32 KB, so a large ticket (e.g. 23K+ characters) overflowed it and the run failed immediately
+  with `0/1 succeeded`. The prompt is now delivered to the Claude CLI over **stdin** instead, so
+  prompt size no longer touches the OS argument limit. The same fix covers crawl summaries,
+  Design Check, grounding checks, auto-learn, and the MCP capability test.
+
 ## 0.6.4 — 2026-06-30
 
 **Sidebar scrolls on short screens**

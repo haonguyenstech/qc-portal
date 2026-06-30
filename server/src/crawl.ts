@@ -207,10 +207,14 @@ export async function crawlOneTicket(opts: {
           '--no-session-persistence',
           '--max-budget-usd',
           '0.30',
-          summaryPrompt(detail.displayId, detail.name, content),
         ],
         150_000,
-        { usageSource: 'crawl-summary', model: useModel },
+        // The ticket text goes over stdin so it can't overflow the argv length cap.
+        {
+          usageSource: 'crawl-summary',
+          model: useModel,
+          input: summaryPrompt(detail.displayId, detail.name, content),
+        },
       )
       const { text, isError } = parseClaudeJsonResult(result.stdout || result.stderr)
       if (result.timedOut) {

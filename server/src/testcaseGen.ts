@@ -415,23 +415,21 @@ export async function generateTestcaseVersion(opts: {
   // Reading source (and, with a live app, driving a browser) costs more than a plain
   // draft — give it more headroom before the cost cap cuts in.
   const budget = appUrl ? '3.50' : format === 'csv' ? '3.00' : '2.00'
+  // The prompt embeds the whole ticket + project context + instructions, so it goes
+  // over stdin (opts.input) rather than as an argv positional — a long prompt would
+  // otherwise blow the OS command-line limit (Windows: spawn ENAMETOOLONG).
+  const prompt = testCasesPrompt(
+    ticketContent,
+    opts.projectName,
+    template,
+    instructions,
+    format,
+    appUrl,
+    ctx.block,
+    sourceRel,
+  )
   const result = await runClaudeStream(
-    [
-      ...baseArgs,
-      ...toolArgs,
-      '--max-budget-usd',
-      budget,
-      testCasesPrompt(
-        ticketContent,
-        opts.projectName,
-        template,
-        instructions,
-        format,
-        appUrl,
-        ctx.block,
-        sourceRel,
-      ),
-    ],
+    [...baseArgs, ...toolArgs, '--max-budget-usd', budget],
     // Reading the source, writing a full CSV, or exploring a live app all take far
     // longer to stream than a plain Markdown table. With reading time-boxed in the
     // prompt, a full exhaustive write fits comfortably; give it up to 14 min before the
@@ -439,7 +437,7 @@ export async function generateTestcaseVersion(opts: {
     840000,
     onLog,
     // Always run inside the project so the model can read its source + CLAUDE.md.
-    { signal: opts.signal, usageSource: 'testcase', model, cwd: opts.rootPath },
+    { signal: opts.signal, usageSource: 'testcase', model, cwd: opts.rootPath, input: prompt },
   )
   if (result.aborted) throw statusError('Generation stopped.', 499)
   if (result.timedOut) throw statusError('Timed out while generating test cases.', 504)
@@ -689,10 +687,13 @@ export async function editTestcaseCell(opts: {
         '--no-session-persistence',
         '--max-budget-usd',
         '0.20',
-        editCellPrompt(opts.projectName, column, oldValue, rowContext, comment),
       ],
       120_000,
-      { usageSource: 'testcase-cell', model },
+      {
+        usageSource: 'testcase-cell',
+        model,
+        input: editCellPrompt(opts.projectName, column, oldValue, rowContext, comment),
+      },
     )
     if (result.timedOut) throw statusError('Timed out while editing the cell.', 504)
     const { text, isError } = parseClaudeJsonResult(result.stdout || result.stderr)

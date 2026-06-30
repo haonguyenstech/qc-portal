@@ -122,10 +122,9 @@ export async function runMcpCapabilityTest(opts: {
       'bypassPermissions',
       '--max-budget-usd',
       '0.40',
-      prompt,
     ],
     180_000,
-    { cwd: opts.rootPath, usageSource: 'mcp-test', model: 'haiku' },
+    { cwd: opts.rootPath, usageSource: 'mcp-test', model: 'haiku', input: prompt },
   )
 
   if (result.timedOut) {

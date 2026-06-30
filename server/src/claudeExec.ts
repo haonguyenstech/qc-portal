@@ -44,6 +44,19 @@ export interface ClaudeResult {
 }
 
 /**
+ * Deliver the prompt to the spawned CLI over stdin (`claude -p` reads stdin when no
+ * prompt positional is given). Passing the prompt this way — instead of as the final
+ * argv entry — keeps a large prompt off the OS command line, which Windows caps at
+ * ~32 KB (a longer one throws `spawn ENAMETOOLONG`). No-op when input is undefined.
+ */
+function writeStdin(child: { stdin?: NodeJS.WritableStream | null }, input?: string): void {
+  if (input == null || !child.stdin) return
+  // A broken pipe (child died early) must not crash the server.
+  child.stdin.on('error', () => {})
+  child.stdin.end(input)
+}
+
+/**
  * Run the Claude CLI headlessly with the given args and resolve with its output.
  * Never rejects — a spawn error or timeout resolves with code: null so callers
  * can treat AI as a best-effort, non-fatal step.
@@ -54,20 +67,23 @@ export interface ClaudeResult {
 export function runClaude(
   args: string[],
   timeoutMs: number,
-  opts?: { cwd?: string; usageSource?: string; model?: string | null },
+  opts?: { cwd?: string; usageSource?: string; model?: string | null; input?: string },
 ): Promise<ClaudeResult> {
   return new Promise((resolve) => {
     let stdout = ''
     let stderr = ''
     let settled = false
-    // stdin 'ignore' → the CLI sees EOF immediately instead of waiting ~3s for
-    // piped stdin that never comes ("no stdin data received in 3s" warning).
+    // When opts.input is set, the prompt is delivered over stdin (so a large prompt
+    // can't blow the OS command-line length limit — Windows caps argv at 32 KB and
+    // throws ENAMETOOLONG). Otherwise stdin is 'ignore' so the CLI sees EOF immediately
+    // instead of waiting ~3s for piped stdin that never comes.
     const child = spawn(CLAUDE_BIN, args, {
       env: { ...process.env },
       cwd: opts?.cwd,
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: [opts?.input != null ? 'pipe' : 'ignore', 'pipe', 'pipe'],
       windowsHide: true, // no cmd window flash on Windows
     })
+    writeStdin(child, opts?.input)
     const timer = setTimeout(() => {
       settled = true
       try {
@@ -128,7 +144,13 @@ export function runClaudeStream(
   args: string[],
   timeoutMs: number,
   onLog: (log: StreamLog) => void,
-  opts?: { signal?: AbortSignal; usageSource?: string; model?: string | null; cwd?: string },
+  opts?: {
+    signal?: AbortSignal
+    usageSource?: string
+    model?: string | null
+    cwd?: string
+    input?: string
+  },
 ): Promise<StreamResult> {
   return new Promise((resolve) => {
     let settled = false
@@ -136,16 +158,19 @@ export function runClaudeStream(
     let isError = false
     let stdoutBuf = ''
     let usage: { costUsd: number; inputTokens: number; outputTokens: number } | null = null
-    // stdin 'ignore' → the CLI sees EOF immediately instead of waiting ~3s for
-    // piped stdin that never comes ("no stdin data received in 3s" warning).
+    // When opts.input is set, the prompt arrives over stdin (keeps a large prompt off
+    // the OS command line — Windows caps argv at ~32 KB → ENAMETOOLONG). Otherwise stdin
+    // is 'ignore' so the CLI sees EOF immediately instead of waiting ~3s for piped stdin
+    // that never comes ("no stdin data received in 3s" warning).
     // Pass opts.cwd to run inside a project folder so its .mcp.json servers
     // (Playwright, …) load — required when the prompt needs to open the real app.
     const child = spawn(CLAUDE_BIN, args, {
       env: { ...process.env },
       cwd: opts?.cwd,
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: [opts?.input != null ? 'pipe' : 'ignore', 'pipe', 'pipe'],
       windowsHide: true, // no cmd window flash on Windows
     })
+    writeStdin(child, opts?.input)
     const timer = setTimeout(() => {
       if (settled) return
       settled = true

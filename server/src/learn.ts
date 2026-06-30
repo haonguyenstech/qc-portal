@@ -130,10 +130,16 @@ export async function runKnowledgeUpdate(opts: {
       '--no-session-persistence',
       '--max-budget-usd',
       '0.30',
-      buildPrompt(opts.projectName, context, existingMemory, existingKnowledge),
     ],
     120_000,
-    { cwd: opts.rootPath, usageSource: 'knowledge-update', model },
+    // Reflection context can be large — deliver the prompt over stdin to avoid the
+    // OS command-line length cap (Windows ENAMETOOLONG).
+    {
+      cwd: opts.rootPath,
+      usageSource: 'knowledge-update',
+      model,
+      input: buildPrompt(opts.projectName, context, existingMemory, existingKnowledge),
+    },
   )
   if (result.timedOut) return { memory: [], knowledge: [], skipped: 'timed out' }
   const { text, isError } = parseClaudeJsonResult(result.stdout || result.stderr)

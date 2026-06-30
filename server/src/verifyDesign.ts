@@ -299,10 +299,11 @@ export async function verifyDesign(opts: {
     // Streaming path — a background job wants live progress. stream-json + --verbose
     // emits the init/tool/assistant events runClaudeStream forwards through onLog.
     const r = await runClaudeStream(
-      ['-p', '--model', model, '--output-format', 'stream-json', '--verbose', ...commonFlags, prompt],
+      ['-p', '--model', model, '--output-format', 'stream-json', '--verbose', ...commonFlags],
       VERIFY_TIMEOUT_MS,
       opts.onLog,
-      { cwd: opts.rootPath, usageSource: 'design-verify', model, signal: opts.signal },
+      // Prompt (ticket + checklist) goes over stdin to dodge the OS argv length cap.
+      { cwd: opts.rootPath, usageSource: 'design-verify', model, signal: opts.signal, input: prompt },
     )
     if (r.aborted) throw statusError('Verification cancelled.', 499)
     if (r.timedOut) throw statusError('Timed out while verifying the design.', 504)
@@ -310,9 +311,9 @@ export async function verifyDesign(opts: {
     isError = r.isError
   } else {
     const result = await runClaude(
-      ['-p', '--model', model, '--output-format', 'json', ...commonFlags, prompt],
+      ['-p', '--model', model, '--output-format', 'json', ...commonFlags],
       VERIFY_TIMEOUT_MS,
-      { cwd: opts.rootPath, usageSource: 'design-verify', model },
+      { cwd: opts.rootPath, usageSource: 'design-verify', model, input: prompt },
     )
     if (result.timedOut) throw statusError('Timed out while verifying the design.', 504)
     const parsed = parseClaudeJsonResult(result.stdout || result.stderr)

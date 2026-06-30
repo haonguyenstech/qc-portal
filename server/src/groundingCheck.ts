@@ -78,10 +78,11 @@ async function runGrounding(opts: {
       '--no-session-persistence',
       '--max-budget-usd',
       BUDGET_USD,
-      opts.prompt,
     ],
     TIMEOUT_MS,
-    { cwd: opts.rootPath, usageSource: opts.usageSource, model },
+    // Prompt embeds the full ticket + generated cases/report — pass it over stdin so a
+    // long document can't overflow the OS command-line limit (Windows ENAMETOOLONG).
+    { cwd: opts.rootPath, usageSource: opts.usageSource, model, input: opts.prompt },
   )
   if (result.timedOut) return null
   const { text, isError } = parseClaudeJsonResult(result.stdout || result.stderr)
