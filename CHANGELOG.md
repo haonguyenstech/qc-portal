@@ -3,6 +3,23 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.6.2 — 2026-06-30
+
+**More thorough test cases**
+
+A quality fix for test-case generation so it covers the whole ticket instead of stopping early.
+
+### Changed
+
+- **Generated test cases now cover every area a ticket spans.** The model is told to be
+  exhaustive rather than representative — it takes stock of each feature, trigger, screen,
+  and role the ticket touches and writes cases for all of them, instead of sampling the first
+  few. Each area still gets happy paths, edge cases, validation/negative cases, and error states.
+- **Reading is time-boxed so writing isn't cut short.** Generation now reads only the handful of
+  most-relevant source files up front, then spends the rest of its budget writing cases. The
+  wall-clock budget was raised (12 → 14 min) so a nearly-complete set finishes instead of being
+  truncated.
+
 ## 0.6.1 — 2026-06-29
 
 **Cleaner CSV test cases**

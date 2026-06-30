@@ -215,7 +215,7 @@ function testCasesPrompt(
 - READ ONLY — never modify any file. If you cannot find the related source, fall back to the ticket and note that the implementation could not be located.
 - Also honor any guidance in the project's CLAUDE.md.
 
-IMPORTANT — be efficient and finish: you are on a limited time budget. Read ONLY the handful of files you actually need (don't open the whole codebase), and do NOT write an architecture summary, a component map, or any analysis as your answer. As soon as you understand the feature, STOP reading and spend the rest of your effort WRITING the test cases. Your FINAL message must be the test cases themselves (and nothing else) — make sure you produce them before you run out of time.`
+IMPORTANT — time-box the reading HARD, then write. You are on a wall-clock budget. Spend only the first few minutes reading: open at MOST a handful of the most relevant files (roughly 5-8 reads), do NOT crawl the whole codebase, do NOT read every file in the module, do NOT spawn sub-agents, and never write findings or an architecture summary. The moment you understand the feature well enough to write cases, STOP reading and start writing — you do NOT need to read everything to write good cases, and time spent over-reading is time stolen from coverage. Then write cases for EVERY area the ticket spans (see Coverage below), not just the first few. Your FINAL message must be the test cases themselves (and nothing else).`
 
   // The output-shape instructions and the "output only X" rule both depend on the
   // target format so CSV templates produce a real, importable CSV (not Markdown).
@@ -263,9 +263,12 @@ ${sourceBlock}
 
 ${formatBlock}
 ${appBlock}${instructionBlock}${knowledge}
-Coverage:
-- Happy paths, edge cases, validation/negative cases, and any error states the ticket implies.
+Coverage — be EXHAUSTIVE, not representative:
+- Silently (do NOT write this out) take stock of every distinct area this ticket spans: each feature/module it touches, each trigger or event it describes, each screen/view, and each user role/permission. A ticket that touches N modules or N triggers needs cases for ALL of them.
+- Then write cases covering EVERY one of those areas — do not stop after the first few modules and do not sample. If you are wrapping up with whole areas of the ticket still uncovered, keep writing until they are all covered.
+- For each area, include: happy paths, edge cases, validation/negative cases, and any error states the ticket implies.
 - Where the ticket is ambiguous, still write a case and note the assumption inline.
+- Do not narrate your plan or list files/areas in prose — go straight from reading to writing the cases.
 
 Rules:
 - Ground every case in what you actually saw — the ticket plus the real SOURCE CODE you read (real names, validation, states, branches). Use the ticket for scope and intent; use the code for the concrete details. Do not invent unrelated features or acceptance criteria that neither the ticket nor the code supports.
@@ -430,9 +433,10 @@ export async function generateTestcaseVersion(opts: {
       ),
     ],
     // Reading the source, writing a full CSV, or exploring a live app all take far
-    // longer to stream than a plain Markdown table; give it up to 12 min so the model
-    // can investigate AND still write the full set before the wall-clock cap.
-    720000,
+    // longer to stream than a plain Markdown table. With reading time-boxed in the
+    // prompt, a full exhaustive write fits comfortably; give it up to 14 min before the
+    // wall-clock cap rather than truncating a nearly-complete set.
+    840000,
     onLog,
     // Always run inside the project so the model can read its source + CLAUDE.md.
     { signal: opts.signal, usageSource: 'testcase', model, cwd: opts.rootPath },
