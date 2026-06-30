@@ -3,6 +3,15 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.6.9 — 2026-06-30
+
+**Documented the release process**
+
+### Changed
+
+- Internal/contributor only: `CLAUDE.md` now spells out the step-by-step release process
+  (version bump → changelog → commit → tag → push). No user-facing change.
+
 ## 0.6.8 — 2026-06-30
 
 **Last console-window flash on Windows**

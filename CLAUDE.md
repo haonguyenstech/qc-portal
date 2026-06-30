@@ -43,6 +43,51 @@ npm -w server start        # run compiled server (dist/index.js)
 
 Open **http://localhost:5175**. The Vite dev server proxies `/api` and `/ws` → `127.0.0.1:5174`.
 
+## Releasing
+
+We ship by bumping a version, recording it in the changelog, and tagging the commit.
+**The root `package.json` `version` is the single source of truth** — the sidebar footer
+reads it (via `/api`, `routes/version.ts` → `readPkgVersion` of the repo-root `package.json`)
+and the `## X.Y.Z` headers in `CHANGELOG.md` must match it. The `web/` and `server/`
+workspace `package.json` versions are **not** bumped — leave them.
+
+Pick the bump with semver intent: **patch** (`0.6.7 → 0.6.8`) for fixes / small tweaks,
+**minor** (`0.6.x → 0.7.0`) for new user-facing features, **major** for breaking changes.
+Recent history is patch-heavy fixes; default to patch unless a real feature landed.
+
+Step by step, from a clean-ish tree on `main`:
+
+1. **Finish the code change** and self-review the diff (`git diff`).
+2. **Verify it compiles** — `npm run typecheck` (both workspaces). Run `npm run build` when
+   the change touches the build/runtime (server or web app code); a non-trivial server change
+   warrants `npm -w server run build`. (Note: `npm -w web run lint` currently reports
+   pre-existing errors unrelated to most changes — don't let that block a release, but don't
+   add new ones.)
+3. **Bump `version`** in the **root** `package.json`.
+4. **Add a `CHANGELOG.md` entry** at the top (newest first, directly under the intro), in this
+   shape — a dated header, a bold one-line title, then `### Added` / `### Changed` / `### Fixed`
+   subsections written for the QC engineer (what changed and why it matters, not the code):
+   ```markdown
+   ## 0.6.8 — 2026-06-30
+
+   **Short human title**
+
+   ### Fixed
+
+   - **Lead sentence in bold.** Then the detail…
+   ```
+   Use today's date (`currentDate` in context). `ReleaseNotesPage` (`/releases`) renders this
+   file verbatim, so keep it reader-facing.
+5. **Commit** everything together with a `Release X.Y.Z — <title>` subject, a body explaining
+   the root cause / rationale, and the repo's `Co-Authored-By` trailer.
+6. **Tag** the commit `vX.Y.Z` (the `v` prefix matches existing tags).
+7. **Push** the branch **and** the tag: `git push origin main && git push origin vX.Y.Z`.
+
+End users upgrade with `qc-portal --update` (git fetch + hard-reset to the upstream branch,
+then `npm install` + `npm run build`; see `bin/qc-portal.mjs`), or the **Release notes** page's
+"check for updates" / "update now". So a release isn't usable until both the commit and the tag
+are pushed.
+
 ## Layout
 
 ```
