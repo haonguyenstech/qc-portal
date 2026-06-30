@@ -133,7 +133,7 @@ export function TicketPicker({ value, onChange, projectId, disabled }: Props) {
             value={value}
             onChange={(e) => onChange(e.target.value)}
             disabled={disabled}
-            className="h-11 pl-9 font-mono shadow-xs transition-shadow focus-visible:shadow-sm"
+            className="pl-9 font-mono"
           />
         </div>
         <p className="text-xs text-muted-foreground">The ticket whose acceptance criteria to verify.</p>
@@ -206,7 +206,7 @@ export function TicketPicker({ value, onChange, projectId, disabled }: Props) {
               if (e.key === 'Escape') setOpen(false)
             }}
             disabled={disabled}
-            className="h-11 pl-9 font-mono shadow-xs transition-shadow focus-visible:shadow-sm"
+            className="pl-9 font-mono"
           />
           {isFetching && (
             <Loader2 className="absolute right-3 top-1/2 size-4 -translate-y-1/2 animate-spin text-muted-foreground" />

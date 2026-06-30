@@ -456,7 +456,7 @@ export default function HistoryPage() {
                   placeholder="Search ticket, project or URL..."
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
-                  className="h-10 rounded-full bg-background pl-9"
+                  className="h-11 rounded-full pl-9 shadow-none"
                 />
               </div>
               <div className="flex items-center justify-between gap-3 sm:justify-end">

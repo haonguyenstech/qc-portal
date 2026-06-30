@@ -4,12 +4,14 @@ import { toast } from 'sonner'
 import {
   AlertTriangle,
   ChevronDown,
+  Clipboard,
   Code2,
   FolderGit2,
   FolderTree,
   Github,
   GitBranch,
   GitCommit,
+  KeyRound,
   Link2,
   Loader2,
   Lock,
@@ -26,6 +28,7 @@ import {
   connectSource,
   disconnectSource,
   getSource,
+  getSourceCredential,
   getSourceJob,
   openSourceFolder,
   syncSource,
@@ -147,6 +150,7 @@ function JobLogPanel({ logs, running }: { logs: SourceLogLine[]; running: boolea
 
 /** Status card shown once a repo is connected. */
 function ConnectedCard({
+  projectId,
   info,
   onSync,
   syncing,
@@ -154,6 +158,7 @@ function ConnectedCard({
   disconnecting,
   onChange,
 }: {
+  projectId: string
   info: SourceInfo
   onSync: () => void
   syncing: boolean
@@ -164,6 +169,20 @@ function ConnectedCard({
   const commit = info.live?.lastCommit || info.lastCommit
   const branch = info.live?.branch || info.branch
   const folderMissing = info.live === null
+  const accessKeyValue = info.credential
+    ? `${info.credential.label} · ${info.credential.tokenPreview}`
+    : 'Public repo'
+
+  function copyAccessKey() {
+    void getSourceCredential(projectId)
+      .then(({ token }) => navigator.clipboard.writeText(token))
+      .then(() => toast.success('Access key copied'))
+      .catch((e) =>
+        toast.error('Could not copy access key', {
+          description: e instanceof Error ? e.message : 'Unknown error',
+        }),
+      )
+  }
 
   return (
     <Card className="rounded-3xl border-border/60 shadow-none">
@@ -183,7 +202,7 @@ function ConnectedCard({
               {info.hasToken && (
                 <span
                   className="inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground"
-                  title="A private-repo access token is stored locally (never shown)."
+                  title={info.credential?.label ?? 'A private-repo access token is stored locally.'}
                 >
                   <Lock className="h-3 w-3" /> private
                 </span>
@@ -215,13 +234,33 @@ function ConnectedCard({
           </Button>
         </div>
 
-        <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-4">
           <Stat icon={GitBranch} label="Branch" value={branch || '—'} />
           <Stat icon={GitCommit} label="Last commit" value={commit || '—'} mono />
           <Stat
             icon={RefreshCw}
             label="Last synced"
             value={info.lastSync ? timeAgo(info.lastSync) : '—'}
+          />
+          <Stat
+            icon={KeyRound}
+            label="Access key"
+            value={accessKeyValue}
+            action={
+              info.credential ? (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  onClick={copyAccessKey}
+                  className="h-6 w-6 rounded-full text-muted-foreground hover:text-foreground"
+                  title="Copy access key info"
+                  aria-label="Copy access key info"
+                >
+                  <Clipboard className="size-3.5" />
+                </Button>
+              ) : undefined
+            }
           />
         </div>
 
@@ -269,19 +308,24 @@ function Stat({
   label,
   value,
   mono,
+  action,
 }: {
   icon: typeof GitBranch
   label: string
   value: string
   mono?: boolean
+  action?: React.ReactNode
 }) {
   return (
     <div className="rounded-2xl border border-border/60 bg-muted/40 px-3 py-2">
       <div className="flex items-center gap-1.5 text-[10px] uppercase tracking-wide text-muted-foreground">
         <Icon className="h-3 w-3" /> {label}
       </div>
-      <div className={cn('mt-0.5 truncate text-sm', mono && 'font-mono text-xs')} title={value}>
-        {value}
+      <div className="mt-0.5 flex min-w-0 items-center gap-1.5">
+        <div className={cn('min-w-0 flex-1 truncate text-sm', mono && 'font-mono text-xs')} title={value}>
+          {value}
+        </div>
+        {action}
       </div>
     </div>
   )
@@ -568,6 +612,7 @@ export default function SourceCodePage() {
 
       {connected && !changing && info && (
         <ConnectedCard
+          projectId={activeProjectId}
           info={info}
           onSync={() => sync.mutate()}
           syncing={running || sync.isPending}

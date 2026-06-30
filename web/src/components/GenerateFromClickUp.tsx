@@ -402,7 +402,7 @@ export function GenerateFromClickUp({
                 placeholder="Search docs by name…"
                 value={docQuery}
                 onChange={(e) => setDocQuery(e.target.value)}
-                className="h-9 pl-9"
+                className="h-11 rounded-full pl-9 shadow-none"
               />
             </div>
             {!!docs?.length && (
@@ -474,7 +474,7 @@ export function GenerateFromClickUp({
                 }
                 value={ticketQuery}
                 onChange={(e) => setTicketQuery(e.target.value)}
-                className="h-9 pl-9"
+                className="h-11 rounded-full pl-9 shadow-none"
               />
             </div>
             <p className="flex items-center gap-1.5 px-1 text-[11px] text-muted-foreground">

@@ -10,6 +10,7 @@ import {
   parseRepoUrl,
   repoStatus,
   setSourceCredential,
+  sourceCredentialInfo,
   type SourceCredential,
 } from '../sourceRepo.js'
 import { getSourceJob, listSourceJobs, startSourceJob } from '../sourceJobs.js'
@@ -30,6 +31,15 @@ sourceRouter.get('/', async (req, res) => {
   if (!project) return res.status(400).json({ error: 'project not found' })
 
   const live = project.sourcePath && isDir(project.sourcePath) ? await repoStatus(project.sourcePath) : null
+  const credential = (() => {
+    const cred = getSourceCredential(project.id)
+    if (!project.sourceRepoUrl || !cred) return null
+    try {
+      return sourceCredentialInfo(parseRepoUrl(project.sourceRepoUrl), cred)
+    } catch {
+      return null
+    }
+  })()
 
   res.json({
     connected: Boolean(project.sourceRepoUrl),
@@ -40,9 +50,19 @@ sourceRouter.get('/', async (req, res) => {
     rootPath: project.rootPath,
     lastSync: project.sourceLastSync,
     lastCommit: project.sourceLastCommit,
-    hasToken: Boolean(getSourceCredential(project.id)),
+    hasToken: Boolean(credential),
+    credential,
     live,
   })
+})
+
+/** GET /api/source/credential — return the stored source token for clipboard copy. */
+sourceRouter.get('/credential', (req, res) => {
+  const project = resolveProject(req)
+  if (!project) return res.status(400).json({ error: 'project not found' })
+  const cred = getSourceCredential(project.id)
+  if (!cred?.token) return res.status(404).json({ error: 'no source access token is stored' })
+  res.json({ token: cred.token })
 })
 
 /**

@@ -138,20 +138,20 @@ export function CrawledTicketPicker({ value, onChange, projectId, disabled }: Pr
         {open && !disabled && (
           <div className="absolute z-20 mt-1.5 w-full overflow-hidden rounded-2xl border border-border/60 bg-popover shadow-lg">
             {/* Search box */}
-            <div className="flex items-center gap-2 border-b border-border/60 px-3 py-2">
-              <Search className="size-3.5 shrink-0 text-muted-foreground" />
+            <div className="relative border-b border-border/60 p-2.5">
+              <Search className="pointer-events-none absolute left-5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
               <input
                 autoFocus
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 placeholder="Filter by id or title…"
-                className="w-full bg-transparent text-sm outline-none placeholder:text-muted-foreground"
+                className="h-11 w-full rounded-full border border-input bg-transparent px-4 pl-9 text-sm shadow-none outline-none transition-[color,box-shadow] placeholder:text-muted-foreground focus:border-ring focus:ring-3 focus:ring-ring/50 focus:shadow-sm"
               />
               {query && (
                 <button
                   type="button"
                   onClick={() => setQuery('')}
-                  className="text-muted-foreground/60 hover:text-foreground"
+                  className="absolute right-5 top-1/2 -translate-y-1/2 text-muted-foreground/60 hover:text-foreground"
                   aria-label="Clear filter"
                 >
                   <X className="size-3.5" />

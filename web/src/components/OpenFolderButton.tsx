@@ -29,7 +29,7 @@ export function OpenFolderButton({
       size="sm"
       onClick={() => mutation.mutate()}
       disabled={mutation.isPending}
-      className="shrink-0 gap-1.5 active:scale-[0.98]"
+      className="shrink-0 gap-1.5 rounded-full active:scale-[0.98]"
     >
       {mutation.isPending ? (
         <Loader2 className="size-3.5 animate-spin" />

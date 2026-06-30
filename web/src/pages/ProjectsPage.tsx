@@ -746,7 +746,13 @@ function AddProjectForm({ onDone }: { onDone: () => void }) {
   const mutation = useMutation({
     mutationFn: () => createProject({ name: name.trim(), rootPath: rootPath.trim() }),
     onSuccess: (p) => {
-      toast.success('Project added', { description: `${p.name} created.` })
+      const created = p.created?.length ?? 0
+      toast.success('Project added', {
+        description:
+          created > 0
+            ? `${p.name} created and initialized (${created} file${created === 1 ? '' : 's'}).`
+            : `${p.name} created. Setup was already present.`,
+      })
       setName('')
       setRootPath('')
       queryClient.invalidateQueries({ queryKey: ['projects'] })
@@ -1421,7 +1427,7 @@ export default function ProjectsPage() {
                     placeholder="Filter by name or path…"
                     value={query}
                     onChange={(e) => setQuery(e.target.value)}
-                    className="h-10 pl-9"
+                    className="h-11 rounded-full pl-9 shadow-none"
                   />
                 </div>
                 <p className="text-xs text-muted-foreground">

@@ -639,13 +639,13 @@ function CrawledTicketPicker({
         <div className="absolute z-50 mt-1 w-full overflow-hidden rounded-2xl border border-border/60 bg-popover text-popover-foreground shadow-sm">
           <div className="border-b p-2">
             <div className="relative">
-              <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+              <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
               <Input
                 autoFocus
                 placeholder="Search crawled tickets…"
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                className="h-8 pl-8 text-xs"
+                className="h-11 rounded-full pl-9 text-sm shadow-none"
               />
             </div>
           </div>

@@ -36,6 +36,12 @@ export interface SourceCredential {
   username?: string
 }
 
+export interface SourceCredentialInfo {
+  label: string
+  tokenPreview: string
+  username: boolean
+}
+
 export interface GitLogLine {
   level: 'info' | 'success' | 'error'
   text: string
@@ -174,6 +180,20 @@ function authSchemeLabel(parsed: ParsedRepo, cred?: SourceCredential): string {
   if (parsed.provider === 'github') return 'GitHub token (user: x-access-token)'
   if (parsed.provider === 'bitbucket') return 'Bitbucket access token (user: x-token-auth)'
   return 'token'
+}
+
+export function sourceCredentialInfo(
+  parsed: ParsedRepo,
+  cred?: SourceCredential,
+): SourceCredentialInfo | null {
+  if (!cred?.token) return null
+  const token = cred.token.trim()
+  const tail = token.length > 4 ? token.slice(-4) : token
+  return {
+    label: authSchemeLabel(parsed, cred),
+    tokenPreview: `****${tail}`,
+    username: Boolean(cred.username),
+  }
 }
 
 /** Remove the token (and an authed URL containing it) from any text we log/return. */

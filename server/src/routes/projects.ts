@@ -114,6 +114,65 @@ Describe what this project is and how it is structured.
 
 const skipDsStore = (src: string) => !src.endsWith('.DS_Store')
 
+function initializeProjectFolder(project: Project): { created: string[]; templateName: string | null } {
+  const root = project.rootPath
+  if (!isDir(root)) {
+    throw new Error(`folder not found: ${root}`)
+  }
+
+  const template = findTemplateProject(project.id)
+  const created: string[] = []
+
+  // 1. CLAUDE.md
+  const targetClaudeMd = path.join(root, 'CLAUDE.md')
+  if (!fs.existsSync(targetClaudeMd)) {
+    const tpl = template && path.join(template.rootPath, 'CLAUDE.md')
+    if (tpl && fs.existsSync(tpl)) {
+      fs.copyFileSync(tpl, targetClaudeMd)
+    } else {
+      fs.writeFileSync(targetClaudeMd, starterClaudeMd(project.name))
+    }
+    created.push('CLAUDE.md')
+  }
+
+  // 2. .claude/skills/qc-testing — scaffold ONLY the `qc-testing` skill (the QC
+  // brain), never the template's other skills. Source preference: an existing
+  // template project's copy (may be customized), else the skill bundled with the
+  // portal (templates/skills/qc-testing) — so a brand-new install with no other
+  // projects to clone from still gets the skill. Keyed on the skill folder, not
+  // the parent, so a pre-existing empty .claude/skills doesn't block it.
+  const targetSkills = skillsDirFor(root)
+  const targetQcSkill = path.join(targetSkills, QC_SKILL)
+  if (!isDir(targetQcSkill)) {
+    const tplQcSkill = template ? path.join(skillsDirFor(template.rootPath), QC_SKILL) : null
+    const sourceQcSkill =
+      tplQcSkill && isDir(tplQcSkill)
+        ? tplQcSkill
+        : isDir(bundledSkillDir(QC_SKILL))
+          ? bundledSkillDir(QC_SKILL)
+          : null
+    if (sourceQcSkill) {
+      fs.mkdirSync(targetSkills, { recursive: true })
+      fs.cpSync(sourceQcSkill, targetQcSkill, { recursive: true, filter: skipDsStore })
+      created.push('.claude/skills/qc-testing')
+    }
+  }
+
+  // 3. .mcp.json
+  const targetMcp = mcpJsonFor(root)
+  if (!fs.existsSync(targetMcp)) {
+    const tpl = template ? mcpJsonFor(template.rootPath) : null
+    if (tpl && fs.existsSync(tpl)) {
+      fs.copyFileSync(tpl, targetMcp)
+    } else {
+      fs.writeFileSync(targetMcp, `${JSON.stringify({ mcpServers: {} }, null, 2)}\n`)
+    }
+    created.push('.mcp.json')
+  }
+
+  return { created, templateName: template?.name ?? null }
+}
+
 projectsRouter.get('/', (_req, res) => {
   res.json(listProjects().map((p) => ({ ...p, ...rootInfo(p.rootPath) })))
 })
@@ -131,7 +190,15 @@ projectsRouter.post('/', (req, res) => {
     return res.status(400).json({ error: `rootPath is not a folder: ${resolved}` })
   }
   const project = createProject(name.trim(), resolved, false)
-  return res.status(201).json({ ...project, ...rootInfo(project.rootPath) })
+  try {
+    const init = initializeProjectFolder(project)
+    return res.status(201).json({ ...project, ...rootInfo(project.rootPath), ...init })
+  } catch (err) {
+    deleteProject(project.id)
+    return res.status(500).json({
+      error: err instanceof Error ? err.message : 'Project initialization failed',
+    })
+  }
 })
 
 projectsRouter.put('/:id', (req, res) => {
@@ -232,72 +299,19 @@ projectsRouter.post('/:id/init', (req, res) => {
   if (!project) return res.status(404).json({ error: 'project not found' })
 
   const root = project.rootPath
-  if (!isDir(root)) {
-    return res.status(400).json({ error: `folder not found: ${root}` })
-  }
-
-  const template = findTemplateProject(project.id)
-  const created: string[] = []
 
   try {
-    // 1. CLAUDE.md
-    const targetClaudeMd = path.join(root, 'CLAUDE.md')
-    if (!fs.existsSync(targetClaudeMd)) {
-      const tpl = template && path.join(template.rootPath, 'CLAUDE.md')
-      if (tpl && fs.existsSync(tpl)) {
-        fs.copyFileSync(tpl, targetClaudeMd)
-      } else {
-        fs.writeFileSync(targetClaudeMd, starterClaudeMd(project.name))
-      }
-      created.push('CLAUDE.md')
-    }
-
-    // 2. .claude/skills/qc-testing — scaffold ONLY the `qc-testing` skill (the QC
-    // brain), never the template's other skills. Source preference: an existing
-    // template project's copy (may be customized), else the skill bundled with the
-    // portal (templates/skills/qc-testing) — so a brand-new install with no other
-    // projects to clone from still gets the skill. Keyed on the skill folder, not
-    // the parent, so a pre-existing empty .claude/skills doesn't block it.
-    const targetSkills = skillsDirFor(root)
-    const targetQcSkill = path.join(targetSkills, QC_SKILL)
-    if (!isDir(targetQcSkill)) {
-      const tplQcSkill = template ? path.join(skillsDirFor(template.rootPath), QC_SKILL) : null
-      const sourceQcSkill =
-        tplQcSkill && isDir(tplQcSkill)
-          ? tplQcSkill
-          : isDir(bundledSkillDir(QC_SKILL))
-            ? bundledSkillDir(QC_SKILL)
-            : null
-      if (sourceQcSkill) {
-        fs.mkdirSync(targetSkills, { recursive: true })
-        fs.cpSync(sourceQcSkill, targetQcSkill, { recursive: true, filter: skipDsStore })
-        created.push('.claude/skills/qc-testing')
-      }
-    }
-
-    // 3. .mcp.json
-    const targetMcp = mcpJsonFor(root)
-    if (!fs.existsSync(targetMcp)) {
-      const tpl = template ? mcpJsonFor(template.rootPath) : null
-      if (tpl && fs.existsSync(tpl)) {
-        fs.copyFileSync(tpl, targetMcp)
-      } else {
-        fs.writeFileSync(targetMcp, `${JSON.stringify({ mcpServers: {} }, null, 2)}\n`)
-      }
-      created.push('.mcp.json')
-    }
+    const init = initializeProjectFolder(project)
+    return res.json({
+      ...project,
+      ...rootInfo(root),
+      ...init,
+    })
   } catch (err) {
     return res
-      .status(500)
+      .status(isDir(root) ? 500 : 400)
       .json({ error: err instanceof Error ? err.message : 'Failed to initialize project' })
   }
-
-  return res.json({
-    ...project,
-    ...rootInfo(root),
-    created,
-    templateName: template?.name ?? null,
-  })
 })
 
 // The project's root CLAUDE.md — the Claude Code guidance the qc-testing skill and

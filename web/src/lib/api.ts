@@ -35,7 +35,9 @@ export function pickFolder(): Promise<{ path: string | null; canceled: boolean }
   return request('/api/projects/pick-folder')
 }
 
-export function createProject(body: { name: string; rootPath: string }): Promise<Project> {
+export function createProject(
+  body: { name: string; rootPath: string },
+): Promise<Project & { created?: string[]; templateName?: string | null }> {
   return request('/api/projects', { method: 'POST', body: JSON.stringify(body) })
 }
 
@@ -569,7 +571,12 @@ export interface SourceInfo {
   rootPath: string
   lastSync: string // ISO
   lastCommit: string // "<shortSha> <subject>"
-  hasToken: boolean // a private-repo token is stored (never returned)
+  hasToken: boolean // a private-repo token is stored (never returned raw)
+  credential: {
+    label: string
+    tokenPreview: string
+    username: boolean
+  } | null
   live: { isRepo: boolean; branch: string; lastCommit: string; remoteUrl: string } | null
 }
 
@@ -597,6 +604,11 @@ export interface SourceJob {
 /** Read the project's connected source repo + live on-disk status. */
 export function getSource(projectId: string): Promise<SourceInfo> {
   return request(`/api/source?projectId=${encodeURIComponent(projectId)}`)
+}
+
+/** Read the stored source access token for clipboard copy. */
+export function getSourceCredential(projectId: string): Promise<{ token: string }> {
+  return request(`/api/source/credential?projectId=${encodeURIComponent(projectId)}`)
 }
 
 /** Connect (clone/adopt) a repo. Runs as a background job — poll getSourceJob. */

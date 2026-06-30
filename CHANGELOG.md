@@ -3,6 +3,27 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.7.0 — 2026-06-30
+
+**Access keys, instant project setup & a cleaner look**
+
+### Added
+
+- **See and copy a project's Source Code access key.** The Source Code page now shows which
+  auth method is in use and a masked preview of the stored token (e.g. `****1234`), with a
+  one-click **Copy** button to put the full token on your clipboard when you need it elsewhere.
+  The token is still never written to the database, the git remote, or any log.
+- **New projects are set up for you automatically.** Creating a project now scaffolds its
+  `CLAUDE.md`, the `qc-testing` skill, and a `.mcp.json` right away (copied from your template
+  project when you have one, otherwise from sensible starters) — so a brand-new project is ready
+  to run without a separate "initialize" step. The create response reports what was created.
+
+### Changed
+
+- **Refreshed input fields across the app.** Search, filter, and URL boxes — on Tickets, Test
+  Cases, Run, History, Skills, Design Check, Diagrams/Overview, and the in-app docs — now use the
+  rounded "pill" style of the System-Style UI, with larger search icons and a consistent focus ring.
+
 ## 0.6.9 — 2026-06-30
 
 **Documented the release process**

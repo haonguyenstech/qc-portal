@@ -466,7 +466,7 @@ function GenerateDialog({
                   value={allUrl}
                   onChange={(e) => setAllUrl(e.target.value)}
                   placeholder="https://staging.example.com/feature"
-                  className="h-9 pl-9"
+                  className="h-11 rounded-full pl-9 shadow-none"
                 />
               </div>
               <Button
@@ -1504,7 +1504,7 @@ export default function TestCasePage() {
                   placeholder="Filter crawled tickets…"
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
-                  className="h-9 pl-9"
+                  className="h-11 rounded-full pl-9 shadow-none"
                 />
               </div>
               <Select value={tcFilter} onValueChange={(v) => setTcFilter(v as TcFilter)}>
