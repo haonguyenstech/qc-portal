@@ -27,7 +27,10 @@ function readCurrentVersion(): string | null {
 }
 
 async function git(args: string[], timeout = 15000): Promise<string> {
-  const { stdout } = await execFileAsync('git', args, { cwd: INSTALL_ROOT, timeout })
+  // windowsHide: the server runs as a console-less detached process on Windows, so a
+  // spawned git would otherwise pop its own console window each call (the check-for-
+  // updates flow runs several). Keep it hidden.
+  const { stdout } = await execFileAsync('git', args, { cwd: INSTALL_ROOT, timeout, windowsHide: true })
   return stdout.trim()
 }
 

@@ -593,7 +593,7 @@ function openBrowser(url: string): void {
   const cmd = platform === 'darwin' ? 'open' : platform === 'win32' ? 'cmd' : 'xdg-open'
   const args = platform === 'win32' ? ['/c', 'start', '', url] : [url]
   try {
-    execFile(cmd, args, () => {})
+    execFile(cmd, args, { windowsHide: true }, () => {}) // hide the transient cmd window
   } catch {
     /* best-effort; the UI also surfaces the URL */
   }

@@ -210,6 +210,7 @@ function runGit(args: string[], opts: RunGitOpts): Promise<string> {
       cwd: opts.cwd,
       // Never prompt for credentials interactively — fail fast instead of hanging.
       env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: 'echo' },
+      windowsHide: true, // no console window flash on Windows (server runs console-less)
     })
     let stdout = ''
     let stderr = ''

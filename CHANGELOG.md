@@ -3,6 +3,18 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.6.7 — 2026-06-30
+
+**No more console windows popping up on Windows**
+
+### Fixed
+
+- **Checking for updates no longer flashes a terminal window on Windows.** The version check
+  runs `git` a few times in the background, but those calls didn't suppress the console window —
+  so each one popped open briefly. They now run hidden.
+- Same fix applied to the other background subprocesses that could flash a window: **Source Code**
+  git clone/sync and opening the **MCP OAuth** browser page.
+
 ## 0.6.6 — 2026-06-30
 
 **Fix QC runs stuck at intake on Windows**
