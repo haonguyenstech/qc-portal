@@ -51,7 +51,7 @@ interface Props {
  * Falls back to a plain text input when ClickUp isn't configured.
  */
 export function TicketPicker({ value, onChange, projectId, disabled }: Props) {
-  const { data: status } = useQuery({ queryKey: ['clickup-status'], queryFn: clickupStatus })
+  const { data: status } = useQuery({ queryKey: ['clickup-status'], queryFn: () => clickupStatus() })
   const configured = !!status?.configured
 
   const [binding, setBinding] = useState<ListBinding | null>(null)

@@ -328,8 +328,8 @@ function pid(projectId?: string): string {
   return projectId ? `&projectId=${encodeURIComponent(projectId)}` : ''
 }
 
-export function clickupStatus(): Promise<{ configured: boolean }> {
-  return request('/api/clickup/status')
+export function clickupStatus(projectId?: string): Promise<{ configured: boolean }> {
+  return request(`/api/clickup/status${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ''}`)
 }
 
 /**
@@ -588,8 +588,8 @@ export function startCrawlJob(body: {
 // project (id = project key), a "task" is an issue, and crawl jobs share the same
 // registry (so getCrawlJob/listCrawlJobs above resolve Jira jobs too).
 
-export function jiraStatus(): Promise<{ configured: boolean }> {
-  return request('/api/jira/status')
+export function jiraStatus(projectId?: string): Promise<{ configured: boolean }> {
+  return request(`/api/jira/status${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ''}`)
 }
 
 export function jiraWorkspaces(projectId?: string): Promise<ClickupWorkspace[]> {

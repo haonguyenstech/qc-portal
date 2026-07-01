@@ -26,15 +26,56 @@ export function pickFolderNative(
         resolve({ path: stdout.trim() })
       })
     } else if (process.platform === 'win32') {
-      const ps =
-        'Add-Type -AssemblyName System.Windows.Forms; ' +
-        '$f = New-Object System.Windows.Forms.FolderBrowserDialog; ' +
-        "if($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK){ Write-Output $f.SelectedPath }"
+      // A bare FolderBrowserDialog.ShowDialog() has no owner window, so it often
+      // opens BEHIND the browser / other windows. The user never sees it, the
+      // PowerShell process blocks on it forever, and the /pick-folder request
+      // hangs with the spinner stuck. Fix: create an invisible, TopMost owner
+      // form, bring it to the foreground, and own the dialog with it so the
+      // picker is guaranteed to appear on top. See also the timeout backstop
+      // below so a wedged dialog can never pend the request indefinitely.
+      const desc = prompt.replace(/['"`\r\n]/g, '')
+      const ps = [
+        'Add-Type -AssemblyName System.Windows.Forms;',
+        '$owner = New-Object System.Windows.Forms.Form;',
+        '$owner.TopMost = $true; $owner.ShowInTaskbar = $false; $owner.Opacity = 0;',
+        '$owner.Show(); $owner.Activate(); $owner.BringToFront();',
+        '$f = New-Object System.Windows.Forms.FolderBrowserDialog;',
+        `$f.Description = '${desc}'; $f.ShowNewFolderButton = $true;`,
+        '$r = $f.ShowDialog($owner);',
+        '$owner.Dispose();',
+        'if($r -eq [System.Windows.Forms.DialogResult]::OK){ Write-Output $f.SelectedPath }',
+      ].join(' ')
+      let settled = false
       // windowsHide hides the PowerShell console; the GUI dialog it opens still shows.
-      execFile('powershell', ['-NoProfile', '-STA', '-Command', ps], { windowsHide: true }, (err, stdout) => {
-        if (err) return resolve({ path: null, error: err.message })
-        resolve({ path: stdout.trim() || null })
-      })
+      const child = execFile(
+        'powershell',
+        ['-NoProfile', '-STA', '-Command', ps],
+        { windowsHide: true },
+        (err, stdout, stderr) => {
+          if (settled) return
+          settled = true
+          clearTimeout(timer)
+          if (err) return resolve({ path: null, error: (stderr || '').trim() || err.message })
+          resolve({ path: stdout.trim() || null })
+        },
+      )
+      // Backstop: if the dialog wedges (e.g. no interactive desktop), kill the
+      // process and fail cleanly instead of pending forever. 5 min is far longer
+      // than anyone needs to pick a folder, so it never cuts off real use.
+      const timer = setTimeout(() => {
+        if (settled) return
+        settled = true
+        try {
+          child.kill()
+        } catch {
+          /* already gone */
+        }
+        resolve({
+          path: null,
+          error:
+            'The folder picker did not respond in time — the dialog may have opened behind another window. Please try again, or type the path manually.',
+        })
+      }, 5 * 60 * 1000)
     } else {
       // Linux: best-effort via zenity if present.
       execFile(

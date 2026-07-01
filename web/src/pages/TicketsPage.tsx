@@ -505,8 +505,16 @@ function CrawlLogPanel({
 export default function TicketsPage() {
   const { activeProjectId, activeProject } = useProjects()
   const queryClient = useQueryClient()
-  const { data: cuStatus } = useQuery({ queryKey: ['clickup-status'], queryFn: clickupStatus })
-  const { data: jStatus } = useQuery({ queryKey: ['jira-status'], queryFn: jiraStatus })
+  // Status is per-project (the tracker creds live in each project's .mcp.json),
+  // so scope both checks to the active project — not the server's default one.
+  const { data: cuStatus } = useQuery({
+    queryKey: ['clickup-status', activeProjectId],
+    queryFn: () => clickupStatus(activeProjectId ?? undefined),
+  })
+  const { data: jStatus } = useQuery({
+    queryKey: ['jira-status', activeProjectId],
+    queryFn: () => jiraStatus(activeProjectId ?? undefined),
+  })
   const clickupOk = !!cuStatus?.configured
   const jiraOk = !!jStatus?.configured
   const bothConfigured = clickupOk && jiraOk

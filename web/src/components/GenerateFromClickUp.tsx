@@ -165,7 +165,7 @@ export function GenerateFromClickUp({
   onGenerated?: (markdown: string) => void
   onDiagramSaved?: (diagram: Diagram) => void
 }) {
-  const { data: status } = useQuery({ queryKey: ['clickup-status'], queryFn: clickupStatus })
+  const { data: status } = useQuery({ queryKey: ['clickup-status'], queryFn: () => clickupStatus() })
   const configured = !!status?.configured
 
   const {

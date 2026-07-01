@@ -3,6 +3,26 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.8.2 — 2026-07-01
+
+**Jira tickets appear for the right project — plus a steadier Windows folder picker**
+
+### Fixed
+
+- **The ClickUp / Jira source switch now follows the project you're in.** After you
+  connected Jira, the Tickets page still checked whether ClickUp and Jira were connected
+  against the *default* project instead of the one selected in the sidebar. So the switch
+  could stay hidden — or Jira could look "not connected" — even though you'd connected it on
+  that project. It now checks the **active** project, so the **ClickUp | Jira** toggle shows
+  whenever both trackers are connected there, and your Jira issues load straight away. (One
+  gotcha worth knowing: Jira needs a *classic* API token — the plain "Create API token" button
+  — not a "token with scopes"; a scoped token silently returns no issues.)
+- **The "choose folder" dialog on Windows no longer hides behind other windows.** The native
+  folder picker — used when importing a skill or pointing the portal at a folder — could open
+  *behind* the browser, leaving the button spinning forever with no dialog in sight. It now
+  opens in front, and if it ever gets wedged it times out cleanly with a clear message instead
+  of hanging.
+
 ## 0.8.1 — 2026-07-01
 
 **Fix MCP servers stuck on "Pending approval"**
