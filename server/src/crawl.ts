@@ -1,20 +1,31 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { ticketsDirFor } from './config.js'
-import {
-  downloadAttachment,
-  getTaskComments,
-  getTaskDetail,
-  type TaskAttachment,
-  type TaskComment,
-  type TaskDetail,
-} from './clickup.js'
+import * as clickup from './clickup.js'
+import * as jira from './jira.js'
+import type { TaskAttachment, TaskComment, TaskDetail } from './clickup.js'
 import { CRAWL_SUMMARY_MODELS, parseClaudeJsonResult, runClaude } from './claudeExec.js'
 
-// Core single-ticket crawl: download a ClickUp ticket's detail + comments +
-// attachments into <root>/testing/test-result/<displayId>/, optionally writing an AI
+// Core single-ticket crawl: download a ticket's detail + comments + attachments
+// into <root>/testing/test-result/<displayId>/, optionally writing an AI
 // summary.md. Extracted so both the synchronous /crawl route and the background
-// crawl-job runner share exactly one implementation.
+// crawl-job runner share exactly one implementation. `source` selects the tracker
+// client (ClickUp or Jira) — both normalize to the same TaskDetail/TaskComment
+// shapes, so everything below is tracker-agnostic.
+
+/** Which tracker a ticket is fetched from. Both clients emit identical shapes. */
+export type TicketSource = 'clickup' | 'jira'
+
+/** The read functions we need from a tracker client — clickup.ts and jira.ts both satisfy this. */
+interface TicketClient {
+  getTaskDetail(id: string): Promise<TaskDetail>
+  getTaskComments(id: string): Promise<TaskComment[]>
+  downloadAttachment(url: string): Promise<Buffer>
+}
+
+function clientFor(source: TicketSource): TicketClient {
+  return source === 'jira' ? jira : clickup
+}
 
 const MAX_SUMMARY_INPUT_CHARS = 40_000
 
@@ -105,7 +116,7 @@ function attachmentFilename(a: TaskAttachment, taken: Set<string>): string {
 
 /** Prompt Claude to turn a crawled ticket's content into a short QC-focused brief. */
 function summaryPrompt(displayId: string, name: string, content: string): string {
-  return `You are a senior QC (acceptance testing) engineer. A ClickUp ticket has just been downloaded for testing. Read it and write a SHORT QC brief in GitHub-flavored Markdown that helps an engineer get oriented fast.
+  return `You are a senior QC (acceptance testing) engineer. A ticket has just been downloaded for testing. Read it and write a SHORT QC brief in GitHub-flavored Markdown that helps an engineer get oriented fast.
 
 Ticket: ${displayId} — ${name}
 
@@ -132,13 +143,15 @@ export async function crawlOneTicket(opts: {
   taskId: string
   rootPath: string
   model?: string
+  source?: TicketSource
   onLog?: (log: CrawlLog) => void
 }): Promise<CrawlResult> {
   const onLog = opts.onLog ?? (() => {})
   const useModel = CRAWL_SUMMARY_MODELS.has(opts.model ?? '') ? (opts.model as string) : ''
+  const client = clientFor(opts.source ?? 'clickup')
 
-  const detail = await getTaskDetail(opts.taskId)
-  const comments = await getTaskComments(opts.taskId)
+  const detail = await client.getTaskDetail(opts.taskId)
+  const comments = await client.getTaskComments(opts.taskId)
 
   // Resolve & path-guard the destination: <root>/testing/test-result/<displayId>/
   const baseDir = ticketsDirFor(opts.rootPath)
@@ -171,7 +184,7 @@ export async function crawlOneTicket(opts: {
       const name = attachmentFilename(a, taken)
       try {
         if (!a.url) throw new Error('no url')
-        const buf = await downloadAttachment(a.url)
+        const buf = await client.downloadAttachment(a.url)
         fs.writeFileSync(path.join(attDir, name), buf)
         written.push({ path: `attachments/${name}`, bytes: buf.byteLength })
         attachmentCount++

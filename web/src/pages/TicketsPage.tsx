@@ -50,6 +50,11 @@ import {
   clickupTasks,
   clickupSubtasks,
   clickupWorkspaces,
+  jiraStatus,
+  jiraTasks,
+  jiraSubtasks,
+  jiraWorkspaces,
+  startJiraCrawlJob,
   getCrawlJob,
   openTicketsFolder,
   startCrawlJob,
@@ -68,8 +73,52 @@ import {
 } from '@/lib/clickupList'
 import { useProjects } from '@/lib/project-context'
 
-const TEAM_KEY = 'qc.clickupTeam'
 const CRAWL_MODEL_KEY = 'qc.crawlModel'
+
+// Which tracker the ticket picker reads from. Both normalize to the same shape,
+// so only the data source differs — the tree, status grouping, and crawler are
+// identical. The pick is remembered per project; the workspace pick is remembered
+// per source (a ClickUp team id and a Jira project key must not collide).
+type TicketSourceId = 'clickup' | 'jira'
+
+const SOURCE_PREFIX = 'qc.ticketSource.'
+function loadTicketSource(projectId: string | null): TicketSourceId {
+  if (!projectId) return 'clickup'
+  try {
+    return localStorage.getItem(SOURCE_PREFIX + projectId) === 'jira' ? 'jira' : 'clickup'
+  } catch {
+    return 'clickup'
+  }
+}
+function saveTicketSource(projectId: string | null, source: TicketSourceId): void {
+  if (!projectId) return
+  try {
+    localStorage.setItem(SOURCE_PREFIX + projectId, source)
+  } catch {
+    /* ignore */
+  }
+}
+
+const TEAM_PREFIX = 'qc.ticketTeam.' // + source ('clickup' | 'jira')
+function loadTeam(source: TicketSourceId): string {
+  try {
+    // Migrate the legacy ClickUp-only key so existing binds survive the rename.
+    return (
+      localStorage.getItem(TEAM_PREFIX + source) ??
+      (source === 'clickup' ? localStorage.getItem('qc.clickupTeam') : null) ??
+      ''
+    )
+  } catch {
+    return ''
+  }
+}
+function saveTeam(source: TicketSourceId, id: string): void {
+  try {
+    localStorage.setItem(TEAM_PREFIX + source, id)
+  } catch {
+    /* ignore */
+  }
+}
 
 // The active background crawl-job id, remembered per project so a browser reload
 // (or navigating away and back) reconnects to the still-running server-side job.
@@ -456,12 +505,30 @@ function CrawlLogPanel({
 export default function TicketsPage() {
   const { activeProjectId, activeProject } = useProjects()
   const queryClient = useQueryClient()
-  const { data: status } = useQuery({ queryKey: ['clickup-status'], queryFn: clickupStatus })
-  const configured = !!status?.configured
+  const { data: cuStatus } = useQuery({ queryKey: ['clickup-status'], queryFn: clickupStatus })
+  const { data: jStatus } = useQuery({ queryKey: ['jira-status'], queryFn: jiraStatus })
+  const clickupOk = !!cuStatus?.configured
+  const jiraOk = !!jStatus?.configured
+  const bothConfigured = clickupOk && jiraOk
+
+  // Remembered pick; only honored when both trackers are connected. Otherwise we
+  // snap to whichever one is configured so the page always shows a usable source.
+  const [sourcePref, setSourcePref] = useState<TicketSourceId>(() =>
+    loadTicketSource(activeProjectId),
+  )
+  const source: TicketSourceId = bothConfigured ? sourcePref : jiraOk ? 'jira' : 'clickup'
+  const configured = source === 'jira' ? jiraOk : clickupOk
+
+  function chooseSource(next: TicketSourceId) {
+    setSourcePref(next)
+    saveTicketSource(activeProjectId, next)
+  }
 
   const [binding, setBinding] = useState<ListBinding | null>(() =>
     activeProjectId ? loadListBinding(activeProjectId) : null,
   )
+  // List binding is a ClickUp-only concept; Jira scopes by project (the workspace).
+  const cuBinding = source === 'clickup' ? binding : null
   const [configuring, setConfiguring] = useState(false)
   const [query, setQuery] = useState('')
   // Multi-select: keep the full task objects keyed by id (a filtered/searched list
@@ -501,6 +568,7 @@ export default function TicketsPage() {
   if (seenProject !== activeProjectId) {
     setSeenProject(activeProjectId)
     setBinding(activeProjectId ? loadListBinding(activeProjectId) : null)
+    setSourcePref(loadTicketSource(activeProjectId))
     setSelected(new Map())
     setJobId(loadActiveCrawlJobId(activeProjectId))
     setHiddenResults(new Set())
@@ -538,19 +606,23 @@ export default function TicketsPage() {
   })
 
   const { data: workspaces } = useQuery({
-    queryKey: ['clickup-workspaces', activeProjectId],
-    queryFn: () => clickupWorkspaces(activeProjectId ?? undefined),
-    enabled: configured && !binding,
+    queryKey: ['ticket-workspaces', source, activeProjectId],
+    queryFn: () =>
+      source === 'jira'
+        ? jiraWorkspaces(activeProjectId ?? undefined)
+        : clickupWorkspaces(activeProjectId ?? undefined),
+    enabled: configured && !cuBinding,
     staleTime: 5 * 60_000,
   })
 
-  const [team, setTeam] = useState<string>(() => {
-    try {
-      return localStorage.getItem(TEAM_KEY) ?? ''
-    } catch {
-      return ''
-    }
-  })
+  // Workspace pick is remembered per source (ClickUp team id vs Jira project key).
+  const [team, setTeam] = useState<string>(() => loadTeam(source))
+  const [seenSource, setSeenSource] = useState(source)
+  if (seenSource !== source) {
+    setSeenSource(source)
+    setTeam(loadTeam(source))
+    setSelected(new Map())
+  }
 
   // Effective workspace: the user's pick if still valid, else the first one.
   const activeTeam =
@@ -558,22 +630,20 @@ export default function TicketsPage() {
 
   function chooseTeam(id: string) {
     setTeam(id)
-    try {
-      localStorage.setItem(TEAM_KEY, id)
-    } catch {
-      /* ignore */
-    }
+    saveTeam(source, id)
   }
 
   const { data: tasks, isFetching } = useQuery({
-    queryKey: binding
-      ? ['clickup-list-tasks', activeProjectId, binding.listId, debounced.trim()]
-      : ['clickup-tasks', activeProjectId, activeTeam, debounced.trim()],
+    queryKey: cuBinding
+      ? ['clickup-list-tasks', activeProjectId, cuBinding.listId, debounced.trim()]
+      : ['ticket-tasks', source, activeProjectId, activeTeam, debounced.trim()],
     queryFn: () =>
-      binding
-        ? clickupListTasks(binding.listId, debounced.trim(), activeProjectId ?? undefined)
-        : clickupTasks(activeTeam, debounced.trim(), activeProjectId ?? undefined),
-    enabled: configured && !!activeProjectId && (binding ? true : !!activeTeam),
+      cuBinding
+        ? clickupListTasks(cuBinding.listId, debounced.trim(), activeProjectId ?? undefined)
+        : source === 'jira'
+          ? jiraTasks(activeTeam, debounced.trim(), activeProjectId ?? undefined)
+          : clickupTasks(activeTeam, debounced.trim(), activeProjectId ?? undefined),
+    enabled: configured && !!activeProjectId && (cuBinding ? true : !!activeTeam),
     staleTime: 15_000,
   })
 
@@ -582,7 +652,7 @@ export default function TicketsPage() {
   // owned by the global <CrawlJobWatcher/>, so it fires even if we leave this page.
   const crawl = useMutation({
     mutationFn: (tasks: ClickupTask[]) =>
-      startCrawlJob({
+      (source === 'jira' ? startJiraCrawlJob : startCrawlJob)({
         projectId: activeProjectId as string,
         model: crawlModel,
         tickets: tasks.map((t) => ({ id: t.id, displayId: t.displayId, name: t.name })),
@@ -661,7 +731,7 @@ export default function TicketsPage() {
 
   // Reset the lazy-loaded subtask caches when the parent list changes (project,
   // workspace, list binding, or search) — old subtasks no longer apply.
-  const listKey = `${activeProjectId}|${binding?.listId ?? activeTeam}|${debounced.trim()}`
+  const listKey = `${source}|${activeProjectId}|${cuBinding?.listId ?? activeTeam}|${debounced.trim()}`
   const [seenListKey, setSeenListKey] = useState(listKey)
   if (seenListKey !== listKey) {
     setSeenListKey(listKey)
@@ -679,7 +749,9 @@ export default function TicketsPage() {
     if (loadedParents.has(parentId) || loadingParents.has(parentId)) return
     setLoadingParents((prev) => new Set(prev).add(parentId))
     try {
-      const subs = await clickupSubtasks(parentId, activeProjectId ?? undefined)
+      const subs = await (source === 'jira'
+        ? jiraSubtasks(parentId, activeProjectId ?? undefined)
+        : clickupSubtasks(parentId, activeProjectId ?? undefined))
       setSubtasks((prev) => {
         const next = new Map(prev)
         for (const s of subs) next.set(s.id, s)
@@ -824,7 +896,7 @@ export default function TicketsPage() {
               </span>
             </span>
           </button>
-          {/* Open the ticket in ClickUp — always available; sits left of delete
+          {/* Open the ticket in its tracker — always available; sits left of delete
               when the ticket is also crawled. */}
           {t.url && (
             <a
@@ -832,8 +904,8 @@ export default function TicketsPage() {
               target="_blank"
               rel="noopener noreferrer"
               onClick={(e) => e.stopPropagation()}
-              title="Open in ClickUp"
-              aria-label={`Open ${t.displayId} in ClickUp`}
+              title="Open ticket"
+              aria-label={`Open ${t.displayId}`}
               className={cn(
                 'absolute top-2 flex size-7 items-center justify-center rounded-xl text-muted-foreground opacity-0 transition-all hover:bg-muted hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100 active:scale-95',
                 crawled ? 'right-9' : 'right-2',
@@ -918,7 +990,7 @@ export default function TicketsPage() {
           <div className="space-y-1">
             <h1 className="text-3xl font-semibold tracking-tight">Tickets</h1>
             <p className="text-sm text-muted-foreground">
-              Pick a ClickUp ticket and crawl it — its description, comments, and attachments are
+              Pick a ticket and crawl it — its description, comments, and attachments are
               downloaded into the project so the QC skill can read them locally.
             </p>
           </div>
@@ -963,7 +1035,7 @@ export default function TicketsPage() {
               <ListChecks className="h-5 w-5" />
             </span>
             <p className="text-sm text-muted-foreground">
-              ClickUp isn't connected. Add your ClickUp token on the{' '}
+              No ticket tracker is connected. Connect ClickUp or Jira on the{' '}
               <a href="/mcp" className="font-medium text-primary hover:underline">
                 MCP page
               </a>{' '}
@@ -987,13 +1059,33 @@ export default function TicketsPage() {
                   )}
                 </span>
                 <div className="flex items-center gap-1">
-                  {!binding && workspaces && workspaces.length > 1 && (
+                  {/* Source toggle — only when both trackers are connected. */}
+                  {bothConfigured && (
+                    <div className="mr-1 inline-flex items-center rounded-full border border-border/60 bg-muted/40 p-0.5 text-xs">
+                      {(['clickup', 'jira'] as const).map((s) => (
+                        <button
+                          key={s}
+                          type="button"
+                          onClick={() => chooseSource(s)}
+                          className={cn(
+                            'rounded-full px-2.5 py-1 font-medium transition-colors',
+                            source === s
+                              ? 'bg-background text-foreground shadow-sm'
+                              : 'text-muted-foreground hover:text-foreground',
+                          )}
+                        >
+                          {s === 'clickup' ? 'ClickUp' : 'Jira'}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  {!cuBinding && workspaces && workspaces.length > 1 && (
                     <Select value={activeTeam} onValueChange={chooseTeam}>
                       <SelectTrigger
                         size="sm"
                         className="h-7 max-w-40 border-none bg-transparent text-xs text-muted-foreground shadow-none hover:text-foreground"
                       >
-                        <SelectValue placeholder="Workspace" />
+                        <SelectValue placeholder={source === 'jira' ? 'Project' : 'Workspace'} />
                       </SelectTrigger>
                       <SelectContent>
                         {workspaces.map((w) => (
@@ -1004,24 +1096,27 @@ export default function TicketsPage() {
                       </SelectContent>
                     </Select>
                   )}
-                  <button
-                    type="button"
-                    onClick={() => setConfiguring(true)}
-                    title={binding ? 'Change the bound list' : 'Bind this project to a ClickUp list'}
-                    className="inline-flex max-w-52 items-center gap-1 rounded-full px-2 py-1 text-xs font-medium text-muted-foreground transition-colors hover:text-primary"
-                  >
-                    {binding ? (
-                      <>
-                        <ListChecks className="size-3.5 shrink-0" />
-                        <span className="truncate">{binding.listName}</span>
-                      </>
-                    ) : (
-                      <>
-                        <Settings2 className="size-3.5" />
-                        Use a list
-                      </>
-                    )}
-                  </button>
+                  {/* List binding is ClickUp-only; Jira scopes by project. */}
+                  {source === 'clickup' && (
+                    <button
+                      type="button"
+                      onClick={() => setConfiguring(true)}
+                      title={binding ? 'Change the bound list' : 'Bind this project to a ClickUp list'}
+                      className="inline-flex max-w-52 items-center gap-1 rounded-full px-2 py-1 text-xs font-medium text-muted-foreground transition-colors hover:text-primary"
+                    >
+                      {binding ? (
+                        <>
+                          <ListChecks className="size-3.5 shrink-0" />
+                          <span className="truncate">{binding.listName}</span>
+                        </>
+                      ) : (
+                        <>
+                          <Settings2 className="size-3.5" />
+                          Use a list
+                        </>
+                      )}
+                    </button>
+                  )}
                 </div>
               </div>
 
@@ -1029,7 +1124,11 @@ export default function TicketsPage() {
                 <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground transition-colors group-focus-within:text-primary" />
                 <Input
                   placeholder={
-                    binding ? `Search “${binding.listName}”…` : 'Search ClickUp tasks…'
+                    cuBinding
+                      ? `Search “${cuBinding.listName}”…`
+                      : source === 'jira'
+                        ? 'Search Jira issues…'
+                        : 'Search ClickUp tasks…'
                   }
                   value={query}
                   autoComplete="off"
@@ -1074,7 +1173,7 @@ export default function TicketsPage() {
                 {!tasks && isFetching && (
                   <div className="flex items-center gap-2 px-2 py-3 text-xs text-muted-foreground">
                     <Loader2 className="size-3.5 animate-spin" />
-                    {binding ? 'Loading list…' : 'Searching…'}
+                    {cuBinding ? 'Loading list…' : 'Searching…'}
                   </div>
                 )}
                 {tasks && tasks.length === 0 && (

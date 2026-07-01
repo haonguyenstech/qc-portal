@@ -254,27 +254,41 @@ function readClaudeProjectSettings(file: string): ClaudeProjectSettings {
   }
 }
 
+function asStringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : []
+}
+
 /**
- * Claude stores approval for project-scoped .mcp.json servers in
- * .claude/settings.local.json. The portal owns these project configs, so Test
- * connection can approve the requested project server before retrying health.
+ * Approve a project-scoped .mcp.json server so `claude mcp list` stops reporting
+ * it "Pending approval". Current Claude Code (2.1.x) reads this approval from the
+ * per-project entry in ~/.claude.json (`hasTrustDialogAccepted` +
+ * `enabledMcpjsonServers`) — NOT from .claude/settings.local.json, which older
+ * versions used. We write BOTH: the ~/.claude.json entry is what actually clears
+ * the gate today; the settings.local.json write is kept for backward compat. The
+ * portal owns these project configs, so Test connection can approve the requested
+ * server before retrying health.
  */
 function approveMcpJsonServer(rootPath: string, name: string): boolean {
   const servers = readMcp(mcpJsonFor(rootPath)).mcpServers ?? {}
   if (!(name in servers)) return false
 
+  // Primary: ~/.claude.json project entry (what the CLI consults). A project that
+  // was never opened interactively has no entry here at all — create it.
+  const config = readClaudeConfig()
+  if (!config.projects) config.projects = {}
+  const project = config.projects[rootPath] ?? {}
+  project.hasTrustDialogAccepted = true
+  project.enabledMcpjsonServers = [...new Set([...asStringArray(project.enabledMcpjsonServers), name])]
+  project.disabledMcpjsonServers = asStringArray(project.disabledMcpjsonServers).filter((v) => v !== name)
+  config.projects[rootPath] = project
+  writeClaudeConfig(config)
+
+  // Backward compat: mirror into .claude/settings.local.json for older CLIs.
   const settingsDir = path.join(rootPath, '.claude')
   const settingsFile = path.join(settingsDir, 'settings.local.json')
   const settings = readClaudeProjectSettings(settingsFile)
-  const enabled = Array.isArray(settings.enabledMcpjsonServers)
-    ? settings.enabledMcpjsonServers.filter((v): v is string => typeof v === 'string')
-    : []
-  const disabled = Array.isArray(settings.disabledMcpjsonServers)
-    ? settings.disabledMcpjsonServers.filter((v): v is string => typeof v === 'string')
-    : []
-
-  settings.enabledMcpjsonServers = [...new Set([...enabled, name])]
-  settings.disabledMcpjsonServers = disabled.filter((v) => v !== name)
+  settings.enabledMcpjsonServers = [...new Set([...asStringArray(settings.enabledMcpjsonServers), name])]
+  settings.disabledMcpjsonServers = asStringArray(settings.disabledMcpjsonServers).filter((v) => v !== name)
 
   fs.mkdirSync(settingsDir, { recursive: true })
   fs.writeFileSync(settingsFile, JSON.stringify(settings, null, 2) + '\n', 'utf8')
@@ -403,8 +417,8 @@ mcpRouter.get('/test/:name', async (req, res) => {
     result = {
       ...retry,
       detail: retry.ok
-        ? `Approved in .claude/settings.local.json. ${retry.detail}`
-        : `Approved in .claude/settings.local.json, but connection still failed: ${retry.detail}`,
+        ? `Approved this project's MCP servers. ${retry.detail}`
+        : `Approved this project's MCP servers, but connection still failed: ${retry.detail}`,
     }
   }
 
@@ -456,7 +470,7 @@ mcpRouter.delete('/:name', (req, res) => {
 
 // ============================ OAuth ("click → authenticate") ============================
 
-type ProviderId = 'clickup' | 'figma'
+type ProviderId = 'clickup' | 'figma' | 'jira'
 
 interface ProviderDef {
   /** Server name written into .mcp.json. */
@@ -549,30 +563,65 @@ const PROVIDERS: Record<ProviderId, ProviderDef> = {
       args: ['-y', 'figma-developer-mcp', '--stdio', '--figma-oauth-token', token],
     }),
   },
+  // Jira has no OAuth app here — it is token-connect only (site URL + email +
+  // API token). The OAuth stubs throw because hasApp() is false, so the
+  // /oauth/:provider/start path is blocked before they can be reached.
+  jira: {
+    serverName: 'jira',
+    hasApp: () => false,
+    authorizeUrl: () => {
+      throw new Error('Jira uses token connect, not OAuth')
+    },
+    exchange: async () => {
+      throw new Error('Jira uses token connect, not OAuth')
+    },
+    buildEntry: () => {
+      throw new Error('Jira uses token connect, not OAuth')
+    },
+  },
 }
 
 function isProviderId(v: string): v is ProviderId {
-  return v === 'clickup' || v === 'figma'
+  return v === 'clickup' || v === 'figma' || v === 'jira'
 }
 
 // Where the user grabs a personal API token for each provider (token-connect flow).
 const TOKEN_URLS: Record<ProviderId, string> = {
   clickup: 'https://app.clickup.com/settings/apps',
   figma: 'https://www.figma.com/settings',
+  jira: 'https://id.atlassian.com/manage-profile/security/api-tokens',
 }
 
 /**
  * Build the .mcp.json entry for a pasted PERSONAL API token (not an OAuth
  * bearer). ClickUp's CLI reads CLICKUP_API_KEY (older builds: CLICKUP_MCP_API_KEY
- * — we set both); Figma's personal-access-token path is FIGMA_API_KEY.
+ * — we set both); Figma's personal-access-token path is FIGMA_API_KEY. Jira
+ * (mcp-atlassian) needs a site URL + account email alongside the API token.
  */
-function buildTokenEntry(provider: ProviderId, token: string): McpEntry {
+function buildTokenEntry(
+  provider: ProviderId,
+  token: string,
+  extra?: { url?: string; email?: string },
+): McpEntry {
   if (provider === 'clickup') {
     return {
       type: 'stdio',
       command: 'uvx',
       args: ['--from', 'git+https://github.com/DiversioTeam/clickup-mcp.git', 'clickup-mcp'],
       env: { CLICKUP_API_KEY: token, CLICKUP_MCP_API_KEY: token },
+    }
+  }
+  if (provider === 'jira') {
+    // mcp-atlassian auto-enables only Jira tools when just the JIRA_* vars are set.
+    return {
+      type: 'stdio',
+      command: 'uvx',
+      args: ['mcp-atlassian'],
+      env: {
+        JIRA_URL: extra?.url ?? '',
+        JIRA_USERNAME: extra?.email ?? '',
+        JIRA_API_TOKEN: token,
+      },
     }
   }
   return {
@@ -642,10 +691,20 @@ mcpRouter.post('/oauth/:provider/token', (req, res) => {
   const token = typeof req.body?.token === 'string' ? req.body.token.trim() : ''
   if (!token) return res.status(400).json({ error: 'token is required' })
 
+  let extra: { url?: string; email?: string } | undefined
+  if (providerId === 'jira') {
+    const url = typeof req.body?.url === 'string' ? req.body.url.trim() : ''
+    const email = typeof req.body?.email === 'string' ? req.body.email.trim() : ''
+    if (!url || !email) {
+      return res.status(400).json({ error: 'Jira needs a site URL and account email' })
+    }
+    extra = { url: url.replace(/\/+$/, ''), email } // drop any trailing slash on the site URL
+  }
+
   const file = mcpJsonFor(project.rootPath)
   const data = readMcp(file)
   if (!data.mcpServers) data.mcpServers = {}
-  data.mcpServers[PROVIDERS[providerId].serverName] = buildTokenEntry(providerId, token)
+  data.mcpServers[PROVIDERS[providerId].serverName] = buildTokenEntry(providerId, token, extra)
   writeMcp(file, data)
   return res.status(201).json({ ok: true })
 })

@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
-import { crawlOneTicket, type CrawlResult } from './crawl.js'
+import { crawlOneTicket, type CrawlResult, type TicketSource } from './crawl.js'
 import { withClickupToken } from './clickup.js'
+import { withJiraCreds, type JiraCreds } from './jira.js'
 
 // In-memory background jobs for ticket crawling. A job runs server-side, so it
 // keeps going even if the browser reloads or navigates away — the client polls by
@@ -33,7 +34,9 @@ interface CrawlJob {
   projectId: string
   projectName: string
   rootPath: string
+  source: TicketSource // which tracker the tickets come from
   token: string | undefined // ClickUp token captured at start (per-project .mcp.json)
+  jiraCreds: JiraCreds | undefined // Jira creds captured at start (per-project .mcp.json)
   model: string
   items: CrawlJobItem[]
   logs: CrawlLogLine[]
@@ -110,15 +113,18 @@ async function runJob(job: CrawlJob): Promise<void> {
     item.status = 'running'
     pushLog(job, 'info', `▶ [${i + 1}/${job.total}] ${item.displayId} — ${item.name}`)
     try {
-      // Re-establish the ClickUp token context — the original request is long gone.
-      const r = await withClickupToken(job.token, () =>
+      // Re-establish the tracker creds context — the original request is long gone.
+      const runOne = () =>
         crawlOneTicket({
           taskId: item.taskId,
           rootPath: job.rootPath,
           model: job.model,
+          source: job.source,
           onLog: (l) => pushLog(job, l.level, `  ${l.text}`),
-        }),
-      )
+        })
+      const r = await (job.source === 'jira'
+        ? withJiraCreds(job.jiraCreds, runOne)
+        : withClickupToken(job.token, runOne))
       item.status = 'done'
       item.result = r
       const att = r.attachmentCount ? ` · ${r.attachmentCount} attachment(s)` : ''
@@ -140,7 +146,9 @@ export function startCrawlJob(opts: {
   projectId: string
   projectName: string
   rootPath: string
-  token: string | undefined
+  source?: TicketSource
+  token?: string | undefined
+  jiraCreds?: JiraCreds | undefined
   model: string
   tickets: { id: string; displayId: string; name: string }[]
 }): PublicCrawlJob {
@@ -149,7 +157,9 @@ export function startCrawlJob(opts: {
     projectId: opts.projectId,
     projectName: opts.projectName,
     rootPath: opts.rootPath,
+    source: opts.source ?? 'clickup',
     token: opts.token,
+    jiraCreds: opts.jiraCreds,
     model: opts.model,
     items: opts.tickets.map((t) => ({
       taskId: t.id,

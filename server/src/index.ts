@@ -17,6 +17,7 @@ import { skillsRouter } from './routes/skills.js'
 import { mcpRouter } from './routes/mcp.js'
 import { projectsRouter } from './routes/projects.js'
 import { clickupRouter } from './routes/clickup.js'
+import { jiraRouter } from './routes/jira.js'
 import { sourceRouter } from './routes/source.js'
 import { aiRouter } from './routes/ai.js'
 import { templatesRouter } from './routes/templates.js'
@@ -54,6 +55,7 @@ app.use('/api/files', filesRouter)
 app.use('/api/skills', skillsRouter)
 app.use('/api/mcp', mcpRouter)
 app.use('/api/clickup', clickupRouter)
+app.use('/api/jira', jiraRouter)
 app.use('/api/source', sourceRouter)
 app.use('/api/ai', aiRouter)
 app.use('/api/templates', templatesRouter)

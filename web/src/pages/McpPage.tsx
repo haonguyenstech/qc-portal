@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import {
@@ -22,6 +22,7 @@ import {
   Plug,
   PlugZap,
   Smartphone,
+  SquareKanban,
   Unplug,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -68,6 +69,12 @@ const OAUTH_META: Record<
     blurb: 'Design files',
     tokenHint: 'Get a token — Settings → Personal access tokens',
   },
+  jira: {
+    label: 'Jira',
+    icon: SquareKanban,
+    blurb: 'Issues & boards',
+    tokenHint: 'Get a token — Atlassian → Security → API tokens',
+  },
 }
 
 // One-line "what is this server for?" copy, surfaced via the header info tooltip
@@ -77,6 +84,8 @@ const SERVER_PURPOSE: Record<string, string> = {
     'Pulls QC tickets, tasks, and comments straight from ClickUp so runs and ticket crawls read requirements from the source.',
   figma:
     'Opens Figma design files so Design Check can compare the built UI against the intended design.',
+  jira:
+    'Pulls QC issues, stories, and their status from Jira so runs and test-case work read requirements straight from the tracker.',
   playwright:
     'Drives a real browser — navigating, clicking, typing, screenshotting — so QC runs can exercise and verify the web app.',
   'mobile-mcp':
@@ -122,6 +131,12 @@ const CAPABILITY: Record<
     inputLabel: 'Figma design link',
     placeholder: 'https://www.figma.com/design/…',
     action: 'Read design',
+  },
+  jira: {
+    needsInput: true,
+    inputLabel: 'Issue key',
+    placeholder: 'e.g. PROJ-123',
+    action: 'Fetch issue',
   },
   playwright: {
     needsInput: false,
@@ -379,7 +394,35 @@ function MobileFunctionalTest({
   )
 }
 
-/** Token-connect cards for ClickUp/Figma (paste a personal token) + a no-auth Playwright add. */
+/** A labeled group of MCP cards (e.g. "Tickets & tasks") with a header + responsive grid. */
+function McpGroup({
+  icon: Icon,
+  title,
+  blurb,
+  children,
+}: {
+  icon: typeof Figma
+  title: string
+  blurb: string
+  children: ReactNode
+}) {
+  return (
+    <section className="space-y-3">
+      <div className="flex items-center gap-2.5">
+        <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl border border-border/60 bg-muted/60 text-muted-foreground">
+          <Icon className="h-4 w-4" />
+        </span>
+        <div className="leading-tight">
+          <h3 className="text-sm font-semibold tracking-tight">{title}</h3>
+          <p className="text-xs text-muted-foreground">{blurb}</p>
+        </div>
+      </div>
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">{children}</div>
+    </section>
+  )
+}
+
+/** Token-connect cards for ClickUp/Figma/Jira (paste a personal token) + no-auth Playwright/Mobile. */
 function ConnectServices({
   projectId,
   existingNames,
@@ -400,6 +443,9 @@ function ConnectServices({
   })
   const [openProvider, setOpenProvider] = useState<McpOauthProvider | null>(null)
   const [token, setToken] = useState('')
+  // Jira needs a site URL + account email alongside the API token (mcp-atlassian).
+  const [jiraUrl, setJiraUrl] = useState('')
+  const [jiraEmail, setJiraEmail] = useState('')
   const [copiedEnv, setCopiedEnv] = useState<string | null>(null)
   // Default to headed (headless = false) so QC can watch the browser during runs;
   // the checkbox below still lets them opt into headless before connecting.
@@ -425,17 +471,34 @@ function ConnectServices({
     const url = tokenUrlFor(provider)
     if (url) window.open(url, '_blank', 'noopener,noreferrer')
     setToken('')
+    setJiraUrl('')
+    setJiraEmail('')
     setOpenProvider(provider)
   }
 
+  // Whether the connect form has everything it needs to save (Jira also needs URL + email).
+  function canSaveToken(provider: McpOauthProvider): boolean {
+    if (!token.trim()) return false
+    if (provider === 'jira') return !!jiraUrl.trim() && !!jiraEmail.trim()
+    return true
+  }
+
   const saveToken = useMutation({
-    mutationFn: (provider: McpOauthProvider) => saveMcpToken(provider, token.trim(), projectId),
+    mutationFn: (provider: McpOauthProvider) =>
+      saveMcpToken(
+        provider,
+        token.trim(),
+        projectId,
+        provider === 'jira' ? { url: jiraUrl.trim(), email: jiraEmail.trim() } : undefined,
+      ),
     onSuccess: (_, provider) => {
       toast.success(`${OAUTH_META[provider].label} connected`, {
         description: "Token saved to this project's .mcp.json.",
       })
       setOpenProvider(null)
       setToken('')
+      setJiraUrl('')
+      setJiraEmail('')
       return refresh()
     },
     onError: (err) =>
@@ -770,219 +833,288 @@ function ConnectServices({
     )
   }
 
-  return (
-    <section className="space-y-3">
-      <div className="flex items-center gap-2">
-        <KeyRound className="h-4 w-4 text-muted-foreground" />
-        <h2 className="text-base font-semibold tracking-tight">Connect a service</h2>
-      </div>
-      <div className="grid gap-3 sm:grid-cols-3">
-        {(Object.keys(OAUTH_META) as McpOauthProvider[]).map((provider) => {
-          const meta = OAUTH_META[provider]
-          const Icon = meta.icon
-          const info = status?.providers.find((p) => p.provider === provider)
-          const configured = !!info?.configured || existingNames.includes(provider)
-          const isOpen = openProvider === provider
-          const saving = saveToken.isPending && saveToken.variables === provider
-          const checking = checkingStatus && !isOpen
+  // ---- card renderers (closures over the mutations + state above) ----
 
-          return (
-            <Card
-              key={provider}
-              className="flex h-full flex-col gap-3 rounded-3xl border-border/60 p-5 shadow-none transition-all duration-200 hover:-translate-y-0.5 hover:border-border hover:shadow-sm"
-            >
-              <div className="flex items-center gap-3">
-                <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl border border-border/60 bg-muted/60 text-muted-foreground">
-                  <Icon className="h-4 w-4" />
-                </span>
-                <div className="min-w-0 leading-tight">
-                  <div className="flex items-center gap-1.5 text-sm font-semibold tracking-tight">
-                    <span className="truncate">{meta.label}</span>
-                    <PurposeTip name={provider} label={meta.label} />
-                  </div>
-                  <div className="truncate text-xs text-muted-foreground">{meta.blurb}</div>
-                </div>
-                <CardStatusBadge
-                  configured={configured}
-                  status={statusByName[provider]}
-                  checking={checking}
-                />
-              </div>
-              {configured && envPreview(provider)}
+  // A token-connect provider card (ClickUp / Figma / Jira). Jira's connect form
+  // adds a Site URL + Account email field on top of the API token.
+  function providerCard(provider: McpOauthProvider) {
+    const meta = OAUTH_META[provider]
+    const Icon = meta.icon
+    const info = status?.providers.find((p) => p.provider === provider)
+    const configured = !!info?.configured || existingNames.includes(provider)
+    const isOpen = openProvider === provider
+    const saving = saveToken.isPending && saveToken.variables === provider
+    const checking = checkingStatus && !isOpen
+    const canSave = canSaveToken(provider)
 
-              {checking ? (
-                <Button size="sm" disabled className="mt-auto w-full rounded-full">
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                  Checking status…
-                </Button>
-              ) : configured ? (
-                connectedActions(provider)
-              ) : isOpen ? (
-                // Token-connect: token page opened in a new tab — paste it here.
-                <div className="mt-auto space-y-2">
-                  <Input
-                    autoFocus
-                    type="password"
-                    placeholder="Paste your token"
-                    value={token}
-                    onChange={(e) => setToken(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' && token.trim()) saveToken.mutate(provider)
-                    }}
-                    className="h-9 font-mono text-xs"
-                  />
-                  <div className="flex gap-2">
-                    <Button
-                      size="sm"
-                      onClick={() => saveToken.mutate(provider)}
-                      disabled={!token.trim() || saving}
-                      className="flex-1 rounded-full transition-all duration-200 active:scale-[0.98]"
-                    >
-                      {saving ? (
-                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                      ) : (
-                        <Check className="h-3.5 w-3.5" />
-                      )}
-                      Save
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => {
-                        setOpenProvider(null)
-                        setToken('')
-                      }}
-                      disabled={saving}
-                    >
-                      Cancel
-                    </Button>
-                  </div>
-                  <a
-                    href={info?.tokenUrl}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="flex items-center justify-center gap-1 text-[11px] text-muted-foreground hover:text-foreground"
-                  >
-                    <ExternalLink className="h-3 w-3" />
-                    {meta.tokenHint}
-                  </a>
-                </div>
-              ) : (
-                <Button
-                  size="sm"
-                  onClick={() => beginConnect(provider)}
-                  className="mt-auto w-full rounded-full transition-all duration-200 active:scale-[0.98]"
-                >
-                  <Plug className="h-3.5 w-3.5" />
-                  Connect
-                </Button>
-              )}
-            </Card>
-          )
-        })}
-
-        {/* Playwright needs no token — one-click project setup. */}
-        <Card className="flex h-full flex-col gap-3 rounded-3xl border-border/60 p-5 shadow-none transition-all duration-200 hover:-translate-y-0.5 hover:border-border hover:shadow-sm">
-          <div className="flex items-center gap-3">
-            <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl border border-border/60 bg-muted/60 text-muted-foreground">
-              <MousePointerClick className="h-4 w-4" />
-            </span>
-            <div className="min-w-0 leading-tight">
-              <div className="flex items-center gap-1.5 text-sm font-semibold tracking-tight">
-                <span className="truncate">Playwright</span>
-                <PurposeTip name="playwright" label="Playwright" />
-              </div>
-              <div className="truncate text-xs text-muted-foreground">Browser driver</div>
+    return (
+      <Card
+        key={provider}
+        className="flex h-full flex-col gap-3 rounded-3xl border-border/60 p-5 shadow-none transition-all duration-200 hover:-translate-y-0.5 hover:border-border hover:shadow-sm"
+      >
+        <div className="flex items-center gap-3">
+          <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl border border-border/60 bg-muted/60 text-muted-foreground">
+            <Icon className="h-4 w-4" />
+          </span>
+          <div className="min-w-0 leading-tight">
+            <div className="flex items-center gap-1.5 text-sm font-semibold tracking-tight">
+              <span className="truncate">{meta.label}</span>
+              <PurposeTip name={provider} label={meta.label} />
             </div>
-            <CardStatusBadge
-              configured={playwrightAdded}
-              status={statusByName['playwright']}
-              checking={checkingStatus}
-            />
+            <div className="truncate text-xs text-muted-foreground">{meta.blurb}</div>
           </div>
-          {checkingStatus ? (
-            <Button size="sm" disabled className="mt-auto w-full rounded-full">
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              Checking status…
-            </Button>
-          ) : playwrightAdded ? (
-            connectedActions('playwright')
-          ) : (
-            <div className="mt-auto space-y-2">
-              <label className="flex items-center justify-between rounded-xl bg-muted/60 px-3 py-2 text-xs text-muted-foreground">
-                <span>Headless</span>
-                <input
-                  type="checkbox"
-                  checked={playwrightHeadless}
-                  onChange={(e) => setPlaywrightHeadless(e.target.checked)}
-                  className="h-4 w-4 accent-primary"
+          <CardStatusBadge
+            configured={configured}
+            status={statusByName[provider]}
+            checking={checking}
+          />
+        </div>
+        {configured && envPreview(provider)}
+
+        {checking ? (
+          <Button size="sm" disabled className="mt-auto w-full rounded-full">
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            Checking status…
+          </Button>
+        ) : configured ? (
+          connectedActions(provider)
+        ) : isOpen ? (
+          // Token-connect: token page opened in a new tab — paste it here.
+          <div className="mt-auto space-y-2">
+            {provider === 'jira' && (
+              <>
+                <Input
+                  autoFocus
+                  type="url"
+                  placeholder="Site URL — https://you.atlassian.net"
+                  value={jiraUrl}
+                  onChange={(e) => setJiraUrl(e.target.value)}
+                  aria-label="Jira site URL"
+                  className="h-9 text-xs"
                 />
-              </label>
+                <Input
+                  type="email"
+                  placeholder="Account email"
+                  value={jiraEmail}
+                  onChange={(e) => setJiraEmail(e.target.value)}
+                  aria-label="Jira account email"
+                  className="h-9 text-xs"
+                />
+              </>
+            )}
+            <Input
+              autoFocus={provider !== 'jira'}
+              type="password"
+              placeholder="Paste your API token"
+              value={token}
+              onChange={(e) => setToken(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && canSave) saveToken.mutate(provider)
+              }}
+              aria-label={`${meta.label} API token`}
+              className="h-9 font-mono text-xs"
+            />
+            <div className="flex gap-2">
               <Button
                 size="sm"
-                onClick={() => addPlaywright.mutate()}
-                disabled={addPlaywright.isPending}
-                className="w-full rounded-full transition-all duration-200 active:scale-[0.98]"
+                onClick={() => saveToken.mutate(provider)}
+                disabled={!canSave || saving}
+                className="flex-1 rounded-full transition-all duration-200 active:scale-[0.98]"
               >
-                {addPlaywright.isPending ? (
+                {saving ? (
                   <Loader2 className="h-3.5 w-3.5 animate-spin" />
                 ) : (
-                  <Plug className="h-3.5 w-3.5" />
+                  <Check className="h-3.5 w-3.5" />
                 )}
-                Connect
+                Save
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => {
+                  setOpenProvider(null)
+                  setToken('')
+                  setJiraUrl('')
+                  setJiraEmail('')
+                }}
+                disabled={saving}
+              >
+                Cancel
               </Button>
             </div>
-          )}
-        </Card>
-
-        {/* Mobile (mobile-next/mobile-mcp) needs no token — one-click project setup. */}
-        <Card className="flex h-full flex-col gap-3 rounded-3xl border-border/60 p-5 shadow-none transition-all duration-200 hover:-translate-y-0.5 hover:border-border hover:shadow-sm">
-          <div className="flex items-center gap-3">
-            <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl border border-border/60 bg-muted/60 text-muted-foreground">
-              <Smartphone className="h-4 w-4" />
-            </span>
-            <div className="min-w-0 leading-tight">
-              <div className="flex items-center gap-1.5 text-sm font-semibold tracking-tight">
-                <span className="truncate">Mobile</span>
-                <PurposeTip name="mobile-mcp" label="Mobile" />
-              </div>
-              <div className="truncate text-xs text-muted-foreground">iOS / Android driver</div>
-            </div>
-            <CardStatusBadge
-              configured={mobileAdded}
-              status={statusByName['mobile-mcp']}
-              checking={checkingStatus}
-            />
+            <a
+              href={info?.tokenUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="flex items-center justify-center gap-1 text-[11px] text-muted-foreground hover:text-foreground"
+            >
+              <ExternalLink className="h-3 w-3" />
+              {meta.tokenHint}
+            </a>
           </div>
-          {checkingStatus ? (
-            <Button size="sm" disabled className="mt-auto w-full rounded-full">
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              Checking status…
-            </Button>
-          ) : mobileAdded ? (
-            connectedActions('mobile-mcp')
-          ) : (
+        ) : (
+          <Button
+            size="sm"
+            onClick={() => beginConnect(provider)}
+            className="mt-auto w-full rounded-full transition-all duration-200 active:scale-[0.98]"
+          >
+            <Plug className="h-3.5 w-3.5" />
+            Connect
+          </Button>
+        )}
+      </Card>
+    )
+  }
+
+  // Playwright needs no token — one-click project setup.
+  function playwrightCard() {
+    return (
+      <Card
+        key="playwright"
+        className="flex h-full flex-col gap-3 rounded-3xl border-border/60 p-5 shadow-none transition-all duration-200 hover:-translate-y-0.5 hover:border-border hover:shadow-sm"
+      >
+        <div className="flex items-center gap-3">
+          <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl border border-border/60 bg-muted/60 text-muted-foreground">
+            <MousePointerClick className="h-4 w-4" />
+          </span>
+          <div className="min-w-0 leading-tight">
+            <div className="flex items-center gap-1.5 text-sm font-semibold tracking-tight">
+              <span className="truncate">Playwright</span>
+              <PurposeTip name="playwright" label="Playwright" />
+            </div>
+            <div className="truncate text-xs text-muted-foreground">Browser driver</div>
+          </div>
+          <CardStatusBadge
+            configured={playwrightAdded}
+            status={statusByName['playwright']}
+            checking={checkingStatus}
+          />
+        </div>
+        {checkingStatus ? (
+          <Button size="sm" disabled className="mt-auto w-full rounded-full">
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            Checking status…
+          </Button>
+        ) : playwrightAdded ? (
+          connectedActions('playwright')
+        ) : (
+          <div className="mt-auto space-y-2">
+            <label className="flex items-center justify-between rounded-xl bg-muted/60 px-3 py-2 text-xs text-muted-foreground">
+              <span>Headless</span>
+              <input
+                type="checkbox"
+                checked={playwrightHeadless}
+                onChange={(e) => setPlaywrightHeadless(e.target.checked)}
+                className="h-4 w-4 accent-primary"
+              />
+            </label>
             <Button
               size="sm"
-              onClick={() => addMobile.mutate()}
-              disabled={addMobile.isPending}
-              className="mt-auto w-full rounded-full transition-all duration-200 active:scale-[0.98]"
+              onClick={() => addPlaywright.mutate()}
+              disabled={addPlaywright.isPending}
+              className="w-full rounded-full transition-all duration-200 active:scale-[0.98]"
             >
-              {addMobile.isPending ? (
+              {addPlaywright.isPending ? (
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
               ) : (
                 <Plug className="h-3.5 w-3.5" />
               )}
               Connect
             </Button>
-          )}
-        </Card>
+          </div>
+        )}
+      </Card>
+    )
+  }
+
+  // Mobile (mobile-next/mobile-mcp) needs no token — one-click project setup.
+  function mobileCard() {
+    return (
+      <Card
+        key="mobile-mcp"
+        className="flex h-full flex-col gap-3 rounded-3xl border-border/60 p-5 shadow-none transition-all duration-200 hover:-translate-y-0.5 hover:border-border hover:shadow-sm"
+      >
+        <div className="flex items-center gap-3">
+          <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl border border-border/60 bg-muted/60 text-muted-foreground">
+            <Smartphone className="h-4 w-4" />
+          </span>
+          <div className="min-w-0 leading-tight">
+            <div className="flex items-center gap-1.5 text-sm font-semibold tracking-tight">
+              <span className="truncate">Mobile</span>
+              <PurposeTip name="mobile-mcp" label="Mobile" />
+            </div>
+            <div className="truncate text-xs text-muted-foreground">iOS / Android driver</div>
+          </div>
+          <CardStatusBadge
+            configured={mobileAdded}
+            status={statusByName['mobile-mcp']}
+            checking={checkingStatus}
+          />
+        </div>
+        {checkingStatus ? (
+          <Button size="sm" disabled className="mt-auto w-full rounded-full">
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            Checking status…
+          </Button>
+        ) : mobileAdded ? (
+          connectedActions('mobile-mcp')
+        ) : (
+          <Button
+            size="sm"
+            onClick={() => addMobile.mutate()}
+            disabled={addMobile.isPending}
+            className="mt-auto w-full rounded-full transition-all duration-200 active:scale-[0.98]"
+          >
+            {addMobile.isPending ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Plug className="h-3.5 w-3.5" />
+            )}
+            Connect
+          </Button>
+        )}
+      </Card>
+    )
+  }
+
+  return (
+    <div className="space-y-6">
+      <div className="flex items-center gap-2">
+        <KeyRound className="h-4 w-4 text-muted-foreground" />
+        <h2 className="text-base font-semibold tracking-tight">Connect a service</h2>
       </div>
+
+      <McpGroup
+        icon={ListChecks}
+        title="Tickets & tasks"
+        blurb="Read QC requirements straight from your tracker."
+      >
+        {providerCard('clickup')}
+        {providerCard('jira')}
+      </McpGroup>
+
+      <McpGroup
+        icon={Figma}
+        title="Design"
+        blurb="Compare the built UI against the intended design."
+      >
+        {providerCard('figma')}
+      </McpGroup>
+
+      <McpGroup
+        icon={MousePointerClick}
+        title="Browser & device"
+        blurb="Drive the real app to exercise and verify it."
+      >
+        {playwrightCard()}
+        {mobileCard()}
+      </McpGroup>
+
       {functionalTestDialog()}
       {capDialogName === 'mobile-mcp' && (
         <MobileFunctionalTest projectId={projectId} onClose={() => setCapDialogName(null)} />
       )}
-    </section>
+    </div>
   )
 }
 

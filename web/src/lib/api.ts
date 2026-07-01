@@ -583,6 +583,44 @@ export function startCrawlJob(body: {
   })
 }
 
+// ---- Jira (same shapes as ClickUp — the ticket UI is source-agnostic) ----
+// The picker + crawler treat Jira exactly like ClickUp: a "workspace" is a Jira
+// project (id = project key), a "task" is an issue, and crawl jobs share the same
+// registry (so getCrawlJob/listCrawlJobs above resolve Jira jobs too).
+
+export function jiraStatus(): Promise<{ configured: boolean }> {
+  return request('/api/jira/status')
+}
+
+export function jiraWorkspaces(projectId?: string): Promise<ClickupWorkspace[]> {
+  const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : ''
+  return request(`/api/jira/workspaces${qs}`)
+}
+
+/** Search issues within a Jira project (`team` is the project key). */
+export function jiraTasks(team: string, q: string, projectId?: string): Promise<ClickupTask[]> {
+  return request(
+    `/api/jira/tasks?team=${encodeURIComponent(team)}&q=${encodeURIComponent(q)}${pid(projectId)}`,
+  )
+}
+
+/** Subtasks (children) of one Jira issue, loaded on demand. */
+export function jiraSubtasks(parent: string, projectId?: string): Promise<ClickupTask[]> {
+  return request(`/api/jira/subtasks?parent=${encodeURIComponent(parent)}${pid(projectId)}`)
+}
+
+/** Start a background job that crawls one or more Jira issues to disk. */
+export function startJiraCrawlJob(body: {
+  projectId: string
+  tickets: { id: string; displayId: string; name: string }[]
+  model?: string
+}): Promise<{ jobId: string; job: CrawlJob }> {
+  return request('/api/jira/crawl/jobs', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+}
+
 /** Poll one crawl job by id. */
 export function getCrawlJob(jobId: string, projectId: string): Promise<{ job: CrawlJob }> {
   return request(
@@ -1266,7 +1304,7 @@ export function openMcpFolder(projectId: string): Promise<{ ok: true; path: stri
 
 // ---- MCP OAuth (one-click connect for ClickUp / Figma) ----
 
-export type McpOauthProvider = 'clickup' | 'figma'
+export type McpOauthProvider = 'clickup' | 'figma' | 'jira'
 
 export interface McpOauthStatus {
   redirectBase: string
@@ -1282,15 +1320,19 @@ export function mcpOauthStatus(projectId: string): Promise<McpOauthStatus> {
   return request(`/api/mcp/oauth/status?projectId=${encodeURIComponent(projectId)}`)
 }
 
-/** Token-connect: save a pasted personal API token into the project's .mcp.json. */
+/**
+ * Token-connect: save a pasted personal API token into the project's .mcp.json.
+ * Jira additionally needs a site URL + account email, passed via `extra`.
+ */
 export function saveMcpToken(
   provider: McpOauthProvider,
   token: string,
   projectId: string,
+  extra?: { url?: string; email?: string },
 ): Promise<void> {
   return request(
     `/api/mcp/oauth/${encodeURIComponent(provider)}/token?projectId=${encodeURIComponent(projectId)}`,
-    { method: 'POST', body: JSON.stringify({ token }) },
+    { method: 'POST', body: JSON.stringify({ token, ...extra }) },
   )
 }
 

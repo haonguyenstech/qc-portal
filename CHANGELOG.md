@@ -3,6 +3,21 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.8.1 — 2026-07-01
+
+**Fix MCP servers stuck on "Pending approval"**
+
+### Fixed
+
+- **"Test connection" now clears a server stuck on "Pending approval."** When a project's
+  MCP server (for example **Figma**) showed *Pending approval* and pressing **Test connection**
+  still failed with *"Approved… but connection still failed"*, the portal was recording the
+  approval in a file the current Claude CLI no longer reads. It now approves the server where the
+  CLI actually looks — trusting the project and enabling its `.mcp.json` servers — so a single
+  click flips it to **Connected**, even for a project you'd never opened in Claude directly. If
+  you hit this with Figma, your API token was never the problem; it was purely this approval
+  handshake.
+
 ## 0.8.0 — 2026-07-01
 
 **Mobile testing, portable projects & faster everyday flows**

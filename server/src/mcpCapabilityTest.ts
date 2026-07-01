@@ -26,6 +26,12 @@ export const CAPABILITY_TESTS: Record<
     inputPlaceholder: 'https://www.figma.com/design/…',
     action: 'Read design',
   },
+  jira: {
+    needsInput: true,
+    inputLabel: 'Issue key',
+    inputPlaceholder: 'e.g. PROJ-123',
+    action: 'Fetch issue',
+  },
   playwright: {
     needsInput: false,
     inputLabel: '',
@@ -67,6 +73,12 @@ means it WORKED. A size/length limit is success, NOT an authentication or access
 Reply with ONLY a JSON object and nothing else:
 - if the tool returned any design data (including an over-size/saved-to-file result): {"ok": true, "summary": "<the file or frame name>"}
 - only if the tool itself failed (authentication, permission, or file-not-found): {"ok": false, "error": "<short reason>"}
+No prose, no markdown, no code fence.`
+    case 'jira':
+      return `Using the Jira (Atlassian) MCP tools available to you, fetch the issue with key "${input}".
+Reply with ONLY a JSON object and nothing else:
+- on success: {"ok": true, "summary": "<issue summary>", "status": "<issue status>"}
+- on failure: {"ok": false, "error": "<short reason>"}
 No prose, no markdown, no code fence.`
     case 'playwright':
       return `Using the Playwright MCP browser tools, do exactly this: open a browser to https://www.google.com , read the page <title>, then CLOSE the browser.
@@ -175,6 +187,8 @@ export async function runMcpCapabilityTest(opts: {
     detail = `Read ticket: ${String(data.name ?? '(no name)')} · status ${String(data.status ?? '?')}`
   } else if (opts.name === 'figma') {
     detail = `Read design: ${String(data.summary ?? '(no summary)')}`
+  } else if (opts.name === 'jira') {
+    detail = `Read issue: ${String(data.summary ?? '(no summary)')} · status ${String(data.status ?? '?')}`
   } else if (opts.name === 'playwright') {
     detail = `Opened & closed browser · page title: ${String(data.title ?? '(none)')}`
   } else if (opts.name === 'mobile-mcp') {
