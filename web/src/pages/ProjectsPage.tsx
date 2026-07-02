@@ -23,6 +23,8 @@ import {
   PinOff,
   PlayCircle,
   Plus,
+  Power,
+  RotateCw,
   Search,
   Settings,
   ShieldCheck,
@@ -68,7 +70,9 @@ import {
   initProject,
   listProjects,
   pickFolder,
+  pingHealth,
   testClaudeModel,
+  triggerRestart,
   updateProject,
   type UsageWindow,
 } from '@/lib/api'
@@ -1560,6 +1564,154 @@ function AutomationRow(props: {
   )
 }
 
+/**
+ * Restart the whole portal server in place. Kicks off a detached
+ * `qc-portal --restart` on the machine, then waits for the server to go down and
+ * come back healthy before reloading the page. Only actually restarts when the
+ * portal was launched via `qc-portal` (a supervised, PID-tracked process); under
+ * `npm run dev` the launcher no-ops, so we just reload after a short grace window.
+ */
+function RestartAppCard() {
+  const [open, setOpen] = useState(false)
+  const [restarting, setRestarting] = useState(false)
+
+  /** Poll /api/health until the server bounces (down → up), then reload. */
+  async function waitForRestartAndReload() {
+    const startedAt = Date.now()
+    let sawDown = false
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      const elapsed = Date.now() - startedAt
+      if (elapsed > 120_000) {
+        toast.error('Restart is taking too long', {
+          description: 'The server has not come back. Reload the page manually once it is up.',
+        })
+        setRestarting(false)
+        return
+      }
+      const up = await pingHealth()
+      if (!up) sawDown = true
+      // Server bounced and is healthy again — reload into the fresh process.
+      if (sawDown && up) {
+        window.location.reload()
+        return
+      }
+      // Never went down within the grace window → nothing to restart (e.g. dev
+      // mode or already-latest). Reload anyway; it's harmless.
+      if (!sawDown && elapsed > 8_000) {
+        window.location.reload()
+        return
+      }
+      await new Promise((r) => setTimeout(r, 800))
+    }
+  }
+
+  const restart = useMutation({
+    mutationFn: triggerRestart,
+    onSuccess: (res) => {
+      if (!res.ok) {
+        toast.error('Could not restart', { description: res.error ?? 'Unknown error' })
+        return
+      }
+      setOpen(false)
+      setRestarting(true)
+      toast.info('Restarting QC Portal…', { description: 'The page will reload automatically.' })
+      void waitForRestartAndReload()
+    },
+    onError: (err) =>
+      toast.error('Could not restart', {
+        description: err instanceof Error ? err.message : 'Unknown error',
+      }),
+  })
+
+  return (
+    <>
+      <Card className="overflow-hidden rounded-3xl border-border/60 py-0 shadow-none">
+        <CardContent className="flex flex-col gap-4 p-4 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex min-w-0 items-start gap-3">
+            <span className="flex size-11 shrink-0 items-center justify-center rounded-2xl bg-foreground text-background shadow-none">
+              <Power className="h-5 w-5" />
+            </span>
+            <div className="min-w-0 space-y-1">
+              <h2 className="text-base font-semibold tracking-tight">Restart app</h2>
+              <p className="max-w-xl text-sm text-muted-foreground">
+                Stop and relaunch the QC Portal server on this machine — useful after changing
+                settings, MCP servers, or when something seems stuck. The page reloads on its own
+                once it's back.
+              </p>
+            </div>
+          </div>
+          <Button
+            variant="outline"
+            onClick={() => setOpen(true)}
+            disabled={restarting || restart.isPending}
+            className="shrink-0 gap-1.5 rounded-full transition-all duration-200 hover:shadow-sm active:scale-[0.98]"
+          >
+            {restarting || restart.isPending ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <RotateCw className="h-4 w-4" />
+            )}
+            {restarting ? 'Restarting…' : 'Restart app'}
+          </Button>
+        </CardContent>
+      </Card>
+
+      <Dialog open={open} onOpenChange={(o) => !restart.isPending && setOpen(o)}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <div className="flex items-start gap-3">
+              <span className="flex size-10 shrink-0 items-center justify-center rounded-2xl border border-amber-300/40 bg-amber-100 text-amber-700">
+                <RotateCw className="size-5" />
+              </span>
+              <div className="space-y-1 text-left">
+                <DialogTitle>Restart QC Portal?</DialogTitle>
+                <DialogDescription>
+                  The server stops and starts again on the same port. Any in-flight QC run, crawl,
+                  or test-case job will be interrupted.
+                </DialogDescription>
+              </div>
+            </div>
+          </DialogHeader>
+          <ul className="space-y-1.5 text-[13px] text-muted-foreground">
+            <li className="flex gap-2">
+              <AlertCircle className="mt-0.5 size-3.5 shrink-0 text-amber-600" />
+              Make sure nothing important is running — background jobs won't resume after the
+              restart.
+            </li>
+            <li className="flex gap-2">
+              <AlertCircle className="mt-0.5 size-3.5 shrink-0 text-amber-600" />
+              This page reloads automatically once the server is healthy again.
+            </li>
+          </ul>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setOpen(false)}
+              disabled={restart.isPending}
+              className="rounded-full transition-all duration-200 active:scale-[0.98]"
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={() => restart.mutate()}
+              disabled={restart.isPending}
+              className="rounded-full bg-amber-600 text-white transition-all duration-200 hover:bg-amber-700 active:scale-[0.98]"
+            >
+              {restart.isPending ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : (
+                <RotateCw className="size-4" />
+              )}
+              Restart now
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
+  )
+}
+
 export default function ProjectsPage() {
   const [searchParams, setSearchParams] = useSearchParams()
   const { data, isLoading, isError, error } = useQuery({
@@ -1763,6 +1915,8 @@ export default function ProjectsPage() {
               </div>
             </div>
           )}
+
+          <RestartAppCard />
         </TabsContent>
 
         <TabsContent value="models" className="space-y-6">

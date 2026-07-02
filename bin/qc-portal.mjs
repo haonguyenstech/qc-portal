@@ -235,7 +235,9 @@ switch (arg) {
     break
   case 'restart':
     stop()
-    await start({ open: true })
+    // QC_NO_OPEN lets the in-app "Restart" button restart without popping a new
+    // browser window (the user already has the portal open).
+    await start({ open: !process.env.QC_NO_OPEN })
     break
   case 'status':
     await status()

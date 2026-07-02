@@ -1236,6 +1236,19 @@ export function listMcp(projectId: string): Promise<McpServer[]> {
   return request(`/api/mcp?projectId=${encodeURIComponent(projectId)}`)
 }
 
+/**
+ * Whether Astral's `uv`/`uvx` is installed on the machine running the server.
+ * ClickUp + Jira MCP servers run via `uvx`, so a missing `uv` makes them fail to
+ * spawn. `platform` is node's process.platform, for a matching install hint.
+ */
+export function mcpUvStatus(): Promise<{
+  available: boolean
+  version: string | null
+  platform: string
+}> {
+  return request('/api/mcp/uv')
+}
+
 export function addMcp(body: Partial<McpServer>, projectId: string): Promise<void> {
   return request(`/api/mcp?projectId=${encodeURIComponent(projectId)}`, {
     method: 'POST',
@@ -1426,6 +1439,31 @@ export interface UpdateTrigger {
  */
 export function triggerUpdate(): Promise<UpdateTrigger> {
   return request('/api/version/update', { method: 'POST' })
+}
+
+export interface RestartTrigger {
+  ok: boolean
+  error?: string
+  alreadyRunning?: boolean
+}
+
+/**
+ * Restart the portal server in place. Returns immediately; the server goes down
+ * and comes back up on its own port — poll {@link pingHealth} until it's back,
+ * then reload. Only effective when the portal was launched via `qc-portal`.
+ */
+export function triggerRestart(): Promise<RestartTrigger> {
+  return request('/api/version/restart', { method: 'POST' })
+}
+
+/** One-shot health check — true when the server answers /api/health with 200. */
+export async function pingHealth(): Promise<boolean> {
+  try {
+    const res = await fetch('/api/health', { cache: 'no-store' })
+    return res.ok
+  } catch {
+    return false
+  }
 }
 
 /** The portal's own release notes (CHANGELOG.md) for the Release Notes page. */

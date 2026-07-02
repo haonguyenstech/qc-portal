@@ -42,6 +42,7 @@ import {
   addMcp,
   listMcp,
   mcpOauthStatus,
+  mcpUvStatus,
   openMcpFolder,
   removeMcp,
   revealMcpSecret,
@@ -1146,6 +1147,63 @@ function OpenFolderButton({ projectId }: { projectId: string }) {
   )
 }
 
+/**
+ * Warns when Astral's `uv` isn't installed on the server machine. ClickUp
+ * (clickup-mcp) and Jira (mcp-atlassian) run via `uvx`, so without `uv` they
+ * fail to spawn — this surfaces the fix up-front with a platform-matched,
+ * copy-able install command. Renders nothing while checking or when uv is present.
+ */
+function UvWarning() {
+  const { data } = useQuery({
+    queryKey: ['mcp-uv'],
+    queryFn: mcpUvStatus,
+    staleTime: 30_000,
+    refetchInterval: (q) => (q.state.data?.available === false ? 15_000 : false),
+  })
+  const [copied, setCopied] = useState(false)
+  if (!data || data.available) return null
+
+  const install =
+    data.platform === 'win32'
+      ? 'winget install --id=astral-sh.uv -e'
+      : 'curl -LsSf https://astral.sh/uv/install.sh | sh'
+
+  return (
+    <div className="flex flex-col gap-2 rounded-2xl border border-amber-300/70 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+      <div className="flex items-start gap-2">
+        <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+        <div className="space-y-1">
+          <p className="font-semibold">ClickUp &amp; Jira need Astral's uv installed</p>
+          <p className="text-amber-800">
+            These servers run through <code className="font-mono text-xs">uvx</code>, which isn't on
+            this machine — so they'll show <span className="font-medium">failed</span> until you
+            install it. Run this{data.platform === 'win32' ? ' in PowerShell or CMD' : ''}, then
+            reopen the portal:
+          </p>
+        </div>
+      </div>
+      <div className="flex items-center gap-2 pl-6">
+        <code className="flex-1 truncate rounded-lg border border-amber-300/70 bg-amber-100/60 px-2.5 py-1.5 font-mono text-xs">
+          {install}
+        </code>
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          className="h-8 shrink-0 rounded-full border-amber-300 bg-transparent text-amber-900 hover:bg-amber-100"
+          onClick={() => {
+            void navigator.clipboard?.writeText(install)
+            setCopied(true)
+            setTimeout(() => setCopied(false), 1500)
+          }}
+        >
+          {copied ? 'Copied' : 'Copy'}
+        </Button>
+      </div>
+    </div>
+  )
+}
+
 export default function McpPage() {
   const { activeProjectId, activeProject } = useProjects()
   const { data, isLoading, isError, error } = useQuery({
@@ -1244,6 +1302,8 @@ export default function McpPage() {
           {error instanceof Error ? error.message : 'Failed to load MCP server status'}
         </div>
       )}
+
+      <UvWarning />
 
       <ConnectServices
         projectId={activeProjectId}

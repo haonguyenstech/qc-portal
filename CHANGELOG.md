@@ -3,6 +3,35 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.9.0 — 2026-07-02
+
+**Restart from the app, a heads-up when uv is missing & a Windows MCP fix**
+
+### Added
+
+- **Restart the portal from Settings.** A new **Restart app** card on the Settings page
+  stops and relaunches the QC Portal server on your machine — handy after changing MCP
+  servers or when something seems stuck. It asks for confirmation (in-flight runs and
+  background jobs are interrupted), then the page reloads by itself once the server is
+  healthy again. No new browser window pops — you keep the tab you're in.
+- **The MCP page now warns when `uv` is missing.** ClickUp and Jira are Python MCP servers
+  that run through `uvx` (Astral's `uv`). On a machine without `uv` they just show
+  **failed**, which looks like a bad token but isn't. The MCP page now checks for `uv`
+  up-front and shows an amber banner with the exact install command for your OS
+  (copy button included). Install it, fully reopen the portal, and test again.
+- **A troubleshooting guide.** The new [`TROUBLESHOOTING.md`](./TROUBLESHOOTING.md)
+  (linked from the README) walks through the common MCP setup problems: ClickUp/Jira
+  showing `failed` (install `uv`), an empty Jira ticket list (site-root `JIRA_URL` +
+  *classic* API token), and the "conflicting scopes" warning.
+
+### Fixed
+
+- **Windows: MCP approval and local-scope servers work again.** The portal located your
+  `~/.claude.json` through the `HOME` environment variable, which usually doesn't exist on
+  Windows — so approving a "Pending approval" server from the Test connection button, and
+  listing servers connected outside the portal, silently did nothing there. The portal now
+  resolves your home folder the proper cross-platform way.
+
 ## 0.8.2 — 2026-07-01
 
 **Jira tickets appear for the right project — plus a steadier Windows folder picker**

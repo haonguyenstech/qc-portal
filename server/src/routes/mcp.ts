@@ -2,6 +2,7 @@ import { Router } from 'express'
 import fs from 'node:fs'
 import { execFile } from 'node:child_process'
 import crypto from 'node:crypto'
+import os from 'node:os'
 import path from 'node:path'
 import spawn from 'cross-spawn'
 import { CLAUDE_BIN, OAUTH_APPS, OAUTH_REDIRECT_BASE, mcpJsonFor } from '../config.js'
@@ -12,6 +13,58 @@ import { runMcpCapabilityTest } from '../mcpCapabilityTest.js'
 import type { McpServer } from '../types.js'
 
 export const mcpRouter = Router()
+
+// ---- `uv`/`uvx` availability ----------------------------------------------
+// ClickUp (clickup-mcp) and Jira (mcp-atlassian) are Python MCP servers the
+// portal runs via `uvx`. On a machine without Astral's `uv` installed the server
+// simply fails to spawn ("failed"), which is confusing. Probe once (cached) so
+// the MCP page can warn up-front with an install hint instead of a dead server.
+
+let uvCache: { at: number; available: boolean; version: string | null } | null = null
+
+function probeUv(): Promise<{ available: boolean; version: string | null }> {
+  return new Promise((resolve) => {
+    let out = ''
+    let done = false
+    const finish = (r: { available: boolean; version: string | null }) => {
+      if (done) return
+      done = true
+      resolve(r)
+    }
+    try {
+      const child = spawn('uvx', ['--version'], { windowsHide: true })
+      child.stdout?.on('data', (d: Buffer) => {
+        out += d.toString()
+      })
+      child.on('error', () => finish({ available: false, version: null }))
+      child.on('close', (code: number | null) =>
+        finish({ available: code === 0, version: code === 0 ? out.trim() || null : null }),
+      )
+      setTimeout(() => {
+        try {
+          child.kill()
+        } catch {
+          /* already gone */
+        }
+        finish({ available: false, version: null })
+      }, 4000)
+    } catch {
+      finish({ available: false, version: null })
+    }
+  })
+}
+
+// Report whether `uvx` is on PATH (cached 30s so re-checks pick up a fresh install
+// without hammering a spawn on every poll). `platform` lets the UI show the right
+// install command.
+mcpRouter.get('/uv', async (_req, res) => {
+  const now = Date.now()
+  if (!uvCache || now - uvCache.at > 30_000 || uvCache.available === false) {
+    const r = await probeUv()
+    uvCache = { at: now, ...r }
+  }
+  res.json({ available: uvCache.available, version: uvCache.version, platform: process.platform })
+})
 
 interface McpTestResult {
   ok: boolean
@@ -185,7 +238,9 @@ function writeMcp(file: string, data: McpFile): void {
 }
 
 function claudeConfigPath(): string | null {
-  const home = process.env.HOME
+  // os.homedir() works on Windows too (USERPROFILE) — process.env.HOME is
+  // usually unset there, which silently disabled ~/.claude.json reads/writes.
+  const home = os.homedir()
   return home ? path.join(home, '.claude.json') : null
 }
 

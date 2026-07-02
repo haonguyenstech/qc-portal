@@ -162,3 +162,54 @@ versionRouter.post('/update', (_req, res) => {
 
   return res.json({ ok: true, current })
 })
+
+// Guards against firing the restart twice within the same process lifetime.
+// (It resets naturally — the launcher replaces this server with a fresh process.)
+let restartStarted = false
+
+// Restart the portal. Spawns `qc-portal --restart` in a DETACHED process so it
+// outlives our own death: the launcher stops this server (via the PID file it
+// wrote at startup) and starts a fresh one on the same port. The browser polls
+// /api/health and reloads once the server is back. Same code path as the
+// `qc-portal --restart` CLI, but without popping a new browser window (QC_NO_OPEN).
+//
+// This only does something when the portal was launched by `qc-portal` (a detached
+// server with a PID file). Under `npm run dev` (tsx watch) there's no such process
+// to hand off to, so the launcher finds the dev server already healthy and no-ops.
+versionRouter.post('/restart', (_req, res) => {
+  const launcher = path.join(INSTALL_ROOT, 'bin', 'qc-portal.mjs')
+  if (!fs.existsSync(launcher)) {
+    return res.status(400).json({
+      ok: false,
+      error: 'Launcher not found — restart from your terminal with `qc-portal --restart`.',
+    })
+  }
+
+  if (restartStarted) {
+    return res.json({ ok: true, alreadyRunning: true })
+  }
+  restartStarted = true
+
+  try {
+    const dataDir = path.join(INSTALL_ROOT, 'data')
+    fs.mkdirSync(dataDir, { recursive: true })
+    const out = fs.openSync(path.join(dataDir, 'restart.log'), 'a')
+    const child = spawn(process.execPath, [launcher, '--restart'], {
+      cwd: INSTALL_ROOT,
+      detached: true,
+      stdio: ['ignore', out, out],
+      windowsHide: true,
+      // Don't re-open the browser — the user already has the portal open.
+      env: { ...process.env, QC_NO_OPEN: '1' },
+    })
+    child.unref()
+  } catch (err) {
+    restartStarted = false
+    return res.status(500).json({
+      ok: false,
+      error: err instanceof Error ? err.message : 'Failed to start the restart.',
+    })
+  }
+
+  return res.json({ ok: true })
+})

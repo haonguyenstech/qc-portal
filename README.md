@@ -90,6 +90,12 @@ npm start            # = qc-portal: serves API + UI on 5174 and opens the browse
 > Projects are stored in SQLite, so they persist across restarts and moves of the `qc-portal/`
 > folder. `QC_REPO_ROOT` only matters for seeding the first project on a brand-new database.
 
+## Troubleshooting
+MCP connection problems (ClickUp/Jira `failed`, empty Jira tickets, "conflicting scopes")
+and their fixes live in [`TROUBLESHOOTING.md`](./TROUBLESHOOTING.md). Most common: ClickUp
+and Jira run via `uvx`, so the machine needs Astral's [`uv`](https://docs.astral.sh/uv/)
+installed (`winget install --id=astral-sh.uv -e` on Windows).
+
 ## Notes
 - Binds to `127.0.0.1` only (local use). No auth in this MVP.
 - Permissions are bypassed so the headless run never blocks on a prompt; the skill itself forbids
