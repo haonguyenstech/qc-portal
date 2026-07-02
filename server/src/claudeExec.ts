@@ -1,6 +1,7 @@
 import spawn from 'cross-spawn'
 import { CLAUDE_BIN } from './config.js'
 import { recordUsage } from './db.js'
+import { spawnEnv } from './toolPath.js'
 
 /** Extract cost + token usage from a Claude CLI result object (or null). */
 export function usageFromResultObject(
@@ -78,7 +79,7 @@ export function runClaude(
     // throws ENAMETOOLONG). Otherwise stdin is 'ignore' so the CLI sees EOF immediately
     // instead of waiting ~3s for piped stdin that never comes.
     const child = spawn(CLAUDE_BIN, args, {
-      env: { ...process.env },
+      env: spawnEnv(),
       cwd: opts?.cwd,
       stdio: [opts?.input != null ? 'pipe' : 'ignore', 'pipe', 'pipe'],
       windowsHide: true, // no cmd window flash on Windows
@@ -165,7 +166,7 @@ export function runClaudeStream(
     // Pass opts.cwd to run inside a project folder so its .mcp.json servers
     // (Playwright, …) load — required when the prompt needs to open the real app.
     const child = spawn(CLAUDE_BIN, args, {
-      env: { ...process.env },
+      env: spawnEnv(),
       cwd: opts?.cwd,
       stdio: [opts?.input != null ? 'pipe' : 'ignore', 'pipe', 'pipe'],
       windowsHide: true, // no cmd window flash on Windows

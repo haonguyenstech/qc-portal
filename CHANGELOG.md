@@ -3,6 +3,23 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.9.2 — 2026-07-02
+
+**ClickUp/Jira connect even when the portal was launched with a stale PATH**
+
+### Fixed
+
+- **`uvx`-based MCP servers (ClickUp, Jira) no longer fail just because of how the portal
+  was started.** A process only sees the `PATH` from the moment it was launched — so a
+  portal started from an old terminal, a shortcut, or before `uv` was installed couldn't
+  find `uvx`, and every ClickUp/Jira server showed **Failed to connect**, even though the
+  same command worked fine in a fresh terminal. The portal now adds the standard per-user
+  tool folders (`~/.local/bin`, `~/.cargo/bin`, and WinGet's links folder on Windows) to
+  `PATH` for everything it launches — QC runs, MCP health checks, test-case generation,
+  the in-app terminal, and the `uv` probe. A plain `"command": "uvx"` in `.mcp.json` now
+  works on every machine; no more hand-editing absolute paths, no more "restart from a
+  new terminal" dance.
+
 ## 0.9.1 — 2026-07-02
 
 **Fix ClickUp "Failed to connect" caused by a renamed token variable**

@@ -109,6 +109,11 @@ server/src/
   terminal.ts       device pseudo-terminal: node-pty shell bridged over /ws/terminal (one shell per socket)
   hub.ts            WebSocket pub/sub by runId (replays persisted events to late subscribers)
   projectScope.ts   resolves the active project's root path; path-guards file writes
+  toolPath.ts       spawnEnv(): process.env with PATH augmented by well-known per-user tool
+                    dirs (~/.local/bin, ~/.cargo/bin, WinGet Links) — used by EVERY child
+                    spawn (claude, uvx probe, terminal) so uvx/npx MCP servers start even
+                    when the portal was launched with a stale PATH; never spawn with a bare
+                    { ...process.env }
   clickup.ts        ClickUp ticket lookup + crawl
   folderPicker.ts   native OS dialogs: pickFolderNative (choose-folder picker, used by skill
                     import) + revealFolderNative (open a folder in Finder/Explorer/xdg-open)

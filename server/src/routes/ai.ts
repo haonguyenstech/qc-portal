@@ -30,6 +30,7 @@ import {
 } from '../testcaseJobs.js'
 import { verifyDesign } from '../verifyDesign.js'
 import { cancelVerifyJob, getVerifyJob, listVerifyJobs, startVerifyJob } from '../verifyJobs.js'
+import { spawnEnv } from '../toolPath.js'
 
 export const aiRouter = Router()
 
@@ -266,7 +267,7 @@ function runCommand(
     let stderr = ''
     let settled = false
     const child = spawn(CLAUDE_BIN, args, {
-      env: { ...process.env },
+      env: spawnEnv(),
       windowsHide: true, // no cmd window flash on Windows
     })
     const timer = setTimeout(() => {

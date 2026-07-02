@@ -4,6 +4,7 @@ import { CLAUDE_BIN } from './config.js'
 import { usageFromResultObject } from './claudeExec.js'
 import { recordUsage } from './db.js'
 import type { LogEvent, Phase } from './types.js'
+import { spawnEnv } from './toolPath.js'
 
 export interface RunHandle {
   child: ChildProcess
@@ -199,7 +200,7 @@ export function runQc(
 
   const child = spawn(CLAUDE_BIN, args, {
     cwd: opts.cwd ?? process.cwd(),
-    env: { ...process.env },
+    env: spawnEnv(),
     stdio: ['pipe', 'pipe', 'pipe'],
     // Own process group so we can signal the *whole* tree (claude + its MCP
     // servers + the Playwright browser) at once, instead of just the lead

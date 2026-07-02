@@ -11,6 +11,7 @@ import { revealFolderNative } from '../folderPicker.js'
 import { resolveProjectClickupToken, verifyToken, withClickupToken } from '../clickup.js'
 import { runMcpCapabilityTest } from '../mcpCapabilityTest.js'
 import type { McpServer } from '../types.js'
+import { spawnEnv } from '../toolPath.js'
 
 export const mcpRouter = Router()
 
@@ -32,7 +33,7 @@ function probeUv(): Promise<{ available: boolean; version: string | null }> {
       resolve(r)
     }
     try {
-      const child = spawn('uvx', ['--version'], { windowsHide: true })
+      const child = spawn('uvx', ['--version'], { env: spawnEnv(), windowsHide: true })
       child.stdout?.on('data', (d: Buffer) => {
         out += d.toString()
       })
@@ -82,7 +83,7 @@ function getStatuses(cwd: string): Promise<Record<string, McpServer['status']>> 
     let out = ''
     const child = spawn(CLAUDE_BIN, ['mcp', 'list'], {
       cwd,
-      env: { ...process.env },
+      env: spawnEnv(),
       windowsHide: true, // no cmd window flash on Windows
     })
     // Health-checking remote servers can take ~10s; give it generous headroom.
@@ -131,7 +132,7 @@ function testServer(cwd: string, name: string): Promise<McpTestResult> {
     let out = ''
     const child = spawn(CLAUDE_BIN, ['mcp', 'list'], {
       cwd,
-      env: { ...process.env },
+      env: spawnEnv(),
       windowsHide: true, // no cmd window flash on Windows
     })
     const timer = setTimeout(() => {

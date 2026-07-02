@@ -37,6 +37,13 @@ uvx --version
 Then **fully close and reopen QC Portal** (and any terminal) so the new `PATH`
 is picked up. Re-run **Test connection** → it should flip to **Connected**.
 
+> **Since 0.9.2** the portal also adds the standard per-user tool folders
+> (`~/.local/bin`, `~/.cargo/bin`, WinGet's Links dir) to `PATH` for everything
+> it launches — so a portal started from a stale shell still finds `uvx` even
+> when `uvx --version` fails in the window that launched it. If you previously
+> worked around this by hardcoding an absolute `uvx.exe` path in `.mcp.json`,
+> that keeps working, but a plain `"command": "uvx"` is portable again.
+
 **Still failing after installing `uv`?** Run the server command by hand to see the
 real error (bad token, blocked network, missing `git`, etc.):
 

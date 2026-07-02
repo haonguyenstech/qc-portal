@@ -5,6 +5,7 @@ import type { IncomingMessage } from 'node:http'
 import type { WebSocket } from 'ws'
 import { CLAUDE_BIN } from './config.js'
 import { getDefaultProject, getProject, getRun, getRunSession, listProjects } from './db.js'
+import { spawnEnv } from './toolPath.js'
 
 // node-pty is a native module shipped with prebuilt binaries. Load it lazily and
 // defensively: if its binding can't load (unsupported platform, broken prebuild),
@@ -139,7 +140,7 @@ export function handleTerminalConnection(ws: WebSocket, req: IncomingMessage): v
       cwd: target.cwd,
       cols,
       rows,
-      env: { ...process.env, TERM: 'xterm-256color' } as Record<string, string>,
+      env: spawnEnv({ TERM: 'xterm-256color' }) as Record<string, string>,
     })
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
