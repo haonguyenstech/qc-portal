@@ -143,10 +143,14 @@ type TestTarget = 'web' | 'web-mobile' | 'app-mobile'
 const TEST_TARGET_KEY = 'qc.runTestTarget'
 const TEST_TARGETS: TestTarget[] = ['web', 'web-mobile', 'app-mobile']
 
+// Mobile targets are not ready yet — shown as "Coming soon" and unselectable.
+const COMING_SOON_TARGETS: TestTarget[] = ['web-mobile', 'app-mobile']
+
 function loadTestTarget(): TestTarget {
   try {
     const v = localStorage.getItem(TEST_TARGET_KEY)
-    return TEST_TARGETS.includes(v as TestTarget) ? (v as TestTarget) : 'web'
+    if (!TEST_TARGETS.includes(v as TestTarget)) return 'web'
+    return COMING_SOON_TARGETS.includes(v as TestTarget) ? 'web' : (v as TestTarget)
   } catch {
     return 'web'
   }
@@ -861,6 +865,7 @@ export default function RunPage() {
                   {TEST_TARGETS.map((t) => {
                     const meta = TARGET_META[t]
                     const active = testTarget === t
+                    const comingSoon = COMING_SOON_TARGETS.includes(t)
                     return (
                       <button
                         key={t}
@@ -873,15 +878,21 @@ export default function RunPage() {
                             /* ignore */
                           }
                         }}
-                        disabled={!activeProject}
+                        disabled={!activeProject || comingSoon}
                         aria-pressed={active}
                         className={cn(
-                          'flex flex-col items-center gap-1 rounded-xl border px-2 py-3 text-center transition-all duration-200 active:scale-[0.98] disabled:opacity-60',
+                          'relative flex flex-col items-center gap-1 rounded-xl border px-2 py-3 text-center transition-all duration-200 active:scale-[0.98] disabled:opacity-60',
                           active
                             ? 'border-primary/40 bg-primary/5'
                             : 'border-border/60 bg-muted/40 hover:border-border hover:bg-muted/70',
+                          comingSoon && 'cursor-not-allowed hover:border-border/60 hover:bg-muted/40',
                         )}
                       >
+                        {comingSoon && (
+                          <span className="absolute -top-2 left-1/2 -translate-x-1/2 whitespace-nowrap rounded-full border border-amber-200 bg-amber-50 px-1.5 py-px text-[9px] font-semibold uppercase tracking-wide text-amber-700">
+                            Coming soon
+                          </span>
+                        )}
                         <meta.Icon
                           className={cn('size-4', active ? 'text-primary' : 'text-muted-foreground')}
                         />

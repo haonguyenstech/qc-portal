@@ -3,6 +3,42 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.9.3 — 2026-07-02
+
+**Windows fixes: in-app update actually finishes, terminal paste, folder picker — plus new projects activate themselves**
+
+### Fixed
+
+- **The in-app "Update now" no longer gets stuck loading on Windows.** The updater used
+  to be started as a child of the portal server — and its first step, stopping the server,
+  killed its own process tree, taking the updater down with it. The update died silently
+  and the page spun forever, forcing a manual `qc-portal --update` in a terminal. The
+  updater (and the in-app Restart) is now launched outside the server's process tree, so
+  it survives the stop and finishes the update on its own. Note: the very first update
+  *onto* 0.9.3 still uses the old updater — if it hangs, run `qc-portal --update` once;
+  every update after that works from the app.
+- **Updating from the app no longer flashes command windows on Windows.** Each update step
+  (git, npm install, build) used to pop its own console window. The whole update now runs
+  invisibly — just the loading toast, then the page reloads on the new version.
+- **A newly created project becomes the active project immediately.** Before, after "Add
+  project" every page (MCP, Instructions, Tickets, Settings) kept showing the *previous*
+  project's data until you clicked "Set active" yourself — which read as the new project
+  showing someone else's data.
+- **Paste works in the in-portal Terminal on Windows.** Ctrl+V used to print `^V` instead
+  of pasting. Ctrl+V (and Ctrl+Shift+V) now paste, Ctrl+Shift+C copies the selection, and
+  plain Ctrl+C still interrupts the running command — same as Windows Terminal. This also
+  applies to the "Continue session" terminal on a run's detail page.
+- **The "Browse…" folder picker is far more reliable on Windows.** The choose-folder
+  dialog could open behind the browser and never get focus, leaving the button loading
+  for minutes. The dialog now forces itself to the foreground for its first seconds, a
+  stuck dialog gives up after 2 minutes (and actually closes) with a clear message, and
+  the picker now starts in the suggested folder like it already did on macOS.
+
+### Changed
+
+- **Mobile test targets are marked "Coming soon".** On the Run page, *Web (mobile)* and
+  *App (mobile)* are visible but not selectable yet; runs default to *Web*.
+
 ## 0.9.2 — 2026-07-02
 
 **ClickUp/Jira connect even when the portal was launched with a stale PATH**

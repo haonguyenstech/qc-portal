@@ -145,7 +145,11 @@ function stop() {
     /* may have just exited */
   }
   // On Windows a detached node tree is most reliably killed with taskkill /t.
-  if (isWin) spawnSync('taskkill', ['/pid', String(pid), '/t', '/f'], { stdio: 'ignore' })
+  if (isWin)
+    spawnSync('taskkill', ['/pid', String(pid), '/t', '/f'], {
+      stdio: 'ignore',
+      windowsHide: true,
+    })
   clearPid()
   console.log('QC Portal stopped.')
   return true
@@ -159,7 +163,10 @@ async function status() {
 }
 
 function run(cmd, args) {
-  const r = spawnSync(cmd, args, { cwd: ROOT, stdio: 'inherit', shell: isWin })
+  // windowsHide: when the updater is launched from the portal UI it has no
+  // console, so without it every shell:true step (git/npm via cmd.exe) would
+  // flash its own console window on screen.
+  const r = spawnSync(cmd, args, { cwd: ROOT, stdio: 'inherit', shell: isWin, windowsHide: true })
   if (r.status !== 0) {
     console.error(`\n\`${cmd} ${args.join(' ')}\` failed.`)
     process.exit(r.status ?? 1)
@@ -172,6 +179,7 @@ function currentBranch() {
     cwd: ROOT,
     encoding: 'utf8',
     shell: isWin,
+    windowsHide: true,
   })
   const name = (r.stdout ?? '').trim()
   return name && name !== 'HEAD' ? name : 'main'

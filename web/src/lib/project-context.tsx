@@ -26,7 +26,7 @@ function readStored(): string | null {
 }
 
 export function ProjectProvider({ children }: { children: ReactNode }) {
-  const { data, isLoading, refetch } = useQuery({
+  const { data, isLoading, isFetching, refetch } = useQuery({
     queryKey: ['projects'],
     queryFn: listProjects,
   })
@@ -37,8 +37,11 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
 
   // Resolve the active id once projects are loaded: keep the stored id if it
   // still exists, otherwise fall back to the default (or first) project.
+  // Never fall back while a refetch is in flight — a just-created project's id
+  // is valid but not in the stale list yet, and falling back here would undo
+  // the auto-activation of a newly created project.
   useEffect(() => {
-    if (projects.length === 0) return
+    if (projects.length === 0 || isFetching) return
     const stored = activeProjectId
     const valid = stored && projects.some((p) => p.id === stored)
     if (valid) return
@@ -51,7 +54,7 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
         /* ignore */
       }
     }
-  }, [projects, activeProjectId])
+  }, [projects, activeProjectId, isFetching])
 
   const setActiveProjectId = useCallback((id: string) => {
     setActiveProjectIdState(id)

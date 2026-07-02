@@ -27,29 +27,60 @@ export function pickFolderNative(
       })
     } else if (process.platform === 'win32') {
       // A bare FolderBrowserDialog.ShowDialog() has no owner window, so it often
-      // opens BEHIND the browser / other windows. The user never sees it, the
-      // PowerShell process blocks on it forever, and the /pick-folder request
-      // hangs with the spinner stuck. Fix: create an invisible, TopMost owner
-      // form, bring it to the foreground, and own the dialog with it so the
-      // picker is guaranteed to appear on top. See also the timeout backstop
-      // below so a wedged dialog can never pend the request indefinitely.
-      const desc = prompt.replace(/['"`\r\n]/g, '')
-      const ps = [
-        'Add-Type -AssemblyName System.Windows.Forms;',
-        '$owner = New-Object System.Windows.Forms.Form;',
-        '$owner.TopMost = $true; $owner.ShowInTaskbar = $false; $owner.Opacity = 0;',
-        '$owner.Show(); $owner.Activate(); $owner.BringToFront();',
-        '$f = New-Object System.Windows.Forms.FolderBrowserDialog;',
-        `$f.Description = '${desc}'; $f.ShowNewFolderButton = $true;`,
-        '$r = $f.ShowDialog($owner);',
-        '$owner.Dispose();',
-        'if($r -eq [System.Windows.Forms.DialogResult]::OK){ Write-Output $f.SelectedPath }',
-      ].join(' ')
+      // opens BEHIND the browser / other windows — the user only sees the request
+      // spinner while PowerShell blocks on an invisible dialog. Two defenses:
+      // (1) own the dialog with an (unshown) TopMost form so it stacks above
+      //     normal windows, and
+      // (2) a WinForms timer that, during the dialog's first seconds, force-raises
+      //     every visible window of the thread via user32.SetForegroundWindow —
+      //     Windows denies foreground moves to background processes in some
+      //     states, so a single attempt isn't enough.
+      // Plus the timeout backstop below (kills the whole tree) so a wedged
+      // dialog can never pend the request forever.
+      const psq = (s: string) => s.replace(/[\r\n]/g, ' ').replace(/'/g, "''")
+      const script = `
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -Namespace Native -Name Win -MemberDefinition @'
+[DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+[DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
+[DllImport("user32.dll")] public static extern bool EnumThreadWindows(uint id, EnumFn fn, IntPtr p);
+[DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
+public delegate bool EnumFn(IntPtr hWnd, IntPtr lParam);
+public static void RaiseThreadWindows() {
+  EnumThreadWindows(GetCurrentThreadId(), delegate(IntPtr h, IntPtr l) {
+    if (IsWindowVisible(h)) { SetForegroundWindow(h); }
+    return true;
+  }, IntPtr.Zero);
+}
+'@
+$owner = New-Object System.Windows.Forms.Form
+$owner.TopMost = $true
+$owner.ShowInTaskbar = $false
+$f = New-Object System.Windows.Forms.FolderBrowserDialog
+$f.Description = '${psq(prompt)}'
+$f.ShowNewFolderButton = $true
+${defaultLocation ? `$f.SelectedPath = '${psq(defaultLocation)}'` : ''}
+$timer = New-Object System.Windows.Forms.Timer
+$timer.Interval = 250
+$script:ticks = 0
+$timer.Add_Tick({
+  $script:ticks++
+  [Native.Win]::RaiseThreadWindows()
+  if ($script:ticks -ge 16) { $timer.Stop() }
+})
+$timer.Start()
+$r = $f.ShowDialog($owner)
+$timer.Stop()
+if ($r -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $f.SelectedPath }
+`
+      // -EncodedCommand sidesteps every cmd/PowerShell quoting pitfall of a
+      // joined one-liner (the previous approach). UTF-16LE is what PS expects.
+      const encoded = Buffer.from(script, 'utf16le').toString('base64')
       let settled = false
       // windowsHide hides the PowerShell console; the GUI dialog it opens still shows.
       const child = execFile(
         'powershell',
-        ['-NoProfile', '-STA', '-Command', ps],
+        ['-NoProfile', '-STA', '-EncodedCommand', encoded],
         { windowsHide: true },
         (err, stdout, stderr) => {
           if (settled) return
@@ -60,22 +91,26 @@ export function pickFolderNative(
         },
       )
       // Backstop: if the dialog wedges (e.g. no interactive desktop), kill the
-      // process and fail cleanly instead of pending forever. 5 min is far longer
-      // than anyone needs to pick a folder, so it never cuts off real use.
+      // whole process tree — child.kill() alone leaves the dialog window up —
+      // and fail cleanly instead of pending forever.
       const timer = setTimeout(() => {
         if (settled) return
         settled = true
-        try {
-          child.kill()
-        } catch {
-          /* already gone */
+        if (child.pid) {
+          execFile('taskkill', ['/PID', String(child.pid), '/T', '/F'], () => {})
+        } else {
+          try {
+            child.kill()
+          } catch {
+            /* already gone */
+          }
         }
         resolve({
           path: null,
           error:
             'The folder picker did not respond in time — the dialog may have opened behind another window. Please try again, or type the path manually.',
         })
-      }, 5 * 60 * 1000)
+      }, 2 * 60 * 1000)
     } else {
       // Linux: best-effort via zenity if present.
       execFile(

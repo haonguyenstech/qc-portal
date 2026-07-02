@@ -106,6 +106,46 @@ versionRouter.post('/check', async (_req, res) => {
   }
 })
 
+// Spawn the launcher (`qc-portal --update` / `--restart`) detached so it outlives
+// this server. On Windows this MUST NOT be a direct child of the server: the
+// launcher stops the server with `taskkill /pid <server> /t /f`, and `/t` kills
+// every live DESCENDANT of the server — a directly-spawned launcher included
+// (`detached` only detaches the console, not the process tree), so the update
+// killed itself mid-run and the UI spun forever. Interposing a `cmd /c start`
+// that exits immediately orphans the launcher, putting it out of taskkill's
+// tree walk. Output goes to data/<logName> either way.
+function spawnLauncherDetached(
+  launcher: string,
+  flag: '--update' | '--restart',
+  logName: string,
+  extraEnv: NodeJS.ProcessEnv = {},
+): void {
+  const dataDir = path.join(INSTALL_ROOT, 'data')
+  fs.mkdirSync(dataDir, { recursive: true })
+  const logPath = path.join(dataDir, logName)
+  if (process.platform === 'win32') {
+    // `start "" /b` = no new window, first "" is the (empty) window title.
+    const cmd = `start "" /b "${process.execPath}" "${launcher}" ${flag} >> "${logPath}" 2>&1`
+    spawn(cmd, {
+      cwd: INSTALL_ROOT,
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+      shell: true,
+      env: { ...process.env, ...extraEnv },
+    }).unref()
+  } else {
+    const out = fs.openSync(logPath, 'a')
+    spawn(process.execPath, [launcher, flag], {
+      cwd: INSTALL_ROOT,
+      detached: true,
+      stdio: ['ignore', out, out],
+      windowsHide: true,
+      env: { ...process.env, ...extraEnv },
+    }).unref()
+  }
+}
+
 // Guards against firing the updater twice within the same process lifetime.
 // (It resets naturally — the updater restarts the server, giving a fresh process.)
 let updateStarted = false
@@ -140,17 +180,7 @@ versionRouter.post('/update', (_req, res) => {
   updateStarted = true
 
   try {
-    const dataDir = path.join(INSTALL_ROOT, 'data')
-    fs.mkdirSync(dataDir, { recursive: true })
-    const out = fs.openSync(path.join(dataDir, 'update.log'), 'a')
-    const child = spawn(process.execPath, [launcher, '--update'], {
-      cwd: INSTALL_ROOT,
-      detached: true,
-      stdio: ['ignore', out, out],
-      windowsHide: true,
-      env: { ...process.env },
-    })
-    child.unref()
+    spawnLauncherDetached(launcher, '--update', 'update.log')
   } catch (err) {
     updateStarted = false
     return res.status(500).json({
@@ -191,18 +221,8 @@ versionRouter.post('/restart', (_req, res) => {
   restartStarted = true
 
   try {
-    const dataDir = path.join(INSTALL_ROOT, 'data')
-    fs.mkdirSync(dataDir, { recursive: true })
-    const out = fs.openSync(path.join(dataDir, 'restart.log'), 'a')
-    const child = spawn(process.execPath, [launcher, '--restart'], {
-      cwd: INSTALL_ROOT,
-      detached: true,
-      stdio: ['ignore', out, out],
-      windowsHide: true,
-      // Don't re-open the browser — the user already has the portal open.
-      env: { ...process.env, QC_NO_OPEN: '1' },
-    })
-    child.unref()
+    // Don't re-open the browser — the user already has the portal open.
+    spawnLauncherDetached(launcher, '--restart', 'restart.log', { QC_NO_OPEN: '1' })
   } catch (err) {
     restartStarted = false
     return res.status(500).json({

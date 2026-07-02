@@ -780,7 +780,7 @@ function ProjectCard({ project }: { project: Project }) {
 /** The body of the "Add project" dialog. Calls onDone() once the project is created. */
 function AddProjectForm({ onDone }: { onDone: () => void }) {
   const queryClient = useQueryClient()
-  const { refetch: refetchContext } = useProjects()
+  const { refetch: refetchContext, setActiveProjectId } = useProjects()
   const [name, setName] = useState('')
   const [rootPath, setRootPath] = useState('')
 
@@ -791,11 +791,19 @@ function AddProjectForm({ onDone }: { onDone: () => void }) {
       toast.success('Project added', {
         description:
           created > 0
-            ? `${p.name} created and initialized (${created} file${created === 1 ? '' : 's'}).`
-            : `${p.name} created. Setup was already present.`,
+            ? `${p.name} created, initialized (${created} file${created === 1 ? '' : 's'}) and set as the active project.`
+            : `${p.name} created and set as the active project.`,
       })
       setName('')
       setRootPath('')
+      // Switch every page (MCP, Instructions, Tickets, …) to the new project
+      // right away — otherwise they keep showing the previous active project.
+      // Seed the cache first so the new id is already valid when the
+      // ProjectProvider fallback effect runs (else it reverts to the default).
+      queryClient.setQueryData<Project[]>(['projects'], (old) =>
+        old && !old.some((x) => x.id === p.id) ? [...old, p] : old ?? [p],
+      )
+      setActiveProjectId(p.id)
       queryClient.invalidateQueries({ queryKey: ['projects'] })
       refetchContext()
       onDone()

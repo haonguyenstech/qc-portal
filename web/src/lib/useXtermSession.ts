@@ -74,6 +74,27 @@ export function useXtermSession(
       },
       allowProposedApi: true,
     })
+    // Windows/Linux clipboard: xterm handles the Ctrl+V keydown itself — it
+    // sends the ^V control byte to the shell and preventDefaults the browser's
+    // native paste, so nothing is ever pasted. Returning false here makes xterm
+    // skip the keydown, letting the native paste event reach its textarea (which
+    // xterm does handle). Ctrl+Shift+C copies the selection (plain Ctrl+C must
+    // stay SIGINT). macOS is untouched — Cmd+V/Cmd+C already work natively, and
+    // Ctrl+V there is a real shell keybinding (literal-next).
+    const isMac = /mac/i.test(navigator.platform)
+    term.attachCustomKeyEventHandler((ev) => {
+      if (ev.type !== 'keydown' || isMac) return true
+      const key = ev.key.toLowerCase()
+      if (ev.ctrlKey && !ev.altKey && key === 'v') return false
+      if (ev.ctrlKey && ev.shiftKey && key === 'c') {
+        const sel = term.getSelection()
+        if (sel) {
+          void navigator.clipboard?.writeText(sel).catch(() => {})
+          return false
+        }
+      }
+      return true
+    })
     const fit = new FitAddon()
     term.loadAddon(fit)
     term.open(hostRef.current)
