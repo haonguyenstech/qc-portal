@@ -421,6 +421,10 @@ grouped cards. Output shape is fixed by the prompt's JSON contract — don't res
 files under `testing/templates/<key>.md`. The UI owns the catalog in `TEMPLATE_KINDS`; add a kind there
 to expose a new upload slot. Current kinds:
 - `testcase` — structure Claude matches when drafting test cases (a per-run upload on `/testcases` still overrides it).
+  **Seeded on project creation**: `initializeProjectFolder` (routes/projects.ts) copies the template
+  project's `testing/templates/testcase.md` when one exists, else the portal-bundled default
+  (`templates/project-templates/testcase.md` via `bundledTemplateFile`), so a new project starts
+  with a test-case template already in place. Never overwrites an existing file.
 - `design-check` — the project's **standard Design Check checklist**. `verifyDesign.ts` injects it into
   the verify prompt as criteria the model must report a finding for (capped at 6 KB,
   `MAX_CHECKLIST_CHARS`). Resolution mirrors `/testcases`: a one-off file uploaded on `/verify` wins

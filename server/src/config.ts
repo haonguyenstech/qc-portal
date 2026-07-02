@@ -22,6 +22,12 @@ export const mcpJsonFor = (root: string) => path.join(root, '.mcp.json')
 export const BUNDLED_SKILLS_DIR = path.join(here, '..', '..', 'templates', 'skills')
 export const bundledSkillDir = (name: string) => path.join(BUNDLED_SKILLS_DIR, name)
 
+// Default project template files bundled with the portal (repo <root>/templates/
+// project-templates/<key>.md). `init` seeds a new project's testing/templates/
+// from here when there's no existing project to clone from.
+export const BUNDLED_TEMPLATES_DIR = path.join(here, '..', '..', 'templates', 'project-templates')
+export const bundledTemplateFile = (key: string) => path.join(BUNDLED_TEMPLATES_DIR, `${key}.md`)
+
 // The portal is a STANDALONE tool that manages many projects — it does not assume
 // it lives inside any project. Optionally seed ONE default project from QC_REPO_ROOT
 // (an absolute repo path). If unset or not a real folder, the portal simply starts

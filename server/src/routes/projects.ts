@@ -10,7 +10,13 @@ import {
   listRuns,
   updateProject,
 } from '../db.js'
-import { bundledSkillDir, mcpJsonFor, skillsDirFor } from '../config.js'
+import {
+  bundledSkillDir,
+  bundledTemplateFile,
+  mcpJsonFor,
+  skillsDirFor,
+  testingDirFor,
+} from '../config.js'
 import { pickFolderNative } from '../folderPicker.js'
 import { listTestcaseJobs } from '../testcaseJobs.js'
 import { listCrawlJobs } from '../crawlJobs.js'
@@ -195,6 +201,28 @@ function initializeProjectFolder(project: Project): { created: string[]; templat
       fs.writeFileSync(targetMcp, `${JSON.stringify({ mcpServers: {} }, null, 2)}\n`)
     }
     created.push('.mcp.json')
+  }
+
+  // 4. testing/templates/testcase.md — the default test-case template shown on
+  // /templates and matched by test-case generation. Source preference mirrors the
+  // skill scaffold: an existing template project's copy (may be customized), else
+  // the default bundled with the portal (templates/project-templates/testcase.md).
+  const targetTcTemplate = path.join(testingDirFor(root), 'templates', 'testcase.md')
+  if (!fs.existsSync(targetTcTemplate)) {
+    const tplTc = template
+      ? path.join(testingDirFor(template.rootPath), 'templates', 'testcase.md')
+      : null
+    const sourceTc =
+      tplTc && fs.existsSync(tplTc)
+        ? tplTc
+        : fs.existsSync(bundledTemplateFile('testcase'))
+          ? bundledTemplateFile('testcase')
+          : null
+    if (sourceTc) {
+      fs.mkdirSync(path.dirname(targetTcTemplate), { recursive: true })
+      fs.copyFileSync(sourceTc, targetTcTemplate)
+      created.push('testing/templates/testcase.md')
+    }
   }
 
   return { created, templateName: template?.name ?? null }

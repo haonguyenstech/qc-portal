@@ -3,6 +3,37 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.9.5 — 2026-07-02
+
+**AI Brain visualization, correct pass rates on run reports, and a starter test-case template for new projects**
+
+### Added
+
+- **AI Brain tab on the Instructions page.** A new animated map (Instructions → AI Brain) shows
+  the AI's working brain for the active project — a pulsing core wired to every Memory note,
+  Knowledge doc, and repo Source map it reads on each run. Hover a node to highlight its
+  connection and see its description; click to read the full content. AI-captured items carry a
+  blinking blue dot. The map follows the app theme (light and dark), is built with lightweight
+  SVG/CSS animation, freezes while a preview dialog is open, and respects the system
+  reduced-motion setting — so it doesn't slow the app down.
+- **New projects start with a test-case template.** Creating a project now seeds
+  `testing/templates/testcase.md` automatically — copied from your existing project's template
+  when one exists (so new projects match your current format), otherwise from a sensible default
+  bundled with the portal. An existing template file is never overwritten.
+
+### Fixed
+
+- **Run pages no longer show a 0% pass rate for reports that count "Pass / Fail".** The run
+  detail page only recognized summary rows labeled "Passed / Failed", so reports whose summary
+  table used "✅ Pass / ❌ Fail" showed 0 passed and a 0% pass rate. Both spellings are now
+  accepted, and a count is only read from a cell that is purely a number — so per-case table
+  rows can't be mistaken for summary counts.
+- **Stored pass/fail counts now match the report.** The server previously counted pass/fail-looking
+  rows across the whole report (over-counting badly on reports with per-case tables); it now reads
+  the report's own Result Summary table first, with the old row counting kept only as a fallback.
+  Older runs self-heal: opening a run recomputes its stored counts from the report, so History
+  matches too. Partial and Blocked still count toward the fail side.
+
 ## 0.9.4 — 2026-07-02
 
 **Multiple source repos per project + AI source maps, App URL check, and a Windows MCP approval fix**

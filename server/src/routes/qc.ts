@@ -2,8 +2,16 @@ import { Router } from 'express'
 import fs from 'node:fs'
 import path from 'node:path'
 import { testResultDirFor } from '../config.js'
-import { deleteRun, getEvents, getProject, getRun, getRunSession, listRuns } from '../db.js'
-import { cancelRun, pauseRun, resumeRun, resolveSlug, startRun } from '../runManager.js'
+import {
+  deleteRun,
+  getEvents,
+  getProject,
+  getRun,
+  getRunSession,
+  listRuns,
+  updateRun,
+} from '../db.js'
+import { cancelRun, parseReport, pauseRun, resumeRun, resolveSlug, startRun } from '../runManager.js'
 import { revealFolderNative } from '../folderPicker.js'
 import { CRAWL_SUMMARY_MODELS } from '../claudeExec.js'
 import type { RunDetail, RunSummary } from '../types.js'
@@ -218,6 +226,22 @@ qcRouter.get('/runs/:id', (req, res) => {
   const issuesMd =
     testingDir && slug ? readIfExists(path.join(testingDir, slug, 'issues.md')) : null
   const screenshots = testingDir && slug ? listScreenshots(testingDir, slug) : []
+
+  // Self-heal stored counts: runs recorded before the summary-table parser landed
+  // (or whose report changed on disk) carry stale pass/fail numbers. Recompute from
+  // the report and persist when they differ, so History matches the report.
+  if (reportMd && run.finishedAt) {
+    const parsed = parseReport(reportMd)
+    if (
+      parsed.totalAcs > 0 &&
+      (parsed.passCount !== run.passCount ||
+        parsed.failCount !== run.failCount ||
+        parsed.totalAcs !== run.totalAcs)
+    ) {
+      updateRun(run.id, parsed)
+      Object.assign(run, parsed)
+    }
+  }
 
   const detail: RunDetail = {
     ...run,

@@ -402,14 +402,18 @@ function parseReportOutcomes(md: string | null, fallback: { passCount: number; f
         .filter(Boolean)
       if (cells.length < 2) continue
 
+      // The count cell must be JUST a number (optionally bold) — otherwise rows
+      // like `| Pass | TC-01 … |` in per-case tables would be misread as counts.
+      if (!/^\*{0,2}\s*\d+\s*\*{0,2}$/.test(cells[1])) continue
       const label = cells[0].toLowerCase().replace(/[^a-z]/g, '')
       const value = Number.parseInt(cells[1].replace(/[^\d]/g, ''), 10)
       if (!Number.isFinite(value)) continue
 
-      if (label.includes('passed')) counts.passed = value
-      if (label.includes('failed')) counts.failed = value
-      if (label.includes('partial')) counts.partial = value
-      if (label.includes('blocked')) counts.blocked = value
+      // Summary tables label rows "✅ Pass" or "Passed" depending on the report.
+      if (label === 'pass' || label.includes('passed')) counts.passed = value
+      else if (label === 'fail' || label.includes('failed')) counts.failed = value
+      else if (label.includes('partial')) counts.partial = value
+      else if (label.includes('blocked')) counts.blocked = value
     }
   }
 

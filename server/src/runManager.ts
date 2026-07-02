@@ -25,8 +25,13 @@ function now(): string {
 }
 
 /**
- * Parse a QC report.md and count Pass / Fail table rows.
+ * Parse a QC report.md into pass/fail counts.
  * Partial / Blocked count toward failCount. Robust to a missing/empty file.
+ *
+ * Preferred source: the report's own "Result Summary" table — rows shaped
+ * `| ✅ Pass | 47 |` (label + a purely numeric count cell). Counting rows across
+ * the whole document over-counts badly (per-case tables, prose tables), so the
+ * row-count heuristic is only the fallback when no summary table exists.
  */
 export function parseReport(md: string): {
   passCount: number
@@ -35,6 +40,41 @@ export function parseReport(md: string): {
 } {
   if (!md) return { passCount: 0, failCount: 0, totalAcs: 0 }
 
+  // 1) Summary-table extraction.
+  const summary: Record<'pass' | 'fail' | 'partial' | 'blocked', number | null> = {
+    pass: null,
+    fail: null,
+    partial: null,
+    blocked: null,
+  }
+  for (const rawLine of md.split('\n')) {
+    const line = rawLine.trim()
+    if (!line.startsWith('|')) continue
+    const cells = line
+      .split('|')
+      .map((c) => c.trim())
+      .filter(Boolean)
+    if (cells.length < 2) continue
+    // The count cell must be JUST a number (optionally bold) — otherwise rows like
+    // `| Pass | TC-01 … |` in per-case tables would be misread as counts.
+    if (!/^\*{0,2}\s*\d+\s*\*{0,2}$/.test(cells[1])) continue
+    const label = cells[0].toLowerCase().replace(/[^a-z]/g, '')
+    const value = Number.parseInt(cells[1].replace(/[^\d]/g, ''), 10)
+    if (!Number.isFinite(value)) continue
+    // First occurrence wins — the summary table sits at the top of the report.
+    if ((label === 'pass' || label === 'passed') && summary.pass === null) summary.pass = value
+    else if ((label === 'fail' || label === 'failed') && summary.fail === null)
+      summary.fail = value
+    else if (label.startsWith('partial') && summary.partial === null) summary.partial = value
+    else if (label.startsWith('blocked') && summary.blocked === null) summary.blocked = value
+  }
+  if (summary.pass !== null || summary.fail !== null) {
+    const passCount = summary.pass ?? 0
+    const failCount = (summary.fail ?? 0) + (summary.partial ?? 0) + (summary.blocked ?? 0)
+    return { passCount, failCount, totalAcs: passCount + failCount }
+  }
+
+  // 2) Fallback: count pass/fail-looking table rows document-wide.
   let passCount = 0
   let failCount = 0
 

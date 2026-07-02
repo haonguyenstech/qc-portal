@@ -21,9 +21,10 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { Textarea } from '@/components/ui/textarea'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import { BrainCircuit, BrainCog } from 'lucide-react'
+import { BrainCircuit, BrainCog, Sparkles } from 'lucide-react'
 import { KnowledgeDocs } from '@/components/KnowledgeDocs'
 import { MemoryNotes } from '@/components/MemoryNotes'
+import { AiBrainMap } from '@/components/AiBrainMap'
 import {
   getProjectClaudeMd,
   openMcpFolder,
@@ -264,7 +265,7 @@ function OpenFolderButton({ projectId }: { projectId: string }) {
   )
 }
 
-const TABS = ['instructions', 'knowledge', 'memory'] as const
+const TABS = ['instructions', 'knowledge', 'memory', 'brain'] as const
 type TabValue = (typeof TABS)[number]
 
 export default function InstructionsPage() {
@@ -374,6 +375,9 @@ export default function InstructionsPage() {
           <TabsTrigger value="memory" className="gap-1.5 rounded-full">
             <BrainCog className="size-3.5" /> Memory
           </TabsTrigger>
+          <TabsTrigger value="brain" className="gap-1.5 rounded-full">
+            <Sparkles className="size-3.5" /> AI Brain
+          </TabsTrigger>
         </TabsList>
 
         <TabsContent value="instructions" className="space-y-3">
@@ -396,6 +400,12 @@ export default function InstructionsPage() {
         <TabsContent value="memory">
           {activeProject && (
             <MemoryNotes projectId={activeProjectId} projectName={activeProject.name} />
+          )}
+        </TabsContent>
+
+        <TabsContent value="brain">
+          {activeProject && (
+            <AiBrainMap projectId={activeProjectId} projectName={activeProject.name} />
           )}
         </TabsContent>
       </Tabs>
