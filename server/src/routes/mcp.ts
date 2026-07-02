@@ -263,16 +263,36 @@ function writeClaudeConfig(data: ClaudeConfig): void {
   fs.writeFileSync(file, JSON.stringify(data, null, 2) + '\n', 'utf8')
 }
 
-function localProjectMcpServers(rootPath: string): Record<string, McpEntry> {
-  return readClaudeConfig().projects?.[rootPath]?.mcpServers ?? {}
+/**
+ * Claude Code keys the ~/.claude.json `projects` map with FORWARD slashes even
+ * on Windows, while our rootPath comes from path.resolve() (back-slashes there).
+ * Always read/write that map through this key, or the entry lands where the CLI
+ * never looks — which is exactly the "Pending approval" bug on Windows.
+ */
+export function claudeProjectKey(rootPath: string): string {
+  return rootPath.replace(/\\/g, '/')
 }
 
-function removeLocalProjectMcpServer(rootPath: string, name: string): void {
+export function localProjectMcpServers(rootPath: string): Record<string, McpEntry> {
+  const projects = readClaudeConfig().projects
+  return (
+    projects?.[claudeProjectKey(rootPath)]?.mcpServers ??
+    projects?.[rootPath]?.mcpServers ??
+    {}
+  )
+}
+
+export function removeLocalProjectMcpServer(rootPath: string, name: string): void {
   const data = readClaudeConfig()
-  const servers = data.projects?.[rootPath]?.mcpServers
-  if (!servers || !(name in servers)) return
-  delete servers[name]
-  writeClaudeConfig(data)
+  let removed = false
+  for (const key of new Set([claudeProjectKey(rootPath), rootPath])) {
+    const servers = data.projects?.[key]?.mcpServers
+    if (servers && name in servers) {
+      delete servers[name]
+      removed = true
+    }
+  }
+  if (removed) writeClaudeConfig(data)
 }
 
 function maskSecret(value: string): string {
@@ -324,19 +344,23 @@ function asStringArray(value: unknown): string[] {
  * portal owns these project configs, so Test connection can approve the requested
  * server before retrying health.
  */
-function approveMcpJsonServer(rootPath: string, name: string): boolean {
+export function approveMcpJsonServer(rootPath: string, name: string): boolean {
   const servers = readMcp(mcpJsonFor(rootPath)).mcpServers ?? {}
   if (!(name in servers)) return false
 
   // Primary: ~/.claude.json project entry (what the CLI consults). A project that
   // was never opened interactively has no entry here at all — create it.
+  // Written under the forward-slash key (see claudeProjectKey), merging from and
+  // deleting any stale back-slash orphan a previous portal version left behind.
   const config = readClaudeConfig()
   if (!config.projects) config.projects = {}
-  const project = config.projects[rootPath] ?? {}
+  const key = claudeProjectKey(rootPath)
+  const project = config.projects[key] ?? config.projects[rootPath] ?? {}
+  if (rootPath !== key && rootPath in config.projects) delete config.projects[rootPath]
   project.hasTrustDialogAccepted = true
   project.enabledMcpjsonServers = [...new Set([...asStringArray(project.enabledMcpjsonServers), name])]
   project.disabledMcpjsonServers = asStringArray(project.disabledMcpjsonServers).filter((v) => v !== name)
-  config.projects[rootPath] = project
+  config.projects[key] = project
   writeClaudeConfig(config)
 
   // Backward compat: mirror into .claude/settings.local.json for older CLIs.

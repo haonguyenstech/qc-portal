@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
-import { setProjectSource } from './db.js'
+import { saveSource } from './db.js'
+import { generateSourceMap, hasSourceMap, sourceMapDocName } from './sourceMap.js'
 import {
   cloneSource,
   pullSource,
@@ -28,8 +29,13 @@ interface SourceJob {
   id: string
   kind: SourceJobKind
   projectId: string
+  sourceId: string // the sources-table row this job creates/updates
+  tag: string // "Backend repo", "Frontend repo", …
+  sourceCreatedAt: string // preserved on re-clone so card order stays stable
   rootPath: string
+  targetDir: string // where a clone should land (per-tag folder)
   sourcePath: string // known up-front for sync; filled after clone
+  prevCommit: string // HEAD before a sync — lets an unchanged sync skip the map refresh
   parsed: ParsedRepo
   cred: SourceCredential | undefined // captured at start; never exposed
   branch: string
@@ -46,6 +52,8 @@ export interface PublicSourceJob {
   id: string
   kind: SourceJobKind
   projectId: string
+  sourceId: string
+  tag: string
   status: 'running' | 'done' | 'error'
   error?: string
   branch: string
@@ -67,6 +75,8 @@ function toPublic(j: SourceJob): PublicSourceJob {
     id: j.id,
     kind: j.kind,
     projectId: j.projectId,
+    sourceId: j.sourceId,
+    tag: j.tag,
     status: j.status,
     error: j.error,
     branch: j.branch,
@@ -101,6 +111,7 @@ async function runJob(job: SourceJob): Promise<void> {
       job.kind === 'clone'
         ? await cloneSource({
             rootPath: job.rootPath,
+            targetDir: job.targetDir,
             parsed: job.parsed,
             branch: job.branch || undefined,
             cred: job.cred,
@@ -115,16 +126,51 @@ async function runJob(job: SourceJob): Promise<void> {
           })
 
     job.result = result
-    job.status = 'done'
-    // Persist the connection so /source reflects it after the job is gone.
-    setProjectSource(job.projectId, {
-      sourceRepoUrl: job.parsed.cleanUrl,
-      sourceProvider: job.parsed.provider,
-      sourceBranch: result.branch,
+    // Persist the connection FIRST so a failed map step can't lose it.
+    saveSource({
+      id: job.sourceId,
+      projectId: job.projectId,
+      tag: job.tag,
+      repoUrl: job.parsed.cleanUrl,
+      provider: job.parsed.provider,
+      branch: result.branch,
       sourcePath: result.sourcePath,
-      sourceLastSync: nowIso(),
-      sourceLastCommit: result.lastCommit,
+      lastSync: nowIso(),
+      lastCommit: result.lastCommit,
+      createdAt: job.sourceCreatedAt,
     })
+
+    // Refresh the repo's SOURCE MAP (a compact AI index saved into testing/knowledge/
+    // so future test-case generations & QC runs jump straight to the right files
+    // instead of re-exploring the repo). Skipped when a sync brought nothing new.
+    const unchanged =
+      job.kind === 'sync' &&
+      job.prevCommit !== '' &&
+      job.prevCommit === result.lastCommit &&
+      hasSourceMap(job.rootPath, job.tag)
+    if (unchanged) {
+      pushLog(job, 'info', 'Source unchanged — keeping the existing source map.')
+    } else {
+      pushLog(
+        job,
+        'info',
+        `Indexing the repo → testing/knowledge/${sourceMapDocName(job.tag)}.md (${job.tag}, one cheap AI pass so future runs don't re-read the code)…`,
+      )
+      const map = await generateSourceMap({
+        rootPath: job.rootPath,
+        sourcePath: result.sourcePath,
+        tag: job.tag,
+        repoUrl: job.parsed.cleanUrl,
+        onLog: (l) => pushLog(job, l.level, l.text),
+      })
+      if (map) {
+        pushLog(job, 'success', `Source map saved — see Instructions → Knowledge ("${map.name}").`)
+      } else {
+        pushLog(job, 'info', 'Source map skipped — generations will explore the repo directly.')
+      }
+    }
+
+    job.status = 'done'
   } catch (err) {
     job.status = 'error'
     job.error = (err as Error).message || `${job.kind} failed`
@@ -136,8 +182,13 @@ async function runJob(job: SourceJob): Promise<void> {
 export function startSourceJob(opts: {
   kind: SourceJobKind
   projectId: string
+  sourceId: string
+  tag: string
+  sourceCreatedAt: string
   rootPath: string
+  targetDir?: string
   sourcePath?: string
+  prevCommit?: string
   parsed: ParsedRepo
   cred: SourceCredential | undefined
   branch?: string
@@ -146,8 +197,13 @@ export function startSourceJob(opts: {
     id: randomUUID(),
     kind: opts.kind,
     projectId: opts.projectId,
+    sourceId: opts.sourceId,
+    tag: opts.tag,
+    sourceCreatedAt: opts.sourceCreatedAt,
     rootPath: opts.rootPath,
+    targetDir: opts.targetDir ?? '',
     sourcePath: opts.sourcePath ?? '',
+    prevCommit: opts.prevCommit ?? '',
     parsed: opts.parsed,
     cred: opts.cred,
     branch: opts.branch ?? '',
@@ -178,4 +234,9 @@ export function listSourceJobs(projectId: string): PublicSourceJob[] {
     .filter((j) => j.projectId === projectId)
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
     .map(toPublic)
+}
+
+/** True while any clone/sync is running for this project (one job at a time). */
+export function hasRunningSourceJob(projectId: string): boolean {
+  return [...jobs.values()].some((j) => j.projectId === projectId && j.status === 'running')
 }

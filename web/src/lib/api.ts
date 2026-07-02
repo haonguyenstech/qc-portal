@@ -157,6 +157,13 @@ export function createRun(body: {
   return request('/api/qc/run', { method: 'POST', body: JSON.stringify(body) })
 }
 
+/** Server-side reachability probe for the run form's App URL (browser fetch would hit CORS). */
+export function checkAppUrl(
+  url: string,
+): Promise<{ ok: boolean; status?: number; finalUrl?: string; error?: string }> {
+  return request('/api/qc/check-url', { method: 'POST', body: JSON.stringify({ url }) })
+}
+
 export function listRuns(projectId?: string): Promise<RunSummary[]> {
   const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : ''
   return request(`/api/qc/runs${qs}`)
@@ -633,15 +640,15 @@ export function listCrawlJobs(projectId: string): Promise<{ jobs: CrawlJob[] }> 
   return request(`/api/clickup/crawl/jobs?projectId=${encodeURIComponent(projectId)}`)
 }
 
-// ---- Source code (connect a GitHub/Bitbucket repo) ----
+// ---- Source code (connect one or more GitHub/Bitbucket repos, each with a tag) ----
 
-export interface SourceInfo {
-  connected: boolean
+export interface SourceRepo {
+  id: string
+  tag: string // "Backend repo", "Frontend repo", …
   repoUrl: string
   provider: string // 'github' | 'bitbucket' | 'other' | ''
   branch: string
   sourcePath: string // absolute local folder of the source
-  rootPath: string
   lastSync: string // ISO
   lastCommit: string // "<shortSha> <subject>"
   hasToken: boolean // a private-repo token is stored (never returned raw)
@@ -651,6 +658,12 @@ export interface SourceInfo {
     username: boolean
   } | null
   live: { isRepo: boolean; branch: string; lastCommit: string; remoteUrl: string } | null
+}
+
+export interface SourceInfo {
+  connected: boolean
+  rootPath: string
+  sources: SourceRepo[]
 }
 
 export type SourceJobKind = 'clone' | 'sync'
@@ -665,6 +678,8 @@ export interface SourceJob {
   id: string
   kind: SourceJobKind
   projectId: string
+  sourceId: string
+  tag: string
   status: 'running' | 'done' | 'error'
   error?: string
   branch: string
@@ -674,23 +689,33 @@ export interface SourceJob {
   updatedAt: string
 }
 
-/** Read the project's connected source repo + live on-disk status. */
+/** Read all of the project's connected source repos + live on-disk status. */
 export function getSource(projectId: string): Promise<SourceInfo> {
   return request(`/api/source?projectId=${encodeURIComponent(projectId)}`)
 }
 
-/** Read the stored source access token for clipboard copy. */
-export function getSourceCredential(projectId: string): Promise<{ token: string }> {
-  return request(`/api/source/credential?projectId=${encodeURIComponent(projectId)}`)
+/** Read one repo's stored access token (+ username) for clipboard copy / edit prefill. */
+export function getSourceCredential(
+  projectId: string,
+  sourceId: string,
+): Promise<{ token: string; username: string }> {
+  return request(
+    `/api/source/credential?projectId=${encodeURIComponent(projectId)}&sourceId=${encodeURIComponent(sourceId)}`,
+  )
 }
 
-/** Connect (clone/adopt) a repo. Runs as a background job — poll getSourceJob. */
+/**
+ * Connect (clone/adopt) a repo under a tag. Runs as a background job — poll
+ * getSourceJob. Pass sourceId to re-point an existing repo ("Change repository").
+ */
 export function connectSource(body: {
   projectId: string
   url: string
+  tag?: string
   branch?: string
   token?: string
   username?: string
+  sourceId?: string
 }): Promise<{ jobId: string; job: SourceJob }> {
   return request(`/api/source/connect?projectId=${encodeURIComponent(body.projectId)}`, {
     method: 'POST',
@@ -698,19 +723,22 @@ export function connectSource(body: {
   })
 }
 
-/** Refresh the connected repo (git pull). Runs as a background job. */
-export function syncSource(projectId: string): Promise<{ jobId: string; job: SourceJob }> {
+/** Refresh one connected repo (git pull). Runs as a background job. */
+export function syncSource(
+  projectId: string,
+  sourceId: string,
+): Promise<{ jobId: string; job: SourceJob }> {
   return request(`/api/source/sync?projectId=${encodeURIComponent(projectId)}`, {
     method: 'POST',
-    body: JSON.stringify({ projectId }),
+    body: JSON.stringify({ sourceId }),
   })
 }
 
-/** Forget the connection (the files on disk are left alone). */
-export function disconnectSource(projectId: string): Promise<{ ok: true }> {
+/** Forget one connected repo (the files on disk are left alone). */
+export function disconnectSource(projectId: string, sourceId: string): Promise<{ ok: true }> {
   return request(`/api/source/disconnect?projectId=${encodeURIComponent(projectId)}`, {
     method: 'POST',
-    body: JSON.stringify({ projectId }),
+    body: JSON.stringify({ sourceId }),
   })
 }
 
@@ -724,11 +752,14 @@ export function listSourceJobs(projectId: string): Promise<{ jobs: SourceJob[] }
   return request(`/api/source/jobs?projectId=${encodeURIComponent(projectId)}`)
 }
 
-/** Reveal the source folder (or project root) in the OS file explorer. */
-export function openSourceFolder(projectId: string): Promise<{ ok: true; path: string }> {
+/** Reveal a source folder (a specific repo's, or the shared source dir) in the OS file explorer. */
+export function openSourceFolder(
+  projectId: string,
+  sourceId?: string,
+): Promise<{ ok: true; path: string }> {
   return request(`/api/source/open?projectId=${encodeURIComponent(projectId)}`, {
     method: 'POST',
-    body: JSON.stringify({ projectId }),
+    body: JSON.stringify({ sourceId }),
   })
 }
 

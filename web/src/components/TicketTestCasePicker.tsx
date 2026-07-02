@@ -1,8 +1,19 @@
-import { useEffect, useMemo } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
-import { ClipboardList, FileText, Loader2, Wand2 } from 'lucide-react'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
+import { ClipboardList, Eye, FileText, Loader2, Wand2 } from 'lucide-react'
+import { cn } from '@/lib/utils'
+import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 import {
   Select,
   SelectContent,
@@ -10,8 +21,18 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import { listTestCaseVersions, type TestCaseFormat } from '@/lib/api'
+import { CsvTable } from '@/components/CsvTable'
+import { getTestCaseVersion, listTestCaseVersions, type TestCaseFormat } from '@/lib/api'
 import { relativeTime } from '@/lib/format'
+
+/** Compact markdown styling for the preview dialog (subset of TestCasePage's MD_CLASS). */
+const MD_CLASS = cn(
+  'text-sm leading-relaxed text-foreground/90',
+  '[&_h1]:mt-5 [&_h1]:mb-2 [&_h1]:text-lg [&_h1]:font-semibold [&_h2]:mt-4 [&_h2]:mb-1.5 [&_h2]:text-base [&_h2]:font-semibold [&_h3]:mt-3 [&_h3]:mb-1 [&_h3]:text-sm [&_h3]:font-semibold',
+  '[&_p]:my-2 [&_ul]:my-2 [&_ul]:list-disc [&_ul]:pl-5 [&_ol]:my-2 [&_ol]:list-decimal [&_ol]:pl-5 [&_li]:my-0.5',
+  '[&_code]:rounded [&_code]:bg-muted [&_code]:px-1.5 [&_code]:py-0.5 [&_code]:font-mono [&_code]:text-xs',
+  '[&_table]:my-3 [&_table]:w-full [&_table]:text-left [&_th]:border [&_th]:bg-muted/50 [&_th]:px-2 [&_th]:py-1 [&_th]:text-xs [&_th]:font-semibold [&_td]:border [&_td]:px-2 [&_td]:py-1 [&_td]:text-xs [&_td]:align-top',
+)
 
 interface Props {
   /** The crawled ticket's folder under testing/tickets/ (null when no ticket picked). */
@@ -40,8 +61,65 @@ export function testcaseRelPath(
  * against. If the picked ticket has no test cases yet, it informs the user and
  * offers a shortcut to generate them on the Test Case page.
  */
+/** Read-only dialog showing the selected test-case version — CSV as a table, markdown rendered. */
+function TestCasePreviewDialog({
+  open,
+  onOpenChange,
+  folder,
+  projectId,
+  version,
+}: {
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  folder: string
+  projectId: string
+  version: number
+}) {
+  const { data, isFetching } = useQuery({
+    queryKey: ['testcase-preview', projectId, folder, version],
+    queryFn: () => getTestCaseVersion(folder, version, projectId),
+    enabled: open,
+  })
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="flex max-h-[92vh] w-[97vw] flex-col gap-0 overflow-hidden p-0 sm:max-w-[90rem]">
+        <DialogHeader className="shrink-0 space-y-1 border-b border-border/60 bg-muted/30 px-5 py-3">
+          <DialogTitle className="flex items-center gap-2 text-base">
+            <ClipboardList className="size-4 text-muted-foreground" />
+            Test cases · {version === 0 ? 'v0 (legacy)' : `v${version}`}
+          </DialogTitle>
+          <DialogDescription className="text-xs">
+            {testcaseRelPath(folder, version, data?.format ?? 'markdown')}
+          </DialogDescription>
+        </DialogHeader>
+        <div className="min-h-0 flex-1 overflow-auto px-6 py-5">
+          {isFetching && !data ? (
+            <p className="flex items-center justify-center gap-2 py-12 text-sm text-muted-foreground">
+              <Loader2 className="size-4 animate-spin" />
+              Loading…
+            </p>
+          ) : data?.testcases ? (
+            data.format === 'csv' ? (
+              <CsvTable csv={data.testcases} />
+            ) : (
+              <div className={MD_CLASS}>
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{data.testcases}</ReactMarkdown>
+              </div>
+            )
+          ) : (
+            <p className="py-12 text-center text-sm text-muted-foreground">
+              No test cases found for this version.
+            </p>
+          )}
+        </div>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 export function TicketTestCasePicker({ folder, projectId, value, onChange, disabled }: Props) {
   const navigate = useNavigate()
+  const [previewOpen, setPreviewOpen] = useState(false)
 
   const { data, isLoading } = useQuery({
     queryKey: ['testcase-versions', projectId, folder],
@@ -133,36 +211,64 @@ export function TicketTestCasePicker({ folder, projectId, value, onChange, disab
   return (
     <div className="space-y-2">
       {label}
-      <Select
-        value={value != null ? String(value) : undefined}
-        onValueChange={(v) => {
-          const ver = Number(v)
-          onChange(ver, versions.find((x) => x.version === ver)?.format ?? null)
-        }}
-        disabled={disabled}
-      >
-        <SelectTrigger className="h-11 w-full rounded-xl shadow-none">
-          <SelectValue placeholder="Choose a test-case version" />
-        </SelectTrigger>
-        <SelectContent>
-          {versions.map((v) => (
-            <SelectItem key={v.version} value={String(v.version)}>
-              <span className="flex items-center gap-2">
-                <ClipboardList className="size-3.5 text-muted-foreground" />
-                <span className="font-medium">{v.label}</span>
-                {v.savedAt && (
-                  <span className="text-xs text-muted-foreground">· {relativeTime(v.savedAt)}</span>
-                )}
-              </span>
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
+      <div className="flex items-center gap-1.5">
+        <Select
+          value={value != null ? String(value) : undefined}
+          onValueChange={(v) => {
+            const ver = Number(v)
+            onChange(ver, versions.find((x) => x.version === ver)?.format ?? null)
+          }}
+          disabled={disabled}
+        >
+          {/* data-[size=default]:h-11 — the base SelectTrigger pins h-9 via the same data
+              selector, so a plain h-11 loses; match the ticket picker's 44px trigger. */}
+          <SelectTrigger className="w-full min-w-0 flex-1 rounded-xl border-border/60 shadow-none data-[size=default]:h-11">
+            <SelectValue placeholder="Choose a test-case version" />
+          </SelectTrigger>
+          <SelectContent>
+            {versions.map((v) => (
+              <SelectItem key={v.version} value={String(v.version)}>
+                <span className="flex items-center gap-2">
+                  <ClipboardList className="size-3.5 text-muted-foreground" />
+                  <span className="font-medium">{v.label}</span>
+                  {v.savedAt && (
+                    <span className="text-xs text-muted-foreground">
+                      · {relativeTime(v.savedAt)}
+                    </span>
+                  )}
+                </span>
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        {/* Quick preview of the selected version's content, without leaving the run form. */}
+        <Button
+          type="button"
+          variant="outline"
+          size="icon"
+          className="size-11 shrink-0 rounded-xl shadow-none"
+          onClick={() => setPreviewOpen(true)}
+          disabled={value == null}
+          title="Preview test cases"
+          aria-label="Preview test cases"
+        >
+          <Eye className="size-4" />
+        </Button>
+      </div>
       <p className="text-xs text-muted-foreground">
         {selected
           ? `Claude will verify against ${testcaseRelPath(folder, selected.version, selected.format)}.`
           : 'Choose which generated test-case version to verify against.'}
       </p>
+      {projectId && value != null && (
+        <TestCasePreviewDialog
+          open={previewOpen}
+          onOpenChange={setPreviewOpen}
+          folder={folder}
+          projectId={projectId}
+          version={value}
+        />
+      )}
     </div>
   )
 }

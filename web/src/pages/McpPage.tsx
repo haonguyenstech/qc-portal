@@ -1,9 +1,11 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
+import { Link } from 'react-router-dom'
 import {
   AlertCircle,
   AlertTriangle,
+  BookOpen,
   Check,
   CheckCircle2,
   Clock,
@@ -952,6 +954,13 @@ function ConnectServices({
               <ExternalLink className="h-3 w-3" />
               {meta.tokenHint}
             </a>
+            <Link
+              to="/document/mcp-tokens"
+              className="flex items-center justify-center gap-1 text-[11px] text-muted-foreground hover:text-foreground"
+            >
+              <BookOpen className="h-3 w-3" />
+              Step-by-step token guide
+            </Link>
           </div>
         ) : (
           <Button
@@ -1083,6 +1092,13 @@ function ConnectServices({
       <div className="flex items-center gap-2">
         <KeyRound className="h-4 w-4 text-muted-foreground" />
         <h2 className="text-base font-semibold tracking-tight">Connect a service</h2>
+        <Link
+          to="/document/mcp-tokens"
+          className="ml-auto flex shrink-0 items-center gap-1.5 rounded-full border border-border/60 px-3 py-1 text-xs text-muted-foreground transition-all duration-200 hover:border-border hover:text-foreground"
+        >
+          <BookOpen className="h-3.5 w-3.5" />
+          How to get a token
+        </Link>
       </div>
 
       <McpGroup

@@ -94,7 +94,9 @@ are pushed.
 server/src/
   index.ts          Express app + WebSocket hub wiring + graceful shutdown
   config.ts         env vars (QC_PORT, QC_REPO_ROOT, QC_CLAUDE_BIN, QC_DB_PATH)
-  db.ts             node:sqlite — projects + runs + events; seed/reconcile on boot
+  db.ts             node:sqlite — projects + runs + events + sources (multi-repo: one tagged
+                    row per connected repo; legacy projects.source* columns migrate on boot);
+                    seed/reconcile on boot
   claude.ts         headless claude launcher + stream-json parser (QC runs, over WebSocket)
   claudeExec.ts     shared one-shot claude helpers: runClaude (buffered JSON),
                     runClaudeStream (stream-json → log callback), parseClaudeJsonResult
@@ -104,7 +106,13 @@ server/src/
   crawlJobs.ts      in-memory background-job registry for ticket crawling (logs + per-item status)
   sourceRepo.ts     git plumbing for the Source Code page: clone/adopt/pull a GitHub/Bitbucket
                     repo, provider detection, token-scrubbing, + the on-disk credential store
-  sourceJobs.ts     in-memory background-job registry for source clone/sync (logs + status)
+  sourceJobs.ts     in-memory background-job registry for source clone/sync (logs + status);
+                    after a clone/sync with new commits it refreshes the repo's SOURCE MAP
+  sourceMap.ts      source map: one cheap (haiku) read-only AI pass over a connected repo →
+                    testing/knowledge/source-map-<tag>.md (AI-badged, via knowledgeStore) so
+                    test-case gen + QC runs jump straight to the files it names instead of
+                    re-exploring the repo each time; skipped when a sync brings no new commits;
+                    deleted on disconnect/tag-rename (regenerates on reconnect)
   runManager.ts     in-flight run lifecycle (spawn, stream, shutdown)
   terminal.ts       device pseudo-terminal: node-pty shell bridged over /ws/terminal (one shell per socket)
   hub.ts            WebSocket pub/sub by runId (replays persisted events to late subscribers)
@@ -292,7 +300,9 @@ with `haiku`.
    ticket) — before testing.
 2. **Direct injection via `projectContext.ts` (test-case generation).** `readProjectContext(root)` packs
    `testing/memory/*.md` (description + body, MEMORY.md excluded) then `testing/knowledge/*.md` (provenance
-   marker stripped) into one capped block (16 KB total / 6 KB per item, memory first), which `testcaseGen.ts`
+   marker stripped) into one capped block (32 KB total / 6 KB per item / memory bounded to 12 KB;
+   memory first, then `source-map-*` docs, then other knowledge newest-first; clipped items are
+   noted inside the block so the model knows to read the full file), which `testcaseGen.ts`
    injects **into the prompt itself** (reliable regardless of what files the model opens) — and passes the
    **same block to `groundTestcases`**. Empty folders → empty block (no-op).
 

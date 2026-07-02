@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import {
   Activity,
@@ -50,6 +50,7 @@ import {
 } from '@/components/ui/select'
 import { Badge } from '@/components/ui/badge'
 import {
+  checkAppUrl,
   createRun,
   listCrawledTickets,
   listRuns,
@@ -508,6 +509,14 @@ export default function RunPage() {
       ? 'The deployed page Claude opens in the mobile browser.'
       : 'The deployed page Claude should open and test.'
 
+  // One-click reachability probe for the App URL (server-side fetch — CORS-free).
+  const urlCheck = useMutation({ mutationFn: (url: string) => checkAppUrl(url) })
+  // A stale verdict is misleading — drop it as soon as the URL is edited.
+  useEffect(() => {
+    urlCheck.reset()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [appUrl])
+
   // Reconcile the chosen skill against the available list: keep a still-valid
   // selection, otherwise fall back to the project's default skill (set on the
   // Skills page), then qc-testing, then the first available skill.
@@ -947,13 +956,50 @@ export default function RunPage() {
                       onChange={(e) => setAppUrl(e.target.value)}
                       disabled={!activeProject}
                       aria-invalid={appUrlInvalid}
-                      className="h-11 pl-9 font-mono text-sm shadow-xs transition-shadow focus-visible:shadow-sm"
+                      className="h-11 pl-9 pr-20 font-mono text-sm shadow-xs transition-shadow focus-visible:shadow-sm"
                     />
+                    {/* Small in-field probe — pings the URL from the server to prove it's reachable. */}
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      size="sm"
+                      className="absolute right-1.5 top-1/2 h-8 -translate-y-1/2 rounded-full px-3 text-xs shadow-none"
+                      disabled={!isValidHttpUrl(appUrl) || urlCheck.isPending}
+                      onClick={() => urlCheck.mutate(appUrl.trim())}
+                    >
+                      {urlCheck.isPending ? (
+                        <Loader2 className="size-3.5 animate-spin" />
+                      ) : (
+                        'Check'
+                      )}
+                    </Button>
                   </div>
                   {appUrlInvalid ? (
                     <p className="flex items-center gap-1.5 text-xs font-medium text-destructive">
                       <TriangleAlert className="size-3.5" />
                       Enter a full http:// or https:// URL.
+                    </p>
+                  ) : urlCheck.data ? (
+                    urlCheck.data.ok ? (
+                      <p className="flex items-center gap-1.5 text-xs font-medium text-emerald-600">
+                        <Check className="size-3.5" />
+                        Reachable · HTTP {urlCheck.data.status}
+                        {urlCheck.data.finalUrl && urlCheck.data.finalUrl !== appUrl.trim() && (
+                          <span className="truncate font-normal text-muted-foreground">
+                            → {urlCheck.data.finalUrl}
+                          </span>
+                        )}
+                      </p>
+                    ) : (
+                      <p className="flex items-center gap-1.5 text-xs font-medium text-destructive">
+                        <TriangleAlert className="size-3.5" />
+                        {urlCheck.data.error ?? 'The URL did not respond.'}
+                      </p>
+                    )
+                  ) : urlCheck.isError ? (
+                    <p className="flex items-center gap-1.5 text-xs font-medium text-destructive">
+                      <TriangleAlert className="size-3.5" />
+                      Could not check the URL — is the portal server running?
                     </p>
                   ) : (
                     <p className="text-xs text-muted-foreground">{appUrlHelp}</p>

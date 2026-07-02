@@ -35,6 +35,7 @@ import {
   type ProjectTemplate,
 } from '@/lib/api'
 import { useProjects } from '@/lib/project-context'
+import { CsvTable, looksLikeCsv } from '@/components/CsvTable'
 
 /** Catalog of file templates a project can define. The key maps to the on-disk
  *  file (testing/templates/<key>.md); add new kinds here to expose more. */
@@ -165,6 +166,8 @@ function TemplateCard({
   // What to preview: the pending upload if any, else the saved content.
   const previewName = pending ? pending.name : saved ? `${kind.key}.md` : null
   const previewContent = pending ? pending.content : (saved?.content ?? '')
+  // Uploaded CSV/Excel is stored as CSV text inside the .md — show it as a table.
+  const previewIsCsv = previewName ? looksLikeCsv(previewName, previewContent) : false
 
   return (
     <Card className="overflow-hidden rounded-3xl border-border/60 shadow-none transition-all duration-200 hover:-translate-y-0.5 hover:border-border hover:shadow-sm">
@@ -296,7 +299,7 @@ function TemplateCard({
       </CardContent>
 
       <Dialog open={showPreview} onOpenChange={setShowPreview}>
-        <DialogContent className="flex max-h-[92vh] w-[97vw] flex-col gap-0 overflow-hidden p-0 sm:max-w-[60rem]">
+        <DialogContent className="flex max-h-[92vh] w-[97vw] flex-col gap-0 overflow-hidden p-0 sm:max-w-[90rem]">
           <DialogHeader className="shrink-0 space-y-1 border-b border-border/60 bg-muted/30 px-5 py-3">
             <DialogTitle className="flex items-center gap-2 text-base">
               <Icon className="h-4 w-4 text-muted-foreground" />
@@ -305,12 +308,17 @@ function TemplateCard({
             <DialogDescription className="text-xs">
               {previewName ?? `${kind.key}.md`}
               {pending ? ' · unsaved upload' : saved ? ` · testing/templates/${kind.key}.md` : ''}
+              {previewIsCsv ? ' · shown as a table' : ''}
             </DialogDescription>
           </DialogHeader>
           <div className="min-h-0 flex-1 overflow-auto px-5 py-4">
-            <pre className="font-mono text-[12px] leading-relaxed whitespace-pre">
-              {previewContent}
-            </pre>
+            {previewIsCsv ? (
+              <CsvTable csv={previewContent} />
+            ) : (
+              <pre className="overflow-x-auto font-mono text-[12px] leading-relaxed whitespace-pre-wrap break-words">
+                {previewContent}
+              </pre>
+            )}
           </div>
         </DialogContent>
       </Dialog>

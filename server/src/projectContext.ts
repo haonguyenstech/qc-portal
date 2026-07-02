@@ -15,8 +15,10 @@ import { listNotes, memoryDir, parseNote } from './memoryStore.js'
 //
 // Best-effort and never throws: a missing folder or unreadable file is skipped.
 
-const DEFAULT_MAX_CHARS = 16_000 // total budget for the whole block
+const DEFAULT_MAX_CHARS = 32_000 // total budget for the whole block (multi-repo source maps need room)
 const PER_ITEM_CHARS = 6_000 // cap any single note/doc so one huge doc can't crowd out the rest
+const MEMORY_MAX_CHARS = 12_000 // memory packs first — bound it so notes can't starve knowledge docs
+const SOURCE_MAP_PREFIX = 'source-map-' // repo index docs (sourceMap.ts) — highest-value knowledge
 const KNOWLEDGE_MARKER_RE = /^<!--\s*qc-portal:source:[\s\S]*?-->\s*\n?/ // provenance comment
 
 export interface ProjectContext {
@@ -72,10 +74,15 @@ export function readProjectContext(rootPath: string, opts?: { maxChars?: number 
     return true
   }
 
-  // Memory first — small durable facts carry the most signal per character.
+  // Memory first — small durable facts carry the most signal per character. Bounded
+  // to MEMORY_MAX_CHARS so a pile of long notes can't starve the knowledge docs.
   try {
     const dir = memoryDir(rootPath)
     for (const n of listNotes(rootPath)) {
+      if (used >= MEMORY_MAX_CHARS) {
+        truncated = true
+        break
+      }
       let parsed: ReturnType<typeof parseNote>
       try {
         parsed = parseNote(fs.readFileSync(path.join(dir, `${n.name}.md`), 'utf8'))
@@ -90,10 +97,17 @@ export function readProjectContext(rootPath: string, opts?: { maxChars?: number 
     /* no memory folder */
   }
 
-  // Knowledge docs — fuller reference material (specs, domain notes).
+  // Knowledge docs — source maps FIRST (the repo indexes the prompts steer by;
+  // being crowded out would silently re-enable full repo exploration), then the
+  // remaining reference material newest-first.
   try {
     const dir = knowledgeDir(rootPath)
-    for (const d of listDocs(rootPath)) {
+    const docs = listDocs(rootPath).sort((a, b) => {
+      const aMap = a.name.startsWith(SOURCE_MAP_PREFIX) ? 0 : 1
+      const bMap = b.name.startsWith(SOURCE_MAP_PREFIX) ? 0 : 1
+      return aMap - bMap // stable: keeps newest-first within each group
+    })
+    for (const d of docs) {
       let raw: string
       try {
         raw = fs.readFileSync(path.join(dir, `${d.name}.md`), 'utf8')
@@ -116,9 +130,15 @@ export function readProjectContext(rootPath: string, opts?: { maxChars?: number 
     'details right instead of guessing. It is authoritative BACKGROUND — it does NOT widen ' +
     'scope: only cover what the ticket / feature under test actually requires.'
 
+  // When something was clipped, say so INSIDE the block — the model is otherwise
+  // told not to re-read these folders, and this is the one case where it should.
+  const omissionNote = truncated
+    ? '\n\n(Note: some items above were clipped or omitted for space. If a detail you need is missing, read the full files in testing/knowledge/ and testing/memory/.)'
+    : ''
+
   const block = `--- PROJECT KNOWLEDGE & MEMORY START ---\n${intro}\n\n${sections.join(
     '\n\n',
-  )}\n--- PROJECT KNOWLEDGE & MEMORY END ---`
+  )}${omissionNote}\n--- PROJECT KNOWLEDGE & MEMORY END ---`
 
   return { block, hasContent: true, docCount, noteCount, truncated }
 }

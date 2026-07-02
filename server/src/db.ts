@@ -11,6 +11,7 @@ import {
   GROUNDING_CHECK_MODEL,
 } from './config.js'
 import type { LogEvent, Project, RunSummary } from './types.js'
+import { renameSourceCredential } from './sourceRepo.js'
 
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true })
 
@@ -120,6 +121,68 @@ db.exec(`
   add('sourcePath')
   add('sourceLastSync')
   add('sourceLastCommit')
+}
+
+// Multi-repo sources: each project can connect SEVERAL repos, each with a tag
+// ("Backend repo", "Frontend repo", …). Tokens stay in source-credentials.json,
+// keyed by the source id.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS sources (
+    id TEXT PRIMARY KEY,
+    projectId TEXT NOT NULL,
+    tag TEXT NOT NULL,
+    repoUrl TEXT NOT NULL,
+    provider TEXT NOT NULL DEFAULT '',
+    branch TEXT NOT NULL DEFAULT '',
+    sourcePath TEXT NOT NULL DEFAULT '',
+    lastSync TEXT NOT NULL DEFAULT '',
+    lastCommit TEXT NOT NULL DEFAULT '',
+    createdAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_sources_projectId ON sources(projectId);
+`)
+
+// Migration: fold the legacy single-repo projects.source* columns into one tagged
+// `sources` row (tag "Source"), re-keying the on-disk credential from projectId to
+// the new source id, then blank the legacy columns so this never re-runs.
+{
+  const legacy = db
+    .prepare(
+      `SELECT id, sourceRepoUrl, sourceProvider, sourceBranch, sourcePath,
+              sourceLastSync, sourceLastCommit
+         FROM projects WHERE sourceRepoUrl IS NOT NULL AND sourceRepoUrl != ''`,
+    )
+    .all() as Record<string, string | null>[]
+  for (const row of legacy) {
+    const projectId = row.id as string
+    const already = db
+      .prepare(`SELECT COUNT(*) AS n FROM sources WHERE projectId = ?`)
+      .get(projectId) as { n: number }
+    if (already.n === 0) {
+      const sourceId = crypto.randomUUID()
+      db.prepare(
+        `INSERT INTO sources (id, projectId, tag, repoUrl, provider, branch, sourcePath,
+                              lastSync, lastCommit, createdAt)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        sourceId,
+        projectId,
+        'Source',
+        row.sourceRepoUrl ?? '',
+        row.sourceProvider ?? '',
+        row.sourceBranch ?? '',
+        row.sourcePath ?? '',
+        row.sourceLastSync ?? '',
+        row.sourceLastCommit ?? '',
+        new Date().toISOString(),
+      )
+      renameSourceCredential(projectId, sourceId)
+    }
+    db.prepare(
+      `UPDATE projects SET sourceRepoUrl = '', sourceProvider = '', sourceBranch = '',
+         sourcePath = '', sourceLastSync = '', sourceLastCommit = '' WHERE id = ?`,
+    ).run(projectId)
+  }
 }
 
 // Migration: per-project AI post-step settings (Settings → Models). These control
@@ -349,43 +412,77 @@ export function deleteProject(id: string): void {
   deleteProjectStmt.run(id)
 }
 
-/** Connected-source-repo fields for a project (no token — that lives on disk). */
-export type ProjectSource = Pick<
-  Project,
-  | 'sourceRepoUrl'
-  | 'sourceProvider'
-  | 'sourceBranch'
-  | 'sourcePath'
-  | 'sourceLastSync'
-  | 'sourceLastCommit'
->
+/** One connected source repo of a project (no token — that lives on disk, keyed by id). */
+export interface SourceRow {
+  id: string
+  projectId: string
+  tag: string
+  repoUrl: string
+  provider: string
+  branch: string
+  sourcePath: string
+  lastSync: string
+  lastCommit: string
+  createdAt: string
+}
 
-/** Persist the connected source repo for a project (after a clone/sync). */
-export function setProjectSource(id: string, source: ProjectSource): void {
+function sourceFromRow(row: Record<string, unknown>): SourceRow {
+  return {
+    id: row.id as string,
+    projectId: row.projectId as string,
+    tag: (row.tag as string | null) ?? '',
+    repoUrl: (row.repoUrl as string | null) ?? '',
+    provider: (row.provider as string | null) ?? '',
+    branch: (row.branch as string | null) ?? '',
+    sourcePath: (row.sourcePath as string | null) ?? '',
+    lastSync: (row.lastSync as string | null) ?? '',
+    lastCommit: (row.lastCommit as string | null) ?? '',
+    createdAt: (row.createdAt as string | null) ?? '',
+  }
+}
+
+/** All source repos connected to a project, oldest first (stable card order). */
+export function listSources(projectId: string): SourceRow[] {
+  const rows = db
+    .prepare(`SELECT * FROM sources WHERE projectId = ? ORDER BY createdAt ASC`)
+    .all(projectId) as Record<string, unknown>[]
+  return rows.map(sourceFromRow)
+}
+
+export function getSourceRow(id: string): SourceRow | undefined {
+  const row = db.prepare(`SELECT * FROM sources WHERE id = ?`).get(id) as
+    | Record<string, unknown>
+    | undefined
+  return row ? sourceFromRow(row) : undefined
+}
+
+/** Insert or fully update a source repo row (after a clone/sync finishes). */
+export function saveSource(source: SourceRow): void {
   db.prepare(
-    `UPDATE projects SET sourceRepoUrl = ?, sourceProvider = ?, sourceBranch = ?,
-       sourcePath = ?, sourceLastSync = ?, sourceLastCommit = ? WHERE id = ?`,
+    `INSERT INTO sources (id, projectId, tag, repoUrl, provider, branch, sourcePath,
+                          lastSync, lastCommit, createdAt)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET
+       tag = excluded.tag, repoUrl = excluded.repoUrl, provider = excluded.provider,
+       branch = excluded.branch, sourcePath = excluded.sourcePath,
+       lastSync = excluded.lastSync, lastCommit = excluded.lastCommit`,
   ).run(
-    source.sourceRepoUrl,
-    source.sourceProvider,
-    source.sourceBranch,
+    source.id,
+    source.projectId,
+    source.tag,
+    source.repoUrl,
+    source.provider,
+    source.branch,
     source.sourcePath,
-    source.sourceLastSync,
-    source.sourceLastCommit,
-    id,
+    source.lastSync,
+    source.lastCommit,
+    source.createdAt,
   )
 }
 
-/** Forget a project's connected source repo (the files on disk are left alone). */
-export function clearProjectSource(id: string): void {
-  setProjectSource(id, {
-    sourceRepoUrl: '',
-    sourceProvider: '',
-    sourceBranch: '',
-    sourcePath: '',
-    sourceLastSync: '',
-    sourceLastCommit: '',
-  })
+/** Forget one connected source repo (the files on disk are left alone). */
+export function deleteSourceRow(id: string): void {
+  db.prepare(`DELETE FROM sources WHERE id = ?`).run(id)
 }
 
 /**

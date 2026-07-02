@@ -80,7 +80,9 @@ export default function SourceJobWatcher() {
       queryClient.invalidateQueries({ queryKey: ['source', w.projectId] })
       queryClient.invalidateQueries({ queryKey: ['projects'] })
 
-      const where = projectName(w.projectId)
+      const where = job.tag
+        ? `${job.tag} · ${projectName(w.projectId)}`
+        : projectName(w.projectId)
       const verb = job.kind === 'clone' ? 'Connected' : 'Synced'
       if (job.status === 'done') {
         const title = `${verb} source code`

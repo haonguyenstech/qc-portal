@@ -10,6 +10,51 @@ import type { RunDetail, RunSummary } from '../types.js'
 
 export const qcRouter = Router()
 
+// Reachability probe for the run form's App URL — the browser can't check a
+// cross-origin staging URL itself (CORS), so the server fetches it and reports
+// the outcome. Follows redirects; any HTTP response counts as reachable (a 401
+// login wall still proves the host is up).
+qcRouter.post('/check-url', async (req, res) => {
+  const raw = typeof req.body?.url === 'string' ? req.body.url.trim() : ''
+  let url: URL
+  try {
+    url = new URL(raw)
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new Error('bad protocol')
+  } catch {
+    res.status(400).json({ ok: false, error: 'Enter a full http:// or https:// URL.' })
+    return
+  }
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 10_000)
+  try {
+    const resp = await fetch(url, {
+      redirect: 'follow',
+      signal: controller.signal,
+      headers: { 'user-agent': 'qc-portal-url-check' },
+    })
+    // Drain nothing — we only care that the server answered.
+    resp.body?.cancel().catch(() => {})
+    res.json({ ok: true, status: resp.status, finalUrl: resp.url })
+  } catch (err) {
+    const raw2 =
+      err instanceof Error
+        ? ((err.cause as Error | undefined)?.message ?? err.message)
+        : 'Request failed'
+    const error = controller.signal.aborted
+      ? 'Timed out after 10s — the URL did not respond.'
+      : raw2.includes('ENOTFOUND')
+        ? 'Host not found — check the domain for typos.'
+        : raw2.includes('ECONNREFUSED')
+          ? 'Connection refused — nothing is listening at that address.'
+          : raw2.includes('CERT') || raw2.includes('certificate')
+            ? `TLS certificate problem (${raw2}).`
+            : raw2
+    res.json({ ok: false, error })
+  } finally {
+    clearTimeout(timer)
+  }
+})
+
 function readIfExists(filePath: string): string | null {
   try {
     return fs.readFileSync(filePath, 'utf8')

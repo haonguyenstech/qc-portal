@@ -42,7 +42,7 @@ interface TestcaseJob {
   projectId: string
   projectName: string
   rootPath: string
-  sourcePath: string
+  sources: { tag: string; path: string }[]
   template: { name?: string; content?: string } | null
   instructions: string
   model: string
@@ -172,7 +172,7 @@ async function processItem(job: TestcaseJob, item: TestcaseJobItem, i: number): 
       instructions: job.instructions,
       model: job.model,
       appUrl: item.appUrl,
-      sourcePath: job.sourcePath,
+      sources: job.sources,
       groundingCheck: job.groundingCheck,
       groundingCheckModel: job.groundingCheckModel,
       signal: ac.signal,
@@ -301,7 +301,7 @@ export function startTestcaseJob(opts: {
   projectId: string
   projectName: string
   rootPath: string
-  sourcePath: string
+  sources: { tag: string; path: string }[]
   folders: string[]
   /** Optional per-folder live app URL (folder → url) to ground that ticket's cases. */
   appUrls?: Record<string, string>
@@ -318,7 +318,7 @@ export function startTestcaseJob(opts: {
     projectId: opts.projectId,
     projectName: opts.projectName,
     rootPath: opts.rootPath,
-    sourcePath: opts.sourcePath,
+    sources: opts.sources,
     template: opts.template,
     instructions: opts.instructions,
     model: opts.model,

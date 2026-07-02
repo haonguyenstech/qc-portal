@@ -199,17 +199,16 @@ function testCasesPrompt(
   format: TestcaseFormat,
   appUrl: string | null,
   knowledgeBlock: string,
-  sourceRel: string,
+  sourceWhere: string,
 ): string {
   // The run executes inside the project repo, so the model should READ the feature's
   // real implementation before drafting — this is what makes cases match the app
   // (true field names, validation, states, branches) instead of guesses from the ticket.
-  const where =
-    sourceRel && sourceRel !== '.'
-      ? `under \`./${sourceRel}\` in the current working directory`
-      : `in the current working directory`
+  const where = sourceWhere || `in the current working directory`
   const sourceBlock = `You are running INSIDE this project's source repository. The application's SOURCE CODE is ${where}. BEFORE writing the cases, do a QUICK, FOCUSED investigation of the real implementation so every case matches the actual app, not a guess from the ticket:
-- Use Grep / Glob / Read to locate the code behind what the ticket describes — search for the screens, components, routes/endpoints, fields, and messages it mentions.
+- CHECK THE PROJECT KNOWLEDGE below FIRST for a SOURCE MAP doc ("Source map — …"): it indexes each repo's screens/routes, models, and validation with file paths. When present, jump DIRECTLY to the files it names for this ticket's feature — do not re-explore the repo structure. Also honor a repo's own CLAUDE.md when it has one.
+- The PROJECT KNOWLEDGE & MEMORY block below ALREADY CONTAINS the project's knowledge docs and memory notes — do NOT spend reads re-opening testing/knowledge/*.md or testing/memory/*.md (only exception: the block itself says items were omitted for space).
+- Only when no source map covers the feature: use Grep / Glob / Read to locate the code behind what the ticket describes — search for the screens, components, routes/endpoints, fields, and messages it mentions.
 - From the real code, take the true field/label names, validation rules, error/empty/loading states, conditional branches, and role/permission checks, and use them in the steps and expected results.
 - Reconcile the ticket against the code: cover what is actually implemented, and where the code and ticket differ, write a case (or an inline note) for the gap.
 - READ ONLY — never modify any file. If you cannot find the related source, fall back to the ticket and note that the implementation could not be located.
@@ -329,8 +328,8 @@ export async function generateTestcaseVersion(opts: {
   model?: string
   /** Optional live app URL — when set, Claude opens it (browser tools) to ground the cases. */
   appUrl?: string | null
-  /** Where the project's source code lives (project.sourcePath). Defaults to rootPath. */
-  sourcePath?: string | null
+  /** The project's connected source repos (tag + absolute path). Empty = the rootPath itself. */
+  sources?: { tag: string; path: string }[]
   /** Run the post-write grounding check (anti-hallucination). Defaults on. */
   groundingCheck?: boolean
   /** Model alias for the grounding check (haiku/sonnet/opus). */
@@ -378,19 +377,33 @@ export async function generateTestcaseVersion(opts: {
   // before the model reads any files). The run now executes inside the project (cwd
   // = rootPath) so the model can also READ the feature's source and the CLAUDE.md.
   const ctx = readProjectContext(opts.rootPath)
-  // Where the source lives relative to the cwd, so the prompt can point the model at
-  // it. '.' = the project root itself; otherwise a subdir like 'source'.
-  const sourceRel = (() => {
-    const sp = (opts.sourcePath ?? '').trim()
-    if (!sp) return '.'
-    const rel = path.relative(opts.rootPath, sp)
-    return !rel || rel.startsWith('..') ? '.' : rel
+  // Where the source lives relative to the cwd, so the prompt can point the model
+  // at it. Each connected repo is named with its tag ("Backend repo" → ./source/backend);
+  // no repos (or the root itself) = the current working directory.
+  const sourceWhere = (() => {
+    const rels: { tag: string; rel: string }[] = []
+    for (const s of opts.sources ?? []) {
+      const sp = (s.path ?? '').trim()
+      if (!sp) continue
+      const rel = path.relative(opts.rootPath, sp)
+      if (rel.startsWith('..')) continue
+      rels.push({ tag: s.tag, rel: rel || '.' })
+    }
+    if (rels.length === 0 || (rels.length === 1 && rels[0].rel === '.')) {
+      return 'in the current working directory'
+    }
+    const list = rels
+      .map((r) => (r.rel === '.' ? `the working directory itself (${r.tag})` : `\`./${r.rel}\` (${r.tag})`))
+      .join(', ')
+    return `in ${rels.length > 1 ? 'these repositories' : 'this repository'} inside the current working directory: ${list}. Pick the repo(s) relevant to the ticket`
   })()
   onLog({
     level: 'info',
     text: `Reading ticket (${ticketContent.length.toLocaleString()} chars)… output: ${format.toUpperCase()} · reading source code${
       ctx.hasContent
-        ? ` · using project context (${ctx.noteCount} memory, ${ctx.docCount} knowledge)`
+        ? ` · using project context (${ctx.noteCount} memory, ${ctx.docCount} knowledge${
+            ctx.truncated ? ', some clipped to fit' : ''
+          })`
         : ''
     }${appUrl ? ` · checking live app ${appUrl}` : ''}`,
   })
@@ -426,7 +439,7 @@ export async function generateTestcaseVersion(opts: {
     format,
     appUrl,
     ctx.block,
-    sourceRel,
+    sourceWhere,
   )
   const result = await runClaudeStream(
     [...baseArgs, ...toolArgs, '--max-budget-usd', budget],

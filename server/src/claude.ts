@@ -151,10 +151,13 @@ export function runQc(
           `durable facts in testing/memory/*.md (indexed by testing/memory/MEMORY.md) and ` +
           `reference docs in testing/knowledge/*.md.`,
         ``,
-        `Also read the SOURCE CODE for the feature under test in this repository — search the ` +
-          `codebase (Grep/Glob/Read) for the screens, components, routes/endpoints, fields, and ` +
-          `messages named in the ticket — to understand the real implementation, expected behavior, ` +
-          `validation, and edge cases before you exercise the app. Read only; never modify the code.`,
+        `Also read the SOURCE CODE for the feature under test in this repository. Start from any ` +
+          `testing/knowledge/source-map-*.md doc — it indexes each connected repo's screens/routes, ` +
+          `models, and validation with file paths, so open the files it names directly instead of ` +
+          `exploring. Only search the codebase (Grep/Glob/Read) for what the map doesn't cover — ` +
+          `the screens, components, routes/endpoints, fields, and messages named in the ticket — ` +
+          `to understand the real implementation, expected behavior, validation, and edge cases ` +
+          `before you exercise the app. Read only; never modify the code.`,
         ``,
         `Follow the skill literally and in order through all 7 phases. ` +
           `Write the report and issues into testing/test-result/<ticket-slug>/ as the skill specifies.`,

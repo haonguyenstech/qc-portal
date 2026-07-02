@@ -3,6 +3,65 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.9.4 — 2026-07-02
+
+**Multiple source repos per project + AI source maps, App URL check, and a Windows MCP approval fix**
+
+### Added
+
+- **Connect multiple source repositories to one project.** The Source Code page is no longer
+  limited to a single repo — connect several, each with its own tag (Backend, Frontend, Mobile,
+  API, or your own label). Each repo clones into its own folder under `source/`, keeps its own
+  access token, and gets its own card with Sync, Edit & reconnect, Disconnect, and Open folder.
+  Test-case generation and QC runs are told about every tagged repo and pick the one relevant to
+  the ticket. An existing single-repo connection migrates automatically on startup (tagged
+  "Source") — no re-connect needed.
+- **Source maps make AI runs faster and cheaper.** After a clone or sync that brings new commits,
+  the portal runs one cheap AI pass over the repo and saves a compact map (screens, routes,
+  domain models, where validation lives — with file paths) into Instructions → Knowledge as
+  `source-map-<tag>.md`, flagged with the AI badge. Test-case generation and QC runs jump
+  straight to the files it names instead of re-exploring the repo every time. A sync with no
+  new commits keeps the existing map; disconnecting removes it; you can review, edit, or delete
+  it like any knowledge doc.
+- **"Check" button for the App URL on the Run page.** The server pings the URL and reports
+  "Reachable · HTTP 200" or a plain-language error (host not found, connection refused, TLS
+  problem, timeout) — so you know the staging site is live *before* launching a run. A login
+  wall still counts as reachable.
+- **Preview test cases right on the Run page.** An eye button next to the version picker opens
+  a read-only preview of the selected test-case version — CSV rendered as a real table,
+  Markdown rendered nicely — so you can see exactly what a run will verify against.
+- **New docs: "Getting API tokens" and "Connecting source code".** Step-by-step guides for
+  creating ClickUp, Figma, and Jira tokens (including the Jira scoped-token trap), and for
+  GitHub/Bitbucket tokens used by the multi-repo flow. The MCP page links to the token guide
+  from each service card, and Core Concepts gained a clickable "how a ticket flows through the
+  portal" panel.
+- **CSV templates preview as a table.** Uploaded CSV/Excel templates on the Templates page now
+  render as a real table instead of raw text.
+
+### Changed
+
+- **"Change repository" is now "Edit & reconnect", prefilled.** The form reopens with the repo's
+  URL, tag, branch, and saved credentials; leaving the token empty keeps the saved one, so
+  changing a branch no longer means re-pasting a token. The token field gained show/hide and
+  copy buttons.
+- **One clone/sync at a time per project.** Starting a second git job while one is running is
+  rejected, so concurrent operations can't step on each other. Repo tags must be unique within
+  a project (they map to folders).
+- **The AI sees more of your Knowledge and Memory.** The project-context budget doubled (16 KB →
+  32 KB), memory notes are capped so they can't crowd out reference docs, source maps are packed
+  first, and anything clipped for space now tells the model to open the full file — a large
+  knowledge base no longer silently starves the AI of detail.
+
+### Fixed
+
+- **MCP servers stuck on "Pending approval" on Windows.** Claude Code keys its per-project
+  config with forward-slash paths even on Windows, while the portal wrote back-slash paths — so
+  approvals landed where the CLI never looked. The portal now uses the forward-slash key and
+  cleans up the stale entry older versions left behind; Test connection works on Windows again.
+- **A failed source-map pass can no longer lose the repo connection.** The connection is saved
+  before the map is generated, so a timed-out AI pass leaves the clone intact.
+- **The test-case version picker no longer collapses shorter than the ticket picker.**
+
 ## 0.9.3 — 2026-07-02
 
 **Windows fixes: in-app update actually finishes, terminal paste, folder picker — plus new projects activate themselves**

@@ -3,15 +3,22 @@ import { NavLink, useNavigate, useParams } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {
+  Activity,
+  ArrowDown,
   ArrowLeft,
   ArrowRight,
   BellRing,
   BookOpen,
   ClipboardList,
   Compass,
+  CornerDownRight,
   FileText,
+  FolderGit2,
+  History,
+  KeyRound,
   Layers,
   LifeBuoy,
+  NotebookPen,
   PlayCircle,
   Plug,
   Power,
@@ -21,6 +28,7 @@ import {
   ShieldCheck,
   SlidersHorizontal,
   TerminalSquare,
+  Ticket,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -169,7 +177,8 @@ Everything the Portal reads and writes for a project lives under \`<project>/tes
 - \`testing/templates/*.md\` — test-case + design-check templates.
 
 Two more folders sit at the **project root** (not under \`testing/\`): \`design-check/\` holds saved Design
-Check reports, and \`source/\` holds the repo cloned from the **Source Code** page.
+Check reports, and \`source/\` holds the tagged repos cloned from the **Source Code** page
+(one subfolder per repo, e.g. \`source/backend-repo\`).
 `,
   },
   {
@@ -207,8 +216,9 @@ The sidebar is grouped by purpose. Here's what each page does.
 
 ### Project
 - **Overview** — the project's free-text intro (Markdown), plus an AI "Generate from ClickUp" draft.
-- **Source Code** — connect the project's Git repo: clone a GitHub / Bitbucket / Git repo into
-  \`source/\`, sync (re-pull), or disconnect. Access tokens are stored locally only — never in git or logs.
+- **Source Code** — connect the project's Git repos, each with a tag (Backend repo, Frontend repo, …):
+  clone GitHub / Bitbucket repos into \`source/\`, sync (re-pull), or disconnect per repo. Access
+  tokens are stored locally only — never in git or logs.
 
 ### Testing
 - **Tickets** — browse a ClickUp workspace/list, multi-select tickets, and **crawl** them to disk
@@ -269,16 +279,262 @@ Each server shows **live health** (a real test call), not just whether it's in t
 **Functional test** runs a real action through it (fetch a ticket, read a design, open a browser, list
 devices). Use **Open folder** to jump to where \`.mcp.json\` lives.
 
+> ClickUp, Figma, and Jira connect with a **personal API token**. Step-by-step instructions for
+> creating each one are on the [Getting API tokens](/document/mcp-tokens) page.
+
 > Some MCP args are machine-specific (e.g. a Playwright \`--user-data-dir\` profile path). Adjust them
 > on the MCP page to match your machine.
 
 ### Source repositories
-On **Source Code** you connect the project's Git repo — paste the repository URL (with an optional
-branch and, for private repos, an access token; Bitbucket also takes a username), and it clones into
-\`source/\`. From there you can **Sync** (re-pull), **Change repository**, or **Disconnect** (files stay
+On **Source Code** you connect the project's Git repos — one or several, each with a **tag**
+(Backend repo, Frontend repo, …). Paste a repository URL (with an optional branch and, for private
+repos, an access token; Bitbucket also takes a username) and it clones into its own folder under
+\`source/\`. Per repo you can **Sync** (re-pull), **Edit & reconnect**, or **Disconnect** (files stay
 on disk). Giving the AI the real code helps QC runs, test-case generation, and Design Check reason about
 actual field names and behavior. Access tokens are kept in a protected on-disk credential store —
 **never** in the database, the git remote URL, or any log.
+
+> Full walkthrough — including **how to create a GitHub or Bitbucket access token** — on the
+> [Connecting source code](/document/source-code) page.
+`,
+  },
+  {
+    id: 'mcp-tokens',
+    title: 'Getting API tokens',
+    icon: KeyRound,
+    blurb: 'Create ClickUp, Figma & Jira tokens step by step.',
+    body: `
+The **MCP** page connects ClickUp, Figma, and Jira with a **personal API token** — you create the
+token on the provider's site, then paste it into the matching card. The **Connect** button on each
+card already opens the right settings page in a new tab; this page walks through what to do there.
+
+Tokens are saved into the **active project's \`.mcp.json\`** on your own machine — they are scoped
+per project, shown only masked afterwards, and **never logged**.
+
+---
+
+## ClickUp — step by step
+
+1. Click **Connect** on the ClickUp card (or open
+   **[app.clickup.com/settings/apps](https://app.clickup.com/settings/apps)** — avatar →
+   **Settings** → **Apps**).
+2. Under **API Token**, click **Generate** (or **Copy** if one already exists). Personal tokens
+   start with \`pk_\`.
+3. Back on the MCP page: paste the token into the ClickUp card and click **Save**.
+
+The token acts as **you** — it sees the same workspaces, lists, and tickets your ClickUp account
+sees.
+
+---
+
+## Figma — step by step
+
+1. Click **Connect** on the Figma card (or open
+   **[figma.com/settings](https://www.figma.com/settings)**), then go to the **Security** tab →
+   **Personal access tokens**.
+2. Click **Generate new token**. Name it (e.g. \`qc-portal\`) and set an expiration.
+3. Under scopes, **File content: Read-only** is enough — Design Check only reads design files.
+4. Click **Generate** and **copy it now** — it's shown once and starts with \`figd_\`.
+5. Paste it into the Figma card and click **Save**.
+
+---
+
+## Jira — step by step
+
+Jira needs **three** things, all entered on the card's connect form:
+
+- **Site URL** — your Jira Cloud address, e.g. \`https://yourcompany.atlassian.net\`.
+- **Account email** — the email you log in to Atlassian with.
+- **API token** — created as follows:
+
+1. Click **Connect** on the Jira card (or open
+   **[id.atlassian.com/manage-profile/security/api-tokens](https://id.atlassian.com/manage-profile/security/api-tokens)** —
+   Atlassian avatar → **Manage account** → **Security** → **API tokens**).
+2. Click **Create API token** — pick the **plain API token**, *not* "API token with scopes".
+   Scoped tokens authenticate but return **empty ticket lists or 401s** through the portal.
+3. Name it (e.g. \`qc-portal\`), set an expiry, and **copy it now** — it's shown once and starts
+   with \`ATATT\`.
+4. Fill in Site URL + email + token on the Jira card and click **Save**.
+
+> This is the same Atlassian API token used for private **Bitbucket** repos on the
+> [Connecting source code](/document/source-code) page — one token can serve both.
+
+---
+
+### Where your token goes (security)
+
+- Tokens are written into the project's **\`.mcp.json\`** (env vars for that MCP server) on the
+  machine running the portal — never into the database or any log.
+- The connected card shows a **masked preview** with a reveal/copy option, and **Disconnect**
+  removes the entry again.
+- Rotating a token = create a new one at the provider, **Disconnect**, and reconnect with the new
+  value.
+
+### Troubleshooting
+
+- **Card shows \`failed\` after connecting (ClickUp / Jira)** — those servers run via \`uvx\`, so
+  **Astral's \`uv\`** must be installed on the machine running the portal. The MCP page shows a
+  warning with a copy-able install command when it's missing.
+- **Jira connects but lists no tickets / 401** — the token is a *scoped* "API token with scopes".
+  Create a plain (classic) API token instead, per the steps above.
+- **Figma test fails** — the token may be expired or missing the **File content: Read** scope;
+  generate a fresh one.
+- Use each card's **Functional test** to verify the connection with a real action (fetch a ticket,
+  read a design file).
+`,
+  },
+  {
+    id: 'source-code',
+    title: 'Connecting source code',
+    icon: FolderGit2,
+    blurb: 'Clone the repo & create access tokens.',
+    body: `
+The **Source Code** page connects the project's Git repositories so the AI reads the **real code**
+(true field names, validation rules, screens, roles) when writing test cases, running QC, and
+checking designs — instead of guessing from the ticket alone.
+
+A project can connect **multiple repositories**, each with a **tag** that tells the AI what it is —
+**Backend repo**, **Frontend repo**, **Mobile repo**, … Each repo clones into its own folder under
+\`source/\` (the folder name comes from the tag, e.g. \`source/backend-repo\`), and the AI is told
+about every tagged repo so it looks in the right one for the ticket at hand.
+
+### Connect a repository
+
+1. Open **Source Code** in the sidebar (Project group).
+2. Paste the repository's **HTTPS URL** — e.g. \`https://github.com/owner/repo.git\` or
+   \`https://bitbucket.org/workspace/repo.git\`. (An SSH URL like \`git@github.com:owner/repo\`
+   is accepted and converted to HTTPS automatically.)
+3. Give it a **tag** — pick a suggestion (Backend repo, Frontend repo, …) or type your own.
+   Left empty, the repo's own name is used. Tags must be unique within the project.
+4. *(Optional)* Enter a **branch** — leave empty for the repo's default branch.
+5. **Private repo?** Paste an **access token** (see below). Public repos need no token.
+   Each repository keeps its **own** token, so a Backend and a Frontend repo can use different ones.
+6. Click **Connect & clone**. The clone runs as a background job with a live log.
+7. **Add repository** connects the next repo the same way — repeat for every repo the
+   project spans.
+
+Each connected repo gets its own card showing the tag, branch, last commit, last sync, and auth
+scheme. Per repo you can **Sync** (pull the latest, fast-forward only), **Edit & reconnect**
+(the form reopens prefilled with the repo's URL, tag, and branch — change any of them, or paste a
+new token, and it re-clones; leaving the token empty **keeps the saved one**), **Disconnect**
+(unlink it — the files stay on disk), or open its folder. One clone/sync runs at a time per project.
+
+### The source map (why syncing saves tokens)
+
+After every clone/sync that brings new commits, the portal runs **one cheap AI pass** over the repo
+and saves a compact **source map** — the repo's screens/routes, domain models, and where validation
+and permissions live, with file paths — into **Instructions → Knowledge** as
+\`source-map-<tag>.md\` (flagged with the AI badge; you can review, edit, or delete it like any
+knowledge doc — editing claims it as yours).
+
+This map is what keeps repeated AI work cheap: test-case generation and QC runs get the map in
+their context and **jump straight to the files it names** instead of re-exploring the repository
+every time. A sync that brings no new commits keeps the existing map (no AI pass). Disconnecting a
+repo removes its map; reconnecting regenerates it.
+
+---
+
+## GitHub — step by step
+
+**Copy the repository URL.** On the repo page click the green **Code** button → **HTTPS** → copy
+(e.g. \`https://github.com/owner/repo.git\`). Public repo? Paste it and connect — you're done.
+Private repo? Create a token first:
+
+### Option A — fine-grained personal access token (recommended)
+
+Read-only, scoped to just this repo — the safest choice.
+
+1. Open **[github.com/settings/personal-access-tokens](https://github.com/settings/personal-access-tokens)**
+   (or navigate: your avatar → **Settings** → **Developer settings** → **Personal access tokens** →
+   **Fine-grained tokens**).
+2. Click **Generate new token**. Give it a name (e.g. \`qc-portal\`) and an expiration.
+3. If the repo belongs to an **organization**, set **Resource owner** to that org (the org must allow
+   fine-grained tokens; ask an org admin if it's not listed).
+4. Under **Repository access** choose **Only select repositories** → pick the repo.
+5. Under **Permissions → Repository permissions**, set **Contents = Read-only**. Nothing else is
+   needed for cloning ("Metadata: Read" is added automatically).
+6. Click **Generate token** and **copy it now** — it's shown once and starts with \`github_pat_\`.
+7. Back on **Source Code**: paste the repo URL + the token → **Connect & clone**.
+
+### Option B — classic personal access token
+
+1. Open **[github.com/settings/tokens](https://github.com/settings/tokens)** → **Generate new token
+   (classic)**.
+2. Tick the **\`repo\`** scope, set an expiration, generate, and copy the \`ghp_…\` token.
+3. If your org enforces **SAML SSO**, go back to the token list and click **Configure SSO** →
+   **Authorize** for that org, or the clone will be rejected.
+
+GitHub tokens authenticate on their own — there is **no username field** for GitHub URLs; the portal
+supplies the right git user (\`x-access-token\`) automatically.
+
+---
+
+## Bitbucket — step by step
+
+**Copy the repository URL.** On the repo page click **Clone** → switch to **HTTPS** → copy the URL
+(e.g. \`https://bitbucket.org/workspace/repo.git\` — if it contains \`you@bitbucket.org\`, that's fine,
+the portal strips it). For a private repo, pick ONE of these three credentials:
+
+### Option A — Atlassian API token (recommended)
+
+Works account-wide, easiest to create:
+
+1. Open **[id.atlassian.com/manage-profile/security/api-tokens](https://id.atlassian.com/manage-profile/security/api-tokens)**
+   (or: Bitbucket avatar → **Personal settings** → follow the link to your Atlassian account →
+   **Security** → **API tokens**).
+2. Click **Create API token**, name it (e.g. \`qc-portal\`), set an expiry, and **copy it now** —
+   it's shown once and starts with \`ATATT\`.
+3. On **Source Code**: paste the repo URL + the token, and **leave Username empty** — API tokens
+   authenticate via a fixed technical user that the portal fills in automatically.
+
+### Option B — repository access token
+
+Scoped to a single repo — needs repo-admin rights to create:
+
+1. In the repo: **Repository settings** → **Security** → **Access tokens** → **Create repository
+   access token**.
+2. Name it and give it the **Repositories: Read** scope only.
+3. Copy the \`ATCTT…\` token, paste it into **Access token**, and **leave Username empty**.
+
+(Workspace and project access tokens work the same way.)
+
+### Option C — app password (legacy)
+
+Being phased out by Atlassian, but still works:
+
+1. Bitbucket avatar → **Personal settings** → **App passwords** → **Create app password**.
+2. Tick **Repositories: Read**, create, and copy the password.
+3. On **Source Code**: paste the token **and fill in Username** with your Bitbucket username (shown
+   on the same Personal settings page — it's *not* your email). This is the **only** case where the
+   Username field is used.
+
+> **Most common Bitbucket mistake:** filling in Username together with an \`ATATT…\` API token — the
+> clone then fails to authenticate. The portal now detects \`ATATT\` tokens and ignores the username,
+> but the rule of thumb stays: **Username is for app passwords only.**
+
+---
+
+### Where your token goes (security)
+
+- The token is stored **only on this machine**, in a permission-restricted local credential file —
+  **never** in the database, never in the cloned repo's \`.git/config\` (the saved remote is
+  tokenless), and never in any log (output is scrubbed).
+- The connected card shows a masked preview (\`****\` + last 4 characters) and a copy button so you
+  can retrieve it later.
+- Disconnecting (or changing the repository) removes the stored credential.
+
+### Troubleshooting
+
+- **"Authentication failed" / asked for a password** — the token is wrong, expired, or lacks read
+  access to that repo. Create a fresh one per the steps above. The job log's \`Auth:\` line shows
+  which scheme was tried.
+- **Bitbucket \`ATATT…\` token fails with a username filled in** — clear the Username field; API
+  tokens must authenticate via their own static user, and the portal handles that automatically.
+- **"git is not installed or not on PATH"** — install Git on the machine running the portal.
+- **"source/ already exists and is not empty"** — the folder holds non-git files; remove it or
+  disconnect the previous source first.
+- **Sync fails with a fast-forward error** — someone edited the clone locally. The portal never
+  force-overwrites; resolve or delete \`source/\` and reconnect.
 `,
   },
   {
@@ -549,7 +805,9 @@ knowledge, and memory. Most pages have an **Open folder** button to jump straigh
 // Rich prose styling for the rendered Markdown (no typography plugin needed).
 const PROSE = cn(
   '[&>*:first-child]:mt-0',
+  '[&_h2]:mt-8 [&_h2]:mb-2 [&_h2]:text-lg [&_h2]:font-semibold [&_h2]:tracking-tight [&_h2]:text-foreground',
   '[&_h3]:mt-6 [&_h3]:mb-2 [&_h3]:text-base [&_h3]:font-semibold [&_h3]:tracking-tight [&_h3]:text-foreground',
+  '[&_hr]:my-6 [&_hr]:border-border/60',
   '[&_p]:my-2.5 [&_p]:text-sm [&_p]:leading-relaxed [&_p]:text-muted-foreground',
   '[&_ul]:my-2.5 [&_ul]:list-disc [&_ul]:space-y-1.5 [&_ul]:pl-5',
   '[&_ol]:my-2.5 [&_ol]:list-decimal [&_ol]:space-y-1.5 [&_ol]:pl-5',
@@ -566,6 +824,113 @@ const PROSE = cn(
   '[&_th]:border [&_th]:border-border/60 [&_th]:bg-muted/60 [&_th]:px-3 [&_th]:py-2 [&_th]:text-left [&_th]:font-semibold [&_th]:text-foreground',
   '[&_td]:border [&_td]:border-border/60 [&_td]:px-3 [&_td]:py-2 [&_td]:align-top [&_td]:text-muted-foreground',
 )
+
+// ---- "How a ticket flows through the portal" — the hand-drawn flow panel shown on
+// the Core concepts page. Two lanes of numbered step cards (each links to its page),
+// joined by arrows, with the on-disk artifacts each phase writes underneath.
+
+interface FlowStep {
+  n: number
+  title: string
+  page: string // the portal page that owns the step (card subtitle)
+  to: string // route the card links to
+  icon: typeof BookOpen
+}
+
+const PREPARE_STEPS: FlowStep[] = [
+  { n: 1, title: 'Register project', page: 'Settings → Projects', to: '/settings', icon: Settings },
+  { n: 2, title: 'Connect services', page: 'MCP page · ClickUp + MCP', to: '/mcp', icon: Plug },
+  { n: 3, title: 'Add context', page: 'Instructions page', to: '/instructions', icon: NotebookPen },
+]
+
+const TEST_STEPS: FlowStep[] = [
+  { n: 4, title: 'Crawl ticket', page: 'Tickets page', to: '/tickets', icon: Ticket },
+  { n: 5, title: 'Generate test cases', page: 'TestCase page', to: '/testcases', icon: ClipboardList },
+  { n: 6, title: 'Launch QC run', page: 'Run page', to: '/qc-run', icon: PlayCircle },
+  { n: 7, title: 'Watch live', page: 'Running page', to: '/running', icon: Activity },
+  { n: 8, title: 'Report + evidence', page: 'History page', to: '/history', icon: History },
+]
+
+function FlowStepCard({ step }: { step: FlowStep }) {
+  const Icon = step.icon
+  return (
+    <NavLink
+      to={step.to}
+      title={`Open the ${step.page}`}
+      className="group flex min-w-0 flex-1 basis-40 items-center gap-2.5 rounded-2xl border border-border/60 bg-card px-3 py-2.5 shadow-none transition-all duration-200 hover:-translate-y-0.5 hover:border-border hover:shadow-sm"
+    >
+      <span className="flex size-7 shrink-0 items-center justify-center rounded-xl bg-foreground text-[11px] font-semibold tabular-nums text-background">
+        {step.n}
+      </span>
+      <span className="min-w-0 leading-tight">
+        <span className="flex items-center gap-1.5 text-[13px] font-medium tracking-tight">
+          <Icon className="size-3.5 shrink-0 text-muted-foreground transition-colors group-hover:text-primary" />
+          <span className="truncate">{step.title}</span>
+        </span>
+        <span className="mt-0.5 block truncate text-[11px] text-muted-foreground">{step.page}</span>
+      </span>
+    </NavLink>
+  )
+}
+
+/** One lane: a small uppercase label chip + its step cards joined by arrows. */
+function FlowLane({ label, steps }: { label: string; steps: FlowStep[] }) {
+  return (
+    <div className="space-y-2">
+      <span className="inline-flex items-center rounded-full border border-border/60 bg-muted/60 px-2.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+        {label}
+      </span>
+      <div className="flex flex-wrap items-stretch gap-1.5">
+        {/* Arrow + card share one flex item so a line wrap carries the arrow with it
+            (a leading “→” on the next line reads as continuation; a trailing one dangles). */}
+        {steps.map((s, i) => (
+          <div key={s.n} className="flex min-w-0 flex-1 basis-44 items-center gap-1.5">
+            {i > 0 && (
+              <ArrowRight className="hidden size-4 shrink-0 text-muted-foreground/40 xl:block" />
+            )}
+            <FlowStepCard step={s} />
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+/** What each phase leaves on disk — mono path chips under the lanes. */
+function FlowArtifact({ path, from }: { path: string; from: string }) {
+  return (
+    <span className="inline-flex min-w-0 items-center gap-1.5 rounded-xl border border-border/60 bg-muted/40 px-2.5 py-1.5">
+      <CornerDownRight className="size-3 shrink-0 text-muted-foreground/60" />
+      <span className="truncate font-mono text-[11px] text-foreground/80">{path}</span>
+      <span className="shrink-0 whitespace-nowrap text-[10px] text-muted-foreground">· {from}</span>
+    </span>
+  )
+}
+
+function ConceptsFlow() {
+  return (
+    <div className="mb-6 space-y-4 rounded-2xl border border-border/60 bg-muted/40 p-4 sm:p-5">
+      <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground/70">
+        How a ticket flows through the portal
+      </p>
+      <FlowLane label="Prepare · once per project" steps={PREPARE_STEPS} />
+      <div className="flex justify-center">
+        <ArrowDown className="size-4 text-muted-foreground/40" />
+      </div>
+      <FlowLane label="Test · per ticket" steps={TEST_STEPS} />
+      <div className="space-y-1.5 border-t border-border/60 pt-3">
+        <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/60">
+          What lands on disk
+        </p>
+        <div className="flex flex-wrap gap-1.5">
+          <FlowArtifact path="testing/tickets/<ticket>/" from="crawl" />
+          <FlowArtifact path="testing/tickets/<ticket>/testcases/v<N>" from="test cases" />
+          <FlowArtifact path="testing/test-result/<slug>/report.md" from="QC run" />
+        </div>
+      </div>
+    </div>
+  )
+}
 
 /** Left-hand docs nav: one entry per doc page, filterable by the search box. */
 function DocsNav({ activeId }: { activeId: string }) {
@@ -673,6 +1038,7 @@ export default function DocumentPage() {
                 <p className="text-sm text-muted-foreground">{section.blurb}</p>
               </div>
             </div>
+            {section.id === 'concepts' && <ConceptsFlow />}
             <div className={cn('overflow-x-auto', PROSE)}>
               <ReactMarkdown remarkPlugins={[remarkGfm]}>{section.body}</ReactMarkdown>
             </div>

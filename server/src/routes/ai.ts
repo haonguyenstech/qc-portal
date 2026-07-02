@@ -11,7 +11,7 @@ import {
   withClickupToken,
 } from '../clickup.js'
 import { parseClaudeUsage } from '../claudeExec.js'
-import { insertDesignCheck, listDesignChecks, recordUsage } from '../db.js'
+import { insertDesignCheck, listDesignChecks, listSources, recordUsage } from '../db.js'
 import { resolveProject } from '../projectScope.js'
 import { revealFolderNative } from '../folderPicker.js'
 import {
@@ -728,7 +728,7 @@ aiRouter.post('/testcases', async (req, res) => {
       instructions: typeof req.body?.instructions === 'string' ? req.body.instructions : '',
       model: typeof req.body?.model === 'string' ? req.body.model : undefined,
       appUrl: typeof req.body?.appUrl === 'string' ? req.body.appUrl : undefined,
-      sourcePath: project.sourcePath,
+      sources: listSources(project.id).map((s) => ({ tag: s.tag, path: s.sourcePath })),
       groundingCheck: project.groundingCheck,
       groundingCheckModel: project.groundingCheckModel,
     })
@@ -949,7 +949,7 @@ aiRouter.post('/testcases/jobs', (req, res) => {
     projectId: project.id,
     projectName,
     rootPath: project.rootPath,
-    sourcePath: project.sourcePath ?? '',
+    sources: listSources(project.id).map((s) => ({ tag: s.tag, path: s.sourcePath })),
     folders,
     appUrls,
     template: parseTemplate(req.body?.template),

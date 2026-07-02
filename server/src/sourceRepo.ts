@@ -90,6 +90,19 @@ export function deleteSourceCredential(projectId: string): void {
   }
 }
 
+/**
+ * Re-key a stored credential (multi-repo migration: credentials used to be keyed
+ * by projectId; they are now keyed by source id). No-op when nothing is stored.
+ */
+export function renameSourceCredential(oldKey: string, newKey: string): void {
+  const all = readAllCreds()
+  if (oldKey in all) {
+    all[newKey] = all[oldKey]
+    delete all[oldKey]
+    writeAllCreds(all)
+  }
+}
+
 // ---------------- url parsing + auth ----------------
 
 /**
@@ -301,6 +314,8 @@ export async function repoStatus(dir: string): Promise<RepoStatus> {
 
 export interface CloneInput {
   rootPath: string
+  /** Where this repo should live (e.g. <root>/source/backend). */
+  targetDir: string
   parsed: ParsedRepo
   branch?: string
   cred?: SourceCredential
@@ -366,39 +381,36 @@ async function cloneInto(
 
 /**
  * Connect a repo to a project:
- *  - the project root is already a git checkout → adopt it (never destroy the root);
- *  - the root is empty → clone straight into it (the root becomes the source);
- *  - otherwise clone into <root>/source (kept apart from testing/ output). If that
- *    folder already holds the SAME repo we adopt it; a DIFFERENT repo is replaced
- *    via a temp-dir swap so a failed re-clone never wipes the working checkout.
+ *  - the project root is already a checkout of the SAME repo → adopt it
+ *    (never destroy or duplicate the root);
+ *  - the target dir already holds the SAME repo → adopt it; a DIFFERENT repo is
+ *    replaced via a temp-dir swap so a failed re-clone never wipes the checkout;
+ *  - otherwise clone into the target dir (a per-tag folder under <root>/source/).
  */
 export async function cloneSource(input: CloneInput): Promise<CloneResult> {
-  const { rootPath, parsed, branch, cred, onLog } = input
+  const { rootPath, targetDir, parsed, branch, cred, onLog } = input
 
   if (isGitRepo(rootPath)) {
-    const result = await adoptRepo(rootPath, branch, cred, onLog)
-    onLog?.({ level: 'success', text: `Source ready at ${rootPath}` })
-    return result
-  }
-
-  // Clone straight into an empty/new project root.
-  if (isEmptyOrAbsent(rootPath)) {
-    await cloneInto(rootPath, parsed, branch, cred, onLog)
-    const status = await repoStatus(rootPath)
-    onLog?.({ level: 'success', text: `Source ready at ${rootPath}` })
-    return { sourcePath: rootPath, branch: status.branch, lastCommit: status.lastCommit }
-  }
-
-  const sub = path.join(rootPath, 'source')
-  if (isGitRepo(sub)) {
-    const status = await repoStatus(sub)
-    if (sameRemote(status.remoteUrl, parsed)) {
-      const result = await adoptRepo(sub, branch, cred, onLog)
-      onLog?.({ level: 'success', text: `Source ready at ${sub}` })
+    const rootStatus = await repoStatus(rootPath)
+    if (sameRemote(rootStatus.remoteUrl, parsed)) {
+      const result = await adoptRepo(rootPath, branch, cred, onLog)
+      onLog?.({ level: 'success', text: `Source ready at ${rootPath}` })
       return result
     }
-    // A different repo is requested — replace our managed source/ via temp swap.
-    onLog?.({ level: 'info', text: `Replacing existing source at ${sub} with the new repository.` })
+  }
+
+  if (isGitRepo(targetDir)) {
+    const status = await repoStatus(targetDir)
+    if (sameRemote(status.remoteUrl, parsed)) {
+      const result = await adoptRepo(targetDir, branch, cred, onLog)
+      onLog?.({ level: 'success', text: `Source ready at ${targetDir}` })
+      return result
+    }
+    // A different repo is requested — replace the managed folder via temp swap.
+    onLog?.({
+      level: 'info',
+      text: `Replacing existing source at ${targetDir} with the new repository.`,
+    })
     const tmp = path.join(rootPath, `.source-incoming-${randomUUID()}`)
     try {
       await cloneInto(tmp, parsed, branch, cred, onLog)
@@ -406,24 +418,34 @@ export async function cloneSource(input: CloneInput): Promise<CloneResult> {
       fs.rmSync(tmp, { recursive: true, force: true })
       throw err
     }
-    fs.rmSync(sub, { recursive: true, force: true })
-    fs.renameSync(tmp, sub)
-    const fresh = await repoStatus(sub)
-    onLog?.({ level: 'success', text: `Source ready at ${sub}` })
-    return { sourcePath: sub, branch: fresh.branch, lastCommit: fresh.lastCommit }
+    fs.rmSync(targetDir, { recursive: true, force: true })
+    fs.renameSync(tmp, targetDir)
+    const fresh = await repoStatus(targetDir)
+    onLog?.({ level: 'success', text: `Source ready at ${targetDir}` })
+    return { sourcePath: targetDir, branch: fresh.branch, lastCommit: fresh.lastCommit }
   }
 
-  if (!isEmptyOrAbsent(sub)) {
+  if (!isEmptyOrAbsent(targetDir)) {
     throw new Error(
-      `${sub} already exists and is not an empty folder or a git repo. ` +
+      `${targetDir} already exists and is not an empty folder or a git repo. ` +
         'Remove it or disconnect the existing source first.',
     )
   }
 
-  await cloneInto(sub, parsed, branch, cred, onLog)
-  const status = await repoStatus(sub)
-  onLog?.({ level: 'success', text: `Source ready at ${sub}` })
-  return { sourcePath: sub, branch: status.branch, lastCommit: status.lastCommit }
+  await cloneInto(targetDir, parsed, branch, cred, onLog)
+  const status = await repoStatus(targetDir)
+  onLog?.({ level: 'success', text: `Source ready at ${targetDir}` })
+  return { sourcePath: targetDir, branch: status.branch, lastCommit: status.lastCommit }
+}
+
+/** Folder-safe slug for a repo tag: "Backend repo" → "backend-repo". */
+export function tagSlug(tag: string): string {
+  const slug = tag
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+  return slug || 'repo'
 }
 
 export interface PullInput {
