@@ -42,11 +42,33 @@ real error (bad token, blocked network, missing `git`, etc.):
 
 ```
 # Windows PowerShell
-$env:CLICKUP_API_KEY="<token>"; uvx --from git+https://github.com/DiversioTeam/clickup-mcp.git clickup-mcp
+$env:CLICKUP_MCP_API_KEY="<token>"; uvx --from git+https://github.com/DiversioTeam/clickup-mcp.git clickup-mcp
 ```
 
 `uvx --from git+…` clones from GitHub on first run, so **`git`** and network access
-are also required.
+are also required. Success looks like the command sitting silently after
+`Starting ClickUp MCP Server...` — an MCP server waits for a client; Ctrl+C to stop.
+
+---
+
+## 1b. ClickUp fails with `1 validation error for Config — api_key Field required`
+
+**Symptom.** Running the command above (or the portal's clickup server) exits with:
+
+```
+Unexpected error: 1 validation error for Config
+api_key
+  Field required
+```
+
+**Cause.** Newer `clickup-mcp` versions read the token from **`CLICKUP_MCP_API_KEY`**
+and ignore the older `CLICKUP_API_KEY`. A `.mcp.json` entry that only sets the old
+variable makes the server crash at startup → the portal shows `✘ failed`.
+
+**Fix.** On the MCP page, **Disconnect** clickup and **Connect** again with the
+token — the portal writes **both** env vars so any server version starts. (Or
+hand-edit `.mcp.json` and add `"CLICKUP_MCP_API_KEY": "<same token>"` next to
+`"CLICKUP_API_KEY"` in the clickup `env` block.)
 
 ---
 

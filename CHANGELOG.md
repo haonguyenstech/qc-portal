@@ -3,6 +3,24 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.9.1 — 2026-07-02
+
+**Fix ClickUp "Failed to connect" caused by a renamed token variable**
+
+### Fixed
+
+- **ClickUp connects again on machines set up with the older token variable.** Newer
+  versions of the ClickUp MCP server read the token from `CLICKUP_MCP_API_KEY` and ignore
+  the older `CLICKUP_API_KEY`. A project connected a while ago (or on another PC) may only
+  have the old name in `.mcp.json` — the server then crashes on startup and the MCP page
+  shows **Failed to connect**, even though the exact same token works elsewhere. The portal
+  now writes **both** variable names on every connect path (token paste *and* OAuth), so any
+  server version starts. **Already hit by this?** Just Disconnect ClickUp and Connect again
+  with your token — that rewrites the entry with both names.
+- **Troubleshooting guide updated** with this exact failure (§1b: the
+  `1 validation error for Config — api_key Field required` error and its fix), and the
+  hand-test command now uses the current variable name.
+
 ## 0.9.0 — 2026-07-02
 
 **Restart from the app, a heads-up when uv is missing & a Windows MCP fix**

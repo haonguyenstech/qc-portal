@@ -567,11 +567,13 @@ const PROVIDERS: Record<ProviderId, ProviderDef> = {
       }
       return j.access_token
     },
+    // Current clickup-mcp reads CLICKUP_MCP_API_KEY; older builds read
+    // CLICKUP_API_KEY. Set both so either version starts.
     buildEntry: (token) => ({
       type: 'stdio',
       command: 'uvx',
       args: ['--from', 'git+https://github.com/DiversioTeam/clickup-mcp.git', 'clickup-mcp'],
-      env: { CLICKUP_API_KEY: token },
+      env: { CLICKUP_API_KEY: token, CLICKUP_MCP_API_KEY: token },
     }),
   },
   figma: {
