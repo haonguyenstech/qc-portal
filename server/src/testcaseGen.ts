@@ -201,16 +201,21 @@ export function detectTemplateFormat(
 }
 
 /**
- * Decide the format from the model's ACTUAL output (not the template). The model can
- * occasionally emit the other format — e.g. a CSV table when Markdown was asked, or a
- * Markdown doc when CSV was asked. We store & render by what it really produced, so the
- * preview never shows CSV as a collapsed run-on markdown paragraph. Same heuristic as
- * detectTemplateFormat, applied to the first non-empty output line (a CSV header line is
- * never multi-line, so this is reliable).
+ * Decide the format from the model's ACTUAL output (used ONLY when the template implies
+ * Markdown, to catch the model emitting CSV anyway). Skips a leading Markdown title/blank
+ * lines (the model sometimes prefixes "# Test Cases — …" before the CSV) and classifies
+ * by the first real content line: a comma-separated header → CSV, a `|` table row → Markdown.
+ * A CSV template is trusted outright by the caller (extractCsv strips any such preamble),
+ * so this never downgrades a CSV template to Markdown.
  */
 export function sniffOutputFormat(text: string): TestcaseFormat {
-  const first = (text ?? '').split(/\r?\n/).find((l) => l.trim().length > 0)?.trim() ?? ''
-  if (!first || first.startsWith('#') || first.startsWith('|')) return 'markdown'
+  // First line that is neither blank nor a Markdown heading (# …).
+  const first =
+    (text ?? '')
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .find((l) => l.length > 0 && !l.startsWith('#')) ?? ''
+  if (!first || first.startsWith('|')) return 'markdown'
   return (first.match(/,/g)?.length ?? 0) >= 2 ? 'csv' : 'markdown'
 }
 
@@ -257,7 +262,8 @@ IMPORTANT — time-box the reading HARD, then write. You are on a wall-clock bud
   const formatBlock =
     format === 'csv'
       ? `A TEST CASE TEMPLATE in CSV format has been provided below. Produce your output as VALID CSV that matches it EXACTLY:
-- First output the SAME header row as the template's first line — identical column names, in the same order. Do not add or remove columns.
+- The VERY FIRST line of your output MUST be the CSV header row. Do NOT put a title, a Markdown heading (e.g. "# Test Cases — …"), or any other text before it — output raw CSV only, starting at the header.
+- Output the SAME header row as the template's first line — identical column names, in the same order. Do not add or remove columns.
 - Each test case is one CSV row with a value (or an intentionally blank value) for every column, in the template's column order.
 - Reproduce the template's conventions precisely: its ID format (sequential, e.g. No-01, No-02, …), its phrasing (Summary lines start with "Verify …"), and which columns it leaves BLANK. Columns filled in only during execution — Actual result, Status, Reference, Note (and any others the template leaves empty) — must be left empty.
 - CSV INTEGRITY — THE #1 FAILURE, get this exactly right or the whole row is corrupted:
@@ -523,12 +529,14 @@ export async function generateTestcaseVersion(opts: {
   if (result.isError || !testcases) {
     throw statusError('Claude did not return any test cases.', 502)
   }
-  // Store & render by what the model ACTUALLY produced, not just what the template
-  // implied. The model sometimes emits the other format (e.g. a CSV table when we asked
-  // for Markdown); trusting the template there would save CSV as a .md file, and the
-  // preview would then render it as one collapsed run-on paragraph. Fall back to the
-  // intended format only if the output is empty/ambiguous.
-  const outFormat = sniffOutputFormat(testcases) || format
+  // Decide the stored format. A CSV template is TRUSTED outright and stays CSV —
+  // extractCsv (below) strips any stray preamble/title the model prepended (e.g. a
+  // "# Test Cases — …" heading), so a CSV template always yields a real .csv table.
+  // Only when the template implies Markdown do we sniff the output, to catch the model
+  // emitting CSV anyway (which would otherwise render as a collapsed run-on paragraph).
+  // NOTE: never let the sniff downgrade a CSV template to Markdown — that regressed the
+  // title-prefixed-CSV case (the CSV was saved as .md and shown as raw text).
+  const outFormat: TestcaseFormat = format === 'csv' ? 'csv' : sniffOutputFormat(testcases)
   if (outFormat !== format) {
     onLog({
       level: 'info',

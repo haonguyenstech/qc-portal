@@ -3,6 +3,19 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.9.7 — 2026-07-06
+
+**Fix: generated CSV test cases showing as raw run-on text instead of a table**
+
+### Fixed
+
+- **CSV test cases render as a table again.** In 0.9.6, when the AI prefixed a title line
+  (e.g. `# Test Cases — …`) before the CSV, the version was mistakenly saved as Markdown and the
+  preview showed it as one long run-on paragraph. A CSV template now always saves as real CSV — the
+  stray title is stripped and the header row is used — so the preview shows a proper table with the
+  pinned header row and first column. Regenerating a ticket produces a clean `.csv`, and any version
+  already saved this way now renders as a table in the preview without regenerating.
+
 ## 0.9.6 — 2026-07-06
 
 **Cleaner test-case & report formatting, project-scoped AI, and new projects that don't inherit another project's settings**
