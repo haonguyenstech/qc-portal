@@ -1,6 +1,8 @@
 import { useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
+import ReactMarkdown, { type Components } from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import {
   ClipboardList,
   Eye,
@@ -36,6 +38,55 @@ import {
 } from '@/lib/api'
 import { useProjects } from '@/lib/project-context'
 import { CsvTable, looksLikeCsv } from '@/components/CsvTable'
+
+// Markdown preview styling (GFM tables included) — mirrors the block used by the
+// Knowledge/Memory previews so a markdown template (e.g. the default testcase.md,
+// which is a markdown doc with pipe tables) renders as formatted headings + tables
+// instead of raw `| ... |` text.
+const MD_CLASS = cn(
+  'text-sm leading-relaxed',
+  '[&_h1]:mt-0 [&_h1]:mb-3 [&_h1]:text-2xl [&_h1]:font-semibold [&_h1]:tracking-tight',
+  '[&_h2]:mt-6 [&_h2]:mb-2 [&_h2]:border-b [&_h2]:pb-1 [&_h2]:text-lg [&_h2]:font-semibold',
+  '[&_h3]:mt-5 [&_h3]:mb-1.5 [&_h3]:text-base [&_h3]:font-semibold',
+  '[&_p]:my-2.5 [&_p]:text-muted-foreground',
+  '[&_ul]:my-2.5 [&_ul]:list-disc [&_ul]:pl-5 [&_ol]:my-2.5 [&_ol]:list-decimal [&_ol]:pl-5',
+  '[&_li]:my-1 [&_li]:text-muted-foreground',
+  '[&_a]:font-medium [&_a]:text-primary [&_a]:underline [&_a]:underline-offset-2',
+  '[&_strong]:font-semibold [&_strong]:text-foreground',
+  '[&_code]:rounded [&_code]:bg-muted [&_code]:px-1.5 [&_code]:py-0.5 [&_code]:font-mono [&_code]:text-xs',
+  '[&_pre]:my-3 [&_pre]:overflow-x-auto [&_pre]:rounded-lg [&_pre]:border [&_pre]:bg-zinc-950 [&_pre]:p-4 [&_pre]:text-xs [&_pre>code]:bg-transparent [&_pre>code]:p-0 [&_pre>code]:text-zinc-100',
+  '[&_blockquote]:border-l-2 [&_blockquote]:border-primary/40 [&_blockquote]:pl-3 [&_blockquote]:text-muted-foreground [&_blockquote]:italic',
+  '[&_hr]:my-5 [&_hr]:border-border',
+  // Table styling lives on MD_TABLE_WRAP below (per-table scroll container), so a
+  // markdown table can pin its header row + first column instead of scrolling away.
+)
+
+// Each markdown table is wrapped in its own scroll box: the header row stays pinned
+// on vertical scroll and the first ("No") column stays pinned on horizontal scroll,
+// matching the CSV preview. Sticky cells carry a solid bg so nothing bleeds through.
+const MD_TABLE_WRAP = cn(
+  'my-3 max-h-[70vh] overflow-auto rounded-2xl border border-border/60',
+  '[&_th]:sticky [&_th]:top-0 [&_th]:z-20 [&_th]:whitespace-nowrap [&_th]:border [&_th]:bg-muted [&_th]:px-2.5 [&_th]:py-1.5 [&_th]:text-left [&_th]:text-xs [&_th]:font-semibold',
+  '[&_th:first-child]:left-0 [&_th:first-child]:z-30',
+  '[&_td]:border [&_td]:px-2.5 [&_td]:py-1.5 [&_td]:align-top [&_td]:text-xs',
+  '[&_tbody_td:first-child]:sticky [&_tbody_td:first-child]:left-0 [&_tbody_td:first-child]:z-10 [&_tbody_td:first-child]:bg-muted [&_tbody_td:first-child]:font-medium [&_tbody_td:first-child]:text-foreground',
+)
+
+/** react-markdown renderers: wrap every table so it scrolls with a sticky header + first column. */
+const MD_COMPONENTS: Components = {
+  table({ node: _node, className: _className, ...props }) {
+    return (
+      <div className={MD_TABLE_WRAP}>
+        <table {...props} className="w-max min-w-full border-collapse text-left text-xs" />
+      </div>
+    )
+  },
+}
+
+/** Does this preview name point at a markdown file? (saved templates are always .md) */
+function looksLikeMarkdown(name: string): boolean {
+  return /\.(md|markdown)$/i.test(name)
+}
 
 /** Catalog of file templates a project can define. The key maps to the on-disk
  *  file (testing/templates/<key>.md); add new kinds here to expose more. */
@@ -168,6 +219,9 @@ function TemplateCard({
   const previewContent = pending ? pending.content : (saved?.content ?? '')
   // Uploaded CSV/Excel is stored as CSV text inside the .md — show it as a table.
   const previewIsCsv = previewName ? looksLikeCsv(previewName, previewContent) : false
+  // Otherwise a markdown template (e.g. the default testcase.md with pipe tables)
+  // must be rendered, not dumped as raw text.
+  const previewIsMarkdown = !previewIsCsv && previewName ? looksLikeMarkdown(previewName) : false
 
   return (
     <Card className="overflow-hidden rounded-3xl border-border/60 shadow-none transition-all duration-200 hover:-translate-y-0.5 hover:border-border hover:shadow-sm">
@@ -314,6 +368,12 @@ function TemplateCard({
           <div className="min-h-0 flex-1 overflow-auto px-5 py-4">
             {previewIsCsv ? (
               <CsvTable csv={previewContent} />
+            ) : previewIsMarkdown ? (
+              <div className={MD_CLASS}>
+                <ReactMarkdown remarkPlugins={[remarkGfm]} components={MD_COMPONENTS}>
+                  {previewContent}
+                </ReactMarkdown>
+              </div>
             ) : (
               <pre className="overflow-x-auto font-mono text-[12px] leading-relaxed whitespace-pre-wrap break-words">
                 {previewContent}

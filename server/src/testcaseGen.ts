@@ -74,6 +74,28 @@ export function extractCsv(raw: string, template: { content?: string } | null): 
   return (start > 0 ? lines.slice(start).join('\n') : s).trim()
 }
 
+/**
+ * Detect data rows that parse into MORE fields than the header — the fingerprint of a
+ * CSV quoting slip, where an unquoted comma inside a free-text field (e.g. a Summary
+ * like "shows badge, title, body") splits into extra fields and shifts every later
+ * value into the wrong column. A well-formed row can never have more fields than the
+ * header, so this has no false positives. Returns the offending rows' IDs (first-column
+ * value). Detection only — the original intent can't be reliably recovered once the
+ * commas are ambiguous, so the caller warns the engineer rather than silently "repairing".
+ */
+export function findOverflowCsvRows(csv: string): { id: string; fields: number }[] {
+  const rows = parseCsvRows(csv)
+  if (rows.length < 2) return []
+  const headerLen = rows[0].length
+  const bad: { id: string; fields: number }[] = []
+  for (let i = 1; i < rows.length; i++) {
+    if (rows[i].length > headerLen) {
+      bad.push({ id: (rows[i][0] ?? '').trim() || `row ${i}`, fields: rows[i].length })
+    }
+  }
+  return bad
+}
+
 export type TestcaseFormat = 'markdown' | 'csv'
 
 export interface TestcaseVersionMeta {
@@ -178,6 +200,20 @@ export function detectTemplateFormat(
   return 'markdown'
 }
 
+/**
+ * Decide the format from the model's ACTUAL output (not the template). The model can
+ * occasionally emit the other format — e.g. a CSV table when Markdown was asked, or a
+ * Markdown doc when CSV was asked. We store & render by what it really produced, so the
+ * preview never shows CSV as a collapsed run-on markdown paragraph. Same heuristic as
+ * detectTemplateFormat, applied to the first non-empty output line (a CSV header line is
+ * never multi-line, so this is reliable).
+ */
+export function sniffOutputFormat(text: string): TestcaseFormat {
+  const first = (text ?? '').split(/\r?\n/).find((l) => l.trim().length > 0)?.trim() ?? ''
+  if (!first || first.startsWith('#') || first.startsWith('|')) return 'markdown'
+  return (first.match(/,/g)?.length ?? 0) >= 2 ? 'csv' : 'markdown'
+}
+
 /** Trim & validate an app URL — only http(s) is allowed. '' (or invalid) → null. */
 export function normalizeAppUrl(raw: string | undefined | null): string | null {
   const s = typeof raw === 'string' ? raw.trim() : ''
@@ -224,7 +260,12 @@ IMPORTANT — time-box the reading HARD, then write. You are on a wall-clock bud
 - First output the SAME header row as the template's first line — identical column names, in the same order. Do not add or remove columns.
 - Each test case is one CSV row with a value (or an intentionally blank value) for every column, in the template's column order.
 - Reproduce the template's conventions precisely: its ID format (sequential, e.g. No-01, No-02, …), its phrasing (Summary lines start with "Verify …"), and which columns it leaves BLANK. Columns filled in only during execution — Actual result, Status, Reference, Note (and any others the template leaves empty) — must be left empty.
-- CSV quoting: wrap any field containing a comma, double-quote, or line break in double quotes, and escape embedded double-quotes by doubling them ("").
+- CSV INTEGRITY — THE #1 FAILURE, get this exactly right or the whole row is corrupted:
+  - Every data row MUST have EXACTLY the same number of fields (commas) as the header — never more, never fewer. One stray or missing comma shifts every following value into the wrong column (e.g. the ticket's Steps landing in "Reference", the Expected result in "Note").
+  - ANY field whose text contains a comma, a double-quote, or a newline MUST be wrapped in double quotes — and this includes SHORT, single-line fields like Summary, not only the long multi-line ones. Example: a Summary such as \`Verify header shows badge, title, and body\` contains commas, so it MUST be written quoted: "Verify header shows badge, title, and body". Forgetting this is exactly what breaks a row.
+  - SAFEST RULE — ALWAYS wrap the free-text columns (Summary, Pre-condition, Steps, Expected result, Note) in double quotes, even when a value has no comma. Quoting a field that didn't need it is harmless; failing to quote one that did corrupts the row. Do this every time and column-shift can't happen.
+  - Escape a double-quote that appears INSIDE a quoted field by doubling it ("").
+  - Self-check before finishing: for each row, confirm it has the right number of columns and that Pre-condition / Steps / Expected result actually sit in those columns — NOT shifted right into Actual result / Priority / Status / Reference / Note (which stay blank).
 - Multi-line fields (Pre-condition, Steps, Expected result) use REAL newlines inside the quoted field, with numbered items (1., 2., …) and lettered sub-items (a., b., …), mirroring the style of the template's sample rows.
 - Use angle-bracket placeholders for variable test data exactly like the template (e.g. <Patient Name data>, <Clinician account data>).
 - The template's rows are only a FORMAT SAMPLE — drive the number and content of the test cases from THIS ticket's scope, not from how many rows the template happens to contain.`
@@ -254,13 +295,36 @@ Use your browser/Playwright tool to OPEN this URL and explore the actual running
 - If the URL cannot be opened, fall back to writing cases from the ticket alone and note that the live app could not be reached.\n`
     : ''
 
+  // Keep the generated steps/expected-results terse and action-focused, matching the
+  // template's sample rows — the model tends to pad them with justifications ("because…",
+  // "per AC…") and restated ticket prose, which makes the cases hard to execute.
+  const styleBlock = `Writing style — CONCISE and to the point (match the brevity of the template's sample rows; do NOT pad):
+- Each step is ONE short, imperative action, verb first: e.g. "Click 'Send OTP'", "Enter <Email data>", "Observe UI". One action per numbered line — do not merge several actions into one line.
+- Do NOT explain WHY, restate the ticket, quote acceptance-criteria text, or add commentary inside steps or expected results ("because…", "per AC…", "this verifies…", "as expected because…"). Keep only what a tester needs to DO and to CHECK.
+- Expected result: state the observable outcome briefly and tie it to the step it applies to ("At step 3, the 'Appointment Management' screen is shown"). No long prose paragraphs, no rationale.
+- Use the exact UI labels / field names instead of describing them; trim filler words. If a step or expected line runs long, split or shorten it.`
+
+  // Hard scope boundary — this run may auto-load the machine's global/user-level
+  // config (e.g. ~/.claude/CLAUDE.md) and, with file tools, could reach sibling
+  // project folders. Everything the model grounds cases in must come from THIS
+  // project only, never from global config or another project.
+  const scopeBlock = `SCOPE — stay strictly inside THIS project ("${projectName}"). Ground the cases ONLY in:
+- the PROJECT KNOWLEDGE & MEMORY block provided below (this project's testing/knowledge + testing/memory),
+- this project's own CLAUDE.md, and
+- the source code inside THIS project's working directory (the repo(s) named above).
+Do NOT read, import, or rely on anything outside this project: no global or user-level configuration (e.g. a home-directory ~/.claude or a global CLAUDE.md), no other project's folder, knowledge, memory, or source code, and no files outside this working directory. If any global or user-level instruction conflicts with this project's own context, this project's context wins — ignore the global one for this task. If you notice global/other-project guidance, treat it as irrelevant, not as scope.`
+
   return `You are a senior QC engineer writing manual acceptance test cases for the project "${projectName}".
 
 Below is a ClickUp ticket (its details and comments). Read it and produce a thorough, executable set of test cases a QC engineer can run to verify this ticket is correctly implemented.
 
+${scopeBlock}
+
 ${sourceBlock}
 
 ${formatBlock}
+
+${styleBlock}
 ${appBlock}${instructionBlock}${knowledge}
 Coverage — be EXHAUSTIVE, not representative:
 - Silently (do NOT write this out) take stock of every distinct area this ticket spans: each feature/module it touches, each trigger or event it describes, each screen/view, and each user role/permission. A ticket that touches N modules or N triggers needs cases for ALL of them.
@@ -272,7 +336,7 @@ Coverage — be EXHAUSTIVE, not representative:
 Rules:
 - Ground every case in what you actually saw — the ticket plus the real SOURCE CODE you read (real names, validation, states, branches). Use the ticket for scope and intent; use the code for the concrete details. Do not invent unrelated features or acceptance criteria that neither the ticket nor the code supports.
 - When PROJECT KNOWLEDGE & MEMORY is provided, use it for this project's real screen/field/button names, roles, terminology, and business rules instead of guessing — but it is background context, NOT scope: only add a case for something it mentions if THIS ticket requires it.
-- Be specific and executable — real steps and expected results, never placeholders like "TBD".
+- Be specific and executable, but CONCISE — real steps and expected results, never placeholders like "TBD", and never padded with rationale (see Writing style above).
 - ${outputRule}
 
 --- TICKET START ---
@@ -459,12 +523,24 @@ export async function generateTestcaseVersion(opts: {
   if (result.isError || !testcases) {
     throw statusError('Claude did not return any test cases.', 502)
   }
+  // Store & render by what the model ACTUALLY produced, not just what the template
+  // implied. The model sometimes emits the other format (e.g. a CSV table when we asked
+  // for Markdown); trusting the template there would save CSV as a .md file, and the
+  // preview would then render it as one collapsed run-on paragraph. Fall back to the
+  // intended format only if the output is empty/ambiguous.
+  const outFormat = sniffOutputFormat(testcases) || format
+  if (outFormat !== format) {
+    onLog({
+      level: 'info',
+      text: `Output looks like ${outFormat.toUpperCase()} (template implied ${format.toUpperCase()}) — saving & rendering as ${outFormat.toUpperCase()}.`,
+    })
+  }
   // Defensively strip a stray ```csv / ``` fence AND any prose preamble the model may
   // emit before the header despite the rule, so the file starts with the real header row.
-  if (format === 'csv') testcases = extractCsv(testcases, template)
+  if (outFormat === 'csv') testcases = extractCsv(testcases, template)
 
   // Save as the next version under <dir>/testcases/v<N>.<md|csv>.
-  const ext = format === 'csv' ? 'csv' : 'md'
+  const ext = outFormat === 'csv' ? 'csv' : 'md'
   const existing = listTestcaseVersions(dir)
   const nextVersion = existing.length ? Math.max(...existing.map((v) => v.version)) + 1 : 1
   const rel = path.join('testcases', `v${nextVersion}.${ext}`)
@@ -487,7 +563,7 @@ export async function generateTestcaseVersion(opts: {
         projectName: opts.projectName,
         ticketContent,
         output: testcases,
-        format,
+        format: outFormat,
         model: opts.groundingCheckModel,
         // Same context the cases were written against, so a case grounded in
         // project knowledge (not the ticket) isn't flagged as invented.
@@ -513,12 +589,25 @@ export async function generateTestcaseVersion(opts: {
     }
   }
 
+  // Final integrity check (CSV only): flag any row whose columns are shifted by an
+  // unquoted comma so the engineer can fix/regenerate instead of trusting a corrupt row.
+  if (outFormat === 'csv') {
+    const overflow = findOverflowCsvRows(testcases)
+    if (overflow.length) {
+      const ids = overflow.map((o) => o.id).join(', ')
+      onLog({
+        level: 'error',
+        text: `⚠ ${overflow.length} row(s) have shifted columns from an unquoted comma and may show wrong values in Actual result / Priority / Status / Reference / Note: ${ids}. Regenerate, or fix these rows by wrapping their comma-containing fields in double quotes.`,
+      })
+    }
+  }
+
   return {
     testcases,
     savedTo: path.join(path.relative(opts.rootPath, dir), rel),
     version: nextVersion,
     usedTemplate: !!template,
-    format,
+    format: outFormat,
   }
 }
 

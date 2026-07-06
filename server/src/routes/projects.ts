@@ -156,15 +156,14 @@ function initializeProjectFolder(project: Project): { created: string[]; templat
   const template = findTemplateProject(project.id)
   const created: string[] = []
 
-  // 1. CLAUDE.md
+  // 1. CLAUDE.md — always start from the blank fill-in-the-blanks scaffold, never
+  // clone another project's CLAUDE.md. That file holds project-specific guidance
+  // (screens, URLs, conventions) that must NOT leak into an unrelated new project;
+  // the engineer fills it in on /instructions. (The skill, .mcp.json, and testcase
+  // template below are generic setup, so those still clone from a template project.)
   const targetClaudeMd = path.join(root, 'CLAUDE.md')
   if (!fs.existsSync(targetClaudeMd)) {
-    const tpl = template && path.join(template.rootPath, 'CLAUDE.md')
-    if (tpl && fs.existsSync(tpl)) {
-      fs.copyFileSync(tpl, targetClaudeMd)
-    } else {
-      fs.writeFileSync(targetClaudeMd, starterClaudeMd(project.name))
-    }
+    fs.writeFileSync(targetClaudeMd, starterClaudeMd(project.name))
     created.push('CLAUDE.md')
   }
 
@@ -191,15 +190,13 @@ function initializeProjectFolder(project: Project): { created: string[]; templat
     }
   }
 
-  // 3. .mcp.json
+  // 3. .mcp.json — always start EMPTY, never clone another project's MCP servers.
+  // MCP config is per-project (and can carry machine/project-specific args), so a new
+  // project should not silently inherit the previous project's servers; the engineer
+  // adds them on /mcp. (Mirrors the CLAUDE.md decision above.)
   const targetMcp = mcpJsonFor(root)
   if (!fs.existsSync(targetMcp)) {
-    const tpl = template ? mcpJsonFor(template.rootPath) : null
-    if (tpl && fs.existsSync(tpl)) {
-      fs.copyFileSync(tpl, targetMcp)
-    } else {
-      fs.writeFileSync(targetMcp, `${JSON.stringify({ mcpServers: {} }, null, 2)}\n`)
-    }
+    fs.writeFileSync(targetMcp, `${JSON.stringify({ mcpServers: {} }, null, 2)}\n`)
     created.push('.mcp.json')
   }
 

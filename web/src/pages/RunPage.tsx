@@ -125,6 +125,9 @@ function loadRunModel(): string {
 // Simple = one ticket, one run (the original flow). Advanced = pick several
 // related tickets + define an ordered feature workflow, all driven as one run.
 type RunMode = 'simple' | 'advanced'
+// Feature (advanced) mode is temporarily disabled — shown as "Coming soon" and not
+// selectable. Flip to true to bring it back; the advanced-mode code below is intact.
+const ADVANCED_ENABLED = false
 const RUN_MODE_KEY = 'qc.runMode'
 const MAX_FEATURE_TICKETS = 5
 
@@ -439,8 +442,11 @@ export default function RunPage() {
   // The Single/Feature tab lives in the URL (?mode=simple|advanced) so it's
   // shareable/bookmarkable and survives reload; localStorage is the fallback default.
   const modeParam = searchParams.get('mode')
-  const mode: RunMode =
+  const requestedMode: RunMode =
     modeParam === 'advanced' ? 'advanced' : modeParam === 'simple' ? 'simple' : loadRunMode()
+  // Force simple while Feature (advanced) is disabled, even if a stale URL/localStorage
+  // value asks for advanced.
+  const mode: RunMode = ADVANCED_ENABLED ? requestedMode : 'simple'
   const [showOptions, setShowOptions] = useState(false)
   const [featureTickets, setFeatureTickets] = useState<string[]>([])
   const [workflowSteps, setWorkflowSteps] = useState<string[]>([''])
@@ -761,8 +767,13 @@ export default function RunPage() {
               <div className="inline-flex w-full rounded-full border border-border/60 bg-muted/60 p-1 sm:w-auto">
                 {(
                   [
-                    { value: 'simple' as const, label: 'Single ticket', icon: Sparkles },
-                    { value: 'advanced' as const, label: 'Feature (advanced)', icon: Workflow },
+                    { value: 'simple' as const, label: 'Single ticket', icon: Sparkles, disabled: false },
+                    {
+                      value: 'advanced' as const,
+                      label: 'Feature (advanced)',
+                      icon: Workflow,
+                      disabled: !ADVANCED_ENABLED,
+                    },
                   ]
                 ).map((opt) => {
                   const Icon = opt.icon
@@ -771,17 +782,26 @@ export default function RunPage() {
                     <button
                       key={opt.value}
                       type="button"
-                      onClick={() => chooseMode(opt.value)}
+                      onClick={() => !opt.disabled && chooseMode(opt.value)}
                       aria-pressed={active}
+                      disabled={opt.disabled}
+                      title={opt.disabled ? 'Coming soon' : undefined}
                       className={cn(
                         'inline-flex flex-1 items-center justify-center gap-1.5 rounded-full px-3 py-1.5 text-sm font-medium transition-all sm:flex-none',
-                        active
-                          ? 'bg-background text-foreground shadow-sm'
-                          : 'text-muted-foreground hover:text-foreground',
+                        opt.disabled
+                          ? 'cursor-not-allowed text-muted-foreground/50'
+                          : active
+                            ? 'bg-background text-foreground shadow-sm'
+                            : 'text-muted-foreground hover:text-foreground',
                       )}
                     >
                       <Icon className="size-3.5" />
                       {opt.label}
+                      {opt.disabled && (
+                        <span className="rounded-full bg-muted px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-muted-foreground">
+                          Soon
+                        </span>
+                      )}
                     </button>
                   )
                 })}

@@ -146,6 +146,14 @@ export function runQc(
     if (isQc) {
       lines.push(
         ``,
+        `SCOPE — stay strictly inside THIS project (the current working directory). Use ONLY this ` +
+          `project's own context to test and judge: its CLAUDE.md, its testing/knowledge/*.md and ` +
+          `testing/memory/*.md, and its own source code in this working directory. Do NOT read, import, ` +
+          `or rely on anything outside it — no global or user-level configuration (e.g. a home-directory ` +
+          `~/.claude or a global CLAUDE.md), no other project's folder, knowledge, memory, or source, and ` +
+          `no files outside this working directory. If any global or user-level instruction conflicts with ` +
+          `this project's context, this project wins — ignore the global one for this run.`,
+        ``,
         `Before testing, read this project's standing context if present and apply it ` +
           `throughout the run (real screen/field names, roles, business rules, known gotchas): ` +
           `durable facts in testing/memory/*.md (indexed by testing/memory/MEMORY.md) and ` +

@@ -3,6 +3,49 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.9.6 — 2026-07-06
+
+**Cleaner test-case & report formatting, project-scoped AI, and new projects that don't inherit another project's settings**
+
+### Added
+
+- **Test cases stay strictly on-project.** Test-case generation and QC runs are now told, in the
+  prompt itself, to use only *this* project's context — its Knowledge, Memory, CLAUDE.md, and
+  source code — and to ignore anything global (your machine-wide `~/.claude`) or belonging to
+  another project. So one project's rules can't leak into another's cases or verdicts.
+
+### Changed
+
+- **Test-case steps are shorter and to the point.** The generator now writes terse, action-first
+  steps and expected results that mirror your test-case template, instead of padding them with
+  explanations ("because…", "per AC…"). Regenerate a ticket to get the tighter style.
+- **Feature (advanced) run mode is marked "Coming soon."** On the Run page the advanced
+  multi-ticket mode is temporarily disabled (shown with a "Soon" badge); single-ticket runs are
+  unaffected.
+- **Design Check moved below History** in the sidebar's Testing group.
+- **New projects no longer inherit another project's CLAUDE.md or MCP servers.** A new project
+  starts with a fresh fill-in-the-blanks `CLAUDE.md` and an empty `.mcp.json`, so you don't carry
+  over an unrelated project's instructions or MCP configuration. (The QC skill and the test-case
+  template — which are generic — still seed automatically.)
+
+### Fixed
+
+- **Test-case previews render as real tables again.** The `/templates` and `/testcases` previews
+  now show Markdown (and CSV-in-Markdown) content as a formatted table instead of a wall of raw
+  text, and the table keeps its **header row and first ("No") column pinned** while you scroll.
+- **Generated CSV test cases keep their columns aligned.** Hardened the CSV rules so a comma inside
+  a field (e.g. a Summary) can no longer shift every later value into the wrong column, added a
+  check that flags any row that still slips, and made a version save/render in the format it was
+  actually written in (so a CSV never renders as a collapsed run-on paragraph).
+- **Run report tables auto-size their columns.** Report/issue tables on the Run page now size each
+  column to its content (short columns stay narrow, long text wraps) and scroll horizontally when
+  wide, instead of cramming everything into fixed-width columns.
+- **Report & issue line breaks are preserved.** Each labeled field (Steps / Expected / Actual /
+  Business impact) now renders on its own line instead of running together into one paragraph.
+- **ClickUp subtasks created from QC issues are formatted properly.** The subtask description is now
+  sent as rich Markdown (bold labels, numbered steps) with proper spacing between sections, instead
+  of showing raw `**asterisks**` all on one line.
+
 ## 0.9.5 — 2026-07-02
 
 **AI Brain visualization, correct pass rates on run reports, and a starter test-case template for new projects**

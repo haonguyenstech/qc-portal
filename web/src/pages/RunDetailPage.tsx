@@ -1,9 +1,16 @@
-import { Children, cloneElement, isValidElement, useMemo, useState } from 'react'
+import { cloneElement, isValidElement, useMemo, useState } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
-import Markdown from 'react-markdown'
+import Markdown, { type Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import remarkBreaks from 'remark-breaks'
+
+// The qc-testing skill writes report/issues with a single newline between labeled
+// fields (AC / Steps / Expected / Actual / Business impact). Plain Markdown collapses
+// those into one run-on paragraph, so remark-breaks turns each soft newline into a
+// real line break — keeping each field on its own line. (Tables/lists are unaffected.)
+const REMARK_PLUGINS = [remarkGfm, remarkBreaks]
 import {
   AlertCircle,
   ArrowUpRight,
@@ -68,14 +75,16 @@ const prose =
   '[&_pre_code]:bg-transparent [&_pre_code]:p-0 [&_pre_code]:text-zinc-100 ' +
   '[&_blockquote]:my-4 [&_blockquote]:border-l-2 [&_blockquote]:border-primary/40 [&_blockquote]:pl-4 [&_blockquote]:text-muted-foreground [&_blockquote]:italic ' +
   '[&_hr]:my-6 [&_hr]:border-border ' +
-  '[&_table]:my-5 [&_table]:block [&_table]:w-full [&_table]:overflow-x-auto [&_table]:border-separate [&_table]:border-spacing-0 [&_table]:text-sm ' +
+  // Table display + width are handled by the `table` component (a wrapper div with
+  // overflow-x-auto + a real display:table that sizes columns to content), so here we
+  // only style borders/spacing — NOT `block`/`w-full`, which would break auto column sizing.
+  '[&_table]:my-5 [&_table]:border-separate [&_table]:border-spacing-0 [&_table]:text-sm ' +
   '[&_thead_tr]:bg-muted/70 [&_th]:border-y [&_th]:border-r [&_th]:border-border [&_th]:px-3 [&_th]:py-2.5 [&_th]:text-left [&_th]:text-xs [&_th]:font-semibold [&_th]:uppercase [&_th]:tracking-wide [&_th]:text-muted-foreground [&_th]:whitespace-nowrap first:[&_th]:rounded-l-lg first:[&_th]:border-l last:[&_th]:rounded-r-lg ' +
-  '[&_td]:border-b [&_td]:border-r [&_td]:px-3 [&_td]:py-2.5 [&_td]:align-top first:[&_td]:border-l [&_tbody_tr:hover]:bg-muted/30 ' +
-  // Fix the first column (the test-case number / ID) to a set width so it neither
-  // wraps to one char per line nor balloons to fit long content — wraps within 7rem.
-  '[&_th:first-child]:w-28 [&_th:first-child]:min-w-28 [&_th:first-child]:max-w-28 ' +
-  '[&_td:first-child]:w-28 [&_td:first-child]:min-w-28 [&_td:first-child]:max-w-28 ' +
-  '[&_td:first-child]:whitespace-normal [&_td:first-child]:break-words [&_td:first-child]:font-medium'
+  // Columns size to their content. A max-width cap lets short columns (No, Priority,
+  // Status) stay narrow while long free-text (Steps, Result) wraps instead of ballooning
+  // the whole table. align-top + break-words keep multi-line cells readable.
+  '[&_td]:max-w-[28rem] [&_td]:whitespace-normal [&_td]:break-words [&_td]:border-b [&_td]:border-r [&_td]:px-3 [&_td]:py-2.5 [&_td]:align-top first:[&_td]:border-l [&_tbody_tr:hover]:bg-muted/30 ' +
+  '[&_td:first-child]:font-medium'
 
 function MarkdownView({ md, empty, icon }: { md: string | null; empty: string; icon: React.ReactNode }) {
   if (!md) {
@@ -90,7 +99,9 @@ function MarkdownView({ md, empty, icon }: { md: string | null; empty: string; i
   }
   return (
     <div className={prose}>
-      <Markdown remarkPlugins={[remarkGfm]}>{md}</Markdown>
+      <Markdown remarkPlugins={REMARK_PLUGINS} components={mdTableComponents}>
+        {md}
+      </Markdown>
     </div>
   )
 }
@@ -165,69 +176,19 @@ function linkifyEvidence(
   return node
 }
 
-// Flatten any markdown-rendered node down to its plain text (for reading headers).
-function nodeText(node: React.ReactNode): string {
-  if (node == null || typeof node === 'boolean') return ''
-  if (typeof node === 'string' || typeof node === 'number') return String(node)
-  if (Array.isArray(node)) return node.map(nodeText).join('')
-  if (isValidElement(node)) {
-    return nodeText((node.props as { children?: React.ReactNode }).children)
-  }
-  return ''
-}
-
-// The header labels we pin to a fixed width (the long free-text "Case" / "Result"
-// columns that otherwise stretch the table). Each maps to its own width class.
-const FIXED_WIDTH_HEADERS: Record<string, string> = {
-  case: 'w-80 min-w-80 max-w-80',
-  result: 'w-72 min-w-72 max-w-72',
-}
-const FIXED_WIDTH_CELL = 'whitespace-normal break-words'
-
-// Read the <thead> row's labels so we can find which column index is "Case".
-function headerLabels(children: React.ReactNode): string[] {
-  let labels: string[] = []
-  Children.forEach(children, (section) => {
-    if (!isValidElement(section) || section.type !== 'thead') return
-    const thead = section as React.ReactElement<{ children?: React.ReactNode }>
-    Children.forEach(thead.props.children, (row) => {
-      if (labels.length || !isValidElement(row)) return
-      const tr = row as React.ReactElement<{ children?: React.ReactNode }>
-      const cells: string[] = []
-      Children.forEach(tr.props.children, (cell) => {
-        if (isValidElement(cell)) cells.push(nodeText(cell).trim().toLowerCase())
-      })
-      labels = cells
-    })
-  })
-  return labels
-}
-
-// Clone the table, stamping each target column's fixed-width class onto its cells.
-function withFixedColumns(
-  children: React.ReactNode,
-  targets: Map<number, string>,
-): React.ReactNode {
-  if (targets.size === 0) return children
-  return Children.map(children, (section) => {
-    if (!isValidElement(section)) return section
-    const sec = section as React.ReactElement<{ children?: React.ReactNode }>
-    const rows = Children.map(sec.props.children, (row) => {
-      if (!isValidElement(row)) return row
-      const tr = row as React.ReactElement<{ children?: React.ReactNode }>
-      let col = -1
-      const cells = Children.map(tr.props.children, (cell) => {
-        if (!isValidElement(cell)) return cell
-        col += 1
-        const widthClass = targets.get(col)
-        if (!widthClass) return cell
-        const c = cell as React.ReactElement<{ className?: string }>
-        return cloneElement(c, { className: cn(c.props.className, widthClass, FIXED_WIDTH_CELL) })
-      })
-      return cloneElement(tr, { children: cells })
-    })
-    return cloneElement(sec, { children: rows })
-  })
+// Wrap every markdown table in a horizontal-scroll container and render a real
+// display:table that AUTO-SIZES its columns to content (w-max), with a full-width
+// floor (min-w-full) so a small table still fills the row and a wide one scrolls
+// instead of cramming its columns. The per-cell max-width in `prose` keeps a long
+// free-text column from ballooning. Shared by every Markdown renderer on this page.
+const mdTableComponents: Components = {
+  table: ({ children, className, ...props }) => (
+    <div className="my-5 w-full overflow-x-auto">
+      <table {...props} className={cn(className, '!my-0 w-max min-w-full')}>
+        {children}
+      </table>
+    </div>
+  ),
 }
 
 function EvidenceReport({
@@ -264,33 +225,12 @@ function EvidenceReport({
     <>
       <div className={prose}>
         <Markdown
-          remarkPlugins={[remarkGfm]}
+          remarkPlugins={REMARK_PLUGINS}
           components={{
+            ...mdTableComponents,
             td: ({ children, ...props }) => (
               <td {...props}>{linkifyEvidence(children, byName, setActive)}</td>
             ),
-            table: ({ children, className, ...props }) => {
-              // Pin the long free-text "Case"/"Result" columns to fixed widths, leaving
-              // other tables (summary / AC) untouched since they lack those headers.
-              const targets = new Map<number, string>()
-              headerLabels(children).forEach((label, i) => {
-                const widthClass = FIXED_WIDTH_HEADERS[label]
-                if (widthClass) targets.set(i, widthClass)
-              })
-              // Wrap in a scroll container and let the table grow to its content
-              // (w-max) with a full-width floor (min-w-full): it fills the row when it
-              // fits and scrolls horizontally when the fixed columns make it wider.
-              return (
-                <div className="my-5 w-full overflow-x-auto">
-                  <table
-                    {...props}
-                    className={cn(className, '!my-0 !table !w-max !min-w-full !overflow-visible')}
-                  >
-                    {withFixedColumns(children, targets)}
-                  </table>
-                </div>
-              )
-            },
           }}
         >
           {md}
@@ -925,7 +865,9 @@ function FilePreview({ projectId, slug, file }: { projectId: string; slug: strin
   if (file.kind === 'markdown') {
     return (
       <div className={prose}>
-        <Markdown remarkPlugins={[remarkGfm]}>{data ?? ''}</Markdown>
+        <Markdown remarkPlugins={REMARK_PLUGINS} components={mdTableComponents}>
+          {data ?? ''}
+        </Markdown>
       </div>
     )
   }

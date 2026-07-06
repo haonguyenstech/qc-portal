@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
-import ReactMarkdown from 'react-markdown'
+import ReactMarkdown, { type Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {
   Check,
@@ -202,9 +202,31 @@ const MD_CLASS = cn(
   '[&_code]:rounded [&_code]:bg-muted [&_code]:px-1.5 [&_code]:py-0.5 [&_code]:font-mono [&_code]:text-xs',
   '[&_pre]:my-3 [&_pre]:overflow-x-auto [&_pre]:rounded-lg [&_pre]:border [&_pre]:bg-zinc-950 [&_pre]:p-4 [&_pre]:text-xs [&_pre>code]:bg-transparent [&_pre>code]:p-0 [&_pre>code]:text-zinc-100',
   '[&_blockquote]:border-l-2 [&_blockquote]:border-primary/40 [&_blockquote]:pl-3 [&_blockquote]:text-muted-foreground [&_blockquote]:italic',
-  '[&_table]:my-3 [&_table]:w-full [&_table]:text-left [&_th]:border [&_th]:bg-muted/50 [&_th]:px-2 [&_th]:py-1 [&_th]:text-xs [&_th]:font-semibold [&_td]:border [&_td]:px-2 [&_td]:py-1 [&_td]:text-xs [&_td]:align-top',
   '[&_hr]:my-5 [&_hr]:border-border',
+  // Table styling lives on MD_TABLE_WRAP below (per-table scroll container) so a
+  // markdown test-case table pins its header row + first column like the CSV view.
 )
+
+// Each markdown table is wrapped in its own scroll box: header row pinned on vertical
+// scroll, first ("No") column pinned on horizontal scroll — matching the CSV preview.
+const MD_TABLE_WRAP = cn(
+  'my-3 max-h-[70vh] overflow-auto rounded-2xl border border-border/60',
+  '[&_th]:sticky [&_th]:top-0 [&_th]:z-20 [&_th]:whitespace-nowrap [&_th]:border [&_th]:bg-muted [&_th]:px-2.5 [&_th]:py-1.5 [&_th]:text-left [&_th]:text-xs [&_th]:font-semibold',
+  '[&_th:first-child]:left-0 [&_th:first-child]:z-30',
+  '[&_td]:border [&_td]:px-2.5 [&_td]:py-1.5 [&_td]:align-top [&_td]:text-xs',
+  '[&_tbody_td:first-child]:sticky [&_tbody_td:first-child]:left-0 [&_tbody_td:first-child]:z-10 [&_tbody_td:first-child]:bg-muted [&_tbody_td:first-child]:font-medium [&_tbody_td:first-child]:text-foreground',
+)
+
+/** react-markdown renderers: wrap every table so it scrolls with a sticky header + first column. */
+const MD_COMPONENTS: Components = {
+  table({ node: _node, className: _className, ...props }) {
+    return (
+      <div className={MD_TABLE_WRAP}>
+        <table {...props} className="w-max min-w-full border-collapse text-left text-xs" />
+      </div>
+    )
+  },
+}
 
 /** Parse RFC-4180-ish CSV into rows of cells (handles quotes, "" escapes, multi-line cells). */
 function parseCsv(text: string): string[][] {
@@ -282,16 +304,21 @@ function CsvTable({
   const idx = Array.from({ length: cols }, (_, i) => i)
   const interactive = !!onCellClick
   return (
-    // w-max lets the table grow past the dialog width so overflow-x-auto gives a
-    // real horizontal scrollbar; min-w-full keeps it filling narrow tables.
-    <div className="overflow-x-auto rounded-2xl border border-border/60">
+    // w-max lets the table grow past the container so overflow-auto gives a real
+    // horizontal scrollbar; min-w-full keeps it filling narrow tables. max-h caps the
+    // body so the sticky header row has room to pin against on vertical scroll.
+    <div className="max-h-[70vh] overflow-auto rounded-2xl border border-border/60">
       <table className="w-max min-w-full border-collapse text-xs">
         <thead>
           <tr>
             {idx.map((i) => (
               <th
                 key={i}
-                className="sticky top-0 z-10 min-w-[12rem] whitespace-nowrap border bg-muted/70 px-3 py-2 text-left font-semibold"
+                className={cn(
+                  'sticky top-0 min-w-[12rem] whitespace-nowrap border bg-muted px-3 py-2 text-left font-semibold',
+                  // first column stays pinned on horizontal scroll; corner sits above both.
+                  i === 0 ? 'left-0 z-30' : 'z-20',
+                )}
               >
                 {head[i] ?? ''}
               </th>
@@ -323,7 +350,11 @@ function CsvTable({
                       title={interactive ? 'Click to refine this cell with AI' : undefined}
                       className={cn(
                         'min-w-[12rem] max-w-[34rem] whitespace-pre-wrap break-words border px-3 py-2 align-top text-muted-foreground',
+                        // Pinned first column: solid bg so other columns can't bleed
+                        // through it while scrolling horizontally.
+                        ci === 0 && 'sticky left-0 z-10 bg-muted font-medium text-foreground',
                         interactive && 'cursor-pointer transition-colors hover:bg-primary/5',
+                        // Selection styling wins over the pinned-column bg.
                         isSel && 'bg-primary/10 text-foreground ring-2 ring-inset ring-primary',
                       )}
                     >
@@ -966,9 +997,17 @@ function TestCasePreviewDialog({
                   }
                 />
               </div>
+            ) : looksLikeCsv('x.md', data.testcases) ? (
+              // Safety net: the version is stored as Markdown but its content is really
+              // CSV (an older file, or a model that emitted the other format). Render it
+              // as a read-only table instead of a collapsed run-on markdown paragraph.
+              // Non-interactive — cell refine needs a real .csv version on disk.
+              <CsvTable csv={data.testcases} />
             ) : (
               <div className={MD_CLASS}>
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>{data.testcases}</ReactMarkdown>
+                <ReactMarkdown remarkPlugins={[remarkGfm]} components={MD_COMPONENTS}>
+                  {data.testcases}
+                </ReactMarkdown>
               </div>
             )
           ) : (

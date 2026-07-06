@@ -2,6 +2,8 @@
 // variant (click-to-refine cells); this one is for plain "show me the file"
 // previews (templates, checklists). Fold VerifyDesignPage's copy in when touched.
 
+import { cn } from '@/lib/utils'
+
 /** Parse RFC-4180-ish CSV into rows of cells (handles quotes, "" escapes, multi-line cells). */
 export function parseCsv(text: string): string[][] {
   const s = text.replace(/\r\n?/g, '\n')
@@ -65,17 +67,26 @@ export function CsvTable({ csv }: { csv: string }) {
   }
   const [head, ...body] = rows
   const idx = Array.from({ length: cols }, (_, i) => i)
+  // First column stays pinned on horizontal scroll (usually the "No" column), header
+  // row stays pinned on vertical scroll. The scroll container caps its own height so
+  // there's actually something to scroll the header against. Sticky cells need an
+  // opaque background or the scrolled content shows through them.
   return (
-    // w-max lets the table grow past the dialog width so overflow-x-auto gives a
-    // real horizontal scrollbar; min-w-full keeps it filling narrow tables.
-    <div className="overflow-x-auto rounded-2xl border border-border/60">
+    // w-max lets the table grow past the dialog width so overflow-auto gives a real
+    // horizontal scrollbar; min-w-full keeps it filling narrow tables. max-h caps the
+    // body so the sticky header has room to pin.
+    <div className="max-h-[75vh] overflow-auto rounded-2xl border border-border/60">
       <table className="w-max min-w-full border-collapse text-xs">
         <thead>
           <tr>
             {idx.map((i) => (
               <th
                 key={i}
-                className="sticky top-0 z-10 min-w-[12rem] whitespace-nowrap border bg-muted/70 px-3 py-2 text-left font-semibold"
+                className={cn(
+                  'sticky top-0 min-w-[12rem] whitespace-nowrap border bg-muted px-3 py-2 text-left font-semibold',
+                  // top-left corner must sit above both the sticky row and sticky column.
+                  i === 0 ? 'left-0 z-30' : 'z-20',
+                )}
               >
                 {head[i] ?? ''}
               </th>
@@ -88,7 +99,13 @@ export function CsvTable({ csv }: { csv: string }) {
               {idx.map((ci) => (
                 <td
                   key={ci}
-                  className="min-w-[12rem] max-w-[34rem] whitespace-pre-wrap break-words border px-3 py-2 align-top text-muted-foreground"
+                  className={cn(
+                    'min-w-[12rem] max-w-[34rem] whitespace-pre-wrap break-words border px-3 py-2 align-top text-muted-foreground',
+                    // Pinned first column: a solid (opaque) shaded background so other
+                    // columns can't bleed through it while scrolling horizontally. Reads
+                    // as a deliberate index column rather than following the zebra stripe.
+                    ci === 0 && 'sticky left-0 z-10 bg-muted font-medium text-foreground',
+                  )}
                 >
                   {r[ci] ?? ''}
                 </td>

@@ -121,10 +121,10 @@ const navGroups: { label: string; items: NavItemDef[] }[] = [
     items: [
       { to: '/tickets', label: 'Tickets', icon: Ticket, end: false },
       { to: '/testcases', label: 'TestCase', icon: ClipboardList, end: false },
-      { to: '/verify', label: 'Design Check', icon: ScanSearch, end: false },
       { to: '/qc-run', label: 'Run', icon: PlayCircle, end: false },
       { to: '/running', label: 'Running', icon: RadioTower, end: false },
       { to: '/history', label: 'History', icon: History, end: false },
+      { to: '/verify', label: 'Design Check', icon: ScanSearch, end: false },
     ],
   },
   {

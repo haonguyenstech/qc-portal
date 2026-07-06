@@ -302,6 +302,31 @@ export function extractClickupTaskId(input: string): string {
   }
 }
 
+/**
+ * Prepare a QC issue body for ClickUp's markdown_content field. The qc-testing skill
+ * writes each field (**AC:**, **Steps to reproduce:**, **Expected:**, **Actual:**, …)
+ * on its own line separated by a SINGLE newline. CommonMark (which ClickUp uses) joins
+ * single-newline lines into one paragraph, so without this the fields render as one
+ * run-on block. We insert a blank line before each bold-label field and before a list
+ * that follows a paragraph, so each renders as its own separated block (bold heading +
+ * numbered/bulleted list), matching the readable layout the QC engineer expects.
+ */
+export function normalizeIssueMarkdown(md: string): string {
+  const lines = md.replace(/\r\n?/g, '\n').split('\n')
+  const isList = (l: string) => /^\s*(?:\d+[.)]|[-*+])\s+/.test(l)
+  const isBoldLabel = (l: string) => /^\s*\*\*.+?\*\*/.test(l)
+  const out: string[] = []
+  for (const line of lines) {
+    const prev = out.length ? out[out.length - 1] : ''
+    // A blank line is only needed when the previous emitted line has content.
+    if (line.trim() && prev.trim() && (isBoldLabel(line) || (isList(line) && !isList(prev)))) {
+      out.push('')
+    }
+    out.push(line)
+  }
+  return out.join('\n')
+}
+
 export async function createIssueSubtask(input: CreateSubtaskInput): Promise<CreatedClickupTask> {
   const parentId = extractClickupTaskId(input.parentTask)
   if (!parentId) {
@@ -316,9 +341,12 @@ export async function createIssueSubtask(input: CreateSubtaskInput): Promise<Cre
     throw Object.assign(new Error('Could not resolve the parent task list in ClickUp'), { status: 502 })
   }
 
+  // Send markdown_content (NOT description): ClickUp renders markdown_content as rich
+  // text (bold labels, numbered/bulleted lists) but shows description as literal plain
+  // text — which is why the raw `**...**` and run-on layout appeared before.
   const created = await cuPost(`/list/${encodeURIComponent(listId)}/task`, {
     name,
-    description: input.description.slice(0, 6000),
+    markdown_content: normalizeIssueMarkdown(input.description).slice(0, 6000),
     parent: parentId,
   })
 
