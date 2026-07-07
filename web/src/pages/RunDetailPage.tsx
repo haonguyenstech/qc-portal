@@ -1,5 +1,5 @@
-import { cloneElement, isValidElement, useMemo, useState } from 'react'
-import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
+import { cloneElement, isValidElement, useEffect, useMemo, useState } from 'react'
+import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import Markdown, { type Components } from 'react-markdown'
@@ -50,6 +50,7 @@ import {
   createClickupIssueSubtasks,
   deleteRun,
   getRun,
+  listCrawledTickets,
   listRunFiles,
   openRunFolder,
   runFileUrl,
@@ -85,6 +86,31 @@ const prose =
   // the whole table. align-top + break-words keep multi-line cells readable.
   '[&_td]:max-w-[28rem] [&_td]:whitespace-normal [&_td]:break-words [&_td]:border-b [&_td]:border-r [&_td]:px-3 [&_td]:py-2.5 [&_td]:align-top first:[&_td]:border-l [&_tbody_tr:hover]:bg-muted/30 ' +
   '[&_td:first-child]:font-medium'
+
+/**
+ * Remove the report's per-case "Test Result Details" section (a level-2 heading
+ * through to the next level-2 heading). We only do this when the executed
+ * test-case table is shown above the report, since that table already presents
+ * the same per-case pass/fail breakdown — the prose section would just duplicate it.
+ */
+function stripCaseDetailSection(md: string): string {
+  const lines = md.split('\n')
+  const isDetailHeading = (l: string) =>
+    /^##\s+/.test(l) &&
+    /(test\s+result\s+details|test\s+case\s+details|detailed\s+results|per[-\s]?case\s+results)/i.test(l)
+  const start = lines.findIndex(isDetailHeading)
+  if (start === -1) return md
+  let end = lines.length
+  for (let i = start + 1; i < lines.length; i++) {
+    // Stop at the next same-or-higher-level heading (## or #), not ### subsections.
+    if (/^#{1,2}\s+/.test(lines[i])) {
+      end = i
+      break
+    }
+  }
+  const out = [...lines.slice(0, start), ...lines.slice(end)]
+  return out.join('\n').replace(/\n{3,}/g, '\n\n').trim()
+}
 
 function MarkdownView({ md, empty, icon }: { md: string | null; empty: string; icon: React.ReactNode }) {
   if (!md) {
@@ -181,6 +207,21 @@ function linkifyEvidence(
 // floor (min-w-full) so a small table still fills the row and a wide one scrolls
 // instead of cramming its columns. The per-cell max-width in `prose` keeps a long
 // free-text column from ballooning. Shared by every Markdown renderer on this page.
+/** Flatten a React node tree to its plain text (for deriving heading anchors). */
+function nodeText(node: React.ReactNode): string {
+  if (node == null || typeof node === 'boolean') return ''
+  if (typeof node === 'string' || typeof node === 'number') return String(node)
+  if (Array.isArray(node)) return node.map(nodeText).join('')
+  if (isValidElement(node)) return nodeText((node.props as { children?: React.ReactNode }).children)
+  return ''
+}
+
+/** Anchor id for an issue heading — `## ISSUE-1 …` → `issue-1` — else undefined. */
+function issueHeadingId(children: React.ReactNode): string | undefined {
+  const m = nodeText(children).match(/\b((?:issue|bug|def|defect)-\d+)\b/i)
+  return m ? m[1].toLowerCase() : undefined
+}
+
 const mdTableComponents: Components = {
   table: ({ children, className, ...props }) => (
     <div className="my-5 w-full overflow-x-auto">
@@ -188,6 +229,18 @@ const mdTableComponents: Components = {
         {children}
       </table>
     </div>
+  ),
+  // Tag issue headings with a scroll anchor so a Reference chip can deep-link to
+  // one; scroll-mt keeps it clear of the sticky tab bar.
+  h2: ({ children, ...props }) => (
+    <h2 id={issueHeadingId(children)} className="scroll-mt-24" {...props}>
+      {children}
+    </h2>
+  ),
+  h3: ({ children, ...props }) => (
+    <h3 id={issueHeadingId(children)} className="scroll-mt-24" {...props}>
+      {children}
+    </h3>
   ),
 }
 
@@ -293,7 +346,9 @@ function formatDuration(start: string, end: string | null): string | null {
   return `${hrs}h ${mins % 60}m`
 }
 
-type OutcomeKey = 'passed' | 'failed' | 'partial' | 'blocked'
+// The project's status vocabulary (matches the executed test-case sheet):
+// Passed / Failed / Blocked / Cancelled / Untested. Order = display order.
+type OutcomeKey = 'passed' | 'failed' | 'blocked' | 'cancelled' | 'untested'
 
 type OutcomeDatum = {
   key: OutcomeKey
@@ -314,20 +369,66 @@ const outcomeConfig: Record<OutcomeKey, Omit<OutcomeDatum, 'key' | 'value'>> = {
     color: '#ef4444',
     tone: 'bg-red-50 text-red-700 ring-red-200',
   },
-  partial: {
-    label: 'Partial',
+  blocked: {
+    label: 'Blocked',
     color: '#f59e0b',
     tone: 'bg-amber-50 text-amber-700 ring-amber-200',
   },
-  blocked: {
-    label: 'Blocked',
+  cancelled: {
+    label: 'Cancelled',
     color: '#64748b',
     tone: 'bg-slate-100 text-slate-700 ring-slate-200',
   },
+  untested: {
+    label: 'Untested',
+    color: '#94a3b8',
+    tone: 'bg-muted text-muted-foreground ring-border',
+  },
 }
 
+const OUTCOME_ORDER: OutcomeKey[] = ['passed', 'failed', 'blocked', 'cancelled', 'untested']
+
 function emptyOutcomeCounts(): Record<OutcomeKey, number> {
-  return { passed: 0, failed: 0, partial: 0, blocked: 0 }
+  return { passed: 0, failed: 0, blocked: 0, cancelled: 0, untested: 0 }
+}
+
+/** Normalize any status label to one of the five defined buckets. */
+function statusBucket(raw: string): OutcomeKey | null {
+  const s = raw.trim().toLowerCase()
+  if (!s) return null
+  if (s.startsWith('pass')) return 'passed'
+  if (s.startsWith('fail')) return 'failed'
+  if (s.startsWith('block')) return 'blocked'
+  if (s.startsWith('cancel')) return 'cancelled'
+  if (s.startsWith('untest') || s.startsWith('not')) return 'untested'
+  if (s.startsWith('partial')) return 'failed' // no Partial in this workflow
+  return null
+}
+
+/** Shared view model — cards + segmented bar + pass rate — from a bucket count. */
+function buildOutcomeView(counts: Record<OutcomeKey, number>, unit: string) {
+  const data = OUTCOME_ORDER.map((key) => ({ key, value: counts[key], ...outcomeConfig[key] }))
+  const total = data.reduce((sum, item) => sum + item.value, 0)
+  // Pass rate is over the WHOLE suite (Passed / Total) — Blocked/Untested/
+  // Cancelled count against it, so the rate reflects how much of everything
+  // planned is actually confirmed passing, not just the executed subset.
+  const passRate = total > 0 ? Math.round((counts.passed / total) * 100) : null
+  const attention = counts.failed + counts.blocked
+  return { counts, data, total, passRate, attention, unit }
+}
+
+/** Count the executed test-case sheet's Status column into the five buckets. */
+function countExecutedOutcomes(text: string, isCsv: boolean) {
+  const rows = trimEmptyTrailingColumns(isCsv ? parseCsvClient(text) : parseMdTableClient(text))
+  if (rows.length < 2) return null
+  const statusIdx = rows[0].findIndex(isStatusHeaderCell)
+  if (statusIdx < 0) return null
+  const counts = emptyOutcomeCounts()
+  for (const r of rows.slice(1)) {
+    // A blank status means the case wasn't executed → Untested (the default).
+    counts[statusBucket((r[statusIdx] ?? '').trim()) ?? 'untested']++
+  }
+  return buildOutcomeView(counts, 'test cases')
 }
 
 function parseReportOutcomes(md: string | null, fallback: { passCount: number; failCount: number }) {
@@ -349,29 +450,23 @@ function parseReportOutcomes(md: string | null, fallback: { passCount: number; f
       const value = Number.parseInt(cells[1].replace(/[^\d]/g, ''), 10)
       if (!Number.isFinite(value)) continue
 
-      // Summary tables label rows "✅ Pass" or "Passed" depending on the report.
+      // Map the report's summary labels onto the defined buckets.
       if (label === 'pass' || label.includes('passed')) counts.passed = value
       else if (label === 'fail' || label.includes('failed')) counts.failed = value
-      else if (label.includes('partial')) counts.partial = value
+      else if (label.includes('partial')) counts.failed += value
       else if (label.includes('blocked')) counts.blocked = value
+      else if (label.includes('cancel')) counts.cancelled = value
+      else if (label.includes('nottested') || label.includes('untested') || label.includes('notrun'))
+        counts.untested = value
     }
   }
 
-  if (Object.values(counts).every((n) => n === 0)) {
+  if (OUTCOME_ORDER.every((k) => counts[k] === 0)) {
     counts.passed = fallback.passCount
     counts.failed = fallback.failCount
   }
 
-  const data = (Object.keys(counts) as OutcomeKey[]).map((key) => ({
-    key,
-    value: counts[key],
-    ...outcomeConfig[key],
-  }))
-  const total = data.reduce((sum, item) => sum + item.value, 0)
-  const passRate = total > 0 ? Math.round((counts.passed / total) * 100) : null
-  const attention = counts.failed + counts.partial + counts.blocked
-
-  return { counts, data, total, passRate, attention }
+  return buildOutcomeView(counts, 'acceptance criteria')
 }
 
 type ParsedIssue = {
@@ -535,7 +630,7 @@ function PassRateDonut({ rate, color }: { rate: number | null; color: string }) 
 function OutcomeBreakdown({ data, total }: { data: OutcomeDatum[]; total: number }) {
   return (
     <div className="flex w-full flex-col justify-center gap-4">
-      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
         {data.map((item) => {
           const pct = total > 0 ? Math.round((item.value / total) * 100) : 0
           return (
@@ -878,6 +973,329 @@ function FilePreview({ projectId, slug, file }: { projectId: string; slug: strin
   )
 }
 
+// ---- Executed test cases (filled after the run) ---------------------------
+
+/** The run-fill writes this filled copy into the run's output folder. */
+const EXECUTED_RE = /^testcases-executed\.(csv|md)$/i
+
+/** Minimal CSV parser (quoted fields, escaped quotes, embedded newlines). */
+function parseCsvClient(text: string): string[][] {
+  const rows: string[][] = []
+  let row: string[] = []
+  let field = ''
+  let inQuotes = false
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i]
+    if (inQuotes) {
+      if (c === '"') {
+        if (text[i + 1] === '"') {
+          field += '"'
+          i++
+        } else inQuotes = false
+      } else field += c
+    } else if (c === '"') inQuotes = true
+    else if (c === ',') {
+      row.push(field)
+      field = ''
+    } else if (c === '\n') {
+      row.push(field)
+      rows.push(row)
+      row = []
+      field = ''
+    } else if (c !== '\r') field += c
+  }
+  if (field.length > 0 || row.length > 0) {
+    row.push(field)
+    rows.push(row)
+  }
+  return rows.filter((r) => r.some((cell) => cell.trim() !== ''))
+}
+
+/** Parse a Markdown pipe table into rows (drops the `---` separator line). */
+function parseMdTableClient(text: string): string[][] {
+  return text
+    .split(/\r?\n/)
+    .filter((l) => l.trim().startsWith('|'))
+    .filter((l) => !(/^\s*\|?[\s:|-]+\|?\s*$/.test(l) && l.includes('-')))
+    .map((l) =>
+      l
+        .replace(/^\s*\|/, '')
+        .replace(/\|\s*$/, '')
+        .split(/(?<!\\)\|/)
+        .map((cell) => cell.trim().replace(/\\\|/g, '|').replace(/<br\s*\/?>/gi, '\n')),
+    )
+}
+
+/**
+ * Drop trailing columns that are empty across the header AND every row — some
+ * test-case CSVs carry a run of trailing commas, which would otherwise render as
+ * a stretch of blank columns after the last real one (e.g. after Note).
+ */
+function trimEmptyTrailingColumns(rows: string[][]): string[][] {
+  if (!rows.length) return rows
+  const width = Math.max(...rows.map((r) => r.length))
+  let last = width - 1
+  while (last >= 0 && rows.every((r) => (r[last] ?? '').trim() === '')) last--
+  if (last === width - 1) return rows
+  return rows.map((r) => r.slice(0, last + 1))
+}
+
+const isStatusHeaderCell = (h: string) => {
+  const n = h.trim().toLowerCase().replace(/[^a-z]/g, '')
+  return n === 'status' || n === 'teststatus' || n === 'executionstatus'
+}
+
+const isReferenceHeaderCell = (h: string) => {
+  const n = h.trim().toLowerCase().replace(/[^a-z]/g, '')
+  return n === 'reference' || n === 'ref' || n === 'bug' || n === 'bugid' || n === 'issue'
+}
+
+/** issue id (ISSUE-1 / BUG-42 / DEF-3) → full title, parsed from issues.md headings. */
+function parseIssueTitles(md: string | null): Map<string, string> {
+  const map = new Map<string, string>()
+  if (!md) return map
+  for (const line of md.split('\n')) {
+    const m = line.match(/^#{2,4}\s+((?:issue|bug|def|defect)-\d+)\b\s*(.*)$/i)
+    if (!m) continue
+    const id = m[1].toUpperCase()
+    // Strip a leading severity like "(Medium)" and the em-dash/colon separator.
+    const title = m[2].replace(/^\s*\([^)]*\)\s*/, '').replace(/^\s*[—\-:]\s*/, '').trim()
+    if (!map.has(id)) map.set(id, title || m[1])
+  }
+  return map
+}
+
+const REF_TOKEN = /(https?:\/\/[^\s)]+|\b(?:issue|bug|def|defect)-\d+\b)/gi
+
+/**
+ * Render a Reference cell: issue ids (ISSUE-1) become chips linking to this run's
+ * Issues tab (with the full issue title inline + on hover); raw URLs become
+ * external links. Anything else stays plain text.
+ */
+function ReferenceCell({ value, issues }: { value: string; issues: Map<string, string> }) {
+  if (!value) return <span className="text-muted-foreground/40">—</span>
+  if (!REF_TOKEN.test(value)) return <>{value}</>
+  const parts: React.ReactNode[] = []
+  let last = 0
+  let key = 0
+  let m: RegExpExecArray | null
+  REF_TOKEN.lastIndex = 0
+  while ((m = REF_TOKEN.exec(value)) !== null) {
+    if (m.index > last) parts.push(value.slice(last, m.index))
+    const tok = m[0]
+    if (/^https?:/i.test(tok)) {
+      parts.push(
+        <a
+          key={key++}
+          href={tok}
+          target="_blank"
+          rel="noreferrer"
+          className="font-medium text-primary underline underline-offset-2 hover:opacity-80"
+        >
+          {tok}
+        </a>,
+      )
+    } else {
+      const id = tok.toUpperCase()
+      const title = issues.get(id)
+      parts.push(
+        <span key={key++} className="inline-flex flex-col gap-0.5">
+          <Link
+            to={{ search: 'tab=issues', hash: `#${id.toLowerCase()}` }}
+            title={title ? `${id} — ${title}` : id}
+            className="inline-flex w-fit items-center gap-1 rounded-md border border-primary/30 bg-primary/5 px-1.5 py-0.5 font-mono text-[11px] font-medium text-primary transition-colors hover:border-primary/50 hover:bg-primary/10"
+          >
+            <AlertCircle className="size-3" />
+            {tok}
+          </Link>
+          {title && <span className="text-xs leading-snug text-muted-foreground">{title}</span>}
+        </span>,
+      )
+    }
+    last = m.index + tok.length
+  }
+  if (last < value.length) parts.push(value.slice(last))
+  return <span className="inline-flex flex-wrap items-baseline gap-1.5">{parts}</span>
+}
+
+/** Status pill tone — Passed/Failed/Blocked/Cancelled/Untested. */
+function statusTone(raw: string): string {
+  const s = raw.trim().toLowerCase()
+  if (s.startsWith('pass'))
+    return 'bg-emerald-50 text-emerald-700 ring-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-400 dark:ring-emerald-500/30'
+  if (s.startsWith('fail'))
+    return 'bg-red-50 text-red-700 ring-red-200 dark:bg-red-500/10 dark:text-red-400 dark:ring-red-500/30'
+  if (s.startsWith('block'))
+    return 'bg-amber-50 text-amber-700 ring-amber-200 dark:bg-amber-500/10 dark:text-amber-400 dark:ring-amber-500/30'
+  if (s.startsWith('cancel'))
+    return 'bg-slate-100 text-slate-600 ring-slate-200 dark:bg-slate-500/10 dark:text-slate-400 dark:ring-slate-500/30'
+  // Untested / unknown
+  return 'bg-muted text-muted-foreground ring-border'
+}
+
+/** Renders the filled test-case sheet as a table with a color-coded Status column. */
+function ExecutedTestcasesTab({
+  projectId,
+  slug,
+  file,
+  issuesMd,
+}: {
+  projectId: string
+  slug: string | null
+  file: RunFile | null
+  issuesMd?: string | null
+}) {
+  const url = file && slug ? runFileUrl(projectId, slug, file.path) : ''
+  const isCsv = !!file && /\.csv$/i.test(file.path)
+  const issueTitles = useMemo(() => parseIssueTitles(issuesMd ?? null), [issuesMd])
+  const { data, isLoading, isError } = useQuery({
+    queryKey: ['run-file', projectId, slug, file?.path],
+    queryFn: () =>
+      fetch(url).then((r) => {
+        if (!r.ok) throw new Error(String(r.status))
+        return r.text()
+      }),
+    enabled: !!file && !!slug,
+  })
+
+  if (!file || !slug) {
+    return (
+      <div className="flex flex-col items-center justify-center gap-3 py-16 text-center">
+        <div className="flex size-11 items-center justify-center rounded-2xl border border-border/60 bg-muted/60 text-muted-foreground">
+          <ListChecks className="size-5" />
+        </div>
+        <p className="text-sm text-muted-foreground">No executed test-case sheet for this run.</p>
+        <p className="max-w-md text-xs text-muted-foreground">
+          It's written automatically after a successful run that has a report and a test-case file
+          for the ticket.
+        </p>
+      </div>
+    )
+  }
+  if (isLoading) return <p className="py-12 text-center text-sm text-muted-foreground">Loading…</p>
+  if (isError || !data)
+    return (
+      <p className="py-12 text-center text-sm text-destructive">
+        Could not load the executed test cases.
+      </p>
+    )
+
+  const rows = trimEmptyTrailingColumns(isCsv ? parseCsvClient(data) : parseMdTableClient(data))
+  if (rows.length < 2) {
+    return (
+      <pre className="overflow-x-auto whitespace-pre-wrap break-words rounded-2xl border border-border/60 bg-muted/30 p-4 font-mono text-xs leading-relaxed">
+        {data}
+      </pre>
+    )
+  }
+  const header = rows[0]
+  const body = rows.slice(1)
+  const statusIdx = header.findIndex(isStatusHeaderCell)
+  const referenceIdx = header.findIndex(isReferenceHeaderCell)
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between gap-3">
+        <p className="text-xs text-muted-foreground">
+          Cloned from the ticket's test-case file and filled from this run's report ·{' '}
+          <span className="font-mono">{file.path}</span>
+        </p>
+        <Button
+          asChild
+          variant="outline"
+          size="sm"
+          className="shrink-0 rounded-full transition-all duration-200 active:scale-[0.98]"
+        >
+          <a href={url} target="_blank" rel="noreferrer">
+            Open raw
+            <ArrowUpRight className="ml-1.5 size-3.5" />
+          </a>
+        </Button>
+      </div>
+      <div className="max-h-[70vh] w-full overflow-auto rounded-2xl border border-border/60">
+        <table className="w-max min-w-full border-separate border-spacing-0 text-sm">
+          <thead>
+            <tr>
+              {/* Pinned row-number column header (top-left corner). */}
+              <th className="sticky left-0 top-0 z-30 border-b border-r border-border/60 bg-muted px-3 py-2.5 text-left text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                No.
+              </th>
+              {header.map((h, i) => (
+                <th
+                  key={i}
+                  className="sticky top-0 z-20 whitespace-nowrap border-b border-r border-border/60 bg-muted px-3 py-2.5 text-left text-xs font-semibold uppercase tracking-wide text-muted-foreground last:border-r-0"
+                >
+                  {h}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {body.map((r, ri) => {
+              const isFailed =
+                statusIdx >= 0 && (r[statusIdx] ?? '').trim().toLowerCase().startsWith('fail')
+              return (
+              <tr
+                key={ri}
+                className={cn(
+                  'group',
+                  isFailed
+                    ? 'bg-red-50/70 hover:bg-red-100/70 dark:bg-red-500/10 dark:hover:bg-red-500/[0.15]'
+                    : 'hover:bg-muted/30',
+                )}
+              >
+                {/* Pinned sequential row number. */}
+                <td
+                  className={cn(
+                    'sticky left-0 z-10 border-b border-r border-border/60 px-3 py-2.5 text-right align-top font-mono text-xs tabular-nums',
+                    isFailed
+                      ? 'bg-red-50 text-red-600 group-hover:bg-red-100/70 dark:bg-red-500/10 dark:text-red-400'
+                      : 'bg-card text-muted-foreground group-hover:bg-muted/30',
+                  )}
+                >
+                  {ri + 1}
+                </td>
+                {header.map((_, ci) => {
+                  const value = (r[ci] ?? '').trim()
+                  const cls =
+                    'max-w-[28rem] whitespace-pre-wrap break-words border-b border-r border-border/60 px-3 py-2.5 align-top last:border-r-0'
+                  if (ci === statusIdx && value) {
+                    return (
+                      <td key={ci} className={cls}>
+                        <span
+                          className={cn(
+                            'inline-flex rounded-full px-2 py-0.5 text-xs font-semibold ring-1',
+                            statusTone(value),
+                          )}
+                        >
+                          {value}
+                        </span>
+                      </td>
+                    )
+                  }
+                  if (ci === referenceIdx) {
+                    return (
+                      <td key={ci} className={cls}>
+                        <ReferenceCell value={value} issues={issueTitles} />
+                      </td>
+                    )
+                  }
+                  return (
+                    <td key={ci} className={cn(cls, ci === 0 && 'font-medium')}>
+                      {value || <span className="text-muted-foreground/40">—</span>}
+                    </td>
+                  )
+                })}
+              </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
 /** A file browser for the run's output folder (evidence + any extra files). */
 function FilesTab({
   projectId,
@@ -959,6 +1377,7 @@ type TabValue = (typeof TAB_VALUES)[number]
 export default function RunDetailPage() {
   const { id = '' } = useParams()
   const navigate = useNavigate()
+  const location = useLocation()
   const queryClient = useQueryClient()
   const [searchParams, setSearchParams] = useSearchParams()
   const [confirmDelete, setConfirmDelete] = useState(false)
@@ -973,6 +1392,17 @@ export default function RunDetailPage() {
     queryFn: () => listRunFiles(id),
     enabled: !!id,
   })
+  // The run record only carries the ticket id; join against crawled tickets for
+  // a human-readable title to show alongside it.
+  const { data: crawledTickets } = useQuery({
+    queryKey: ['crawled', run?.projectId],
+    queryFn: () => listCrawledTickets(run!.projectId),
+    enabled: !!run?.projectId,
+  })
+  const ticketTitle =
+    (crawledTickets ?? []).find(
+      (t) => (t.displayId ?? t.name) === run?.ticketId,
+    )?.title ?? null
 
   // Delete the run (record + on-disk output) and return to history.
   const deleteMutation = useMutation({
@@ -989,6 +1419,51 @@ export default function RunDetailPage() {
       })
     },
   })
+
+  // The executed test-case sheet — fetched here (shares the cache with the table)
+  // so the hero summary can count the REAL per-case statuses (Passed/Failed/
+  // Blocked/Cancelled/Untested) instead of the report's ad-hoc buckets.
+  const filesSlugForCounts = filesData?.slug ?? run?.slug ?? null
+  const executedFileForCounts =
+    (filesData?.files ?? []).find((f) => EXECUTED_RE.test(f.path.split('/').pop() ?? '')) ?? null
+  const executedIsCsv = !!executedFileForCounts && /\.csv$/i.test(executedFileForCounts.path)
+  const { data: executedText } = useQuery({
+    queryKey: ['run-file', run?.projectId, filesSlugForCounts, executedFileForCounts?.path],
+    queryFn: () =>
+      fetch(runFileUrl(run!.projectId, filesSlugForCounts!, executedFileForCounts!.path)).then((r) => {
+        if (!r.ok) throw new Error(String(r.status))
+        return r.text()
+      }),
+    enabled: !!run?.projectId && !!filesSlugForCounts && !!executedFileForCounts,
+  })
+  const executedOutcomes = useMemo(
+    () => (executedText ? countExecutedOutcomes(executedText, executedIsCsv) : null),
+    [executedText, executedIsCsv],
+  )
+
+  // Deep-link scroll: a Reference chip links to ?tab=issues#issue-1 — once the
+  // Issues tab is active and rendered, scroll that heading into view.
+  const locationHash = location.hash
+  const tabForScroll = searchParams.get('tab')
+  useEffect(() => {
+    if (tabForScroll !== 'issues' || !locationHash) return
+    const targetId = decodeURIComponent(locationHash.replace(/^#/, ''))
+    if (!targetId) return
+    let tries = 0
+    let raf = 0
+    const tick = () => {
+      const el = document.getElementById(targetId)
+      if (el) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+        el.classList.add('ring-2', 'ring-primary/50', 'rounded-lg')
+        window.setTimeout(() => el.classList.remove('ring-2', 'ring-primary/50', 'rounded-lg'), 2000)
+      } else if (tries++ < 20) {
+        raf = requestAnimationFrame(tick)
+      }
+    }
+    raf = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(raf)
+  }, [tabForScroll, locationHash])
 
   if (isLoading) {
     return <DetailSkeleton />
@@ -1029,7 +1504,13 @@ export default function RunDetailPage() {
   // A still-running run is using its session/output — deletion is blocked until it ends.
   const isRunActive =
     run.status === 'running' || run.status === 'queued' || run.status === 'paused'
-  const outcomes = parseReportOutcomes(run.reportMd, run)
+  // The report's Result Summary is the authoritative QC verdict (it applies
+  // rules the per-case fill can't, e.g. "Blocked: no data / non-mutating run").
+  // Prefer it; fall back to counting the executed test-case sheet only when the
+  // report has no parseable summary table.
+  const reportOutcomes = parseReportOutcomes(run.reportMd, run)
+  const outcomes =
+    reportOutcomes.total > 0 ? reportOutcomes : (executedOutcomes ?? reportOutcomes)
   const hasResults = outcomes.total > 0
   const passRate = outcomes.passRate
 
@@ -1069,10 +1550,17 @@ export default function RunDetailPage() {
         ? 'Needs attention'
         : 'Review required'
 
-  // Files for the Files tab — exclude report/issues/screenshots (own tabs already).
+  // Files for the Files tab — exclude report/issues/screenshots (own tabs already)
+  // and the executed test-case sheet (its own Test Cases tab).
   const filesSlug = filesData?.slug ?? run.slug
+  const executedFile =
+    (filesData?.files ?? []).find((f) => EXECUTED_RE.test(f.path.split('/').pop() ?? '')) ?? null
   const evidenceFiles = (filesData?.files ?? []).filter(
-    (f) => f.path !== 'report.md' && f.path !== 'issues.md' && !f.path.startsWith('screenshots/'),
+    (f) =>
+      f.path !== 'report.md' &&
+      f.path !== 'issues.md' &&
+      !f.path.startsWith('screenshots/') &&
+      f.path !== executedFile?.path,
   )
 
   return (
@@ -1094,6 +1582,11 @@ export default function RunDetailPage() {
                 </h1>
                 <StatusBadge status={run.status} />
               </div>
+              {ticketTitle && (
+                <p className="text-lg font-medium tracking-tight text-foreground">
+                  {ticketTitle}
+                </p>
+              )}
               <p className="text-sm text-muted-foreground">
                 Acceptance test report
                 {run.projectName && (
@@ -1135,7 +1628,7 @@ export default function RunDetailPage() {
                 <div className="text-center">
                   <div className="text-sm font-semibold tracking-tight">{headline}</div>
                   <div className="text-xs text-muted-foreground">
-                    {outcomes.total} acceptance criteria
+                    {outcomes.total} {outcomes.unit}
                   </div>
                 </div>
               </div>
@@ -1264,15 +1757,37 @@ export default function RunDetailPage() {
               </TabsList>
             </div>
 
-            <TabsContent value="report" className="m-0 p-6">
-              <EvidenceReport
-                md={run.reportMd}
-                empty="No report was generated for this run."
-                icon={<FileText className="h-5 w-5" />}
-                projectId={run.projectId}
-                slug={filesSlug}
-                files={filesData?.files ?? []}
-              />
+            <TabsContent value="report" className="m-0 space-y-8 p-6">
+              {/* Full report first (summary + narrative), then the per-case
+                  results as a table in the ticket's test-case shape. */}
+              <section className="space-y-3">
+                <EvidenceReport
+                  md={
+                    executedFile && run.reportMd
+                      ? stripCaseDetailSection(run.reportMd)
+                      : run.reportMd
+                  }
+                  empty="No report was generated for this run."
+                  icon={<FileText className="h-5 w-5" />}
+                  projectId={run.projectId}
+                  slug={filesSlug}
+                  files={filesData?.files ?? []}
+                />
+              </section>
+              {executedFile && (
+                <section className="space-y-3">
+                  <div className="flex items-center gap-2 border-t border-border/60 pt-6">
+                    <ListChecks className="size-4 text-muted-foreground" />
+                    <h2 className="text-base font-semibold tracking-tight">Test execution results</h2>
+                  </div>
+                  <ExecutedTestcasesTab
+                    projectId={run.projectId}
+                    slug={filesSlug}
+                    file={executedFile}
+                    issuesMd={run.issuesMd}
+                  />
+                </section>
+              )}
             </TabsContent>
 
             <TabsContent value="issues" className="m-0 p-6">

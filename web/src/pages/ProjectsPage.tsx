@@ -13,9 +13,13 @@ import {
   Download,
   FileArchive,
   Gauge,
+  ChevronUp,
+  Folder,
   FolderGit2,
   FolderOpen,
   FolderPlus,
+  HardDrive,
+  Home,
   Info,
   Loader2,
   Pencil,
@@ -61,6 +65,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
 import {
+  browseFolder,
   claudeStatus,
   claudeUsage,
   createProject,
@@ -102,10 +107,18 @@ function withFolderName(fullPath: string, folder: string): string {
   return parts.join(sep)
 }
 
-/** A "Browse…" button that opens the OS folder picker and reports the chosen path. */
+/**
+ * Folder selection: the native OS picker (kept as the primary, unchanged) plus an
+ * in-app web folder browser as a fallback. The native dialog needs an interactive
+ * desktop and hangs when the portal was launched headlessly (cmd started another
+ * way, Task Scheduler, SSH, autostart); the in-app browser works regardless of
+ * how the server was started, on both Windows and macOS.
+ */
 function BrowseButton({ onPick }: { onPick: (path: string) => void }) {
   const [loading, setLoading] = useState(false)
-  async function browse() {
+  const [webOpen, setWebOpen] = useState(false)
+
+  async function browseNative() {
     setLoading(true)
     try {
       const res = await pickFolder()
@@ -118,22 +131,221 @@ function BrowseButton({ onPick }: { onPick: (path: string) => void }) {
       setLoading(false)
     }
   }
+
   return (
-    <Button
-      type="button"
-      variant="outline"
-      size="sm"
-      onClick={browse}
-      disabled={loading}
-      className="h-11 shrink-0 rounded-full transition-all duration-200 hover:shadow-sm active:scale-[0.98]"
-    >
-      {loading ? (
-        <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
-      ) : (
-        <FolderOpen className="mr-1.5 h-3.5 w-3.5" />
-      )}
-      Browse…
-    </Button>
+    <div className="flex shrink-0 items-center gap-1.5">
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        onClick={browseNative}
+        disabled={loading}
+        className="h-11 shrink-0 rounded-full transition-all duration-200 hover:shadow-sm active:scale-[0.98]"
+      >
+        {loading ? (
+          <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+        ) : (
+          <FolderOpen className="mr-1.5 h-3.5 w-3.5" />
+        )}
+        Browse…
+      </Button>
+      <Button
+        type="button"
+        variant="ghost"
+        size="sm"
+        title="In-app folder browser — use this if Browse… doesn't open a window"
+        onClick={() => setWebOpen(true)}
+        className="h-11 shrink-0 rounded-full text-muted-foreground transition-all duration-200 hover:shadow-sm active:scale-[0.98]"
+      >
+        <Folder className="mr-1.5 h-3.5 w-3.5" />
+        In-app
+      </Button>
+      <FolderBrowserDialog
+        open={webOpen}
+        onOpenChange={setWebOpen}
+        onPick={(p) => {
+          onPick(p)
+          setWebOpen(false)
+        }}
+      />
+    </div>
+  )
+}
+
+/** In-app folder browser: navigate the server's filesystem and pick a folder. */
+function FolderBrowserDialog({
+  open,
+  onOpenChange,
+  onPick,
+}: {
+  open: boolean
+  onOpenChange: (v: boolean) => void
+  onPick: (path: string) => void
+}) {
+  // undefined → let the server start at the user's home directory.
+  const [nav, setNav] = useState<string | undefined>(undefined)
+  const [draft, setDraft] = useState('')
+
+  const { data, isFetching, isError, error } = useQuery({
+    queryKey: ['browse-folder', nav ?? '~home'],
+    queryFn: () => browseFolder(nav),
+    enabled: open,
+  })
+
+  // Keep the editable path box in step with wherever we navigated to.
+  useEffect(() => {
+    if (data?.path) setDraft(data.path)
+  }, [data?.path])
+
+  const goto = (p: string) => setNav(p)
+  const submitDraft = () => {
+    const p = draft.trim()
+    if (p) setNav(p)
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>Choose a folder</DialogTitle>
+          <DialogDescription>
+            Navigate to the folder on this machine, or type/paste a path below.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-3">
+          {/* Path bar: home, up, editable path, go */}
+          <div className="flex items-center gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="icon"
+              title="Home"
+              onClick={() => setNav(undefined)}
+              className="h-9 w-9 shrink-0 rounded-full"
+            >
+              <Home className="h-4 w-4" />
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="icon"
+              title="Up one level"
+              disabled={!data?.parent}
+              onClick={() => data?.parent && goto(data.parent)}
+              className="h-9 w-9 shrink-0 rounded-full"
+            >
+              <ChevronUp className="h-4 w-4" />
+            </Button>
+            <Input
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault()
+                  submitDraft()
+                }
+              }}
+              placeholder="Type or paste a folder path…"
+              className="h-9 font-mono text-xs"
+            />
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={submitDraft}
+              className="h-9 shrink-0 rounded-full"
+            >
+              Go
+            </Button>
+          </div>
+
+          {/* Windows drive chips */}
+          {data?.drives && data.drives.length > 0 && (
+            <div className="flex flex-wrap gap-1.5">
+              {data.drives.map((d) => (
+                <Button
+                  key={d}
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => goto(d)}
+                  className="h-7 rounded-full px-2.5 text-xs"
+                >
+                  <HardDrive className="mr-1 h-3 w-3" />
+                  {d.replace(/\\$/, '')}
+                </Button>
+              ))}
+            </div>
+          )}
+
+          {/* Folder list */}
+          <div className="h-72 overflow-y-auto rounded-2xl border border-border/60 bg-muted/40 p-1.5">
+            {isFetching ? (
+              <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Loading…
+              </div>
+            ) : isError ? (
+              <div className="flex h-full items-center justify-center px-4 text-center text-sm text-destructive">
+                {error instanceof Error ? error.message : 'Could not read this folder'}
+              </div>
+            ) : data?.error ? (
+              <div className="flex h-full items-center justify-center px-4 text-center text-sm text-amber-600 dark:text-amber-500">
+                {data.error}
+              </div>
+            ) : data && data.entries.length === 0 ? (
+              <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+                No sub-folders here.
+              </div>
+            ) : (
+              <ul className="space-y-0.5">
+                {data?.entries.map((e) => (
+                  <li key={e.path}>
+                    <button
+                      type="button"
+                      onDoubleClick={() => goto(e.path)}
+                      onClick={() => setDraft(e.path)}
+                      className={cn(
+                        'flex w-full items-center gap-2 rounded-xl px-2.5 py-1.5 text-left text-sm transition-colors',
+                        'hover:bg-background',
+                        draft === e.path && 'bg-background ring-1 ring-border',
+                      )}
+                      title="Double-click to open"
+                    >
+                      <Folder className="h-4 w-4 shrink-0 text-muted-foreground" />
+                      <span className="truncate">{e.name}</span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+          <p className="text-xs text-muted-foreground">
+            Click a folder to select it, double-click to open it. Then choose{' '}
+            <span className="font-medium text-foreground">Use this folder</span>.
+          </p>
+        </div>
+
+        <DialogFooter>
+          <Button
+            type="button"
+            variant="ghost"
+            className="rounded-full"
+            onClick={() => onOpenChange(false)}
+          >
+            Cancel
+          </Button>
+          <Button
+            type="button"
+            className="rounded-full"
+            disabled={!draft.trim()}
+            onClick={() => onPick(draft.trim())}
+          >
+            Use this folder
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   )
 }
 

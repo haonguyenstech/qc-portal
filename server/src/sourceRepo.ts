@@ -268,7 +268,15 @@ function runGit(args: string[], opts: RunGitOpts): Promise<string> {
     })
     child.on('close', (code) => {
       if (code === 0) return resolve(stdout)
-      const detail = scrub(stderr.trim() || stdout.trim(), opts.cred) || `git exited with code ${code}`
+      let detail = scrub(stderr.trim() || stdout.trim(), opts.cred) || `git exited with code ${code}`
+      // Bitbucket rejects an unscoped Atlassian API token with this exact message.
+      // Point the user at the fix instead of leaving a bare 403.
+      if (/no bitbucket scopes/i.test(detail)) {
+        detail +=
+          '\n\nFix: your Atlassian API token has no Bitbucket access. Use a Bitbucket app password ' +
+          '(Repositories: Read + your username) or a repository access token (ATCTT…), or recreate ' +
+          'the API token with the read:repository scope. See Docs → Connecting source code.'
+      }
       reject(new Error(detail))
     })
   })

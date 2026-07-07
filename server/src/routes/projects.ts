@@ -1,5 +1,6 @@
 import { Router } from 'express'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import JSZip from 'jszip'
 import {
@@ -52,6 +53,70 @@ projectsRouter.get('/pick-folder', async (_req, res) => {
   if (result.error) return res.status(500).json({ error: result.error })
   return res.json({ path: result.path, canceled: result.path === null })
 })
+
+/**
+ * Web-based folder browser — lists the sub-directories of a folder so the UI can
+ * navigate the server's filesystem WITHOUT a native OS dialog. Unlike the native
+ * picker (which needs an interactive desktop and hangs when the portal was
+ * launched headlessly / over SSH / via Task Scheduler), this works no matter how
+ * the server was started, on both Windows and macOS.
+ *
+ * `?path=` — the folder to list; omit (or pass '') to start at the user's home
+ * directory. Returns the (normalized) folder, its parent, the immediate
+ * sub-directories, and — on Windows — the available drive roots.
+ */
+projectsRouter.get('/browse-folder', (req, res) => {
+  const isWin = process.platform === 'win32'
+  const drives = isWin ? listWindowsDrives() : []
+
+  const raw = typeof req.query.path === 'string' ? req.query.path.trim() : ''
+  let target = raw ? path.resolve(raw) : os.homedir()
+  // A bare drive letter ("C:") resolves to the cwd on that drive; force the root.
+  if (isWin && /^[A-Za-z]:$/.test(target)) target = target + '\\'
+
+  let entries: { name: string; path: string }[] = []
+  let error: string | undefined
+  try {
+    entries = fs
+      .readdirSync(target, { withFileTypes: true })
+      .filter((d) => {
+        if (!d.isDirectory() && !d.isSymbolicLink()) return false
+        return true
+      })
+      .map((d) => ({ name: d.name, path: path.join(target, d.name) }))
+      // Keep only entries that are really directories (resolve symlinks safely).
+      .filter((e) => isDir(e.path))
+      .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }))
+  } catch (err) {
+    error = err instanceof Error ? err.message : 'Cannot read this folder'
+  }
+
+  const parent = path.dirname(target)
+  return res.json({
+    path: target,
+    parent: parent === target ? null : parent, // null at a filesystem root
+    entries,
+    drives,
+    separator: path.sep,
+    home: os.homedir(),
+    error,
+  })
+})
+
+/** Enumerate present drive roots on Windows (C:\, D:\, …). Empty elsewhere. */
+function listWindowsDrives(): string[] {
+  if (process.platform !== 'win32') return []
+  const found: string[] = []
+  for (let c = 'A'.charCodeAt(0); c <= 'Z'.charCodeAt(0); c++) {
+    const root = `${String.fromCharCode(c)}:\\`
+    try {
+      if (fs.existsSync(root)) found.push(root)
+    } catch {
+      /* drive not ready (e.g. empty card reader) — skip */
+    }
+  }
+  return found
+}
 
 function isDir(p: string): boolean {
   try {

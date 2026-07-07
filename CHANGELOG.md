@@ -3,6 +3,37 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.9.8 — 2026-07-07
+
+**In-app folder browser so "Browse" always works, plus an executed test-case record from each run**
+
+### Added
+
+- **A built-in folder browser for picking a project folder.** Next to **Browse…** on Add/Edit
+  project there's now an **In-app** button that opens a folder browser *inside the portal* — navigate
+  drives and folders, or type/paste a path, and click **Use this folder**. Unlike the native
+  **Browse…** dialog (which needs the portal to be running in your own desktop session and can hang
+  with nothing appearing when it isn't), the in-app browser works no matter how the portal was
+  started — from a Command Prompt, at login, or remotely. Use it whenever **Browse…** doesn't pop a
+  window.
+- **An "executed" test-case sheet is written after every QC run.** When a run finishes, the portal
+  clones the ticket's latest test-case file and fills in the execution columns — Actual result,
+  Status, Reference, Note — from the run's report, saved alongside the report as
+  `testcases-executed.<ext>`. You get a ready-to-file QC execution record without copying verdicts by
+  hand. The steps, expected results, and priority are spliced through untouched, so the AI can't
+  corrupt them; it's best-effort and never affects the run itself.
+
+### Changed
+
+- **Clearer live-run and run-detail views.** The running-run and run-detail pages were reworked for
+  a cleaner read of progress, phases, evidence, and the final report.
+
+### Fixed
+
+- **The native "Browse…" folder picker no longer leaves you staring at a spinner.** If it can't open
+  a window (for example when the portal was started outside your desktop session), use the new
+  **In-app** browser next to it.
+
 ## 0.9.7 — 2026-07-06
 
 **Fix: generated CSV test cases showing as raw run-on text instead of a table**

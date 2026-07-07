@@ -35,6 +35,25 @@ export function pickFolder(): Promise<{ path: string | null; canceled: boolean }
   return request('/api/projects/pick-folder')
 }
 
+export interface FolderListing {
+  path: string
+  parent: string | null
+  entries: { name: string; path: string }[]
+  drives: string[]
+  separator: string
+  home: string
+  error?: string
+}
+
+/**
+ * Lists a folder's sub-directories via the server (no native OS dialog). Works
+ * however the portal was launched. Omit `path` to start at the user's home dir.
+ */
+export function browseFolder(path?: string): Promise<FolderListing> {
+  const qs = path ? `?path=${encodeURIComponent(path)}` : ''
+  return request(`/api/projects/browse-folder${qs}`)
+}
+
 export function createProject(
   body: { name: string; rootPath: string },
 ): Promise<Project & { created?: string[]; templateName?: string | null }> {

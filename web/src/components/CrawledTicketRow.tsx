@@ -1,4 +1,4 @@
-import { Check, CheckCircle2, ExternalLink, Eye, Ticket } from 'lucide-react'
+import { Check, CheckCircle2, ExternalLink, Eye, Ticket, TriangleAlert } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { relativeTime } from '@/lib/format'
 import { priorityClass } from '@/lib/crawled-tickets'
@@ -30,6 +30,7 @@ export function CrawledTicketRow({
   onSelect,
   onView,
   blocked,
+  flagMissingTestcases,
 }: {
   ticket: CrawledTicket
   selected: boolean
@@ -38,6 +39,8 @@ export function CrawledTicketRow({
   onView?: () => void
   /** Selection disabled (e.g. a multi-select cap was reached and this row is off). */
   blocked?: boolean
+  /** Show an amber "No test cases" pill when the ticket has none — used where test cases are required to select the ticket. */
+  flagMissingTestcases?: boolean
 }) {
   return (
     <div
@@ -115,6 +118,14 @@ export function CrawledTicketRow({
             {ticket.testcaseVersions > 1 ? `${ticket.testcaseVersions} versions` : 'Test cases'}
           </span>
         )
+      ) : flagMissingTestcases ? (
+        <span
+          title="Generate test cases for this ticket first"
+          className="inline-flex shrink-0 items-center gap-1 rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-700"
+        >
+          <TriangleAlert className="size-3" />
+          No test cases
+        </span>
       ) : ticket.crawledAt ? (
         <span className="shrink-0 px-1 text-[11px] text-muted-foreground">
           {relativeTime(ticket.crawledAt)}

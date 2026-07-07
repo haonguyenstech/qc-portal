@@ -49,6 +49,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { Badge } from '@/components/ui/badge'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import {
   checkAppUrl,
   createRun,
@@ -67,7 +68,6 @@ import { StatusBadge } from '@/lib/status'
 import { ManageHintsDialog } from '@/components/ManageHintsDialog'
 import { RunPresetsDialog } from '@/components/RunPresetsDialog'
 import { useRunPresets, type RunPreset } from '@/lib/presets'
-import { CrawledTicketPicker } from '@/components/CrawledTicketPicker'
 import { CrawledStatusHeader, CrawledTicketRow } from '@/components/CrawledTicketRow'
 import { groupCrawledByStatus } from '@/lib/crawled-tickets'
 import { TicketTestCasePicker, testcaseRelPath } from '@/components/TicketTestCasePicker'
@@ -130,6 +130,9 @@ type RunMode = 'simple' | 'advanced'
 const ADVANCED_ENABLED = false
 const RUN_MODE_KEY = 'qc.runMode'
 const MAX_FEATURE_TICKETS = 5
+// Single-ticket mode: several tickets may be selected, but each becomes its OWN
+// run and the server executes them strictly one at a time (never in parallel).
+const MAX_QUEUE_TICKETS = 10
 
 function loadRunMode(): RunMode {
   try {
@@ -182,23 +185,29 @@ function StepHeader({ n, title, hint }: { n: number; title: string; hint?: strin
 const ticketIdOf = (t: CrawledTicket) => t.displayId ?? t.name
 
 /**
- * Advanced-mode ticket picker: choose several crawled tickets that together make
- * up one feature. The first pick is the **lead** (the run's report lands under
- * its slug); the rest ride along as related context in the same run.
+ * Multi-select ticket picker over the crawled list. Two uses:
+ *  - variant "feature" (advanced mode): the tickets make up ONE run; the first
+ *    pick is the **lead** (the run's report lands under its slug).
+ *  - variant "queue" (single-ticket mode): each ticket becomes its OWN run and
+ *    the server executes them sequentially, one at a time.
  */
 function FeatureTicketsPicker({
   tickets,
   value,
   onChange,
   disabled,
+  variant = 'feature',
 }: {
   tickets: CrawledTicket[]
   value: string[]
   onChange: (next: string[]) => void
   disabled?: boolean
+  variant?: 'feature' | 'queue'
 }) {
   const [query, setQuery] = useState('')
-  const atMax = value.length >= MAX_FEATURE_TICKETS
+  const isQueue = variant === 'queue'
+  const maxTickets = isQueue ? MAX_QUEUE_TICKETS : MAX_FEATURE_TICKETS
+  const atMax = value.length >= maxTickets
   const q = query.trim().toLowerCase()
   const filtered = useMemo(() => {
     const list = q
@@ -212,18 +221,32 @@ function FeatureTicketsPicker({
   }, [tickets, q])
 
   function toggle(id: string) {
-    if (value.includes(id)) onChange(value.filter((v) => v !== id))
-    else if (!atMax) onChange([...value, id])
+    if (value.includes(id)) {
+      onChange(value.filter((v) => v !== id))
+      return
+    }
+    if (atMax) return
+    // Queue runs verify against the ticket's generated test cases — a ticket
+    // without any can't be picked (the row is blocked; this is a safety net).
+    if (isQueue) {
+      const t = tickets.find((x) => ticketIdOf(x) === id)
+      if (!t?.hasTestcases) return
+    }
+    onChange([...value, id])
   }
 
   return (
     <div className="space-y-2">
       <div className="flex items-center justify-between gap-2">
         <Label className="flex items-center gap-1.5">
-          <Layers className="size-3.5 text-muted-foreground" />
-          Tickets in this feature
+          {isQueue ? (
+            <Ticket className="size-3.5 text-muted-foreground" />
+          ) : (
+            <Layers className="size-3.5 text-muted-foreground" />
+          )}
+          {isQueue ? 'Tickets to test' : 'Tickets in this feature'}
           <span className="rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-muted-foreground">
-            {value.length}/{MAX_FEATURE_TICKETS}
+            {value.length}/{maxTickets}
           </span>
         </Label>
         <Link
@@ -235,32 +258,65 @@ function FeatureTicketsPicker({
         </Link>
       </div>
 
-      {/* selected chips, in run order — the first is the lead ticket */}
+      {/* selected chips, one per row in run order — the first is the lead ticket */}
       {value.length > 0 && (
-        <div className="flex flex-wrap gap-1.5">
-          {value.map((id, i) => (
+        <div className="flex flex-col gap-1.5">
+          {value.map((id, i) => {
+            const title = tickets.find((t) => ticketIdOf(t) === id)?.title
+            return (
             <span
               key={id}
-              className="group inline-flex items-center gap-1.5 rounded-full border border-primary/30 bg-primary/5 py-1 pl-2.5 pr-1.5 text-xs font-medium text-foreground"
+              title={title ?? undefined}
+              className="group flex w-full items-center gap-1.5 rounded-full border border-primary/30 bg-primary/5 py-1 pl-2.5 pr-1.5 text-xs font-medium text-foreground"
             >
-              {i === 0 && (
-                <span className="rounded-full bg-primary px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-primary-foreground">
-                  Lead
+              {isQueue ? (
+                <span className="rounded-full bg-muted px-1.5 py-0.5 text-[9px] font-semibold tabular-nums text-muted-foreground">
+                  {i + 1}
+                </span>
+              ) : (
+                i === 0 && (
+                  <span className="rounded-full bg-primary px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-primary-foreground">
+                    Lead
+                  </span>
+                )
+              )}
+              <span className="shrink-0 font-mono">{id}</span>
+              {title && (
+                <span className="min-w-0 flex-1 truncate font-normal text-muted-foreground">
+                  {title}
                 </span>
               )}
-              <span className="font-mono">{id}</span>
               {!disabled && (
                 <button
                   type="button"
                   aria-label={`Remove ${id}`}
                   onClick={() => toggle(id)}
-                  className="grid size-4 place-items-center rounded-full text-muted-foreground/60 transition-colors hover:bg-muted hover:text-foreground"
+                  className="ml-auto grid size-4 shrink-0 place-items-center rounded-full text-muted-foreground/60 transition-colors hover:bg-muted hover:text-foreground"
                 >
                   <X className="size-3" />
                 </button>
               )}
             </span>
-          ))}
+            )
+          })}
+        </div>
+      )}
+
+      {/* every crawled ticket lacks test cases — explain why nothing is selectable */}
+      {isQueue && tickets.length > 0 && !tickets.some((t) => t.hasTestcases) && (
+        <div className="flex items-start gap-2.5 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-800">
+          <TriangleAlert className="mt-0.5 size-4 shrink-0" />
+          <div className="space-y-0.5 leading-snug">
+            <p className="font-medium">No ticket has test cases yet.</p>
+            <p>
+              A QC run verifies a ticket against its generated test cases, so tickets without them
+              can’t be selected. Generate test cases on the{' '}
+              <Link to="/testcases" className="font-medium underline">
+                Test cases
+              </Link>{' '}
+              page first, then come back here to run.
+            </p>
+          </div>
         </div>
       )}
 
@@ -298,13 +354,15 @@ function FeatureTicketsPicker({
                   {group.tickets.map((t) => {
                     const id = ticketIdOf(t)
                     const isSel = value.includes(id)
+                    const noTestcases = isQueue && !t.hasTestcases
                     return (
                       <li key={t.name}>
                         <CrawledTicketRow
                           ticket={t}
                           selected={isSel}
                           onSelect={() => toggle(id)}
-                          blocked={disabled || (!isSel && atMax)}
+                          blocked={disabled || noTestcases || (!isSel && atMax)}
+                          flagMissingTestcases={isQueue}
                         />
                       </li>
                     )
@@ -315,11 +373,24 @@ function FeatureTicketsPicker({
           )}
         </div>
       </div>
-      <p className="text-xs text-muted-foreground">
-        Pick the tickets that make up one feature. The first one is the{' '}
-        <span className="font-medium text-foreground">lead</span> — the run’s report is written
-        under its folder.
-      </p>
+      {isQueue ? (
+        <p className="text-xs text-muted-foreground">
+          Each ticket becomes its <span className="font-medium text-foreground">own QC run</span>,
+          executed one at a time — never in parallel. Only tickets with{' '}
+          <span className="font-medium text-foreground">generated test cases</span> can be
+          selected; create them on the{' '}
+          <Link to="/testcases" className="font-medium text-primary hover:underline">
+            Test cases
+          </Link>{' '}
+          page first.
+        </p>
+      ) : (
+        <p className="text-xs text-muted-foreground">
+          Pick the tickets that make up one feature. The first one is the{' '}
+          <span className="font-medium text-foreground">lead</span> — the run’s report is written
+          under its folder.
+        </p>
+      )}
     </div>
   )
 }
@@ -433,8 +504,13 @@ export default function RunPage() {
   const navigate = useNavigate()
   const [searchParams, setSearchParams] = useSearchParams()
   const { activeProject } = useProjects()
-  const [ticketId, setTicketId] = useState('')
+  // Single-ticket mode selection. Several tickets are allowed — each becomes its
+  // own run, executed by the server strictly one at a time (never in parallel).
+  const [simpleTickets, setSimpleTickets] = useState<string[]>([])
   const [appUrl, setAppUrl] = useState('')
+  // Per-ticket App URL overrides for multi-ticket queues (ticket id → url).
+  // Blank = the ticket uses the shared App URL field as its default.
+  const [ticketUrls, setTicketUrls] = useState<Record<string, string>>({})
   const [testTarget, setTestTarget] = useState<TestTarget>(loadTestTarget)
   const [skill, setSkill] = useState('')
   const [model, setModel] = useState<string>(loadRunModel)
@@ -473,16 +549,19 @@ export default function RunPage() {
     queryFn: () => listCrawledTickets(activeProject!.id),
     enabled: !!activeProject,
   })
+  // Test-case selection only applies when exactly ONE ticket is chosen — with a
+  // multi-ticket queue there is no single test-case file to verify against.
+  const soloTicketId = simpleTickets.length === 1 ? simpleTickets[0] : ''
   const selectedTicket = (crawledTickets ?? []).find(
-    (t) => (t.displayId ?? t.name) === ticketId,
+    (t) => (t.displayId ?? t.name) === soloTicketId,
   )
   const selectedFolder = selectedTicket?.name ?? null
 
   // Reset the chosen test-case version whenever the ticket changes (render-phase
   // pattern — the picker re-selects the latest version for the new ticket).
-  const [seenTicket, setSeenTicket] = useState(ticketId)
-  if (seenTicket !== ticketId) {
-    setSeenTicket(ticketId)
+  const [seenTicket, setSeenTicket] = useState(soloTicketId)
+  if (seenTicket !== soloTicketId) {
+    setSeenTicket(soloTicketId)
     setTestcaseVersion(null)
   }
 
@@ -496,7 +575,7 @@ export default function RunPage() {
   useEffect(() => {
     if (!activeProject) return
     const saved = loadLastInputs(activeProject.id)
-    setTicketId(saved?.ticketId ?? '')
+    setSimpleTickets(saved?.ticketId ? [saved.ticketId] : [])
     setAppUrl(saved?.appUrl ?? '')
     setInstructions(saved?.instructions ?? '')
     // The project's default skill (set on the Skills page) wins on load; otherwise
@@ -569,10 +648,10 @@ export default function RunPage() {
     if (next === mode) return
     // Carry the chosen ticket across the switch so nothing is lost: simple→advanced
     // seeds the feature list with the single ticket; advanced→simple keeps the lead.
-    if (next === 'advanced' && featureTickets.length === 0 && ticketId.trim()) {
-      setFeatureTickets([ticketId.trim()])
-    } else if (next === 'simple' && !ticketId.trim() && featureTickets.length > 0) {
-      setTicketId(featureTickets[0])
+    if (next === 'advanced' && featureTickets.length === 0 && simpleTickets.length > 0) {
+      setFeatureTickets(simpleTickets.slice(0, MAX_FEATURE_TICKETS))
+    } else if (next === 'simple' && simpleTickets.length === 0 && featureTickets.length > 0) {
+      setSimpleTickets(featureTickets.slice(0, MAX_QUEUE_TICKETS))
     }
     writeMode(next)
   }
@@ -611,42 +690,107 @@ export default function RunPage() {
     requestAnimationFrame(() => instructionsRef.current?.focus())
   }
 
-  // The tickets that drive this run: a single ticket in simple mode, or the
-  // ordered feature list in advanced mode (first = lead, the rest are related).
-  const runTickets =
-    mode === 'advanced' ? featureTickets : ticketId.trim() ? [ticketId.trim()] : []
+  // The tickets driving this submit: in simple mode each one becomes its own
+  // sequential run; in advanced mode they form ONE feature run (first = lead).
+  const runTickets = mode === 'advanced' ? featureTickets : simpleTickets
   const leadTicket = runTickets[0] ?? ''
+  // The picker refuses tickets without test cases, but a restored last-input (or a
+  // ticket whose test cases were deleted) can still slip in — catch those here so
+  // the run can't start without test cases to verify against.
+  const ticketsMissingTestcases =
+    mode === 'simple' && crawledTickets
+      ? runTickets.filter((id) => {
+          const t = crawledTickets.find((x) => (x.displayId ?? x.name) === id)
+          return !t?.hasTestcases
+        })
+      : []
   const cleanSteps = workflowSteps.map((s) => s.trim()).filter(Boolean)
-  const appUrlReady = isAppTarget || !!appUrl.trim()
+  // Multi-ticket queue: each run points at its OWN URL — there's no shared default,
+  // so every selected ticket must have its own App URL filled in.
+  const multiUrl = mode === 'simple' && runTickets.length > 1 && !isAppTarget
+  const urlFor = (id: string) => ticketUrls[id]?.trim() ?? ''
+  const invalidTicketUrls = multiUrl
+    ? runTickets.filter((id) => {
+        const u = ticketUrls[id]?.trim()
+        return !!u && !isValidHttpUrl(u)
+      })
+    : []
+  const missingTicketUrls = multiUrl ? runTickets.filter((id) => !urlFor(id)) : []
+  const appUrlReady = isAppTarget || (multiUrl ? missingTicketUrls.length === 0 : !!appUrl.trim())
+  // The shared App URL field is hidden in multi mode, so its validity is irrelevant there.
+  const sharedUrlInvalid = !multiUrl && appUrlInvalid
   const canSubmit =
-    !submitting && !!leadTicket && appUrlReady && !appUrlInvalid && !!activeProject
+    !submitting &&
+    !!leadTicket &&
+    appUrlReady &&
+    !sharedUrlInvalid &&
+    invalidTicketUrls.length === 0 &&
+    !!activeProject &&
+    ticketsMissingTestcases.length === 0
   const recent = recentRuns ?? []
   const liveRuns = recent.filter((run) => run.status === 'running' || run.status === 'queued').length
   const completedRuns = recent.filter((run) => run.status === 'passed' || run.status === 'failed').length
   const selectedTestcaseLabel =
-    mode === 'simple' && testcaseVersion != null ? `v${testcaseVersion}` : mode === 'advanced' ? `${cleanSteps.length} step${cleanSteps.length === 1 ? '' : 's'}` : 'Optional'
+    mode === 'simple' && runTickets.length > 1
+      ? `${runTickets.length} runs in turn`
+      : mode === 'simple' && testcaseVersion != null
+        ? `v${testcaseVersion}`
+        : mode === 'advanced'
+          ? `${cleanSteps.length} step${cleanSteps.length === 1 ? '' : 's'}`
+          : 'Optional'
   const readyChecks = [
     { label: 'Project', ok: !!activeProject, value: activeProject?.name ?? 'Select one' },
-    { label: mode === 'advanced' ? 'Lead ticket' : 'Ticket', ok: !!leadTicket, value: leadTicket || 'Choose ticket' },
     {
-      label: isAppTarget ? 'App' : 'App URL',
-      ok: appUrlReady && !appUrlInvalid,
+      label:
+        mode === 'advanced' ? 'Lead ticket' : runTickets.length > 1 ? 'Tickets' : 'Ticket',
+      ok: !!leadTicket && ticketsMissingTestcases.length === 0,
+      value:
+        ticketsMissingTestcases.length > 0
+          ? 'Needs test cases'
+          : mode === 'simple' && runTickets.length > 1
+            ? `${runTickets.length} selected`
+            : leadTicket || 'Choose ticket',
+    },
+    {
+      label: isAppTarget ? 'App' : multiUrl ? 'App URLs' : 'App URL',
+      ok: appUrlReady && !sharedUrlInvalid && invalidTicketUrls.length === 0,
       value: isAppTarget
         ? 'On device'
-        : appUrlInvalid
+        : sharedUrlInvalid || invalidTicketUrls.length > 0
           ? 'Invalid URL'
-          : appUrl.trim()
-            ? 'Ready'
-            : 'Required',
+          : multiUrl
+            ? missingTicketUrls.length > 0
+              ? `${missingTicketUrls.length} missing`
+              : 'Ready'
+            : appUrl.trim()
+              ? 'Ready'
+              : 'Required',
     },
     { label: 'Skill', ok: !!skill, value: skill || 'Choose skill' },
   ]
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault()
-    if (!leadTicket || !activeProject || (!isAppTarget && !appUrl.trim())) return
-    if (!isAppTarget && !isValidHttpUrl(appUrl)) {
+    if (!leadTicket || !activeProject || !appUrlReady) return
+    if (!isAppTarget && appUrl.trim() && !isValidHttpUrl(appUrl)) {
       toast.error('Invalid App URL', { description: 'Enter a full http:// or https:// address.' })
+      return
+    }
+    if (multiUrl) {
+      const bad = runTickets.find((id) => !isValidHttpUrl(urlFor(id)))
+      if (bad) {
+        toast.error('Invalid App URL', {
+          description: `Check the URL for ${bad} — enter a full http:// or https:// address.`,
+        })
+        return
+      }
+    } else if (!isAppTarget && !appUrl.trim()) {
+      return
+    }
+    if (ticketsMissingTestcases.length > 0) {
+      toast.error('Missing test cases', {
+        description: `Generate test cases for ${ticketsMissingTestcases.join(', ')} first — a QC run verifies against them.`,
+      })
       return
     }
     setSubmitting(true)
@@ -660,18 +804,35 @@ export default function RunPage() {
           : ''
       const finalInstructions = [base, tcLine].filter(Boolean).join('\n\n')
 
-      await createRun({
-        projectId: activeProject.id,
-        ticketId: leadTicket,
-        appUrl: isAppTarget ? '' : appUrl.trim(),
-        skill: skill || undefined,
-        instructions: finalInstructions || undefined,
-        model,
-        relatedTickets:
-          mode === 'advanced' && runTickets.length > 1 ? runTickets.slice(1) : undefined,
-        workflowSteps: mode === 'advanced' && cleanSteps.length ? cleanSteps : undefined,
-        testTarget,
-      })
+      if (mode === 'simple') {
+        // One run per ticket. The server executes runs strictly one at a time —
+        // the first starts now, the rest are queued and run in this order.
+        for (const ticket of runTickets) {
+          await createRun({
+            projectId: activeProject.id,
+            ticketId: ticket,
+            // Single ticket uses the shared App URL field; only multi-ticket
+            // runs collect a per-ticket URL in `ticketUrls`.
+            appUrl: isAppTarget ? '' : multiUrl ? urlFor(ticket) : appUrl.trim(),
+            skill: skill || undefined,
+            instructions: finalInstructions || undefined,
+            model,
+            testTarget,
+          })
+        }
+      } else {
+        await createRun({
+          projectId: activeProject.id,
+          ticketId: leadTicket,
+          appUrl: isAppTarget ? '' : appUrl.trim(),
+          skill: skill || undefined,
+          instructions: finalInstructions || undefined,
+          model,
+          relatedTickets: runTickets.length > 1 ? runTickets.slice(1) : undefined,
+          workflowSteps: cleanSteps.length ? cleanSteps : undefined,
+          testTarget,
+        })
+      }
       saveLastInputs(activeProject.id, {
         ticketId: leadTicket,
         appUrl: appUrl.trim(),
@@ -680,12 +841,18 @@ export default function RunPage() {
       })
       queryClient.invalidateQueries({ queryKey: ['runs'] })
       toast.success(
-        mode === 'advanced' && runTickets.length > 1 ? 'Feature QC run started' : 'QC run started',
+        mode === 'advanced' && runTickets.length > 1
+          ? 'Feature QC run started'
+          : mode === 'simple' && runTickets.length > 1
+            ? `${runTickets.length} QC runs queued`
+            : 'QC run started',
         {
           description:
             mode === 'advanced' && runTickets.length > 1
               ? `Testing ${runTickets.length} tickets as one feature — tracking on the Running page.`
-              : 'Tracking progress on the Running page.',
+              : mode === 'simple' && runTickets.length > 1
+                ? 'Runs execute one at a time, in order — tracking on the Running page.'
+                : 'Tracking progress on the Running page.',
         },
       )
       navigate('/running')
@@ -842,19 +1009,53 @@ export default function RunPage() {
               <StepHeader
                 n={1}
                 title="What to test"
-                hint={mode === 'advanced' ? 'a feature across tickets' : 'a crawled ticket'}
+                hint={
+                  mode === 'advanced' ? 'a feature across tickets' : 'crawled tickets, one run each'
+                }
               />
               {mode === 'simple' ? (
                 <div className="space-y-4">
-                  <CrawledTicketPicker
-                    value={ticketId}
-                    onChange={setTicketId}
-                    projectId={activeProject?.id}
+                  <FeatureTicketsPicker
+                    variant="queue"
+                    tickets={crawledTickets ?? []}
+                    value={simpleTickets}
+                    onChange={setSimpleTickets}
                     disabled={!activeProject}
                   />
 
+                  {ticketsMissingTestcases.length > 0 && (
+                    <div className="flex items-start gap-2.5 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-800">
+                      <TriangleAlert className="mt-0.5 size-4 shrink-0" />
+                      <p className="leading-snug">
+                        <span className="font-mono font-medium">
+                          {ticketsMissingTestcases.join(', ')}
+                        </span>{' '}
+                        has no test cases — the run can’t start without them. Generate test cases
+                        on the{' '}
+                        <Link to="/testcases" className="font-medium underline">
+                          Test cases
+                        </Link>{' '}
+                        page, or remove the ticket from the selection.
+                      </p>
+                    </div>
+                  )}
+
+                  {simpleTickets.length > 1 && (
+                    <div className="flex items-start gap-2 rounded-2xl border border-border/60 bg-muted/60 px-3 py-2 text-xs leading-relaxed text-muted-foreground">
+                      <ListOrdered className="mt-0.5 size-3.5 shrink-0 text-primary" />
+                      <span>
+                        <span className="font-medium text-foreground">
+                          {simpleTickets.length} separate runs, one at a time:
+                        </span>{' '}
+                        the first ticket starts now; the rest wait in a queue and run in order —
+                        never in parallel. Test-case selection is available when a single ticket is
+                        chosen.
+                      </span>
+                    </div>
+                  )}
+
                   {/* Test cases for the chosen ticket (or a prompt to generate them). */}
-                  {ticketId.trim() && selectedFolder && (
+                  {soloTicketId && selectedFolder && (
                     <TicketTestCasePicker
                       folder={selectedFolder}
                       projectId={activeProject?.id}
@@ -961,6 +1162,10 @@ export default function RunPage() {
                   </div>
                 </div>
               ) : (
+                <>
+                {/* Single ticket: one shared App URL field. Multi-ticket queues use
+                    the per-ticket list below instead (each run has its own URL). */}
+                {!multiUrl && (
                 <div className="space-y-2">
                   <Label htmlFor="appUrl" className="flex items-center gap-1.5">
                     <Globe className="size-3.5 text-muted-foreground" />
@@ -1025,6 +1230,84 @@ export default function RunPage() {
                     <p className="text-xs text-muted-foreground">{appUrlHelp}</p>
                   )}
                 </div>
+                )}
+
+                {/* per-ticket URLs — each queued run tests its own page (no shared default) */}
+                {multiUrl && (
+                  <div className="space-y-2.5 rounded-2xl border border-border/60 bg-muted/30 p-3.5">
+                    <p className="flex items-center gap-1.5 text-xs font-semibold tracking-tight">
+                      <Globe className="size-3.5 text-muted-foreground" />
+                      App URL per ticket
+                      <span className="font-normal text-muted-foreground">
+                        · one for each selected ticket
+                      </span>
+                    </p>
+                    <div className="space-y-1.5">
+                      {runTickets.map((id, i) => {
+                        const title =
+                          (crawledTickets ?? []).find((t) => (t.displayId ?? t.name) === id)
+                            ?.title ?? null
+                        const own = ticketUrls[id] ?? ''
+                        const ownInvalid = !!own.trim() && !isValidHttpUrl(own)
+                        const effective = urlFor(id)
+                        return (
+                          <div key={id} className="flex items-center gap-2">
+                            <span className="grid size-6 shrink-0 place-items-center rounded-full bg-muted text-xs font-semibold tabular-nums text-muted-foreground">
+                              {i + 1}
+                            </span>
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <span className="flex w-36 shrink-0 cursor-default flex-col justify-center">
+                                  <span className="truncate font-mono text-xs font-medium leading-tight">
+                                    {id}
+                                  </span>
+                                  {title && (
+                                    <span className="truncate text-[11px] leading-tight text-muted-foreground">
+                                      {title}
+                                    </span>
+                                  )}
+                                </span>
+                              </TooltipTrigger>
+                              <TooltipContent side="top" align="start">
+                                <span className="font-mono font-medium">{id}</span>
+                                {title && <span> — {title}</span>}
+                              </TooltipContent>
+                            </Tooltip>
+                            <Input
+                              value={own}
+                              onChange={(e) =>
+                                setTicketUrls((prev) => ({ ...prev, [id]: e.target.value }))
+                              }
+                              disabled={!activeProject}
+                              aria-invalid={ownInvalid || !effective}
+                              placeholder="https://staging.example.com/page"
+                              className="h-9 flex-1 font-mono text-xs shadow-xs transition-shadow focus-visible:shadow-sm"
+                            />
+                          </div>
+                        )
+                      })}
+                    </div>
+                    {invalidTicketUrls.length > 0 ? (
+                      <p className="flex items-center gap-1.5 text-xs font-medium text-destructive">
+                        <TriangleAlert className="size-3.5" />
+                        Invalid URL for {invalidTicketUrls.join(', ')} — enter a full http:// or
+                        https:// address.
+                      </p>
+                    ) : missingTicketUrls.length > 0 ? (
+                      <p className="flex items-center gap-1.5 text-xs font-medium text-amber-600">
+                        <TriangleAlert className="size-3.5" />
+                        {missingTicketUrls.join(', ')} has no URL — every ticket needs its own App
+                        URL to run.
+                      </p>
+                    ) : (
+                      <p className="text-xs text-muted-foreground">
+                        Each ticket's run opens its own URL — useful when the tickets live on
+                        different pages.
+                      </p>
+                    )}
+                  </div>
+                )}
+                </>
               )}
             </section>
 
@@ -1218,7 +1501,11 @@ export default function RunPage() {
                 ) : (
                   <>
                     <Play className="size-4" />
-                    {mode === 'advanced' && runTickets.length > 1 ? 'Run feature QC' : 'Run QC'}
+                    {mode === 'advanced' && runTickets.length > 1
+                      ? 'Run feature QC'
+                      : runTickets.length > 1
+                        ? `Run ${runTickets.length} tickets in turn`
+                        : 'Run QC'}
                     <ArrowRight className="size-4 transition-transform group-hover:translate-x-0.5" />
                   </>
                 )}

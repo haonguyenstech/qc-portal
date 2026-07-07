@@ -4,6 +4,7 @@ import { testResultDirFor } from './config.js'
 import { runQc } from './claude.js'
 import type { RunHandle } from './claude.js'
 import { groundReport } from './groundingCheck.js'
+import { fillExecutedTestcases } from './fillTestcases.js'
 import { runKnowledgeUpdate } from './learn.js'
 import {
   appendEvent,
@@ -20,8 +21,41 @@ import type { CreateRunBody, LogEvent, Project, RunSummary } from './types.js'
 
 const active = new Map<string, RunHandle>()
 
+// QC runs execute ONE AT A TIME, globally — they all drive the same Playwright
+// browser profile, so parallel runs would fight over it. Extra runs are inserted
+// as 'queued' and started in order as each run finishes (done/error/cancel/pause).
+interface QueuedRun {
+  id: string
+  project: Project
+  body: CreateRunBody
+  // Set when a paused run is re-queued via resumeRun: it continues its kept
+  // Claude session (`claude --resume`) instead of starting fresh.
+  resumeSessionId?: string
+}
+const queue: QueuedRun[] = []
+
 function now(): string {
   return new Date().toISOString()
+}
+
+/** Start the oldest still-queued run, if nothing is running. */
+function startNextQueued(): void {
+  if (active.size > 0) return
+  const next = queue.shift()
+  if (!next) return
+  // Skip runs the user canceled while they were waiting.
+  const run = getRun(next.id)
+  if (!run || run.status !== 'queued') {
+    startNextQueued()
+    return
+  }
+  updateRun(next.id, { status: 'running', finishedAt: null })
+  record(next.id, {
+    ts: now(),
+    kind: 'system',
+    text: next.resumeSessionId ? 'Resuming queued run…' : 'Starting queued run…',
+  })
+  spawnRun(next.id, next.project, next.body, next.resumeSessionId)
 }
 
 /**
@@ -201,6 +235,7 @@ function spawnRun(
         const currentStatus = getRun(id)?.status
         if (currentStatus === 'paused' || currentStatus === 'canceled') {
           active.delete(id)
+          startNextQueued()
           return
         }
         const slug = resolveSlug(testingDir, body.ticketId)
@@ -272,6 +307,39 @@ function spawnRun(
         appendEvent(id, final)
         hub.broadcast(id, { runId: id, event: final })
 
+        // Fill an executed test-case sheet: clone the ticket's latest test-case
+        // file and fill its Actual result / Status / Reference / Note columns from
+        // this run's report, saved as testcases-executed.<ext> in the run's output
+        // folder. Best-effort, fire-and-forget — never blocks or fails the run.
+        if (success && reportMd && slug) {
+          void fillExecutedTestcases({
+            rootPath: project.rootPath,
+            projectName: project.name,
+            ticketId: body.ticketId,
+            report: reportMd,
+            slug,
+            model: project.groundingCheckModel,
+          })
+            .then((r) => {
+              const ev: LogEvent = r.filled
+                ? {
+                    ts: now(),
+                    kind: 'system',
+                    text: `Filled executed test cases → ${r.file} (${r.covered}/${r.total} cases from the report).`,
+                  }
+                : {
+                    ts: now(),
+                    kind: 'system',
+                    text: `Executed test-case sheet not written: ${r.reason}.`,
+                  }
+              appendEvent(id, ev)
+              hub.broadcast(id, { runId: id, event: ev })
+            })
+            .catch(() => {
+              /* best-effort — filling never sinks a finished run */
+            })
+        }
+
         // AI auto-capture: reflect on the finished run and persist durable facts into
         // testing/memory (+ knowledge). Best-effort, fire-and-forget — never blocks or
         // fails the run; results are surfaced as a follow-up event on the run's stream.
@@ -308,16 +376,19 @@ function spawnRun(
         }
 
         active.delete(id)
+        startNextQueued()
       },
       onError: (message) => {
         const currentStatus = getRun(id)?.status
         if (currentStatus === 'paused' || currentStatus === 'canceled') {
           active.delete(id)
+          startNextQueued()
           return
         }
         record(id, { ts: now(), kind: 'error', text: message })
         updateRun(id, { status: 'error', finishedAt: now() })
         active.delete(id)
+        startNextQueued()
       },
     },
   )
@@ -331,6 +402,10 @@ export function startRun(body: CreateRunBody): RunSummary {
     throw Object.assign(new Error('project not found'), { status: 400 })
   }
 
+  // One run at a time: if anything is already running (or waiting), this run
+  // joins the queue and starts automatically when its turn comes.
+  const mustQueue = active.size > 0 || queue.length > 0
+
   const id = newRunId()
   const summary: RunSummary = {
     id,
@@ -339,7 +414,7 @@ export function startRun(body: CreateRunBody): RunSummary {
     ticketId: body.ticketId,
     appUrl: body.appUrl,
     slug: null,
-    status: 'running',
+    status: mustQueue ? 'queued' : 'running',
     passCount: 0,
     failCount: 0,
     totalAcs: 0,
@@ -348,7 +423,16 @@ export function startRun(body: CreateRunBody): RunSummary {
   }
   insertRun(summary)
 
-  spawnRun(id, project, body)
+  if (mustQueue) {
+    queue.push({ id, project, body })
+    record(id, {
+      ts: now(),
+      kind: 'system',
+      text: `Run queued (position ${queue.length}) — QC runs execute one at a time; it starts when the current run finishes.`,
+    })
+  } else {
+    spawnRun(id, project, body)
+  }
   return summary
 }
 
@@ -377,6 +461,7 @@ export function resumeRun(id: string): boolean {
     throw Object.assign(new Error('run is not paused'), { status: 409 })
   }
   if (active.has(id)) return true // already running again
+  if (queue.some((q) => q.id === id)) return true // already waiting in the queue
 
   const project = run.projectId ? getProject(run.projectId) : undefined
   if (!project) {
@@ -390,15 +475,30 @@ export function resumeRun(id: string): boolean {
     )
   }
 
+  const body: CreateRunBody = {
+    projectId: project.id,
+    ticketId: run.ticketId,
+    appUrl: run.appUrl,
+  }
+
+  // One run at a time — resuming while another run is live can't start now, so
+  // the run rejoins the queue and continues automatically when the current run
+  // finishes (instead of failing the resume).
+  if (active.size > 0 || queue.length > 0) {
+    updateRun(id, { status: 'queued', finishedAt: null })
+    queue.push({ id, project, body, resumeSessionId: sessionId })
+    record(id, {
+      ts: now(),
+      kind: 'system',
+      text: `Resume queued (position ${queue.length}) — another QC run is in progress; it continues automatically when that run finishes.`,
+    })
+    return true
+  }
+
   updateRun(id, { status: 'running', finishedAt: null })
   record(id, { ts: now(), kind: 'system', text: 'Resuming run…' })
 
-  spawnRun(
-    id,
-    project,
-    { ticketId: run.ticketId, appUrl: run.appUrl },
-    sessionId,
-  )
+  spawnRun(id, project, body, sessionId)
   return true
 }
 
@@ -440,13 +540,16 @@ export function cancelRun(id: string): boolean {
     handle.cancel()
     active.delete(id)
   }
-  // A canceled run is terminal — covers both live ('running') and 'paused' runs.
-  if (run && (run.status === 'running' || run.status === 'paused')) {
+  // A queued run just leaves the queue — nothing was spawned yet.
+  const queuedIdx = queue.findIndex((q) => q.id === id)
+  if (queuedIdx >= 0) queue.splice(queuedIdx, 1)
+  // A canceled run is terminal — covers live ('running'), 'paused' and 'queued' runs.
+  if (run && (run.status === 'running' || run.status === 'paused' || run.status === 'queued')) {
     const finishedAt = now()
     updateRun(id, { status: 'canceled', finishedAt })
     const event: LogEvent = { ts: finishedAt, kind: 'system', text: 'Run canceled' }
     appendEvent(id, event)
     hub.broadcast(id, { runId: id, event })
   }
-  return !!handle
+  return !!handle || queuedIdx >= 0
 }

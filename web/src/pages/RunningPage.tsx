@@ -4,8 +4,8 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import {
   ArrowRight,
-  Check,
   ChevronDown,
+  Clock,
   Loader2,
   Pause,
   Play,
@@ -18,11 +18,11 @@ import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { cn } from '@/lib/utils'
-import { cancelRun, listRuns, pauseRun, resumeRun } from '@/lib/api'
+import { cancelRun, listCrawledTickets, listRuns, pauseRun, resumeRun } from '@/lib/api'
 import { useProjects } from '@/lib/project-context'
 import { useRunStream } from '@/lib/useRunStream'
 import { StatusBadge } from '@/lib/status'
-import { relativeTime } from '@/lib/format'
+import { formatDuration, relativeTime } from '@/lib/format'
 import type { LogEvent, Phase, RunSummary } from '@/lib/types'
 
 const PHASES: { key: Phase; label: string }[] = [
@@ -63,84 +63,89 @@ function logLineClass(kind: LogEvent['kind']): string {
 }
 
 /**
- * Horizontal 7-phase timeline. `activeIdx` is the furthest phase reached (monotonic),
- * so completed phases stay filled and the marker never snaps backward even when the
- * phase guess from the log text wobbles.
+ * Compact segmented progress bar. One thin segment per phase: filled for phases
+ * already reached, the active one shimmering, the rest empty. `activeIdx` is the
+ * furthest phase reached (monotonic) so it never snaps backward when the phase
+ * guess from the log text wobbles. Reads far cleaner than 7 cramped numbered dots.
  */
-function PhaseStepper({ activeIdx, paused }: { activeIdx: number; paused: boolean }) {
+function PhaseProgress({
+  activeIdx,
+  paused,
+  starting,
+}: {
+  activeIdx: number
+  paused: boolean
+  /** No phase reached yet — light up segment 1 as "preparing" so the bar shows motion. */
+  starting?: boolean
+}) {
   return (
-    <ol className="flex items-start">
+    <div className="flex items-center gap-1" aria-hidden>
       {PHASES.map((p, i) => {
         const done = i < activeIdx
         const active = i === activeIdx
-        const last = i === PHASES.length - 1
-        // A connector segment is "filled" once the phase it leads INTO is reached.
-        const leftFilled = i <= activeIdx
-        const rightFilled = i < activeIdx
+        const preparing = starting && i === 0
         return (
-          <li
+          <span
             key={p.key}
-            className={cn('flex min-w-0 flex-col items-center gap-1.5', last ? 'flex-none' : 'flex-1')}
+            className={cn(
+              'h-1.5 flex-1 overflow-hidden rounded-full transition-colors duration-300',
+              done
+                ? 'bg-foreground'
+                : active
+                  ? paused
+                    ? 'bg-amber-500'
+                    : 'bg-sky-500'
+                  : preparing
+                    ? 'bg-sky-500/25'
+                    : 'bg-border',
+            )}
           >
-            <div className="relative flex h-6 w-full items-center justify-center">
-              {i > 0 && (
-                <span
-                  className={cn(
-                    'absolute left-0 right-1/2 top-1/2 h-0.5 -translate-y-1/2 transition-colors',
-                    leftFilled ? 'bg-foreground' : 'bg-border',
-                  )}
-                  aria-hidden
-                />
-              )}
-              {!last && (
-                <span
-                  className={cn(
-                    'absolute left-1/2 right-0 top-1/2 h-0.5 -translate-y-1/2 transition-colors',
-                    rightFilled ? 'bg-foreground' : 'bg-border',
-                  )}
-                  aria-hidden
-                />
-              )}
-              <span
-                className={cn(
-                  'relative z-10 flex size-6 items-center justify-center rounded-full text-[10px] font-semibold tabular-nums transition-colors',
-                  done
-                    ? 'bg-foreground text-background'
-                    : active
-                      ? paused
-                        ? 'bg-amber-500 text-white ring-4 ring-amber-500/15'
-                        : 'bg-sky-500 text-white ring-4 ring-sky-500/15'
-                      : 'border border-border bg-background text-muted-foreground',
-                )}
-              >
-                {done ? (
-                  <Check className="size-3" />
-                ) : active && !paused ? (
-                  <span className="size-2 animate-pulse rounded-full bg-white" aria-hidden />
-                ) : (
-                  i + 1
-                )}
-              </span>
-            </div>
-            <span
-              className={cn(
-                'max-w-full truncate text-center text-[10px] font-medium leading-none',
-                done || active ? 'text-foreground' : 'text-muted-foreground/60',
-              )}
-            >
-              {p.label}
-            </span>
-          </li>
+            {((active && !paused) || preparing) && (
+              <span className="block h-full w-full animate-pulse bg-sky-400/60" />
+            )}
+          </span>
         )
       })}
-    </ol>
+    </div>
+  )
+}
+
+/**
+ * Live count-up of how long a run has been going, ticking every second while
+ * `active`. When not active (paused) the interval stops so the value freezes.
+ */
+function ElapsedTime({ since, active }: { since: string; active: boolean }) {
+  const start = useMemo(() => new Date(since).getTime(), [since])
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    if (!active) return
+    setNow(Date.now())
+    const id = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(id)
+  }, [active])
+  if (Number.isNaN(start)) return null
+  return (
+    <span className="flex items-center gap-1 tabular-nums">
+      <Clock className="size-3" />
+      {formatDuration(now - start)}
+    </span>
   )
 }
 
 function LogPanel({ events, connected }: { events: LogEvent[]; connected: boolean }) {
-  const bottomRef = useRef<HTMLDivElement>(null)
+  const scrollRef = useRef<HTMLDivElement>(null)
+  // Auto-scroll ONLY the log's own viewport — never scrollIntoView, which also
+  // scrolls the page/window and made the whole page jump on every new event.
+  // And only when the user is already pinned to the bottom, so scrolling up to
+  // read doesn't fight the incoming stream.
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ block: 'end' })
+    const viewport = scrollRef.current?.querySelector<HTMLElement>(
+      '[data-slot="scroll-area-viewport"]',
+    )
+    if (!viewport) return
+    const nearBottom =
+      viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight < 48
+    if (nearBottom) viewport.scrollTop = viewport.scrollHeight
   }, [events.length])
 
   return (
@@ -170,7 +175,7 @@ function LogPanel({ events, connected }: { events: LogEvent[]; connected: boolea
           {events.length} {events.length === 1 ? 'event' : 'events'}
         </span>
       </div>
-      <ScrollArea className="h-64 p-3">
+      <ScrollArea className="h-48 p-3" ref={scrollRef}>
         <div className="space-y-0.5 font-mono text-[11px] leading-relaxed">
           {events.length === 0 && (
             <div className="flex items-center gap-2 text-zinc-500">
@@ -187,7 +192,6 @@ function LogPanel({ events, connected }: { events: LogEvent[]; connected: boolea
               <span className="whitespace-pre-wrap break-words">{e.text}</span>
             </div>
           ))}
-          <div ref={bottomRef} />
         </div>
       </ScrollArea>
     </div>
@@ -196,19 +200,22 @@ function LogPanel({ events, connected }: { events: LogEvent[]; connected: boolea
 
 function RunningRow({
   run,
+  title,
   onPause,
   onResume,
   onCancel,
   busy,
 }: {
   run: RunSummary
+  title: string | null
   onPause: (id: string) => void
   onResume: (id: string) => void
   onCancel: (id: string) => void
   busy: boolean
 }) {
   const { events, phase, connected } = useRunStream(run.id)
-  const [showLogs, setShowLogs] = useState(true)
+  // Collapsed by default so a card stays small — expand to watch the stream.
+  const [showLogs, setShowLogs] = useState(false)
   const isPaused = run.status === 'paused'
 
   // Phase is *guessed* from log text and can wobble (even point at a later phase
@@ -238,49 +245,57 @@ function RunningRow({
         : 'Starting'
 
   return (
-    <Card className="overflow-hidden rounded-3xl border-border/60 shadow-none transition-all duration-200 hover:-translate-y-0.5 hover:border-border hover:shadow-sm">
-      <CardContent className="space-y-5 p-5">
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+    <Card className="overflow-hidden rounded-2xl border-border/60 shadow-none transition-all duration-200 hover:-translate-y-0.5 hover:border-border hover:shadow-sm">
+      <CardContent className="space-y-2 p-3.5">
+        <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
           {isPaused ? (
-            <span className="size-2.5 shrink-0 rounded-full bg-amber-500" aria-hidden />
+            <span className="size-2 shrink-0 rounded-full bg-amber-500" aria-hidden />
           ) : (
-            <span className="relative flex size-2.5 shrink-0" aria-hidden>
+            <span className="relative flex size-2 shrink-0" aria-hidden>
               <span className="absolute inline-flex size-full animate-ping rounded-full bg-sky-400/70" />
-              <span className="relative inline-flex size-2.5 rounded-full bg-sky-500" />
+              <span className="relative inline-flex size-2 rounded-full bg-sky-500" />
             </span>
           )}
-          <Link to={`/run/${run.id}`} className="font-mono text-sm font-semibold hover:underline">
-            {run.ticketId}
+          <Link
+            to={`/run/${run.id}`}
+            className="flex min-w-0 items-baseline gap-1.5 hover:underline"
+          >
+            <span className="font-mono text-sm font-semibold">{run.ticketId}</span>
+            {title && (
+              <span className="truncate text-sm font-medium text-foreground">{title}</span>
+            )}
           </Link>
-          <StatusBadge status={run.status} />
+          <StatusBadge status={run.status} compact />
           <span className="truncate font-mono text-xs text-muted-foreground">
             {hostOf(run.appUrl)}
           </span>
-          <span className="ml-auto text-xs tabular-nums text-muted-foreground">
-            started {relativeTime(run.createdAt)}
+          <span className="ml-auto flex items-center gap-2 text-[11px] tabular-nums text-muted-foreground">
+            <ElapsedTime since={run.createdAt} active={!isPaused && run.status !== 'queued'} />
+          </span>
+          <span className="flex items-center gap-1.5 text-[11px] font-medium tracking-tight text-foreground">
+            {isPaused ? (
+              <Pause className="size-3 text-amber-500" />
+            ) : (
+              <Loader2 className="size-3 animate-spin text-sky-500" />
+            )}
+            {phaseLabel}
+            {step > 0 && (
+              <span className="tabular-nums font-normal text-muted-foreground">
+                · {step}/{PHASES.length}
+              </span>
+            )}
           </span>
         </div>
 
-        {/* live phase timeline */}
-        <div className="space-y-3 rounded-2xl border border-border/60 bg-muted/40 px-4 py-3.5">
-          <div className="flex items-center justify-between gap-2 text-xs">
-            <span className="flex items-center gap-1.5 font-medium text-foreground">
-              {isPaused ? (
-                <Pause className="size-3.5 text-amber-500" />
-              ) : (
-                <Loader2 className="size-3.5 animate-spin text-sky-500" />
-              )}
-              {phaseLabel}
-            </span>
-            <span className="tabular-nums text-muted-foreground">
-              {step > 0 ? `Step ${step} of ${PHASES.length}` : `${PHASES.length} phases`}
-            </span>
-          </div>
-          <PhaseStepper activeIdx={idx} paused={isPaused} />
-        </div>
+        {/* thin phase bar directly under the header — no framing box */}
+        <PhaseProgress
+          activeIdx={idx}
+          paused={isPaused}
+          starting={idx < 0 && !isPaused && run.status !== 'queued'}
+        />
 
-        {/* live logs */}
-        <div className="space-y-2">
+        {/* logs toggle + actions on one row to keep the card small */}
+        <div className="flex items-center gap-2">
           <button
             type="button"
             onClick={() => setShowLogs((s) => !s)}
@@ -289,63 +304,141 @@ function RunningRow({
             <ChevronDown
               className={cn('size-3.5 transition-transform', showLogs ? '' : '-rotate-90')}
             />
-            {showLogs ? 'Hide' : 'Show'} live logs
+            {showLogs ? 'Hide' : 'Show'} logs
             {events.length > 0 && (
               <span className="tabular-nums text-muted-foreground/70">({events.length})</span>
             )}
           </button>
-          {showLogs && <LogPanel events={events} connected={connected} />}
-        </div>
-
-        <div className="flex items-center justify-end gap-2">
-          {isPaused ? (
-            <>
+          <div className="ml-auto flex items-center gap-2">
+            {isPaused ? (
+              <>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => onCancel(run.id)}
+                  disabled={busy}
+                  className="h-8 rounded-full text-muted-foreground hover:text-destructive"
+                >
+                  <Square className="size-3.5" />
+                  Discard
+                </Button>
+                <Button
+                  size="sm"
+                  onClick={() => onResume(run.id)}
+                  disabled={busy}
+                  className="h-8 rounded-full transition-all duration-200 active:scale-[0.98]"
+                >
+                  {busy ? (
+                    <Loader2 className="size-3.5 animate-spin" />
+                  ) : (
+                    <Play className="size-3.5" />
+                  )}
+                  Resume
+                </Button>
+              </>
+            ) : run.status === 'queued' ? (
+              // Queued runs haven't spawned anything yet — they can only be
+              // canceled (removed from the queue), not paused.
               <Button
-                variant="ghost"
+                variant="outline"
                 size="sm"
                 onClick={() => onCancel(run.id)}
                 disabled={busy}
-                className="rounded-full text-muted-foreground hover:text-destructive"
+                className="h-8 rounded-full text-muted-foreground transition-all duration-200 hover:text-destructive active:scale-[0.98]"
               >
-                <Square className="size-3.5" />
-                Discard
+                {busy ? (
+                  <Loader2 className="size-3.5 animate-spin" />
+                ) : (
+                  <Square className="size-3.5" />
+                )}
+                Cancel
               </Button>
+            ) : (
               <Button
+                variant="outline"
                 size="sm"
-                onClick={() => onResume(run.id)}
+                onClick={() => onPause(run.id)}
                 disabled={busy}
-                className="rounded-full transition-all duration-200 active:scale-[0.98]"
+                className="h-8 rounded-full transition-all duration-200 active:scale-[0.98]"
               >
-                {busy ? <Loader2 className="size-3.5 animate-spin" /> : <Play className="size-3.5" />}
-                Resume
+                {busy ? (
+                  <Loader2 className="size-3.5 animate-spin" />
+                ) : (
+                  <Pause className="size-3.5" />
+                )}
+                Stop
               </Button>
-            </>
-          ) : (
+            )}
             <Button
-              variant="outline"
+              asChild
               size="sm"
-              onClick={() => onPause(run.id)}
-              disabled={busy}
-              className="rounded-full transition-all duration-200 active:scale-[0.98]"
+              variant={isPaused ? 'outline' : 'default'}
+              className="h-8 rounded-full transition-all duration-200 active:scale-[0.98]"
             >
-              {busy ? <Loader2 className="size-3.5 animate-spin" /> : <Pause className="size-3.5" />}
-              Stop
+              <Link to={`/run/${run.id}`}>
+                Open
+                <ArrowRight className="size-3.5" />
+              </Link>
             </Button>
-          )}
-          <Button
-            asChild
-            size="sm"
-            variant={isPaused ? 'outline' : 'default'}
-            className="rounded-full transition-all duration-200 active:scale-[0.98]"
-          >
-            <Link to={`/run/${run.id}`}>
-              Open
-              <ArrowRight className="size-3.5" />
-            </Link>
-          </Button>
+          </div>
         </div>
+
+        {showLogs && <LogPanel events={events} connected={connected} />}
       </CardContent>
     </Card>
+  )
+}
+
+/**
+ * Compact row for a run waiting in the queue. Queued runs haven't spawned
+ * anything yet — no phases, no logs — so a slim row with its position and a
+ * Cancel button is all that's useful.
+ */
+function QueuedRow({
+  run,
+  title,
+  position,
+  onCancel,
+  busy,
+}: {
+  run: RunSummary
+  title: string | null
+  position: number
+  onCancel: (id: string) => void
+  busy: boolean
+}) {
+  return (
+    <li className="flex items-center gap-2.5 px-3.5 py-2 transition-colors hover:bg-muted/50">
+      <span className="grid size-5 shrink-0 place-items-center rounded-full bg-muted text-[11px] font-semibold tabular-nums text-muted-foreground">
+        {position}
+      </span>
+      <Link
+        to={`/run/${run.id}`}
+        className="flex min-w-0 items-baseline gap-1.5 hover:underline"
+      >
+        <span className="shrink-0 font-mono text-sm font-semibold">{run.ticketId}</span>
+        {title && (
+          <span className="truncate text-sm font-medium text-foreground">{title}</span>
+        )}
+      </Link>
+      <StatusBadge status={run.status} compact />
+      <span className="min-w-0 truncate font-mono text-xs text-muted-foreground">
+        {hostOf(run.appUrl)}
+      </span>
+      <span className="ml-auto shrink-0 text-xs tabular-nums text-muted-foreground">
+        queued {relativeTime(run.createdAt)}
+      </span>
+      <Button
+        variant="ghost"
+        size="sm"
+        onClick={() => onCancel(run.id)}
+        disabled={busy}
+        className="h-7 shrink-0 rounded-full text-muted-foreground hover:text-destructive"
+      >
+        {busy ? <Loader2 className="size-3.5 animate-spin" /> : <Square className="size-3.5" />}
+        Cancel
+      </Button>
+    </li>
   )
 }
 
@@ -360,14 +453,33 @@ export default function RunningPage() {
     refetchInterval: 4000, // these are live — keep the list fresh
   })
 
+  // Runs only carry the ticket id; join against crawled tickets for a title.
+  const { data: crawledTickets } = useQuery({
+    queryKey: ['crawled', activeProject?.id],
+    queryFn: () => listCrawledTickets(activeProject!.id),
+    enabled: !!activeProject,
+  })
+  const titleFor = (ticketId: string): string | null => {
+    const t = (crawledTickets ?? []).find(
+      (x) => (x.displayId ?? x.name) === ticketId,
+    )
+    return t?.title ?? null
+  }
+
   const [busyId, setBusyId] = useState<string | null>(null)
 
   // In-progress runs include paused ones so they stay visible (with a Resume).
   const active = (runs ?? []).filter(
     (r) => r.status === 'running' || r.status === 'queued' || r.status === 'paused',
   )
-  const liveCount = active.filter((r) => r.status !== 'paused').length
-  const pausedCount = active.length - liveCount
+  // Live (running/paused) cards render on top; queued runs wait in a compact
+  // list below, in start order (oldest first — the order they'll execute).
+  const live = active.filter((r) => r.status !== 'queued')
+  const queued = active
+    .filter((r) => r.status === 'queued')
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+  const liveCount = live.filter((r) => r.status !== 'paused').length
+  const pausedCount = live.length - liveCount
 
   async function onPause(id: string) {
     setBusyId(id)
@@ -415,14 +527,14 @@ export default function RunningPage() {
   }
 
   return (
-    <div className="mx-auto max-w-6xl space-y-8">
-      <header className="flex flex-wrap items-end justify-between gap-3">
-        <div className="flex items-start gap-3">
-          <span className="mt-0.5 flex size-11 shrink-0 items-center justify-center rounded-2xl bg-foreground text-background">
-            <RadioTower className="size-5" />
+    <div className="mx-auto max-w-6xl space-y-6">
+      <header className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-2.5">
+          <span className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-foreground text-background">
+            <RadioTower className="size-4" />
           </span>
-          <div className="space-y-1">
-            <h1 className="flex items-center gap-2 text-3xl font-semibold tracking-tight">
+          <div className="space-y-0.5">
+            <h1 className="flex items-center gap-2 text-xl font-semibold tracking-tight">
               Running tests
               {liveCount > 0 && (
                 <Badge variant="secondary" className="gap-1 font-normal">
@@ -439,6 +551,12 @@ export default function RunningPage() {
                   {pausedCount} paused
                 </Badge>
               )}
+              {queued.length > 0 && (
+                <Badge variant="secondary" className="gap-1 font-normal">
+                  <Clock className="size-3" />
+                  {queued.length} queued
+                </Badge>
+              )}
             </h1>
             <p className="text-sm text-muted-foreground">
               QC runs currently in progress. Live progress updates automatically.
@@ -448,7 +566,7 @@ export default function RunningPage() {
         <Button asChild variant="outline" size="sm" className="rounded-full">
           <Link to="/qc-run">
             <RadioTower className="size-4" />
-            Start a run
+            New Run
           </Link>
         </Button>
       </header>
@@ -486,24 +604,63 @@ export default function RunningPage() {
             </div>
             <Button asChild size="sm" className="mt-1 rounded-full">
               <Link to="/qc-run">
-                Start a run
+                New Run
                 <ArrowRight className="size-4" />
               </Link>
             </Button>
           </CardContent>
         </Card>
       ) : (
-        <div className="space-y-4">
-          {active.map((run) => (
-            <RunningRow
-              key={run.id}
-              run={run}
-              onPause={onPause}
-              onResume={onResume}
-              onCancel={onCancel}
-              busy={busyId === run.id}
-            />
-          ))}
+        <div className="space-y-6">
+          {/* live runs — full cards with phase timeline + logs */}
+          {live.length > 0 && (
+            <div className="space-y-2.5">
+              {live.map((run) => (
+                <RunningRow
+                  key={run.id}
+                  run={run}
+                  title={titleFor(run.ticketId)}
+                  onPause={onPause}
+                  onResume={onResume}
+                  onCancel={onCancel}
+                  busy={busyId === run.id}
+                />
+              ))}
+            </div>
+          )}
+
+          {/* up next — the waiting queue, in execution order */}
+          {queued.length > 0 && (
+            <section className="space-y-2">
+              <div className="flex items-center gap-2 px-1">
+                <Clock className="size-4 text-muted-foreground" />
+                <h2 className="text-sm font-semibold tracking-tight">Up next</h2>
+                <span className="rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium tabular-nums text-muted-foreground">
+                  {queued.length}
+                </span>
+                <span className="text-xs text-muted-foreground">
+                  · runs one at a time, in this order
+                  {live.length > 0 ? ' — starts when the current run finishes' : ''}
+                </span>
+              </div>
+              <Card className="overflow-hidden rounded-3xl border-border/60 py-0 shadow-none">
+                <CardContent className="p-0">
+                  <ul className="divide-y divide-border/60">
+                    {queued.map((run, i) => (
+                      <QueuedRow
+                        key={run.id}
+                        run={run}
+                        title={titleFor(run.ticketId)}
+                        position={i + 1}
+                        onCancel={onCancel}
+                        busy={busyId === run.id}
+                      />
+                    ))}
+                  </ul>
+                </CardContent>
+              </Card>
+            </section>
+          )}
         </div>
       )}
     </div>

@@ -201,21 +201,16 @@ export function detectTemplateFormat(
 }
 
 /**
- * Decide the format from the model's ACTUAL output (used ONLY when the template implies
- * Markdown, to catch the model emitting CSV anyway). Skips a leading Markdown title/blank
- * lines (the model sometimes prefixes "# Test Cases — …" before the CSV) and classifies
- * by the first real content line: a comma-separated header → CSV, a `|` table row → Markdown.
- * A CSV template is trusted outright by the caller (extractCsv strips any such preamble),
- * so this never downgrades a CSV template to Markdown.
+ * Decide the format from the model's ACTUAL output (not the template). The model can
+ * occasionally emit the other format — e.g. a CSV table when Markdown was asked, or a
+ * Markdown doc when CSV was asked. We store & render by what it really produced, so the
+ * preview never shows CSV as a collapsed run-on markdown paragraph. Same heuristic as
+ * detectTemplateFormat, applied to the first non-empty output line (a CSV header line is
+ * never multi-line, so this is reliable).
  */
 export function sniffOutputFormat(text: string): TestcaseFormat {
-  // First line that is neither blank nor a Markdown heading (# …).
-  const first =
-    (text ?? '')
-      .split(/\r?\n/)
-      .map((l) => l.trim())
-      .find((l) => l.length > 0 && !l.startsWith('#')) ?? ''
-  if (!first || first.startsWith('|')) return 'markdown'
+  const first = (text ?? '').split(/\r?\n/).find((l) => l.trim().length > 0)?.trim() ?? ''
+  if (!first || first.startsWith('#') || first.startsWith('|')) return 'markdown'
   return (first.match(/,/g)?.length ?? 0) >= 2 ? 'csv' : 'markdown'
 }
 
@@ -262,10 +257,9 @@ IMPORTANT — time-box the reading HARD, then write. You are on a wall-clock bud
   const formatBlock =
     format === 'csv'
       ? `A TEST CASE TEMPLATE in CSV format has been provided below. Produce your output as VALID CSV that matches it EXACTLY:
-- The VERY FIRST line of your output MUST be the CSV header row. Do NOT put a title, a Markdown heading (e.g. "# Test Cases — …"), or any other text before it — output raw CSV only, starting at the header.
-- Output the SAME header row as the template's first line — identical column names, in the same order. Do not add or remove columns.
+- First output the SAME header row as the template's first line — identical column names, in the same order. Do not add or remove columns.
 - Each test case is one CSV row with a value (or an intentionally blank value) for every column, in the template's column order.
-- Reproduce the template's conventions precisely: its ID format (sequential, e.g. No-01, No-02, …), its phrasing (Summary lines start with "Verify …"), and which columns it leaves BLANK. Columns filled in only during execution — Actual result, Status, Reference, Note (and any others the template leaves empty) — must be left empty.
+- Reproduce the template's OWN conventions, derived from its sample rows — do not assume any particular style: its ID format (whatever the template actually uses, e.g. No-01 / TC-001, continued sequentially), its phrasing style for summaries/titles, and EXACTLY which columns its sample rows leave BLANK. Columns the template only fills during execution (often ones like Actual result / Status / Reference / Note — but follow THIS template's sample rows, not that list) must stay empty.
 - CSV INTEGRITY — THE #1 FAILURE, get this exactly right or the whole row is corrupted:
   - Every data row MUST have EXACTLY the same number of fields (commas) as the header — never more, never fewer. One stray or missing comma shifts every following value into the wrong column (e.g. the ticket's Steps landing in "Reference", the Expected result in "Note").
   - ANY field whose text contains a comma, a double-quote, or a newline MUST be wrapped in double quotes — and this includes SHORT, single-line fields like Summary, not only the long multi-line ones. Example: a Summary such as \`Verify header shows badge, title, and body\` contains commas, so it MUST be written quoted: "Verify header shows badge, title, and body". Forgetting this is exactly what breaks a row.
@@ -304,7 +298,9 @@ Use your browser/Playwright tool to OPEN this URL and explore the actual running
   // Keep the generated steps/expected-results terse and action-focused, matching the
   // template's sample rows — the model tends to pad them with justifications ("because…",
   // "per AC…") and restated ticket prose, which makes the cases hard to execute.
-  const styleBlock = `Writing style — CONCISE and to the point (match the brevity of the template's sample rows; do NOT pad):
+  const styleBlock = `Writing style — CONCISE and to the point${
+    template ? " (match the brevity of the template's sample rows)" : ''
+  }; do NOT pad:
 - Each step is ONE short, imperative action, verb first: e.g. "Click 'Send OTP'", "Enter <Email data>", "Observe UI". One action per numbered line — do not merge several actions into one line.
 - Do NOT explain WHY, restate the ticket, quote acceptance-criteria text, or add commentary inside steps or expected results ("because…", "per AC…", "this verifies…", "as expected because…"). Keep only what a tester needs to DO and to CHECK.
 - Expected result: state the observable outcome briefly and tie it to the step it applies to ("At step 3, the 'Appointment Management' screen is shown"). No long prose paragraphs, no rationale.
@@ -317,7 +313,7 @@ Use your browser/Playwright tool to OPEN this URL and explore the actual running
   const scopeBlock = `SCOPE — stay strictly inside THIS project ("${projectName}"). Ground the cases ONLY in:
 - the PROJECT KNOWLEDGE & MEMORY block provided below (this project's testing/knowledge + testing/memory),
 - this project's own CLAUDE.md, and
-- the source code inside THIS project's working directory (the repo(s) named above).
+- the source code inside THIS project's working directory (the repo(s) named in the SOURCE CODE section below).
 Do NOT read, import, or rely on anything outside this project: no global or user-level configuration (e.g. a home-directory ~/.claude or a global CLAUDE.md), no other project's folder, knowledge, memory, or source code, and no files outside this working directory. If any global or user-level instruction conflicts with this project's own context, this project's context wins — ignore the global one for this task. If you notice global/other-project guidance, treat it as irrelevant, not as scope.`
 
   return `You are a senior QC engineer writing manual acceptance test cases for the project "${projectName}".
@@ -336,6 +332,7 @@ Coverage — be EXHAUSTIVE, not representative:
 - Silently (do NOT write this out) take stock of every distinct area this ticket spans: each feature/module it touches, each trigger or event it describes, each screen/view, and each user role/permission. A ticket that touches N modules or N triggers needs cases for ALL of them.
 - Then write cases covering EVERY one of those areas — do not stop after the first few modules and do not sample. If you are wrapping up with whole areas of the ticket still uncovered, keep writing until they are all covered.
 - For each area, include: happy paths, edge cases, validation/negative cases, and any error states the ticket implies.
+- ORDER matters: within each area write the core happy paths and primary validations FIRST, then edge/rare cases — so if the output is ever cut short, the essential coverage survives.
 - Where the ticket is ambiguous, still write a case and note the assumption inline.
 - Do not narrate your plan or list files/areas in prose — go straight from reading to writing the cases.
 
@@ -354,6 +351,12 @@ ${ticketContent}
 --- TEST CASE TEMPLATE ("${template.name}") START ---
 ${template.content}
 --- TEST CASE TEMPLATE END ---`
+      : ''
+  }
+
+Final reminder: ${outputRule}${
+    format === 'csv'
+      ? ' Wrap every free-text field in double quotes and keep every row at exactly the header’s column count (see CSV INTEGRITY above).'
       : ''
   }`
 }
@@ -529,14 +532,12 @@ export async function generateTestcaseVersion(opts: {
   if (result.isError || !testcases) {
     throw statusError('Claude did not return any test cases.', 502)
   }
-  // Decide the stored format. A CSV template is TRUSTED outright and stays CSV —
-  // extractCsv (below) strips any stray preamble/title the model prepended (e.g. a
-  // "# Test Cases — …" heading), so a CSV template always yields a real .csv table.
-  // Only when the template implies Markdown do we sniff the output, to catch the model
-  // emitting CSV anyway (which would otherwise render as a collapsed run-on paragraph).
-  // NOTE: never let the sniff downgrade a CSV template to Markdown — that regressed the
-  // title-prefixed-CSV case (the CSV was saved as .md and shown as raw text).
-  const outFormat: TestcaseFormat = format === 'csv' ? 'csv' : sniffOutputFormat(testcases)
+  // Store & render by what the model ACTUALLY produced, not just what the template
+  // implied. The model sometimes emits the other format (e.g. a CSV table when we asked
+  // for Markdown); trusting the template there would save CSV as a .md file, and the
+  // preview would then render it as one collapsed run-on paragraph. Fall back to the
+  // intended format only if the output is empty/ambiguous.
+  const outFormat = sniffOutputFormat(testcases) || format
   if (outFormat !== format) {
     onLog({
       level: 'info',
@@ -597,6 +598,18 @@ export async function generateTestcaseVersion(opts: {
     }
   }
 
+  // Default the Status column to "Untested" on a freshly generated sheet — a
+  // just-drafted case has not been executed. Deterministic: only blank Status
+  // cells are stamped; every other column is left exactly as written.
+  {
+    const stamped = stampDefaultStatus(testcases, outFormat)
+    if (stamped !== testcases) {
+      testcases = stamped
+      fs.writeFileSync(path.join(dir, rel), testcases + '\n', 'utf8')
+      onLog({ level: 'info', text: 'Set blank Status cells to "Untested".' })
+    }
+  }
+
   // Final integrity check (CSV only): flag any row whose columns are shifted by an
   // unquoted comma so the engineer can fix/regenerate instead of trusting a corrupt row.
   if (outFormat === 'csv') {
@@ -629,7 +642,7 @@ const MAX_CELL_COMMENT_CHARS = 2_000
 const MAX_CELL_VALUE_CHARS = 8_000
 
 /** Parse RFC-4180-ish CSV into rows of cells (mirrors the web parser exactly). */
-function parseCsvRows(text: string): string[][] {
+export function parseCsvRows(text: string): string[][] {
   const s = text.replace(/\r\n?/g, '\n')
   const rows: string[][] = []
   let row: string[] = []
@@ -668,8 +681,72 @@ function csvField(s: string): string {
 }
 
 /** Serialize rows back to CSV text (no trailing newline; the caller adds one). */
-function serializeCsv(rows: string[][]): string {
+export function serializeCsv(rows: string[][]): string {
   return rows.map((r) => r.map(csvField).join(',')).join('\n')
+}
+
+/** Header-name → is this the Status column? (mirrors fillTestcases' matcher). */
+function isStatusHeader(header: string): boolean {
+  const h = header.trim().replace(/^"|"$/g, '').toLowerCase().replace(/[^a-z]/g, '')
+  return h === 'status' || h === 'teststatus' || h === 'executionstatus'
+}
+
+/**
+ * Stamp blank cells in the Status column with "Untested" — the default state of
+ * a freshly generated (not-yet-executed) test case. Only blank Status cells are
+ * touched; non-blank cells and every other column are preserved verbatim. Works
+ * for both CSV and Markdown pipe tables; a no-op (returns input) when there is
+ * no Status column or the content isn't a table we can parse safely.
+ */
+function stampDefaultStatus(content: string, format: TestcaseFormat): string {
+  const DEFAULT = 'Untested'
+  if (format === 'csv') {
+    const rows = parseCsvRows(content)
+    if (rows.length < 2) return content
+    const idx = rows[0].findIndex(isStatusHeader)
+    if (idx < 0) return content
+    let changed = false
+    for (let i = 1; i < rows.length; i++) {
+      const row = rows[i]
+      if (idx >= row.length) continue
+      if ((row[idx] ?? '').trim() === '') {
+        row[idx] = DEFAULT
+        changed = true
+      }
+    }
+    return changed ? serializeCsv(rows) : content
+  }
+
+  // Markdown pipe table.
+  const lines = content.split(/\r?\n/)
+  const headerIdx = lines.findIndex(
+    (l, i) =>
+      l.trim().startsWith('|') &&
+      lines[i + 1] != null &&
+      /^\s*\|?[\s:|-]+\|?\s*$/.test(lines[i + 1]) &&
+      lines[i + 1].includes('-'),
+  )
+  if (headerIdx < 0) return content
+  const splitRow = (line: string) =>
+    line
+      .replace(/^\s*\|/, '')
+      .replace(/\|\s*$/, '')
+      .split(/(?<!\\)\|/)
+  const statusIdx = splitRow(lines[headerIdx]).findIndex((c) => isStatusHeader(c))
+  if (statusIdx < 0) return content
+  let changed = false
+  for (let i = headerIdx + 2; i < lines.length; i++) {
+    const l = lines[i]
+    if (!l.trim().startsWith('|')) break
+    const cells = splitRow(l)
+    if (statusIdx >= cells.length) continue
+    if (cells[statusIdx].trim() === '') {
+      cells[statusIdx] = ` ${DEFAULT} `
+      lines[i] = `| ${cells.map((c) => c.trim()).join(' | ')} |`
+      changed = true
+    }
+  }
+  return changed ? lines.join('\n') : content
 }
 
 function editCellPrompt(

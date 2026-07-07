@@ -473,44 +473,50 @@ supplies the right git user (\`x-access-token\`) automatically.
 
 **Copy the repository URL.** On the repo page click **Clone** → switch to **HTTPS** → copy the URL
 (e.g. \`https://bitbucket.org/workspace/repo.git\` — if it contains \`you@bitbucket.org\`, that's fine,
-the portal strips it). For a private repo, pick ONE of these three credentials:
+the portal strips it). For a private repo, pick ONE of these three credentials.
 
-### Option A — Atlassian API token (recommended)
+> ⚠️ **The #1 cause of a failed Bitbucket clone** is a **403 — "API Token provided has no Bitbucket
+> scopes."** It means you created a *plain* Atlassian API token, which grants **no** Bitbucket access.
+> If you hit this, use **Option A (app password)** or **Option B (access token)** below — they always
+> work — or recreate the API token **with scopes** (Option C).
 
-Works account-wide, easiest to create:
+### Option A — app password (simplest, always works) ✅
 
-1. Open **[id.atlassian.com/manage-profile/security/api-tokens](https://id.atlassian.com/manage-profile/security/api-tokens)**
-   (or: Bitbucket avatar → **Personal settings** → follow the link to your Atlassian account →
-   **Security** → **API tokens**).
-2. Click **Create API token**, name it (e.g. \`qc-portal\`), set an expiry, and **copy it now** —
-   it's shown once and starts with \`ATATT\`.
-3. On **Source Code**: paste the repo URL + the token, and **leave Username empty** — API tokens
-   authenticate via a fixed technical user that the portal fills in automatically.
+Recommended for QC engineers — no admin rights needed, and it can't hit the "no scopes" error:
 
-### Option B — repository access token
+1. Bitbucket avatar (bottom-left) → **Personal settings** → **App passwords** → **Create app password**.
+2. Name it (e.g. \`qc-portal\`), tick **Repositories: Read**, create, and **copy the password now**
+   (shown once).
+3. On **Source Code**: paste the repo URL + the app password into **Access token**, **and fill in
+   Username** with your Bitbucket username — the short handle shown at the top of **Personal settings**,
+   **not** your email. This is the one case where the Username field is required.
 
-Scoped to a single repo — needs repo-admin rights to create:
+### Option B — repository / workspace access token ✅
+
+Scoped to a single repo (or workspace) — needs repo-admin rights, but never hits the scopes error:
 
 1. In the repo: **Repository settings** → **Security** → **Access tokens** → **Create repository
-   access token**.
+   access token**. (Workspace: **Workspace settings** → **Access tokens**.)
 2. Name it and give it the **Repositories: Read** scope only.
-3. Copy the \`ATCTT…\` token, paste it into **Access token**, and **leave Username empty**.
+3. Copy the \`ATCTT…\` token, paste it into **Access token**, and **leave Username empty** — the
+   portal supplies the fixed \`x-token-auth\` user automatically.
 
-(Workspace and project access tokens work the same way.)
+### Option C — Atlassian API token (must add Bitbucket scopes)
 
-### Option C — app password (legacy)
+Works account-wide, but a *scoped* token is required — a plain one is rejected by Bitbucket:
 
-Being phased out by Atlassian, but still works:
+1. Open **[id.atlassian.com/manage-profile/security/api-tokens](https://id.atlassian.com/manage-profile/security/api-tokens)**.
+2. Click **Create API token with scopes** (NOT the plain "Create API token"). Name it, set an expiry.
+3. Choose **app: Bitbucket**, then select the scope **\`read:repository\`** (add **\`read:pullrequest\`**
+   too if you like). Without a Bitbucket scope the clone fails with **403 — no Bitbucket scopes**.
+4. **Copy it now** — it starts with \`ATATT\`. On **Source Code**: paste the repo URL + the token, and
+   **leave Username empty** — the portal fills in \`x-bitbucket-api-token-auth\` automatically.
 
-1. Bitbucket avatar → **Personal settings** → **App passwords** → **Create app password**.
-2. Tick **Repositories: Read**, create, and copy the password.
-3. On **Source Code**: paste the token **and fill in Username** with your Bitbucket username (shown
-   on the same Personal settings page — it's *not* your email). This is the **only** case where the
-   Username field is used.
-
-> **Most common Bitbucket mistake:** filling in Username together with an \`ATATT…\` API token — the
-> clone then fails to authenticate. The portal now detects \`ATATT\` tokens and ignores the username,
-> but the rule of thumb stays: **Username is for app passwords only.**
+> **Two most common Bitbucket mistakes:**
+> 1. **Plain (unscoped) API token** → 403 "no Bitbucket scopes." Use Option A/B, or recreate it
+>    *with scopes* (Option C).
+> 2. **Username filled in next to an \`ATATT…\` API token** — the portal now detects \`ATATT\` and
+>    ignores the username, but the rule of thumb stays: **Username is for app passwords only.**
 
 ---
 
@@ -525,6 +531,11 @@ Being phased out by Atlassian, but still works:
 
 ### Troubleshooting
 
+- **Bitbucket 403 — "API Token provided has no Bitbucket scopes"** — your Atlassian API token is
+  *unscoped* (the plain **Create API token** gives one that works for Jira/Confluence but not
+  Bitbucket). Fix it with **Option A (app password)** or **Option B (repository access token)** above
+  — the fastest fix — or recreate the API token via **Create API token with scopes** and add
+  **\`read:repository\`** for **app: Bitbucket** (Option C).
 - **"Authentication failed" / asked for a password** — the token is wrong, expired, or lacks read
   access to that repo. Create a fresh one per the steps above. The job log's \`Auth:\` line shows
   which scheme was tried.

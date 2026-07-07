@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, type ReactNode } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
@@ -21,7 +21,8 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { Textarea } from '@/components/ui/textarea'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import { BrainCircuit, BrainCog, Sparkles } from 'lucide-react'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { BrainCircuit, BrainCog, Info, Sparkles } from 'lucide-react'
 import { KnowledgeDocs } from '@/components/KnowledgeDocs'
 import { MemoryNotes } from '@/components/MemoryNotes'
 import { AiBrainMap } from '@/components/AiBrainMap'
@@ -268,6 +269,28 @@ function OpenFolderButton({ projectId }: { projectId: string }) {
 const TABS = ['instructions', 'knowledge', 'memory', 'brain'] as const
 type TabValue = (typeof TABS)[number]
 
+/** Small info icon shown inside a tab; hovering it explains what the tab is for.
+ *  The tooltip's own data-state lands on this span (not the TabsTrigger), so the
+ *  tab's data-state="active" styling is preserved. */
+function TabInfo({ children }: { children: ReactNode }) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span
+          role="button"
+          tabIndex={-1}
+          onClick={(e) => e.stopPropagation()}
+          onPointerDown={(e) => e.stopPropagation()}
+          className="ml-0.5 inline-flex text-muted-foreground/70 transition-colors hover:text-foreground"
+        >
+          <Info className="size-3" />
+        </span>
+      </TooltipTrigger>
+      <TooltipContent>{children}</TooltipContent>
+    </Tooltip>
+  )
+}
+
 export default function InstructionsPage() {
   const { activeProjectId, activeProject } = useProjects()
   const [searchParams, setSearchParams] = useSearchParams()
@@ -368,15 +391,33 @@ export default function InstructionsPage() {
         <TabsList className="rounded-full">
           <TabsTrigger value="instructions" className="gap-1.5 rounded-full">
             <FileText className="size-3.5" /> Instructions
+            <TabInfo>
+              The project's lean root <span className="font-mono">CLAUDE.md</span> — the standing
+              rules & guidance Claude Code reads on every QC run. Keep it short; link out to
+              Knowledge and Memory rather than pasting everything here.
+            </TabInfo>
           </TabsTrigger>
           <TabsTrigger value="knowledge" className="gap-1.5 rounded-full">
             <BrainCircuit className="size-3.5" /> Knowledge
+            <TabInfo>
+              Reference docs you upload (Word, PDF, Markdown, CSV, Excel) — specs, requirements,
+              domain knowledge. Converted to Markdown and fed to Claude as background so it uses
+              your real project terms and rules.
+            </TabInfo>
           </TabsTrigger>
           <TabsTrigger value="memory" className="gap-1.5 rounded-full">
             <BrainCog className="size-3.5" /> Memory
+            <TabInfo>
+              Small, durable notes you write here — one fact each (decisions, gotchas,
+              conventions). Short and long-lived, unlike the larger uploaded Knowledge docs.
+            </TabInfo>
           </TabsTrigger>
           <TabsTrigger value="brain" className="gap-1.5 rounded-full">
             <Sparkles className="size-3.5" /> AI Brain
+            <TabInfo>
+              A visual map of everything Claude knows about this project — how CLAUDE.md,
+              Knowledge, and Memory connect and feed each QC run.
+            </TabInfo>
           </TabsTrigger>
         </TabsList>
 

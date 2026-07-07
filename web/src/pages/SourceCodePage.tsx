@@ -417,9 +417,9 @@ function ConnectForm({
       }
     : isBitbucket
       ? {
-          href: 'https://id.atlassian.com/manage-profile/security/api-tokens',
-          label: 'Create an Atlassian API token',
-          note: 'API tokens (ATATT…) work on their own — leave Username empty.',
+          href: 'https://bitbucket.org/account/settings/app-passwords/',
+          label: 'Create a Bitbucket app password',
+          note: 'Tick Repositories: Read, then fill Username below. (A plain Atlassian API token has no Bitbucket scopes → 403.)',
         }
       : null
 
@@ -564,7 +564,7 @@ function ConnectForm({
             <Label htmlFor="src-username">Username (Bitbucket app passwords only)</Label>
             <Input
               id="src-username"
-              placeholder="leave empty for an API token (ATATT…)"
+              placeholder="your Bitbucket username — for app passwords"
               value={username}
               onChange={(e) => setUsername(e.target.value)}
               className="text-sm"
@@ -572,9 +572,16 @@ function ConnectForm({
               spellCheck={false}
             />
             <p className="text-[11px] text-muted-foreground">
-              An Atlassian <span className="font-medium">API token</span> (<code className="font-mono">ATATT…</code>)
-              authenticates on its own — leave this blank. Only fill it in when using a Bitbucket{' '}
-              <span className="font-medium">app password</span> (then it's your Bitbucket username).
+              <span className="font-medium">App password</span> (recommended) → fill in your Bitbucket
+              username here. <span className="font-medium">Access token</span> (
+              <code className="font-mono">ATCTT…</code>) or a <span className="font-medium">scoped</span>{' '}
+              API token (<code className="font-mono">ATATT…</code>) → leave this blank. A plain
+              (unscoped) API token fails with <span className="font-medium">403 — no Bitbucket scopes</span>;
+              see{' '}
+              <Link to="/document/source-code" className="font-medium text-primary hover:underline">
+                the guide
+              </Link>
+              .
             </p>
           </div>
         )}

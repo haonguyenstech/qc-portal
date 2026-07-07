@@ -380,24 +380,6 @@ function looksLikeCsv(name: string, content: string): boolean {
   return (first.match(/,/g)?.length ?? 0) >= 2
 }
 
-/**
- * Some versions are stored as Markdown but their content is really CSV, sometimes with a
- * leading Markdown title the model prefixed (e.g. "# Test Cases — …" then the CSV header).
- * Return the CSV body (from the header row onward) so it can render as a table, or null if
- * the content isn't CSV. Only leading blank lines + Markdown headings are skipped — once a
- * real content line appears, a `|` row (Markdown table) or a non-comma line means "not CSV",
- * so a genuine Markdown report is never mis-detected.
- */
-function csvBodyOrNull(content: string): string | null {
-  const lines = content.split(/\r?\n/)
-  let i = 0
-  while (i < lines.length && (!lines[i].trim() || lines[i].trim().startsWith('#'))) i++
-  const header = lines[i]?.trim() ?? ''
-  if (!header || header.startsWith('|')) return null
-  if ((header.match(/,/g)?.length ?? 0) < 2) return null
-  return lines.slice(i).join('\n').trim()
-}
-
 /** Read-only dialog that previews a template file — CSV as a table, else raw text. */
 function TemplatePreviewDialog({
   template,
@@ -1015,12 +997,12 @@ function TestCasePreviewDialog({
                   }
                 />
               </div>
-            ) : csvBodyOrNull(data.testcases) ? (
+            ) : looksLikeCsv('x.md', data.testcases) ? (
               // Safety net: the version is stored as Markdown but its content is really
-              // CSV (an older file, or a model that prefixed a "# Test Cases" title before
-              // the CSV). Render the CSV body as a read-only table instead of a collapsed
-              // run-on paragraph. Non-interactive — cell refine needs a real .csv on disk.
-              <CsvTable csv={csvBodyOrNull(data.testcases)!} />
+              // CSV (an older file, or a model that emitted the other format). Render it
+              // as a read-only table instead of a collapsed run-on markdown paragraph.
+              // Non-interactive — cell refine needs a real .csv version on disk.
+              <CsvTable csv={data.testcases} />
             ) : (
               <div className={MD_CLASS}>
                 <ReactMarkdown remarkPlugins={[remarkGfm]} components={MD_COMPONENTS}>
