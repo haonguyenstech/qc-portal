@@ -1562,6 +1562,42 @@ export default function TestCasePage() {
   // Cap concurrent *running* jobs — pausing one frees a slot to start another.
   const atCap = runningCount >= MAX_PARALLEL_JOBS
 
+  // Refresh the crawled-tickets badge + a ticket's version list the moment each item
+  // finishes — from our own poll data, not waiting for the whole job to finalize or
+  // for the global TestCaseJobWatcher's slower poll. A job stays `running` while the
+  // best-effort auto-learn step runs (an AI call that can take many seconds) AFTER
+  // every item is already written to disk, and the watcher only acts on terminal job
+  // states — so without this the new version wouldn't appear until a manual reload.
+  const seenDone = useRef<Set<string>>(new Set())
+  // Signature of every completed item across tracked jobs — recomputed each render but
+  // gated by the ref set, so invalidation fires once per newly-finished item.
+  const doneSignature = jobs
+    .flatMap((j) =>
+      j.items
+        .filter((i) => i.status === 'done' && i.version != null)
+        .map((i) => `${j.id}:${i.folder}:${i.version}`),
+    )
+    .join('|')
+  useEffect(() => {
+    if (!activeProjectId) return
+    let changed = false
+    for (const j of jobs) {
+      for (const it of j.items) {
+        if (it.status !== 'done' || it.version == null) continue
+        const key = `${j.id}:${it.folder}:${it.version}`
+        if (seenDone.current.has(key)) continue
+        seenDone.current.add(key)
+        changed = true
+        queryClient.invalidateQueries({
+          queryKey: ['testcase-versions', activeProjectId, it.folder],
+        })
+      }
+    }
+    if (changed) queryClient.invalidateQueries({ queryKey: ['crawled', activeProjectId] })
+    // `jobs` is rebuilt each render; `doneSignature` is the stable trigger.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [doneSignature, activeProjectId, queryClient])
+
   function onPickTemplate(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0]
     if (!file) return

@@ -1,7 +1,7 @@
 {
   "name": "qc-portal",
   "private": true,
-  "version": "0.9.12",
+  "version": "0.9.13",
   "type": "module",
   "bin": {
     "qc-portal": "bin/qc-portal.mjs"

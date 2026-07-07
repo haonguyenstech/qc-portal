@@ -3,6 +3,19 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.9.13 — 2026-07-07
+
+**Generated test cases show up right away — no manual reload**
+
+### Fixed
+
+- **New test-case versions now appear as soon as each ticket finishes.** After generating, the
+  crawled-ticket "Test cases" badge and the version list refreshed only after the *whole* job fully
+  settled — but the job stays busy for a few more seconds running the background "learn from these
+  cases" step, even though the cases are already saved. That gap made it look like nothing happened
+  until you reloaded the page. The Test cases page now refreshes the moment each ticket's version is
+  written, so the new version shows immediately.
+
 ## 0.9.12 — 2026-07-07
 
 **No more console window popping up when you update from the app**
