@@ -67,19 +67,16 @@ import { cn } from '@/lib/utils'
 import {
   browseFolder,
   claudeStatus,
-  claudeUsage,
   createProject,
   deleteProject,
   exportProject,
   importProject,
   initProject,
   listProjects,
-  pickFolder,
   pingHealth,
   testClaudeModel,
   triggerRestart,
   updateProject,
-  type UsageWindow,
 } from '@/lib/api'
 import { useProjects } from '@/lib/project-context'
 import { relativeTime } from '@/lib/format'
@@ -108,64 +105,37 @@ function withFolderName(fullPath: string, folder: string): string {
 }
 
 /**
- * Folder selection: the native OS picker (kept as the primary, unchanged) plus an
- * in-app web folder browser as a fallback. The native dialog needs an interactive
- * desktop and hangs when the portal was launched headlessly (cmd started another
- * way, Task Scheduler, SSH, autostart); the in-app browser works regardless of
- * how the server was started, on both Windows and macOS.
+ * A single "Browse…" button that opens the in-portal folder picker (a folder
+ * browser rendered inside the page, backed by GET /api/projects/browse-folder).
+ *
+ * We intentionally do NOT use the native OS folder dialog here: it only renders
+ * when the portal runs attached to the user's interactive desktop, so it hangs
+ * forever whenever the server was started any other way (from a shortcut that
+ * detaches, Task Scheduler, SSH, autostart, another session). The in-portal
+ * picker works no matter how the server was launched, on Windows and macOS.
+ * (`pickFolderNative` / `GET /api/projects/pick-folder` still exist for the
+ * skills-import flow.)
  */
 function BrowseButton({ onPick }: { onPick: (path: string) => void }) {
-  const [loading, setLoading] = useState(false)
-  const [webOpen, setWebOpen] = useState(false)
-
-  async function browseNative() {
-    setLoading(true)
-    try {
-      const res = await pickFolder()
-      if (res.path) onPick(res.path)
-    } catch (err) {
-      toast.error('Could not open folder picker', {
-        description: err instanceof Error ? err.message : 'Unknown error',
-      })
-    } finally {
-      setLoading(false)
-    }
-  }
-
+  const [open, setOpen] = useState(false)
   return (
     <div className="flex shrink-0 items-center gap-1.5">
       <Button
         type="button"
         variant="outline"
         size="sm"
-        onClick={browseNative}
-        disabled={loading}
+        onClick={() => setOpen(true)}
         className="h-11 shrink-0 rounded-full transition-all duration-200 hover:shadow-sm active:scale-[0.98]"
       >
-        {loading ? (
-          <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
-        ) : (
-          <FolderOpen className="mr-1.5 h-3.5 w-3.5" />
-        )}
+        <FolderOpen className="mr-1.5 h-3.5 w-3.5" />
         Browse…
       </Button>
-      <Button
-        type="button"
-        variant="ghost"
-        size="sm"
-        title="In-app folder browser — use this if Browse… doesn't open a window"
-        onClick={() => setWebOpen(true)}
-        className="h-11 shrink-0 rounded-full text-muted-foreground transition-all duration-200 hover:shadow-sm active:scale-[0.98]"
-      >
-        <Folder className="mr-1.5 h-3.5 w-3.5" />
-        In-app
-      </Button>
       <FolderBrowserDialog
-        open={webOpen}
-        onOpenChange={setWebOpen}
+        open={open}
+        onOpenChange={setOpen}
         onPick={(p) => {
           onPick(p)
-          setWebOpen(false)
+          setOpen(false)
         }}
       />
     </div>
@@ -1362,104 +1332,6 @@ function ImportProjectDialog() {
   )
 }
 
-function usageBarColor(pct: number): string {
-  if (pct >= 90) return 'bg-red-500'
-  if (pct >= 70) return 'bg-amber-500'
-  return 'bg-primary'
-}
-
-function UsageRow({ w }: { w: UsageWindow }) {
-  const pct = Math.max(0, Math.min(100, w.percent))
-  return (
-    <div className="space-y-1.5">
-      <div className="flex items-center justify-between gap-2 text-sm">
-        <span className="font-medium">{w.label}</span>
-        <span className="tabular-nums font-semibold">{w.percent}%</span>
-      </div>
-      <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
-        <div
-          className={cn('h-full rounded-full transition-all duration-500', usageBarColor(pct))}
-          style={{ width: `${pct}%` }}
-        />
-      </div>
-      <div className="flex items-center gap-1 text-[11px] text-muted-foreground">
-        <Clock className="h-3 w-3" />
-        resets {w.reset}
-      </div>
-    </div>
-  )
-}
-
-function ClaudeUsageCard() {
-  const { data, isLoading, isError, refetch, isFetching } = useQuery({
-    queryKey: ['claude-usage'],
-    queryFn: claudeUsage,
-    // The server caches /usage for 10 minutes; match it so navigating back to
-    // this tab serves the cache instead of re-spawning a `claude -p` read.
-    refetchInterval: 10 * 60_000,
-    staleTime: 10 * 60_000,
-    refetchOnMount: false,
-  })
-
-  return (
-    <Card className="overflow-hidden rounded-3xl border-border/60 shadow-none">
-      <div className="flex items-center gap-2 border-b border-border/60 bg-muted/60 px-4 py-2.5">
-        <span className="flex size-7 shrink-0 items-center justify-center rounded-xl border border-border/60 bg-muted/60 text-muted-foreground">
-          <Gauge className="size-4" />
-        </span>
-        <div className="min-w-0 flex-1">
-          <p className="text-sm font-medium leading-tight">Claude usage</p>
-          <p className="text-[11px] text-muted-foreground">
-            Your subscription limits, live from Claude Code's <span className="font-mono">/usage</span>
-          </p>
-        </div>
-        <Button
-          variant="ghost"
-          size="icon"
-          onClick={() => refetch()}
-          disabled={isFetching}
-          aria-label="Refresh usage"
-          className="size-7 rounded-full text-muted-foreground hover:text-foreground"
-        >
-          <Loader2 className={cn('size-3.5', isFetching && 'animate-spin')} />
-        </Button>
-      </div>
-      <CardContent className="space-y-4 p-4">
-        {isLoading ? (
-          <div className="flex items-center gap-2 py-4 text-sm text-muted-foreground">
-            <Loader2 className="size-4 animate-spin" />
-            Reading usage…
-          </div>
-        ) : isError || !data?.available ? (
-          <div className="flex items-start gap-2 rounded-xl border border-amber-200/70 bg-amber-50/50 px-3 py-2.5 text-[13px] text-amber-700">
-            <AlertCircle className="mt-0.5 size-4 shrink-0 text-amber-600" />
-            <span>
-              {data?.error ??
-                'Could not read Claude usage. Make sure Claude Code is signed in with a subscription.'}
-            </span>
-          </div>
-        ) : (
-          <>
-            {data.windows.map((w) => (
-              <UsageRow key={w.label} w={w} />
-            ))}
-            {data.details && (
-              <details className="group">
-                <summary className="cursor-pointer text-[11px] font-medium text-muted-foreground hover:text-foreground">
-                  What's contributing
-                </summary>
-                <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap rounded-xl border border-border/60 bg-muted/60 px-3 py-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
-                  {data.details}
-                </pre>
-              </details>
-            )}
-          </>
-        )}
-      </CardContent>
-    </Card>
-  )
-}
-
 function AiRuntimeCard() {
   const { data, isLoading, isError, error } = useQuery({
     queryKey: ['claude-status'],
@@ -2149,7 +2021,6 @@ export default function ProjectsPage() {
               </p>
             </div>
           </section>
-          <ClaudeUsageCard />
           <AiRuntimeCard />
           <AiAutomationCard />
         </TabsContent>

@@ -3,6 +3,20 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.9.9 — 2026-07-07
+
+**"Browse…" now opens a folder picker inside the portal — no more spinning forever**
+
+### Changed
+
+- **The "Browse…" button when adding or editing a project now opens a folder picker _inside_ the
+  page** instead of a Windows/macOS system dialog. Navigate your drives and folders (or type/paste a
+  path) and click **Use this folder**. The old system dialog could only appear when the portal was
+  running in your own signed-in desktop — so if the portal was started from a shortcut, at login, or
+  any other way, **Browse…** would just spin forever with no window ever showing. The in-portal
+  picker always works, however the portal was launched. The separate "In-app" button added in 0.9.8
+  is gone — there's just one **Browse…** button again, and it's the reliable one.
+
 ## 0.9.8 — 2026-07-07
 
 **In-app folder browser so "Browse" always works, plus an executed test-case record from each run**
