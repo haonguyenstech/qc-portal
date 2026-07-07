@@ -3,6 +3,21 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.9.14 — 2026-07-07
+
+**Failed runs now tell you WHY, without digging through the log**
+
+### Added
+
+- **A plain-language "Why it failed" banner on failed test results.** When a run ends without a
+  report — for example the Playwright/MCP test browser hung or dropped its connection, the portal
+  server restarted mid-run, or the app URL couldn't be reached — the run page now shows the reason up
+  front instead of a bare "check the log". It appears at the top of the run and inside the (otherwise
+  empty) Report and Issues tabs, explains what went wrong in everyday terms, shows the exact error
+  line pulled from the log, suggests what to try next, and gives you a one-click **View full log**.
+  Recognized cases include the Playwright browser hanging/disconnecting, an MCP server not
+  responding, network/connection errors, a server interruption, and unexpected exits.
+
 ## 0.9.13 — 2026-07-07
 
 **Generated test cases show up right away — no manual reload**

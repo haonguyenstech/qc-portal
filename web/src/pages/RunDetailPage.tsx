@@ -559,6 +559,281 @@ function parseIssues(md: string | null): ParsedIssue[] {
   ]
 }
 
+// ---- Failure diagnosis ----------------------------------------------------
+// When a run ends without a report (e.g. the Playwright/MCP browser connection
+// hung), the Report and Issues tabs are empty and the ONLY clue is buried deep in
+// the event log. This scans the log for the real failure reason and surfaces it up
+// front, with a plain-language explanation for the common Playwright/MCP cases.
+
+type FailureCategory = 'playwright' | 'mcp' | 'connection' | 'interrupted' | 'exit' | 'error'
+
+interface FailureDiagnosis {
+  category: FailureCategory
+  title: string
+  detail: string
+  hint?: string
+  /** Key raw log lines that back the diagnosis (deduped + capped). */
+  evidence: string[]
+}
+
+// Signature patterns matched against error/tool-result log text.
+const SIG_PLAYWRIGHT =
+  /playwright|\bbrowser_[a-z_]+|\bbrowser\b[^.\n]{0,60}\b(?:closed|disconnected|crashed|not connected|unavailable)|\btarget\b[^.\n]{0,60}\bclosed\b|has been closed|browsercontext|browsertype\.launch|page\.(?:goto|click|wait)|net::err|\bchromium\b|\bwebkit\b|\bmsedge\b|user-data-dir/i
+const SIG_MCP = /\bmcp\b|mcp server|model context protocol|failed to (?:reconnect|connect) to/i
+const SIG_CONNECTION =
+  /econnrefused|econnreset|enotfound|etimedout|epipe|connection (?:refused|reset|closed|timed out|error|lost)|failed to (?:start|connect|launch|initialize|respond)|timed out|timeout|not responding|unresponsive|\bhang|\bhung|stalled|deadline exceeded/i
+// The portal restarted/stopped mid-run (server shutdown, update, crash) — the run's
+// child was killed and reconcile flagged it. Unambiguous, so it's classified first.
+const SIG_INTERRUPTED =
+  /\binterrupted\b|server (?:stopped|restarted|was shut down|shutdown|shutting down)|did not finish/i
+
+/** A browser/device-driving tool whose presence signals the run was mid-browser-action. */
+function isBrowserTool(tool?: string): boolean {
+  return !!tool && (tool.startsWith('browser_') || /playwright|^mobile_|^mcp__playwright/i.test(tool))
+}
+
+function truncateLine(s: string, n = 300): string {
+  const one = s.replace(/\s+/g, ' ').trim()
+  return one.length > n ? `${one.slice(0, n)}…` : one
+}
+
+/**
+ * Inspect a finished run's event log and, when it ended badly, return a plain
+ * explanation of WHY. Returns null when nothing actionable is found. Only meant
+ * for runs that failed / errored / were canceled without a report.
+ */
+function diagnoseFailure(log: LogEvent[], status: string): FailureDiagnosis | null {
+  if (status !== 'error' && status !== 'failed' && status !== 'canceled') return null
+
+  // Collect the lines most likely to explain the failure: stderr / error events,
+  // a non-zero process exit, and any tool-result/text/system line that trips a
+  // known failure signature.
+  const raw: string[] = []
+  let exitCode: number | null = null
+  let lastBrowserTool: string | null = null
+  let sawPlaywright = false
+  let sawMcp = false
+  let sawConnection = false
+  let sawInterrupted = false
+
+  for (const e of log) {
+    const text = e.text ?? ''
+    if (e.kind === 'tool' && isBrowserTool(e.tool)) lastBrowserTool = e.tool ?? null
+
+    const exitMatch = text.match(/exited with code (\d+)/i)
+    if (e.kind === 'done' && exitMatch) {
+      const code = Number(exitMatch[1])
+      if (Number.isFinite(code) && code !== 0) exitCode = code
+      continue
+    }
+
+    const signalsFailure =
+      e.kind === 'error' ||
+      SIG_PLAYWRIGHT.test(text) ||
+      SIG_MCP.test(text) ||
+      SIG_CONNECTION.test(text) ||
+      SIG_INTERRUPTED.test(text)
+    if (!signalsFailure) continue
+
+    if (SIG_INTERRUPTED.test(text)) sawInterrupted = true
+    if (SIG_PLAYWRIGHT.test(text) || isBrowserTool(e.tool)) sawPlaywright = true
+    if (SIG_MCP.test(text)) sawMcp = true
+    if (SIG_CONNECTION.test(text)) sawConnection = true
+
+    // Keep genuinely informative lines (error events always; others only when they
+    // matched a signature above), deduped and capped.
+    const line = truncateLine(text)
+    if (line && !raw.includes(line)) raw.push(line)
+  }
+
+  const evidence = raw.slice(-4)
+
+  // Classify — most specific first. A server interruption is unambiguous, so it
+  // wins even if the run had touched the browser earlier.
+  if (sawInterrupted) {
+    return {
+      category: 'interrupted',
+      title: 'The run was interrupted before it finished',
+      detail:
+        'The portal server stopped or restarted while this run was in progress, so testing was ' +
+        'cut short and no report was written.',
+      hint:
+        'Start the run again. If this happens right after an update or restart, wait until the ' +
+        'server is fully back up (the page reconnects on its own) before launching a new run.',
+      evidence,
+    }
+  }
+  // A browser tool left mid-flight with a connection/timeout signal is the classic
+  // "Playwright MCP hung" case.
+  if (sawPlaywright || lastBrowserTool) {
+    return {
+      category: 'playwright',
+      title: 'The test browser (Playwright) stopped responding',
+      detail:
+        'The run could not drive the automated browser — the Playwright browser connection ' +
+        (sawConnection ? 'hung or dropped' : 'failed') +
+        `, so testing couldn't continue and no report was written${
+          lastBrowserTool ? ` (it stalled during \`${lastBrowserTool}\`)` : ''
+        }.`,
+      hint:
+        'Re-run the test. If it keeps happening, make sure no other QC run is using the browser ' +
+        '(runs share one browser profile and execute one at a time), then restart the portal so ' +
+        'the Playwright MCP server starts cleanly.',
+      evidence,
+    }
+  }
+  if (sawMcp) {
+    return {
+      category: 'mcp',
+      title: 'An MCP tool server did not respond',
+      detail:
+        'A required MCP server failed to start or stopped responding, so the run could not ' +
+        'complete and no report was produced.',
+      hint: 'Open the MCP page to confirm the server connects, then re-run the test.',
+      evidence,
+    }
+  }
+  if (sawConnection) {
+    return {
+      category: 'connection',
+      title: 'The run hit a connection error',
+      detail:
+        'A network or connection error stopped the run before it could finish testing and write ' +
+        'a report.',
+      hint: 'Check that the app URL is reachable from this machine, then re-run.',
+      evidence,
+    }
+  }
+  if (evidence.length > 0) {
+    return {
+      category: 'error',
+      title: 'The run ended with an error',
+      detail: 'The run stopped before writing a report. The error it reported is shown below.',
+      hint: 'Check the full log for context, then re-run.',
+      evidence,
+    }
+  }
+  if (exitCode != null) {
+    return {
+      category: 'exit',
+      title: 'The run exited unexpectedly',
+      detail: `The Claude process ended (exit code ${exitCode}) before writing a report, so no results were recorded.`,
+      hint: 'Open the full log to see what it was doing when it stopped, then re-run.',
+      evidence,
+    }
+  }
+  return null
+}
+
+const FAILURE_TONE: Record<FailureCategory, { ring: string; icon: string; chip: string }> = {
+  playwright: {
+    ring: 'border-red-500/30 bg-red-50/60 dark:bg-red-500/5',
+    icon: 'bg-red-100 text-red-600 dark:bg-red-500/15 dark:text-red-400',
+    chip: 'bg-red-100 text-red-700 dark:bg-red-500/15 dark:text-red-400',
+  },
+  mcp: {
+    ring: 'border-red-500/30 bg-red-50/60 dark:bg-red-500/5',
+    icon: 'bg-red-100 text-red-600 dark:bg-red-500/15 dark:text-red-400',
+    chip: 'bg-red-100 text-red-700 dark:bg-red-500/15 dark:text-red-400',
+  },
+  connection: {
+    ring: 'border-amber-500/30 bg-amber-50/60 dark:bg-amber-500/5',
+    icon: 'bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-400',
+    chip: 'bg-amber-100 text-amber-800 dark:bg-amber-500/15 dark:text-amber-400',
+  },
+  interrupted: {
+    ring: 'border-amber-500/30 bg-amber-50/60 dark:bg-amber-500/5',
+    icon: 'bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-400',
+    chip: 'bg-amber-100 text-amber-800 dark:bg-amber-500/15 dark:text-amber-400',
+  },
+  exit: {
+    ring: 'border-amber-500/30 bg-amber-50/60 dark:bg-amber-500/5',
+    icon: 'bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-400',
+    chip: 'bg-amber-100 text-amber-800 dark:bg-amber-500/15 dark:text-amber-400',
+  },
+  error: {
+    ring: 'border-red-500/30 bg-red-50/60 dark:bg-red-500/5',
+    icon: 'bg-red-100 text-red-600 dark:bg-red-500/15 dark:text-red-400',
+    chip: 'bg-red-100 text-red-700 dark:bg-red-500/15 dark:text-red-400',
+  },
+}
+
+/** Prominent, plain-language explanation of why a run failed, with the raw evidence. */
+function RunFailureNotice({
+  diagnosis,
+  onViewLog,
+  compact = false,
+}: {
+  diagnosis: FailureDiagnosis
+  onViewLog?: () => void
+  compact?: boolean
+}) {
+  const tone = FAILURE_TONE[diagnosis.category]
+  return (
+    <div
+      className={cn(
+        'rounded-3xl border p-5 shadow-none',
+        tone.ring,
+        compact && 'rounded-2xl p-4',
+      )}
+    >
+      <div className="flex items-start gap-3">
+        <span className={cn('flex size-9 shrink-0 items-center justify-center rounded-2xl', tone.icon)}>
+          <AlertCircle className="size-5" />
+        </span>
+        <div className="min-w-0 flex-1 space-y-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <h3 className="text-sm font-semibold tracking-tight">{diagnosis.title}</h3>
+            <span
+              className={cn(
+                'rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide',
+                tone.chip,
+              )}
+            >
+              Why it failed
+            </span>
+          </div>
+          <p className="text-sm text-muted-foreground">{diagnosis.detail}</p>
+
+          {diagnosis.evidence.length > 0 && (
+            <div className="overflow-hidden rounded-xl border border-border/60 bg-zinc-950">
+              <div className="border-b border-zinc-800 px-3 py-1.5 font-mono text-[10px] uppercase tracking-wide text-zinc-500">
+                From the log
+              </div>
+              <div className="max-h-40 space-y-1 overflow-auto p-3 font-mono text-[11px] leading-relaxed text-red-300">
+                {diagnosis.evidence.map((line, i) => (
+                  <div key={i} className="whitespace-pre-wrap break-words">
+                    {line}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {diagnosis.hint && (
+            <p className="text-xs text-muted-foreground">
+              <span className="font-medium text-foreground">What to try:</span> {diagnosis.hint}
+            </p>
+          )}
+
+          {onViewLog && (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={onViewLog}
+              className="mt-1 rounded-full transition-all duration-200 active:scale-[0.98]"
+            >
+              <Terminal className="mr-1.5 size-3.5" />
+              View full log
+            </Button>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 /** A compact key/value pair for the run's meta strip (started, finished, output…). */
 function MetaInline({
   icon,
@@ -1501,6 +1776,10 @@ export default function RunDetailPage() {
   const duration = formatDuration(run.createdAt, run.finishedAt)
   const isFail = run.status === 'failed' || run.status === 'error'
   const isCanceled = run.status === 'canceled'
+  // When a run ended without a report, dig the real failure reason out of the log
+  // (e.g. a hung Playwright/MCP browser) so we can show it instead of a bare
+  // "check the log" — the Report/Issues tabs would otherwise be blank.
+  const diagnosis = !run.reportMd ? diagnoseFailure(run.logTail, run.status) : null
   // A still-running run is using its session/output — deletion is blocked until it ends.
   const isRunActive =
     run.status === 'running' || run.status === 'queued' || run.status === 'paused'
@@ -1666,7 +1945,9 @@ export default function RunDetailPage() {
                 {isCanceled
                   ? 'It was stopped before any acceptance criteria were checked. See the log for what ran.'
                   : isFail
-                    ? 'The run ended early, so no pass/fail results were recorded. Check the log for details.'
+                    ? diagnosis
+                      ? 'The run ended early, so no pass/fail results were recorded — see the reason below.'
+                      : 'The run ended early, so no pass/fail results were recorded. Check the log for details.'
                     : 'This run recorded no acceptance criteria.'}
               </p>
             </div>
@@ -1708,6 +1989,12 @@ export default function RunDetailPage() {
           )}
         </div>
       </section>
+
+      {/* Why the run failed — surfaced up front so the reason (e.g. a hung
+          Playwright/MCP browser) isn't buried in the Log tab. */}
+      {diagnosis && (
+        <RunFailureNotice diagnosis={diagnosis} onViewLog={() => onTabChange('log')} />
+      )}
 
       {run.hasSession && (
         <ContinueSessionPanel runId={run.id} runStatus={run.status} hasSession={run.hasSession} />
@@ -1761,18 +2048,22 @@ export default function RunDetailPage() {
               {/* Full report first (summary + narrative), then the per-case
                   results as a table in the ticket's test-case shape. */}
               <section className="space-y-3">
-                <EvidenceReport
-                  md={
-                    executedFile && run.reportMd
-                      ? stripCaseDetailSection(run.reportMd)
-                      : run.reportMd
-                  }
-                  empty="No report was generated for this run."
-                  icon={<FileText className="h-5 w-5" />}
-                  projectId={run.projectId}
-                  slug={filesSlug}
-                  files={filesData?.files ?? []}
-                />
+                {!run.reportMd && diagnosis ? (
+                  <RunFailureNotice diagnosis={diagnosis} onViewLog={() => onTabChange('log')} />
+                ) : (
+                  <EvidenceReport
+                    md={
+                      executedFile && run.reportMd
+                        ? stripCaseDetailSection(run.reportMd)
+                        : run.reportMd
+                    }
+                    empty="No report was generated for this run."
+                    icon={<FileText className="h-5 w-5" />}
+                    projectId={run.projectId}
+                    slug={filesSlug}
+                    files={filesData?.files ?? []}
+                  />
+                )}
               </section>
               {executedFile && (
                 <section className="space-y-3">
@@ -1796,11 +2087,15 @@ export default function RunDetailPage() {
                 projectId={run.projectId}
                 ticketId={run.ticketId}
               />
-              <MarkdownView
-                md={run.issuesMd}
-                empty="No issues were logged for this run."
-                icon={<AlertCircle className="h-5 w-5" />}
-              />
+              {!run.issuesMd && diagnosis ? (
+                <RunFailureNotice diagnosis={diagnosis} onViewLog={() => onTabChange('log')} />
+              ) : (
+                <MarkdownView
+                  md={run.issuesMd}
+                  empty="No issues were logged for this run."
+                  icon={<AlertCircle className="h-5 w-5" />}
+                />
+              )}
             </TabsContent>
 
             <TabsContent value="screenshots" className="m-0 p-6">
