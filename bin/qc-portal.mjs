@@ -163,10 +163,20 @@ async function status() {
 }
 
 function run(cmd, args) {
-  // windowsHide: when the updater is launched from the portal UI it has no
-  // console, so without it every shell:true step (git/npm via cmd.exe) would
-  // flash its own console window on screen.
-  const r = spawnSync(cmd, args, { cwd: ROOT, stdio: 'inherit', shell: isWin, windowsHide: true })
+  // When the updater is launched from the portal UI it has no attached terminal
+  // (stdout is redirected to a log file, not a TTY). On Windows, a shell:true step
+  // (git / npm via cmd.exe) with stdio:'inherit' then pops its OWN console window
+  // — windowsHide does not reliably suppress a window for an inherited-console
+  // child. So only inherit stdio when we actually have a user terminal; otherwise
+  // run fully headless (no inherited console → no window). Phase progress is still
+  // captured because the launcher's own console.log is redirected to the log file.
+  const headless = process.env.QC_HEADLESS === '1' || !process.stdout.isTTY
+  const r = spawnSync(cmd, args, {
+    cwd: ROOT,
+    stdio: headless ? 'ignore' : 'inherit',
+    shell: isWin,
+    windowsHide: true,
+  })
   if (r.status !== 0) {
     console.error(`\n\`${cmd} ${args.join(' ')}\` failed.`)
     process.exit(r.status ?? 1)

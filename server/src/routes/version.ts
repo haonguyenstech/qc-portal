@@ -180,7 +180,9 @@ versionRouter.post('/update', (_req, res) => {
   updateStarted = true
 
   try {
-    spawnLauncherDetached(launcher, '--update', 'update.log')
+    // QC_HEADLESS: tell the launcher there's no user terminal so its git/npm/build
+    // steps run without inheriting a console — otherwise each pops its own window.
+    spawnLauncherDetached(launcher, '--update', 'update.log', { QC_HEADLESS: '1' })
   } catch (err) {
     updateStarted = false
     return res.status(500).json({

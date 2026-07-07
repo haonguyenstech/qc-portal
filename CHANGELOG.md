@@ -3,6 +3,19 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.9.12 — 2026-07-07
+
+**No more console window popping up when you update from the app**
+
+### Fixed
+
+- **Clicking "Update now" (or the update icon) no longer flashes a terminal window on Windows.**
+  When the update was started from the portal UI, each step (git, npm install, build) opened its own
+  console window because it had no terminal to attach to. The updater now runs those steps fully
+  headless when there's no user terminal, so the update happens quietly in the background — the page
+  still reloads on its own once the new version is live. Running `qc-portal --update` yourself in a
+  Command Prompt still shows full progress as before.
+
 ## 0.9.11 — 2026-07-07
 
 **Tidier "New folder" row in the Browse… picker**
