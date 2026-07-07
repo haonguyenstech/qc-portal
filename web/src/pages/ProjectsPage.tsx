@@ -269,11 +269,14 @@ function FolderBrowserDialog({
           )}
 
           {/* New-folder action / inline creator */}
-          <div className="flex items-center justify-between gap-2">
-            <span className="truncate font-mono text-[11px] text-muted-foreground" title={data?.path}>
-              {data?.path ?? ''}
-            </span>
-            {!creating ? (
+          {!creating ? (
+            <div className="flex items-center justify-between gap-2">
+              <span
+                className="min-w-0 flex-1 truncate font-mono text-[11px] text-muted-foreground"
+                title={data?.path}
+              >
+                {data?.path ?? ''}
+              </span>
               <Button
                 type="button"
                 variant="outline"
@@ -288,48 +291,48 @@ function FolderBrowserDialog({
                 <FolderPlus className="mr-1.5 h-3.5 w-3.5" />
                 New folder
               </Button>
-            ) : (
-              <div className="flex shrink-0 items-center gap-1.5">
-                <Input
-                  autoFocus
-                  value={newName}
-                  onChange={(e) => setNewName(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') {
-                      e.preventDefault()
-                      if (newName.trim() && !createMutation.isPending) createMutation.mutate()
-                    } else if (e.key === 'Escape') {
-                      setCreating(false)
-                    }
-                  }}
-                  placeholder="New folder name"
-                  className="h-8 w-48 text-xs"
-                />
-                <Button
-                  type="button"
-                  size="sm"
-                  disabled={!newName.trim() || createMutation.isPending}
-                  onClick={() => createMutation.mutate()}
-                  className="h-8 shrink-0 rounded-full text-xs"
-                >
-                  {createMutation.isPending ? (
-                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                  ) : (
-                    'Create'
-                  )}
-                </Button>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => setCreating(false)}
-                  className="h-8 shrink-0 rounded-full text-xs"
-                >
-                  Cancel
-                </Button>
-              </div>
-            )}
-          </div>
+            </div>
+          ) : (
+            <div className="flex items-center gap-1.5">
+              <Input
+                autoFocus
+                value={newName}
+                onChange={(e) => setNewName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault()
+                    if (newName.trim() && !createMutation.isPending) createMutation.mutate()
+                  } else if (e.key === 'Escape') {
+                    setCreating(false)
+                  }
+                }}
+                placeholder="New folder name"
+                className="h-8 min-w-0 flex-1 text-xs"
+              />
+              <Button
+                type="button"
+                size="sm"
+                disabled={!newName.trim() || createMutation.isPending}
+                onClick={() => createMutation.mutate()}
+                className="h-8 shrink-0 rounded-full text-xs"
+              >
+                {createMutation.isPending ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  'Create'
+                )}
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={() => setCreating(false)}
+                className="h-8 shrink-0 rounded-full text-xs"
+              >
+                Cancel
+              </Button>
+            </div>
+          )}
 
           {/* Folder list */}
           <div className="h-72 overflow-y-auto rounded-2xl border border-border/60 bg-muted/40 p-1.5">

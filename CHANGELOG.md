@@ -3,6 +3,17 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.9.11 — 2026-07-07
+
+**Tidier "New folder" row in the Browse… picker**
+
+### Fixed
+
+- **The New-folder input no longer gets cramped.** When you click **New folder** in the picker, the
+  name field now spans the full row and the **Create** / **Cancel** buttons always stay visible,
+  instead of being squeezed next to the current path. (If you also see a small colored icon inside
+  the field, that's a browser extension adding an "AI write" button — not part of QC Portal.)
+
 ## 0.9.10 — 2026-07-07
 
 **Create a new folder right from the "Browse…" picker**
