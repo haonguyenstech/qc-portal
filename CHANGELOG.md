@@ -3,6 +3,17 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.9.10 — 2026-07-07
+
+**Create a new folder right from the "Browse…" picker**
+
+### Added
+
+- **A "New folder" button in the folder picker.** When adding or editing a project, the **Browse…**
+  picker now has a **New folder** button — type a name, hit **Create**, and the folder is made in the
+  location you're browsing and selected for you, so you can register a fresh project folder without
+  leaving the portal. Invalid names are sanitized and duplicates are rejected with a clear message.
+
 ## 0.9.9 — 2026-07-07
 
 **"Browse…" now opens a folder picker inside the portal — no more spinning forever**

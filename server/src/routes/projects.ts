@@ -103,6 +103,32 @@ projectsRouter.get('/browse-folder', (req, res) => {
   })
 })
 
+/**
+ * Create a new sub-directory inside `parent` and return its path, so the folder
+ * browser can offer a "New folder" action. `name` is sanitized to a single safe
+ * segment (no separators / illegal chars). Fails cleanly if the parent is missing
+ * or the folder already exists.
+ */
+projectsRouter.post('/create-folder', (req, res) => {
+  const parent = typeof req.body?.parent === 'string' ? req.body.parent.trim() : ''
+  const rawName = typeof req.body?.name === 'string' ? req.body.name : ''
+  if (!parent) return res.status(400).json({ error: 'A parent folder is required.' })
+  if (!isDir(parent)) return res.status(400).json({ error: 'The parent folder does not exist.' })
+  const name = safeFolderName(rawName)
+  if (!name) return res.status(400).json({ error: 'Enter a valid folder name.' })
+
+  const target = path.join(path.resolve(parent), name)
+  if (fs.existsSync(target)) {
+    return res.status(409).json({ error: `"${name}" already exists here.` })
+  }
+  try {
+    fs.mkdirSync(target)
+  } catch (err) {
+    return res.status(500).json({ error: err instanceof Error ? err.message : 'Could not create the folder.' })
+  }
+  return res.json({ path: target, name })
+})
+
 /** Enumerate present drive roots on Windows (C:\, D:\, …). Empty elsewhere. */
 function listWindowsDrives(): string[] {
   if (process.platform !== 'win32') return []

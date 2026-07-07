@@ -67,6 +67,7 @@ import { cn } from '@/lib/utils'
 import {
   browseFolder,
   claudeStatus,
+  createFolder,
   createProject,
   deleteProject,
   exportProject,
@@ -155,6 +156,9 @@ function FolderBrowserDialog({
   // undefined → let the server start at the user's home directory.
   const [nav, setNav] = useState<string | undefined>(undefined)
   const [draft, setDraft] = useState('')
+  const [creating, setCreating] = useState(false)
+  const [newName, setNewName] = useState('')
+  const queryClient = useQueryClient()
 
   const { data, isFetching, isError, error } = useQuery({
     queryKey: ['browse-folder', nav ?? '~home'],
@@ -172,6 +176,21 @@ function FolderBrowserDialog({
     const p = draft.trim()
     if (p) setNav(p)
   }
+
+  const createMutation = useMutation({
+    mutationFn: () => createFolder(data?.path ?? '', newName),
+    onSuccess: (r) => {
+      toast.success('Folder created', { description: r.path })
+      setCreating(false)
+      setNewName('')
+      setDraft(r.path) // select the new folder
+      queryClient.invalidateQueries({ queryKey: ['browse-folder'] })
+    },
+    onError: (err) =>
+      toast.error('Could not create folder', {
+        description: err instanceof Error ? err.message : 'Unknown error',
+      }),
+  })
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -248,6 +267,69 @@ function FolderBrowserDialog({
               ))}
             </div>
           )}
+
+          {/* New-folder action / inline creator */}
+          <div className="flex items-center justify-between gap-2">
+            <span className="truncate font-mono text-[11px] text-muted-foreground" title={data?.path}>
+              {data?.path ?? ''}
+            </span>
+            {!creating ? (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={!data?.path || !!data?.error}
+                onClick={() => {
+                  setNewName('')
+                  setCreating(true)
+                }}
+                className="h-8 shrink-0 rounded-full text-xs"
+              >
+                <FolderPlus className="mr-1.5 h-3.5 w-3.5" />
+                New folder
+              </Button>
+            ) : (
+              <div className="flex shrink-0 items-center gap-1.5">
+                <Input
+                  autoFocus
+                  value={newName}
+                  onChange={(e) => setNewName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault()
+                      if (newName.trim() && !createMutation.isPending) createMutation.mutate()
+                    } else if (e.key === 'Escape') {
+                      setCreating(false)
+                    }
+                  }}
+                  placeholder="New folder name"
+                  className="h-8 w-48 text-xs"
+                />
+                <Button
+                  type="button"
+                  size="sm"
+                  disabled={!newName.trim() || createMutation.isPending}
+                  onClick={() => createMutation.mutate()}
+                  className="h-8 shrink-0 rounded-full text-xs"
+                >
+                  {createMutation.isPending ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    'Create'
+                  )}
+                </Button>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setCreating(false)}
+                  className="h-8 shrink-0 rounded-full text-xs"
+                >
+                  Cancel
+                </Button>
+              </div>
+            )}
+          </div>
 
           {/* Folder list */}
           <div className="h-72 overflow-y-auto rounded-2xl border border-border/60 bg-muted/40 p-1.5">

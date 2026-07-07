@@ -54,6 +54,14 @@ export function browseFolder(path?: string): Promise<FolderListing> {
   return request(`/api/projects/browse-folder${qs}`)
 }
 
+/** Creates a new sub-folder under `parent` and returns its absolute path. */
+export function createFolder(parent: string, name: string): Promise<{ path: string; name: string }> {
+  return request('/api/projects/create-folder', {
+    method: 'POST',
+    body: JSON.stringify({ parent, name }),
+  })
+}
+
 export function createProject(
   body: { name: string; rootPath: string },
 ): Promise<Project & { created?: string[]; templateName?: string | null }> {
