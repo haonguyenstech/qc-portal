@@ -3,6 +3,23 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.9.15 — 2026-07-08
+
+**Windows: canceling a run no longer leaves runs piling up on top of each other**
+
+### Fixed
+
+- **On Windows, stopping (or pausing) a QC run now fully shuts down its test browser and helpers —
+  so the next run doesn't start while the old one is still going.** Each run launches Claude, which
+  in turn opens the Playwright/Edge test browser and its MCP helpers. On Windows the portal was only
+  closing the outer command-window wrapper on cancel, leaving the real Claude process and its browser
+  running in the background. Because that leftover work never registered as "finished", newly started
+  tickets stopped waiting their turn in the queue and ran at the same time — the runs appeared to
+  execute in parallel instead of one at a time (macOS was unaffected). The portal now terminates the
+  whole process tree on Windows, so a canceled run leaves nothing behind and the one-at-a-time queue
+  holds. The queue ordering itself was already correct; this was strictly a Windows process-cleanup
+  problem.
+
 ## 0.9.14 — 2026-07-07
 
 **Failed runs now tell you WHY, without digging through the log**

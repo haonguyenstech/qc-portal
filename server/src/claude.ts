@@ -347,13 +347,41 @@ export function runQc(
 }
 
 /**
- * Signal a child *and all its descendants*. The child was spawned `detached`,
- * so it leads its own process group — `process.kill(-pid, …)` reaches the group
- * (claude + MCP servers + Playwright/Edge). Falls back to the lone process if
- * the group send fails (e.g. it already exited).
+ * Signal a child *and all its descendants* (claude + MCP servers + Playwright/Edge).
+ *
+ * POSIX: the child was spawned `detached`, so it leads its own process group and
+ * `process.kill(-pid, …)` reaches the whole group; falls back to the lone process
+ * if the group send fails (e.g. it already exited).
+ *
+ * Windows: there are no process groups, and `child.kill()` only reaches the
+ * `cmd.exe`/`claude.cmd` wrapper — leaving `claude.exe`, its MCP servers, and the
+ * browser orphaned and running (which is what lets extra runs pile up concurrently
+ * after a cancel/pause). `taskkill /T` walks the whole tree by pid instead; `/F`
+ * force-terminates and is used for the SIGKILL escalation.
  */
 function killTree(child: ChildProcess, signal: NodeJS.Signals): void {
   if (child.pid == null) return
+  if (process.platform === 'win32') {
+    const args = ['/PID', String(child.pid), '/T']
+    if (signal === 'SIGKILL') args.push('/F')
+    try {
+      spawn('taskkill', args, { stdio: 'ignore', windowsHide: true }).on('error', () => {
+        // taskkill missing/failed — fall back to at least the wrapper.
+        try {
+          child.kill(signal)
+        } catch {
+          /* already gone */
+        }
+      })
+    } catch {
+      try {
+        child.kill(signal)
+      } catch {
+        /* already gone */
+      }
+    }
+    return
+  }
   try {
     process.kill(-child.pid, signal)
   } catch {
