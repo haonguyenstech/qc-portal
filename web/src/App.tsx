@@ -28,6 +28,7 @@ import {
   Ticket,
   Upload,
   Wrench,
+  Zap,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -54,6 +55,7 @@ import RunDetailPage from '@/pages/RunDetailPage'
 import SkillsPage from '@/pages/SkillsPage'
 import TicketsPage from '@/pages/TicketsPage'
 import TestCasePage from '@/pages/TestCasePage'
+import ApiTestingPage from '@/pages/ApiTestingPage'
 import McpPage from '@/pages/McpPage'
 import ProjectsPage from '@/pages/ProjectsPage'
 import ProjectSettingsPage from '@/pages/ProjectSettingsPage'
@@ -125,6 +127,7 @@ const navGroups: { label: string; items: NavItemDef[] }[] = [
       { to: '/running', label: 'Running', icon: RadioTower, end: false },
       { to: '/history', label: 'History', icon: History, end: false },
       { to: '/verify', label: 'Design Check', icon: ScanSearch, end: false },
+      { to: '/api-testing', label: 'API Testing', icon: Zap, end: false },
     ],
   },
   {
@@ -807,6 +810,7 @@ function App() {
             <Route path="/tickets" element={<TicketsPage />} />
             <Route path="/testcases" element={<TestCasePage />} />
             <Route path="/verify" element={<VerifyDesignPage />} />
+            <Route path="/api-testing" element={<ApiTestingPage />} />
             <Route path="/terminal" element={<TerminalPage />} />
             <Route path="/skills" element={<SkillsPage />} />
             <Route path="/mcp" element={<McpPage />} />

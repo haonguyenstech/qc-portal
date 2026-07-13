@@ -1536,6 +1536,217 @@ export function getReleaseNotes(): Promise<{ current: string | null; markdown: s
   return request('/api/version/changelog')
 }
 
+// ---- API Testing ----
+
+export interface ApiKV {
+  key: string
+  value: string
+  enabled: boolean
+}
+
+export type ApiAssertionType =
+  | 'status-equals'
+  | 'status-2xx'
+  | 'body-contains'
+  | 'body-matches'
+  | 'json-equals'
+  | 'json-exists'
+  | 'header-equals'
+  | 'header-exists'
+  | 'time-below'
+
+export interface ApiAssertion {
+  id: string
+  type: ApiAssertionType
+  target: string
+  expected: string
+  enabled: boolean
+}
+
+export type ApiBodyMode = 'none' | 'json' | 'text'
+
+export interface ApiRequestDef {
+  name: string
+  method: string
+  url: string
+  query: ApiKV[]
+  headers: ApiKV[]
+  bodyMode: ApiBodyMode
+  body: string
+  assertions: ApiAssertion[]
+  aiExpect: string // plain-language expectation the AI check evaluates the response against
+  savedAt?: string
+}
+
+export interface AiCheckResult {
+  ok: boolean
+  verdict?: 'pass' | 'fail' | 'partial'
+  summary?: string
+  checks?: { expectation: string; pass: boolean; note: string }[]
+  issues?: { severity: 'high' | 'warn' | 'info'; title: string; detail: string }[]
+  error?: string
+}
+
+export interface ApiSendResult {
+  ok: boolean // true when the server got any HTTP response (even a 4xx/5xx)
+  status?: number
+  statusText?: string
+  headers?: Record<string, string>
+  contentType?: string
+  bodyText?: string
+  sizeBytes?: number
+  truncated?: boolean
+  timeMs: number
+  requestUrl: string
+  method: string
+  error?: string // network-level error when ok=false
+}
+
+/** Proxy an HTTP request through the server (avoids browser CORS) and return the response. */
+export function sendApiRequest(body: {
+  method: string
+  url: string
+  query: ApiKV[]
+  headers: ApiKV[]
+  bodyMode: ApiBodyMode
+  body: string
+  timeoutMs?: number
+}): Promise<ApiSendResult> {
+  return request('/api/api-tests/send', { method: 'POST', body: JSON.stringify(body) })
+}
+
+/** List the project's saved API requests (testing/api-tests/*.json). */
+export function listApiRequests(projectId: string): Promise<ApiRequestDef[]> {
+  return request(`/api/api-tests?projectId=${encodeURIComponent(projectId)}`)
+}
+
+/** Create or overwrite a saved API request. */
+export function saveApiRequest(
+  projectId: string,
+  name: string,
+  def: Omit<ApiRequestDef, 'name' | 'savedAt'>,
+): Promise<ApiRequestDef> {
+  return request(`/api/api-tests/${encodeURIComponent(name)}?projectId=${encodeURIComponent(projectId)}`, {
+    method: 'PUT',
+    body: JSON.stringify(def),
+  })
+}
+
+/** Rename a saved API request (also moves its stored run history). */
+export function renameApiRequest(
+  projectId: string,
+  name: string,
+  newName: string,
+): Promise<ApiRequestDef> {
+  return request(`/api/api-tests/${encodeURIComponent(name)}/rename?projectId=${encodeURIComponent(projectId)}`, {
+    method: 'POST',
+    body: JSON.stringify({ newName }),
+  })
+}
+
+/** Delete a saved API request. */
+export function deleteApiRequest(projectId: string, name: string): Promise<{ ok: true }> {
+  return request(
+    `/api/api-tests/${encodeURIComponent(name)}?projectId=${encodeURIComponent(projectId)}`,
+    { method: 'DELETE' },
+  )
+}
+
+/** Reveal the project's testing/api-tests folder in the OS file explorer. */
+export function openApiTestsFolder(projectId: string): Promise<{ ok: true; path: string }> {
+  return request('/api/api-tests/open', {
+    method: 'POST',
+    body: JSON.stringify({ projectId }),
+  })
+}
+
+// ---- API result history ----
+
+export interface ApiResultMeta {
+  id: string
+  at: string
+  method: string
+  url: string
+  status: number
+  ok: boolean
+  timeMs: number
+  sizeBytes: number
+  error: string | null
+  checks: { passed: number; total: number }
+  scan: { high: number; warn: number; info: number }
+}
+
+export interface ApiResultRecord {
+  id: string
+  at: string
+  name: string
+  request: { method: string; url: string }
+  result: ApiSendResult & { headers?: Record<string, string> }
+  checks: { passed: number; total: number }
+  scan: { high: number; warn: number; info: number }
+}
+
+/** Store one send's outcome under the request's history folder (evidence trail). */
+export function saveApiResult(
+  projectId: string,
+  name: string,
+  payload: {
+    request: { method: string; url: string }
+    result: ApiSendResult
+    checks: { passed: number; total: number }
+    scan: { high: number; warn: number; info: number }
+  },
+): Promise<{ id: string; at: string }> {
+  return request('/api/api-tests/results', {
+    method: 'POST',
+    body: JSON.stringify({ projectId, name, ...payload }),
+  })
+}
+
+/** Ask AI to judge a response against a plain-language expectation (best-effort). */
+export function aiCheckApi(body: {
+  projectId: string
+  expect: string
+  request: { method: string; url: string }
+  result: {
+    status?: number
+    statusText?: string
+    contentType?: string
+    timeMs?: number
+    headers?: Record<string, string>
+    bodyText?: string
+  }
+  model?: string
+}): Promise<AiCheckResult> {
+  return request('/api/api-tests/ai-check', { method: 'POST', body: JSON.stringify(body) })
+}
+
+/** List a saved request's stored run history (newest first, metadata only). */
+export function listApiResults(projectId: string, name: string): Promise<ApiResultMeta[]> {
+  return request(
+    `/api/api-tests/results?projectId=${encodeURIComponent(projectId)}&name=${encodeURIComponent(name)}`,
+  )
+}
+
+/** Fetch one stored result in full (with response headers + body). */
+export function getApiResult(
+  projectId: string,
+  name: string,
+  id: string,
+): Promise<ApiResultRecord> {
+  return request(
+    `/api/api-tests/results/${encodeURIComponent(name)}/${encodeURIComponent(id)}?projectId=${encodeURIComponent(projectId)}`,
+  )
+}
+
+/** Clear a saved request's whole run history. */
+export function clearApiResults(projectId: string, name: string): Promise<{ ok: true }> {
+  return request(
+    `/api/api-tests/results/${encodeURIComponent(name)}?projectId=${encodeURIComponent(projectId)}`,
+    { method: 'DELETE' },
+  )
+}
+
 // ---- Terminal ----
 
 /** Whether the device-terminal feature is usable (node-pty native binding loaded). */

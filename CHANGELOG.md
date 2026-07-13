@@ -3,6 +3,37 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.9.18 — 2026-07-13
+
+**New API Testing page, plus reports render cleanly instead of leaking raw HTML**
+
+### Added
+
+- **API Testing page (sidebar → Testing → API Testing).** Send any HTTP request from the portal and
+  keep the result as evidence — no external tool needed. Paste a **cURL** command straight from your
+  browser's DevTools or an app and it fills in the method, URL, query params, headers, and body for
+  you (and you can copy the request back out as cURL). Saved requests live per project: they
+  **auto-save on any change**, rename with the pencil icon, and ask before deleting.
+- **Rule-based assertions.** Add checks — status is 2xx / equals, body contains / matches, JSON path
+  equals / exists, header equals / exists, response time under N ms — with quick-add presets, and see
+  a pass/total bar with each row coloured green or red after every Send.
+- **Automatic QC & security scan.** Every response is graded for common issues — plain HTTP, missing
+  security headers (HSTS, nosniff, CSP, clickjacking), permissive CORS, server/version disclosure,
+  insecure cookies, leaked stack traces / SQL errors / secrets / PII, wrong or missing Content-Type,
+  slow or oversized responses — bucketed high / warning / info.
+- **AI check against plain-language expectations.** Type what the response *should* do (or pick from
+  quick-select criteria chips) and the AI verdict — pass / partial / fail with per-point reasons and
+  flagged issues — runs **automatically right after each Send** when an expectation is set.
+- **Result history.** Every Send on a saved request is stored under `testing/api-tests/` (newest 30
+  kept) so you have a trail of what you tested and what came back.
+
+### Fixed
+
+- **QC run reports no longer show a wall of raw HTML at the top.** Some reports opened with a literal
+  `<style>` block and raw `<table>` markup printed as text, because the report viewer renders
+  Markdown, not HTML. The report prompt now requires pure GitHub-Flavored Markdown — markdown pipe
+  tables and `![](image)` links — so every table and screenshot renders instead of leaking as source.
+
 ## 0.9.17 — 2026-07-13
 
 **Generated CSV test cases no longer shift values into the wrong columns**

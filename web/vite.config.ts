@@ -24,9 +24,12 @@ export default defineConfig({
   },
   server: {
     port: 5175,
+    // Match on the trailing slash (RegExp keys start with ^) so ONLY real API
+    // paths (/api/…) and the websocket (/ws…) are proxied. A bare '/api' prefix
+    // would also swallow client routes like /api-testing and break a hard reload.
     proxy: {
-      '/api': { target: 'http://127.0.0.1:5174', changeOrigin: true },
-      '/ws': { target: 'ws://127.0.0.1:5174', ws: true },
+      '^/api/': { target: 'http://127.0.0.1:5174', changeOrigin: true },
+      '^/ws(/|$)': { target: 'ws://127.0.0.1:5174', ws: true },
     },
   },
 })

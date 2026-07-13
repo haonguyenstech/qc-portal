@@ -179,6 +179,16 @@ export function runQc(
           `with THESE exact H2 headings and table shapes, on every run (even a blocked or ` +
           `failed one). Fill every row; never omit a section.`,
         ``,
+        // The portal renders report.md as GitHub-Flavored Markdown (react-markdown),
+        // which does NOT execute or render raw HTML — a `<style>` block or a
+        // `<table class="qc">` prints as literal source text at the top of the report.
+        // Force pure GFM so every table/image renders instead of leaking as raw tags.
+        `WRITE PURE GITHUB-FLAVORED MARKDOWN — no raw HTML anywhere in report.md. Do NOT emit a ` +
+          `<style> block, inline CSS, or any HTML tags (<table>, <tr>, <td>, <th>, <col>, <colgroup>, ` +
+          `<b>, <br>, <img>, …). Every table MUST be a markdown pipe table ("| A | B |" with a ` +
+          `"|---|---|" separator row); every image MUST use markdown "![alt](relative/path.png)". ` +
+          `The viewer shows raw HTML as literal text, so any HTML you emit will corrupt the report.`,
+        ``,
         `## 1. Test Suite Executed — a two-column "Field | Value" table with these rows: ` +
           `**Suite / Module** (the feature/screens under test), **Ticket** (id + link + title), ` +
           `**Tested by**, **Test Execution Date** (today), **Build / Environment** (the App URL / target), ` +

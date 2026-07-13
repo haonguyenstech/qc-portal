@@ -24,6 +24,7 @@ import { templatesRouter } from './routes/templates.js'
 import { knowledgeRouter } from './routes/knowledge.js'
 import { memoryRouter } from './routes/memory.js'
 import { diagramsRouter } from './routes/diagrams.js'
+import { apiTestsRouter } from './routes/apiTests.js'
 import { versionRouter } from './routes/version.js'
 
 // Optionally seed a default project from QC_REPO_ROOT (no-op if unset / already seeded).
@@ -62,6 +63,7 @@ app.use('/api/templates', templatesRouter)
 app.use('/api/knowledge', knowledgeRouter)
 app.use('/api/memory', memoryRouter)
 app.use('/api/diagrams', diagramsRouter)
+app.use('/api/api-tests', apiTestsRouter)
 app.use('/api/version', versionRouter)
 
 // In a packaged install the Express server also serves the built web UI so the
@@ -74,8 +76,11 @@ const indexHtml = path.join(webDist, 'index.html')
 if (fs.existsSync(indexHtml)) {
   app.use(express.static(webDist))
   // SPA fallback: any non-API, non-WebSocket GET serves index.html so client-side
-  // routes (React Router) work on reload. /api/* and /ws are handled above.
-  app.get(/^(?!\/(api|ws)\b).*/, (_req, res) => {
+  // routes (React Router) work on reload. Only real API paths (/api/…) and the
+  // websocket (/ws, /ws/…) are excluded — matching on the trailing slash so client
+  // routes such as /api-testing still fall through to the SPA (a bare \b boundary
+  // would wrongly treat /api-testing as an API path).
+  app.get(/^(?!\/(?:api\/|ws(?:\/|$))).*/, (_req, res) => {
     res.sendFile(indexHtml)
   })
   console.log(`Serving web UI from ${webDist}`)
