@@ -3,6 +3,23 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.9.17 — 2026-07-13
+
+**Generated CSV test cases no longer shift values into the wrong columns**
+
+### Fixed
+
+- **A test case with a comma in a short field no longer pushes its Steps and Expected result into
+  the Actual result and Priority columns.** When a single-line field — most often a Pre-condition
+  like `Services of different modalities exist (e.g. X-Ray, CT, MRI)` — contained a comma and wasn't
+  wrapped in quotes, that comma split the field and shoved every later value one or more columns to
+  the right, so columns that should stay blank on a fresh sheet (Actual result, Priority) ended up
+  holding the real steps and expected results. The test-case generation prompt now treats quoting
+  every free-text column as an absolute rule on every row — including the short single-line values
+  that are the usual culprit — and self-checks each row before finishing (a non-blank Actual result
+  or Priority is the tell-tale sign of a dropped quote). The portal already flags any remaining
+  shifted rows by ID in the generation log so you can spot-fix or regenerate.
+
 ## 0.9.16 — 2026-07-13
 
 **Report results are always shown, correctly counted, and in sync between History and the run detail**
