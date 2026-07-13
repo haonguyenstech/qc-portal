@@ -47,6 +47,9 @@ export interface RunSummary {
   status: RunStatus
   passCount: number
   failCount: number
+  blockedCount: number
+  untestedCount: number
+  cancelledCount: number
   totalAcs: number
   createdAt: string // ISO
   finishedAt: string | null

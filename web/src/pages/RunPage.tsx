@@ -10,6 +10,7 @@ import {
   Bookmark,
   Boxes,
   Brain,
+  Bug,
   Check,
   ChevronDown,
   ChevronRight,
@@ -69,7 +70,7 @@ import { ManageHintsDialog } from '@/components/ManageHintsDialog'
 import { RunPresetsDialog } from '@/components/RunPresetsDialog'
 import { useRunPresets, type RunPreset } from '@/lib/presets'
 import { CrawledStatusHeader, CrawledTicketRow } from '@/components/CrawledTicketRow'
-import { groupCrawledByStatus } from '@/lib/crawled-tickets'
+import { buildCrawledTree } from '@/lib/crawled-tickets'
 import { TicketTestCasePicker, testcaseRelPath } from '@/components/TicketTestCasePicker'
 import { McpRequiredNotice } from '@/components/McpRequiredNotice'
 
@@ -163,6 +164,26 @@ function loadTestTarget(): TestTarget {
   }
 }
 
+// Bug-tagged tickets, persisted per project so a "Mark bug" survives a reload.
+const BUG_TICKETS_KEY = 'qc.bugTickets.'
+function loadBugTickets(projectId: string): string[] {
+  try {
+    const raw = localStorage.getItem(BUG_TICKETS_KEY + projectId)
+    const arr = raw ? JSON.parse(raw) : []
+    return Array.isArray(arr) ? arr.filter((x): x is string => typeof x === 'string') : []
+  } catch {
+    return []
+  }
+}
+function saveBugTickets(projectId: string, ids: string[]): void {
+  try {
+    if (ids.length) localStorage.setItem(BUG_TICKETS_KEY + projectId, JSON.stringify(ids))
+    else localStorage.removeItem(BUG_TICKETS_KEY + projectId)
+  } catch {
+    /* ignore quota / disabled storage */
+  }
+}
+
 const TARGET_META: Record<TestTarget, { label: string; hint: string; Icon: typeof Globe }> = {
   web: { label: 'Web', hint: 'Desktop browser', Icon: Globe },
   'web-mobile': { label: 'Web on mobile', hint: 'Mobile browser', Icon: Smartphone },
@@ -197,28 +218,42 @@ function FeatureTicketsPicker({
   onChange,
   disabled,
   variant = 'feature',
+  bugTickets,
+  onToggleBug,
 }: {
   tickets: CrawledTicket[]
   value: string[]
   onChange: (next: string[]) => void
   disabled?: boolean
   variant?: 'feature' | 'queue'
+  /** Ids tagged as bugs (queue mode) — those run without test cases. */
+  bugTickets?: Set<string>
+  onToggleBug?: (id: string) => void
 }) {
   const [query, setQuery] = useState('')
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
+  const toggleCollapse = (name: string) =>
+    setCollapsed((prev) => {
+      const next = new Set(prev)
+      if (next.has(name)) next.delete(name)
+      else next.add(name)
+      return next
+    })
   const isQueue = variant === 'queue'
   const maxTickets = isQueue ? MAX_QUEUE_TICKETS : MAX_FEATURE_TICKETS
   const atMax = value.length >= maxTickets
   const q = query.trim().toLowerCase()
-  const filtered = useMemo(() => {
-    const list = q
-      ? tickets.filter(
-          (t) =>
-            ticketIdOf(t).toLowerCase().includes(q) ||
-            (t.title ?? '').toLowerCase().includes(q),
-        )
-      : tickets
-    return [...list].sort((a, b) => (b.crawledAt ?? '').localeCompare(a.crawledAt ?? ''))
-  }, [tickets, q])
+  // Roots most-recently-crawled first; subtasks nest beneath their parent.
+  const tree = useMemo(() => {
+    const sorted = [...tickets].sort((a, b) => (b.crawledAt ?? '').localeCompare(a.crawledAt ?? ''))
+    return buildCrawledTree(sorted, {
+      collapsed,
+      match: q
+        ? (t) =>
+            ticketIdOf(t).toLowerCase().includes(q) || (t.title ?? '').toLowerCase().includes(q)
+        : undefined,
+    })
+  }, [tickets, q, collapsed])
 
   function toggle(id: string) {
     if (value.includes(id)) {
@@ -226,11 +261,12 @@ function FeatureTicketsPicker({
       return
     }
     if (atMax) return
-    // Queue runs verify against the ticket's generated test cases — a ticket
-    // without any can't be picked (the row is blocked; this is a safety net).
+    // A ticket with test cases runs as a feature check. One WITHOUT test cases can
+    // only run if the user tagged it a bug (via the row's "Mark bug" toggle) — so
+    // block selecting an untagged, test-case-less ticket here.
     if (isQueue) {
       const t = tickets.find((x) => ticketIdOf(x) === id)
-      if (!t?.hasTestcases) return
+      if (!t?.hasTestcases && !bugTickets?.has(id)) return
     }
     onChange([...value, id])
   }
@@ -281,6 +317,15 @@ function FeatureTicketsPicker({
                 )
               )}
               <span className="shrink-0 font-mono">{id}</span>
+              {bugTickets?.has(id) && (
+                <span
+                  title="Runs as a bug repro (no test cases)"
+                  className="inline-flex shrink-0 items-center gap-0.5 rounded-full border border-red-300 bg-red-100 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-red-700"
+                >
+                  <Bug className="size-2.5" />
+                  Bug
+                </span>
+              )}
               {title && (
                 <span className="min-w-0 flex-1 truncate font-normal text-muted-foreground">
                   {title}
@@ -302,19 +347,23 @@ function FeatureTicketsPicker({
         </div>
       )}
 
-      {/* every crawled ticket lacks test cases — explain why nothing is selectable */}
-      {isQueue && tickets.length > 0 && !tickets.some((t) => t.hasTestcases) && (
-        <div className="flex items-start gap-2.5 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-800">
-          <TriangleAlert className="mt-0.5 size-4 shrink-0" />
+      {/* Some tickets have no test cases — explain the "Mark bug" path to run them. */}
+      {isQueue && tickets.some((t) => !t.hasTestcases) && (
+        <div className="flex items-start gap-2.5 rounded-xl border border-border/60 bg-muted/50 px-3 py-2.5 text-xs text-muted-foreground">
+          <Bug className="mt-0.5 size-4 shrink-0 text-red-600" />
           <div className="space-y-0.5 leading-snug">
-            <p className="font-medium">No ticket has test cases yet.</p>
+            <p className="font-medium text-foreground">
+              A ticket needs test cases to run — unless you tag it a{' '}
+              <span className="text-red-600">bug</span>.
+            </p>
             <p>
-              A QC run verifies a ticket against its generated test cases, so tickets without them
-              can’t be selected. Generate test cases on the{' '}
+              Tickets with test cases run as a feature check (verified against them). For one without,
+              hit <span className="font-medium text-foreground">Mark bug</span> on its row — Claude then
+              reproduces the reported issue and checks whether it’s fixed. Or generate cases on the{' '}
               <Link to="/testcases" className="font-medium underline">
                 Test cases
               </Link>{' '}
-              page first, then come back here to run.
+              page.
             </p>
           </div>
         </div>
@@ -341,28 +390,42 @@ function FeatureTicketsPicker({
                 Crawl tickets on the Tickets page first — they’ll appear here ready to test.
               </p>
             </div>
-          ) : filtered.length === 0 ? (
+          ) : tree.count === 0 ? (
             <div className="flex items-center gap-2 px-3 py-6 text-xs text-muted-foreground">
               <Search className="size-3.5" />
               No crawled ticket matches “{query}”.
             </div>
           ) : (
-            groupCrawledByStatus(filtered).map((group) => (
+            tree.groups.map((group) => (
               <div key={group.status || '∅'}>
-                <CrawledStatusHeader status={group.status} count={group.tickets.length} />
+                <CrawledStatusHeader status={group.status} count={group.roots.length} />
                 <ul className="divide-y">
-                  {group.tickets.map((t) => {
+                  {tree.rows(group.roots).map(({ ticket: t, depth, hasChildren }) => {
                     const id = ticketIdOf(t)
                     const isSel = value.includes(id)
-                    const noTestcases = isQueue && !t.hasTestcases
+                    const isBug = !!bugTickets?.has(id)
+                    // A test-case-less ticket shows the Bug toggle — tagging it a bug
+                    // (which also selects it) is the only way to run it. A ticket WITH
+                    // test cases runs as a feature check (no bug toggle).
+                    const canTagBug = isQueue && !t.hasTestcases && !!onToggleBug
+                    // Its checkbox can't select it until it's tagged a bug — lock the
+                    // checkbox (with a tooltip) rather than leaving it silently inert.
+                    const selectLocked = canTagBug && !isBug && !isSel
                     return (
                       <li key={t.name}>
                         <CrawledTicketRow
                           ticket={t}
+                          depth={depth}
+                          hasChildren={hasChildren}
+                          isOpen={!collapsed.has(t.name)}
+                          onToggleExpand={() => toggleCollapse(t.name)}
                           selected={isSel}
                           onSelect={() => toggle(id)}
-                          blocked={disabled || noTestcases || (!isSel && atMax)}
-                          flagMissingTestcases={isQueue}
+                          blocked={disabled || (!isSel && atMax)}
+                          bug={isBug}
+                          onToggleBug={canTagBug ? () => onToggleBug!(id) : undefined}
+                          selectLocked={selectLocked}
+                          selectLockedHint="No test cases yet — tap “Mark bug” to run this ticket as a bug, or generate test cases first."
                         />
                       </li>
                     )
@@ -507,6 +570,9 @@ export default function RunPage() {
   // Single-ticket mode selection. Several tickets are allowed — each becomes its
   // own run, executed by the server strictly one at a time (never in parallel).
   const [simpleTickets, setSimpleTickets] = useState<string[]>([])
+  // Tickets the user explicitly tagged as a BUG — those run as bug repros and don't
+  // need test cases. A ticket is a bug ONLY when tagged here (never by default).
+  const [bugTickets, setBugTickets] = useState<Set<string>>(new Set())
   const [appUrl, setAppUrl] = useState('')
   // Per-ticket App URL overrides for multi-ticket queues (ticket id → url).
   // Blank = the ticket uses the shared App URL field as its default.
@@ -557,6 +623,30 @@ export default function RunPage() {
   )
   const selectedFolder = selectedTicket?.name ?? null
 
+  // Tag / untag a ticket as a bug. For a test-case-less ticket, tagging it a bug is
+  // also how you add it to the run (it can't run otherwise), so tagging selects it
+  // and untagging removes it — keeping selection and bug state coherent.
+  const toggleBug = (id: string) => {
+    const t = (crawledTickets ?? []).find((x) => (x.displayId ?? x.name) === id)
+    const noTestcases = !!t && !t.hasTestcases
+    const next = new Set(bugTickets)
+    if (next.has(id)) {
+      next.delete(id)
+      if (noTestcases) setSimpleTickets((sel) => sel.filter((s) => s !== id))
+    } else {
+      next.add(id)
+      // Tagging a test-case-less ticket adds it to the run (respecting the cap).
+      if (noTestcases) {
+        setSimpleTickets((sel) =>
+          sel.includes(id) || sel.length >= MAX_QUEUE_TICKETS ? sel : [...sel, id],
+        )
+      }
+    }
+    setBugTickets(next)
+    // Persist immediately so the tag survives a page reload.
+    if (activeProject) saveBugTickets(activeProject.id, [...next])
+  }
+
   // Reset the chosen test-case version whenever the ticket changes (render-phase
   // pattern — the picker re-selects the latest version for the new ticket).
   const [seenTicket, setSeenTicket] = useState(soloTicketId)
@@ -575,7 +665,12 @@ export default function RunPage() {
   useEffect(() => {
     if (!activeProject) return
     const saved = loadLastInputs(activeProject.id)
-    setSimpleTickets(saved?.ticketId ? [saved.ticketId] : [])
+    // Restore persisted bug tags, and keep those tickets selected (a bug ticket is
+    // only in the run because it was tagged) alongside the last lead ticket.
+    const savedBugs = loadBugTickets(activeProject.id)
+    setBugTickets(new Set(savedBugs))
+    const lead = saved?.ticketId ? [saved.ticketId] : []
+    setSimpleTickets([...new Set([...lead, ...savedBugs])].slice(0, MAX_QUEUE_TICKETS))
     setAppUrl(saved?.appUrl ?? '')
     setInstructions(saved?.instructions ?? '')
     // The project's default skill (set on the Skills page) wins on load; otherwise
@@ -694,12 +789,16 @@ export default function RunPage() {
   // sequential run; in advanced mode they form ONE feature run (first = lead).
   const runTickets = mode === 'advanced' ? featureTickets : simpleTickets
   const leadTicket = runTickets[0] ?? ''
-  // The picker refuses tickets without test cases, but a restored last-input (or a
-  // ticket whose test cases were deleted) can still slip in — catch those here so
-  // the run can't start without test cases to verify against.
-  const ticketsMissingTestcases =
+  // A ticket runs as a feature (verified against its test cases) UNLESS the user
+  // tagged it a bug — bug runs reproduce the issue and need no test cases.
+  const bugTicketIds = new Set(runTickets.filter((id) => bugTickets.has(id)))
+  // Selected tickets that have NO test cases and were NOT tagged as a bug can't run
+  // (nothing to verify against). The picker prevents selecting them, but a restored
+  // last-input can still slip one in — gate submit on it.
+  const unrunnableTickets =
     mode === 'simple' && crawledTickets
       ? runTickets.filter((id) => {
+          if (bugTickets.has(id)) return false
           const t = crawledTickets.find((x) => (x.displayId ?? x.name) === id)
           return !t?.hasTestcases
         })
@@ -726,7 +825,7 @@ export default function RunPage() {
     !sharedUrlInvalid &&
     invalidTicketUrls.length === 0 &&
     !!activeProject &&
-    ticketsMissingTestcases.length === 0
+    unrunnableTickets.length === 0
   const recent = recentRuns ?? []
   const liveRuns = recent.filter((run) => run.status === 'running' || run.status === 'queued').length
   const completedRuns = recent.filter((run) => run.status === 'passed' || run.status === 'failed').length
@@ -743,10 +842,10 @@ export default function RunPage() {
     {
       label:
         mode === 'advanced' ? 'Lead ticket' : runTickets.length > 1 ? 'Tickets' : 'Ticket',
-      ok: !!leadTicket && ticketsMissingTestcases.length === 0,
+      ok: !!leadTicket && unrunnableTickets.length === 0,
       value:
-        ticketsMissingTestcases.length > 0
-          ? 'Needs test cases'
+        unrunnableTickets.length > 0
+          ? 'Tag as bug or add test cases'
           : mode === 'simple' && runTickets.length > 1
             ? `${runTickets.length} selected`
             : leadTicket || 'Choose ticket',
@@ -787,27 +886,39 @@ export default function RunPage() {
     } else if (!isAppTarget && !appUrl.trim()) {
       return
     }
-    if (ticketsMissingTestcases.length > 0) {
-      toast.error('Missing test cases', {
-        description: `Generate test cases for ${ticketsMissingTestcases.join(', ')} first — a QC run verifies against them.`,
+    if (unrunnableTickets.length > 0) {
+      toast.error('Test cases required', {
+        description: `${unrunnableTickets.join(', ')} has no test cases — tag it as a bug to run without them, or generate test cases first.`,
       })
       return
     }
     setSubmitting(true)
     try {
-      // Simple mode only: when a test-case version is chosen, tell Claude to verify
-      // against that file (it runs in the project folder, so the path is readable).
       const base = instructions.trim()
+      // A ticket with a chosen test-case version → verify against it (acceptance
+      // check). A ticket with no test cases → bug repro. This line is per-ticket.
+      const bugLine =
+        'This is a BUG ticket. There are NO manual test cases and none are required — do NOT look ' +
+        "for or verify against any test-case file. Instead, read the ticket's OWN content first — " +
+        'its description, comments, and any attachments in its crawled folder under testing/tickets/ — ' +
+        'to understand exactly what was reported. Then VERIFY the bug against the app: reproduce the ' +
+        'reported steps, confirm whether the issue still occurs or has been fixed, capture evidence ' +
+        '(screenshots) of the actual vs. expected behavior, and check closely related areas for ' +
+        'regressions. Base Pass/Fail on whether the reported bug is resolved — not on feature ' +
+        'acceptance criteria.'
       const tcLine =
         mode === 'simple' && selectedFolder && testcaseVersion != null
           ? `Verify against the manual test cases in ${testcaseRelPath(selectedFolder, testcaseVersion, testcaseFormat ?? 'markdown')} — treat each case as an acceptance check.`
           : ''
-      const finalInstructions = [base, tcLine].filter(Boolean).join('\n\n')
 
       if (mode === 'simple') {
         // One run per ticket. The server executes runs strictly one at a time —
         // the first starts now, the rest are queued and run in this order.
         for (const ticket of runTickets) {
+          // Per-ticket guidance: bug repro when it has no test cases, else the
+          // (solo-ticket) verify-against-version line when one was picked.
+          const perTicket = bugTicketIds.has(ticket) ? bugLine : tcLine
+          const finalInstructions = [base, perTicket].filter(Boolean).join('\n\n')
           await createRun({
             projectId: activeProject.id,
             ticketId: ticket,
@@ -821,6 +932,7 @@ export default function RunPage() {
           })
         }
       } else {
+        const finalInstructions = [base, tcLine].filter(Boolean).join('\n\n')
         await createRun({
           projectId: activeProject.id,
           ticketId: leadTicket,
@@ -1021,24 +1133,9 @@ export default function RunPage() {
                     value={simpleTickets}
                     onChange={setSimpleTickets}
                     disabled={!activeProject}
+                    bugTickets={bugTickets}
+                    onToggleBug={toggleBug}
                   />
-
-                  {ticketsMissingTestcases.length > 0 && (
-                    <div className="flex items-start gap-2.5 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-800">
-                      <TriangleAlert className="mt-0.5 size-4 shrink-0" />
-                      <p className="leading-snug">
-                        <span className="font-mono font-medium">
-                          {ticketsMissingTestcases.join(', ')}
-                        </span>{' '}
-                        has no test cases — the run can’t start without them. Generate test cases
-                        on the{' '}
-                        <Link to="/testcases" className="font-medium underline">
-                          Test cases
-                        </Link>{' '}
-                        page, or remove the ticket from the selection.
-                      </p>
-                    </div>
-                  )}
 
                   {simpleTickets.length > 1 && (
                     <div className="flex items-start gap-2 rounded-2xl border border-border/60 bg-muted/60 px-3 py-2 text-xs leading-relaxed text-muted-foreground">
@@ -1065,6 +1162,7 @@ export default function RunPage() {
                         setTestcaseFormat(f)
                       }}
                       disabled={!activeProject}
+                      isBug={bugTickets.has(soloTicketId)}
                     />
                   )}
                 </div>

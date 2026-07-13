@@ -3,7 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { ClipboardList, Eye, FileText, Loader2, Wand2 } from 'lucide-react'
+import { Bug, ClipboardList, Eye, FileText, Loader2, Wand2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
@@ -43,6 +43,8 @@ interface Props {
   /** Reports the chosen version and its on-disk format (so callers can build the path). */
   onChange: (version: number | null, format: TestCaseFormat | null) => void
   disabled?: boolean
+  /** This ticket is tagged a bug — it runs without test cases, so show a bug note. */
+  isBug?: boolean
 }
 
 /** Build the on-disk path of a test-case version (mirrors the server layout). */
@@ -117,7 +119,14 @@ function TestCasePreviewDialog({
   )
 }
 
-export function TicketTestCasePicker({ folder, projectId, value, onChange, disabled }: Props) {
+export function TicketTestCasePicker({
+  folder,
+  projectId,
+  value,
+  onChange,
+  disabled,
+  isBug,
+}: Props) {
   const navigate = useNavigate()
   const [previewOpen, setPreviewOpen] = useState(false)
 
@@ -161,6 +170,27 @@ export function TicketTestCasePicker({ folder, projectId, value, onChange, disab
         <p className="rounded-xl border border-dashed border-border/60 px-3 py-2.5 text-xs text-muted-foreground">
           Pick a ticket above to choose its test cases.
         </p>
+      </div>
+    )
+  }
+
+  // Tagged as a bug → it runs without test cases; don't nag to generate them.
+  if (isBug) {
+    return (
+      <div className="space-y-2">
+        {label}
+        <div className="flex items-start gap-2.5 rounded-2xl border border-red-200 bg-red-50/70 px-3.5 py-3 text-xs dark:border-red-900/50 dark:bg-red-950/20">
+          <Bug className="mt-0.5 size-4 shrink-0 text-red-600" />
+          <div className="min-w-0 space-y-0.5">
+            <p className="text-sm font-medium text-red-900 dark:text-red-200">
+              Runs as a bug — no test cases needed
+            </p>
+            <p className="leading-snug text-red-700/90 dark:text-red-300/80">
+              Claude reads this ticket’s content and verifies the reported issue (reproduce & confirm
+              whether it’s fixed) instead of checking against manual test cases.
+            </p>
+          </div>
+        </div>
       </div>
     )
   }

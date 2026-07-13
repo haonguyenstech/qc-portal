@@ -8,6 +8,7 @@ import {
   Check,
   CheckCircle2,
   ChevronDown,
+  ChevronRight,
   ChevronsUpDown,
   Clock,
   Eye,
@@ -29,6 +30,7 @@ import {
   XCircle,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { buildCrawledTree } from '@/lib/crawled-tickets'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import {
@@ -540,30 +542,11 @@ function priorityClass(priority: string): string {
   return 'border-border bg-muted text-muted-foreground' // low / unknown
 }
 
-/** Group crawled tickets by ClickUp status, "No status" last (mirrors TestCases). */
-function groupCrawledByStatus(
-  tickets: CrawledTicket[],
-): { status: string; tickets: CrawledTicket[] }[] {
-  const map = new Map<string, CrawledTicket[]>()
-  for (const t of tickets) {
-    const key = t.status?.trim() || ''
-    const arr = map.get(key)
-    if (arr) arr.push(t)
-    else map.set(key, [t])
-  }
-  return [...map.entries()]
-    .map(([status, items]) => ({ status, tickets: items }))
-    .sort((a, b) => {
-      if (!a.status) return 1
-      if (!b.status) return -1
-      return a.status.localeCompare(b.status)
-    })
-}
-
 /**
  * Searchable single-select crawled-ticket picker. A Select-like trigger that opens
- * a panel with a search box + status-grouped rows, styled to match the ticket list
- * on the TestCases page. Closes on outside-click / Escape / selection.
+ * a panel with a search box + status-grouped rows (subtasks nested beneath their
+ * parent), styled to match the ticket list on the TestCases page. Closes on
+ * outside-click / Escape / selection.
  */
 function CrawledTicketPicker({
   tickets,
@@ -580,6 +563,14 @@ function CrawledTicketPicker({
 }) {
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
+  const toggleCollapse = (name: string) =>
+    setCollapsed((prev) => {
+      const next = new Set(prev)
+      if (next.has(name)) next.delete(name)
+      else next.add(name)
+      return next
+    })
   const ref = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -600,10 +591,12 @@ function CrawledTicketPicker({
 
   const selected = tickets.find((t) => t.name === value) ?? null
   const q = query.trim().toLowerCase()
-  const filtered = tickets.filter((t) =>
-    `${t.name} ${t.displayId ?? ''} ${t.title ?? ''}`.toLowerCase().includes(q),
-  )
-  const groups = groupCrawledByStatus(filtered)
+  const tree = buildCrawledTree(tickets, {
+    collapsed,
+    match: q
+      ? (t) => `${t.name} ${t.displayId ?? ''} ${t.title ?? ''}`.toLowerCase().includes(q)
+      : undefined,
+  })
 
   const triggerDisabled = disabled || loading || tickets.length === 0
   const triggerLabel = loading
@@ -651,12 +644,12 @@ function CrawledTicketPicker({
             </div>
           </div>
           <div className="max-h-72 overflow-auto">
-            {filtered.length === 0 ? (
+            {tree.count === 0 ? (
               <p className="px-3 py-6 text-center text-xs text-muted-foreground">
                 {tickets.length === 0 ? 'No crawled tickets.' : `No tickets match “${query}”.`}
               </p>
             ) : (
-              groups.map((group) => (
+              tree.groups.map((group) => (
                 <div key={group.status || '∅'}>
                   {/* Sticky status header — same treatment as the TestCases list. */}
                   <div className="sticky top-0 z-10 flex items-center gap-2 border-b bg-muted/80 px-3 py-1.5 backdrop-blur supports-[backdrop-filter]:bg-muted/60">
@@ -665,15 +658,36 @@ function CrawledTicketPicker({
                       {group.status || 'No status'}
                     </span>
                     <span className="text-[11px] font-medium text-muted-foreground/70">
-                      {group.tickets.length}
+                      {group.roots.length}
                     </span>
                     <span className="h-px flex-1 bg-border/60" aria-hidden />
                   </div>
                   <ul>
-                    {group.tickets.map((t) => {
+                    {tree.rows(group.roots).map(({ ticket: t, depth, hasChildren }) => {
                       const isSel = t.name === value
+                      const isCollapsed = collapsed.has(t.name)
                       return (
-                        <li key={t.name}>
+                        <li key={t.name} className="flex items-center gap-1 pr-1">
+                          {/* Indent guide + chevron for subtasks (mirrors TestCases). */}
+                          {depth > 0 && (
+                            <span aria-hidden style={{ width: depth * 16 }} className="shrink-0" />
+                          )}
+                          {hasChildren ? (
+                            <button
+                              type="button"
+                              onClick={() => toggleCollapse(t.name)}
+                              aria-label={isCollapsed ? 'Expand subtasks' : 'Collapse subtasks'}
+                              className="flex size-5 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:text-foreground"
+                            >
+                              {isCollapsed ? (
+                                <ChevronRight className="size-4" />
+                              ) : (
+                                <ChevronDown className="size-4" />
+                              )}
+                            </button>
+                          ) : (
+                            <span className="w-5 shrink-0" aria-hidden />
+                          )}
                           <button
                             type="button"
                             onClick={() => {
@@ -682,7 +696,7 @@ function CrawledTicketPicker({
                               setQuery('')
                             }}
                             className={cn(
-                              'flex w-full items-center gap-2.5 px-3 py-2 text-left text-sm transition-colors',
+                              'flex min-w-0 flex-1 items-center gap-2.5 px-3 py-2 text-left text-sm transition-colors',
                               isSel ? 'bg-primary/5' : 'hover:bg-muted',
                             )}
                           >

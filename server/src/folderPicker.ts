@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process'
+import path from 'node:path'
 
 /**
  * Open the OS-native "choose folder" dialog ON THE MACHINE RUNNING THE SERVER
@@ -140,7 +141,11 @@ export function revealFolderNative(dir: string): Promise<{ ok: boolean; error?: 
     if (process.platform === 'darwin') {
       execFile('open', [dir], done)
     } else if (process.platform === 'win32') {
-      execFile('explorer', [dir], () => resolve({ ok: true })) // explorer exits non-zero on success
+      // explorer.exe treats "/" as a command switch, so a path with forward
+      // slashes (e.g. a project rootPath saved as C:/Users/...) silently opens
+      // the default folder instead of the target. Force backslashes first.
+      const winPath = path.win32.normalize(dir)
+      execFile('explorer.exe', [winPath], () => resolve({ ok: true })) // explorer exits non-zero on success
     } else {
       execFile('xdg-open', [dir], (err) =>
         resolve(err ? { ok: false, error: 'No file manager available on this OS' } : { ok: true }),

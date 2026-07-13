@@ -95,6 +95,45 @@ function outputSlugForRun(
   return resolveSlug(testingDir, run.ticketId, run.slug)
 }
 
+// Runs whose stored counts we've already reconciled against their report.md this
+// server session. Recomputing is a per-run file read; memoizing keeps the History
+// list (polled) from re-reading every report on every request.
+const healedRunCounts = new Set<string>()
+
+/**
+ * Self-heal a run's stored pass/fail/blocked/untested/cancelled counts from its
+ * report.md, persisting when they differ, so History shows the SAME breakdown as
+ * the run detail. Mutates `run` in place. Runs recorded before the per-bucket
+ * parser landed (or whose report changed on disk) carry stale numbers; this
+ * reconciles them the first time the run is listed or opened.
+ */
+function healRunCounts(run: RunSummary, force = false): void {
+  if (!run.finishedAt) return
+  // The list is polled — heal each run once per session. The detail view passes
+  // force so a report edited via "Continue session" re-reconciles every open.
+  if (!force && healedRunCounts.has(run.id)) return
+  const project = run.projectId ? getProject(run.projectId) : undefined
+  const testingDir = project ? testResultDirFor(project.rootPath) : null
+  const slug = outputSlugForRun(testingDir, run)
+  const reportMd =
+    testingDir && slug ? readIfExists(path.join(testingDir, slug, 'report.md')) : null
+  if (!reportMd) return // report not written (yet) — retry on a later request
+  const parsed = parseReport(reportMd)
+  if (
+    parsed.totalAcs > 0 &&
+    (parsed.passCount !== run.passCount ||
+      parsed.failCount !== run.failCount ||
+      parsed.blockedCount !== run.blockedCount ||
+      parsed.untestedCount !== run.untestedCount ||
+      parsed.cancelledCount !== run.cancelledCount ||
+      parsed.totalAcs !== run.totalAcs)
+  ) {
+    updateRun(run.id, parsed)
+    Object.assign(run, parsed)
+  }
+  healedRunCounts.add(run.id)
+}
+
 type RunFileKind = 'markdown' | 'image' | 'text' | 'other'
 
 interface RunFileInfo {
@@ -210,7 +249,11 @@ qcRouter.post('/run', (req, res) => {
 
 qcRouter.get('/runs', (req, res) => {
   const projectId = typeof req.query.projectId === 'string' ? req.query.projectId : undefined
-  res.json(listRuns(projectId))
+  const runs = listRuns(projectId)
+  // Reconcile each run's stored counts with its report (once per session) so the
+  // History list breakdown matches the detail page without opening every run.
+  for (const run of runs) healRunCounts(run)
+  res.json(runs)
 })
 
 qcRouter.get('/runs/:id', (req, res) => {
@@ -227,21 +270,10 @@ qcRouter.get('/runs/:id', (req, res) => {
     testingDir && slug ? readIfExists(path.join(testingDir, slug, 'issues.md')) : null
   const screenshots = testingDir && slug ? listScreenshots(testingDir, slug) : []
 
-  // Self-heal stored counts: runs recorded before the summary-table parser landed
-  // (or whose report changed on disk) carry stale pass/fail numbers. Recompute from
-  // the report and persist when they differ, so History matches the report.
-  if (reportMd && run.finishedAt) {
-    const parsed = parseReport(reportMd)
-    if (
-      parsed.totalAcs > 0 &&
-      (parsed.passCount !== run.passCount ||
-        parsed.failCount !== run.failCount ||
-        parsed.totalAcs !== run.totalAcs)
-    ) {
-      updateRun(run.id, parsed)
-      Object.assign(run, parsed)
-    }
-  }
+  // Self-heal stored counts from the report so the detail's stored numbers match
+  // what's rendered (and the History list). Shared with GET /runs; forced here so
+  // a report edited via "Continue session" re-reconciles on every open.
+  healRunCounts(run, true)
 
   const detail: RunDetail = {
     ...run,

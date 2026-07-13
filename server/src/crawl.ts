@@ -15,6 +15,7 @@ import { CRAWL_SUMMARY_MODELS, parseClaudeJsonResult, runClaude } from './claude
 
 /** Which tracker a ticket is fetched from. Both clients emit identical shapes. */
 export type TicketSource = 'clickup' | 'jira'
+export type TicketKind = 'feature' | 'bug'
 
 /** The read functions we need from a tracker client — clickup.ts and jira.ts both satisfy this. */
 interface TicketClient {
@@ -37,6 +38,7 @@ export interface CrawlLog {
 export interface CrawlResult {
   displayId: string
   name: string
+  ticketKind: TicketKind | null
   dir: string // path relative to the project root, e.g. testing/test-result/ABC-1
   absDir: string
   files: { path: string; bytes: number }[]
@@ -65,9 +67,54 @@ export function safeSegment(s: string): string {
   )
 }
 
-export function ticketMarkdown(t: TaskDetail): string {
+/**
+ * Locate a crawled ticket's folder under testing/tickets/, accounting for the fact
+ * that a subtask may be nested inside its parent's folder. Tries the classic flat
+ * <safeSegment(idOrDisplayId)>/ first (fast path, and how most tickets are stored),
+ * then walks the tree for a ticket folder whose leaf segment matches or whose stored
+ * ticket.json displayId matches. Returns the absolute dir, or null when not found.
+ */
+export function findCrawledTicketDir(rootPath: string, idOrDisplayId: string): string | null {
+  const baseDir = ticketsDirFor(rootPath)
+  const leaf = safeSegment(idOrDisplayId)
+  const isTicketDir = (abs: string) =>
+    fs.existsSync(path.join(abs, 'ticket.json')) || fs.existsSync(path.join(abs, 'ticket.md'))
+
+  const flat = path.join(baseDir, leaf)
+  if (isTicketDir(flat)) return flat
+
+  const reserved = new Set(['testcases', 'attachments'])
+  const stack = [baseDir]
+  while (stack.length) {
+    const dir = stack.pop() as string
+    let entries: fs.Dirent[]
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true })
+    } catch {
+      continue
+    }
+    for (const d of entries) {
+      if (!d.isDirectory() || reserved.has(d.name)) continue
+      const abs = path.join(dir, d.name)
+      if (isTicketDir(abs)) {
+        if (d.name === leaf) return abs
+        try {
+          const j = JSON.parse(fs.readFileSync(path.join(abs, 'ticket.json'), 'utf8'))
+          if (typeof j.displayId === 'string' && safeSegment(j.displayId) === leaf) return abs
+        } catch {
+          /* ignore unreadable ticket.json */
+        }
+      }
+      stack.push(abs)
+    }
+  }
+  return null
+}
+
+export function ticketMarkdown(t: TaskDetail, ticketKind: TicketKind | null = null): string {
   const lines: string[] = [`# ${t.displayId} — ${t.name}`, '']
   const meta: [string, string | null][] = [
+    ['Ticket type', ticketKind ? (ticketKind === 'bug' ? 'Bug' : 'Feature') : null],
     ['Status', t.status || null],
     ['Priority', t.priority],
     ['Assignees', t.assignees.length ? t.assignees.join(', ') : null],
@@ -143,20 +190,38 @@ export async function crawlOneTicket(opts: {
   taskId: string
   rootPath: string
   model?: string
+  ticketKind?: TicketKind | null
   source?: TicketSource
+  /**
+   * Relative folder path (possibly nested, e.g. "PARENT/CHILD") this ticket should
+   * be written to under testing/tickets/. Each segment is re-sanitized here. When
+   * omitted, falls back to the flat `safeSegment(displayId)` — so existing callers
+   * and single-ticket crawls keep the classic flat layout.
+   */
+  relDir?: string
   onLog?: (log: CrawlLog) => void
 }): Promise<CrawlResult> {
   const onLog = opts.onLog ?? (() => {})
   const useModel = CRAWL_SUMMARY_MODELS.has(opts.model ?? '') ? (opts.model as string) : ''
+  const ticketKind = opts.ticketKind === 'bug' || opts.ticketKind === 'feature' ? opts.ticketKind : null
   const client = clientFor(opts.source ?? 'clickup')
 
   const detail = await client.getTaskDetail(opts.taskId)
   const comments = await client.getTaskComments(opts.taskId)
 
-  // Resolve & path-guard the destination: <root>/testing/test-result/<displayId>/
+  // Resolve & path-guard the destination under <root>/testing/tickets/. A `relDir`
+  // (e.g. "PARENT/CHILD") nests a subtask under its parent; each segment is
+  // sanitized independently so no segment can be a separator, "..", or a dotfile.
+  // Absent/empty → the classic flat <displayId>/ folder.
   const baseDir = ticketsDirFor(opts.rootPath)
-  const dir = path.resolve(baseDir, safeSegment(detail.displayId))
-  if (dir !== path.join(baseDir, path.basename(dir)) || !dir.startsWith(baseDir + path.sep)) {
+  const relSegments = (opts.relDir ?? '')
+    .split(/[/\\]+/)
+    .map((s) => safeSegment(s))
+    .filter(Boolean)
+  const relDir = relSegments.length ? relSegments.join(path.sep) : safeSegment(detail.displayId)
+  const dir = path.resolve(baseDir, relDir)
+  // Every segment is sanitized, so a prefix check fully guards against escape.
+  if (dir !== baseDir && !dir.startsWith(baseDir + path.sep)) {
     throw statusError('invalid ticket path', 400)
   }
   fs.mkdirSync(dir, { recursive: true })
@@ -168,9 +233,9 @@ export async function crawlOneTicket(opts: {
     written.push({ path: name, bytes: buf.byteLength })
   }
 
-  writeFile('ticket.md', ticketMarkdown(detail))
+  writeFile('ticket.md', ticketMarkdown(detail, ticketKind))
   writeFile('comments.md', commentsMarkdown(detail.displayId, comments))
-  writeFile('ticket.json', JSON.stringify({ ...detail, comments }, null, 2))
+  writeFile('ticket.json', JSON.stringify({ ...detail, ticketKind, comments }, null, 2))
   onLog({ level: 'info', text: `${detail.displayId} — ${comments.length} comment(s), 3 base files` })
 
   // Attachments → <dir>/attachments/. Failures are collected, not fatal.
@@ -204,7 +269,7 @@ export async function crawlOneTicket(opts: {
   if (useModel) {
     onLog({ level: 'info', text: `Writing AI summary (${useModel})…` })
     try {
-      let content = ticketMarkdown(detail)
+      let content = ticketMarkdown(detail, ticketKind)
       const cmt = commentsMarkdown(detail.displayId, comments)
       if (cmt) content += `\n\n${cmt}`
       if (content.length > MAX_SUMMARY_INPUT_CHARS) {
@@ -251,6 +316,7 @@ export async function crawlOneTicket(opts: {
   return {
     displayId: detail.displayId,
     name: detail.name,
+    ticketKind,
     dir: path.relative(opts.rootPath, dir),
     absDir: dir,
     files: written,

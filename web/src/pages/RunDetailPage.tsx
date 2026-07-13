@@ -450,14 +450,22 @@ function parseReportOutcomes(md: string | null, fallback: { passCount: number; f
       const value = Number.parseInt(cells[1].replace(/[^\d]/g, ''), 10)
       if (!Number.isFinite(value)) continue
 
-      // Map the report's summary labels onto the defined buckets.
-      if (label === 'pass' || label.includes('passed')) counts.passed = value
+      // Map the report's summary labels onto the defined buckets. The mandated
+      // Execution Summary lists Passed and Passed-with-issue as SEPARATE rows —
+      // match the more specific one first and ADD both into `passed` (a
+      // passed-with-issue case still passed), so the specific row can't overwrite
+      // the plain Passed count.
+      if (label.includes('passedwithissue') || label.includes('passwithissue')) counts.passed += value
+      else if (label === 'pass' || label.includes('passed')) counts.passed += value
       else if (label === 'fail' || label.includes('failed')) counts.failed = value
       else if (label.includes('partial')) counts.failed += value
-      else if (label.includes('blocked')) counts.blocked = value
-      else if (label.includes('cancel')) counts.cancelled = value
+      // "Not Tested" is matched BEFORE "blocked" (same order as the server parser),
+      // so a legacy combined "Not Tested / Blocked" row buckets identically on both
+      // sides and History can't drift from the detail tiles.
       else if (label.includes('nottested') || label.includes('untested') || label.includes('notrun'))
         counts.untested = value
+      else if (label.includes('blocked')) counts.blocked = value
+      else if (label.includes('cancel')) counts.cancelled = value
     }
   }
 

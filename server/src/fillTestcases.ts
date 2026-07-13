@@ -1,7 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import { safeSegment } from './crawl.js'
-import { ticketsDirFor, testResultDirFor, GROUNDING_CHECK_MODEL } from './config.js'
+import { findCrawledTicketDir } from './crawl.js'
+import { testResultDirFor, GROUNDING_CHECK_MODEL } from './config.js'
 import { CRAWL_SUMMARY_MODELS, parseClaudeJsonResult, runClaude } from './claudeExec.js'
 import {
   listTestcaseVersions,
@@ -286,8 +286,9 @@ export async function fillExecutedTestcases(opts: {
   model?: string
 }): Promise<FillResult> {
   try {
-    const folder = safeSegment(opts.ticketId)
-    const dir = path.join(ticketsDirFor(opts.rootPath), folder)
+    // Resolve the crawled ticket folder — may be nested under a parent subtask.
+    const dir = findCrawledTicketDir(opts.rootPath, opts.ticketId)
+    if (!dir) return { filled: false, reason: 'no test-case file for this ticket' }
     const versions = listTestcaseVersions(dir)
     if (!versions.length) return { filled: false, reason: 'no test-case file for this ticket' }
 
@@ -309,11 +310,24 @@ export async function fillExecutedTestcases(opts: {
       const key = execKeyFor(h)
       if (key) execCols.push({ index: i, key })
     })
+    // If the sheet has NO execution columns (a bare template of only ID / Title /
+    // Steps / Expected), append the standard ones rather than skipping — so ANY
+    // ticket that has generated test cases still produces a filled execution
+    // record and the run's "Test execution results" table shows up.
     if (!execCols.length) {
-      return {
-        filled: false,
-        reason: 'template has no Actual result / Status / Reference / Note columns to fill',
+      const appended: { header: string; key: ExecKey }[] = [
+        { header: 'Status', key: 'status' },
+        { header: 'Actual result', key: 'actual' },
+        { header: 'Reference', key: 'reference' },
+        { header: 'Note', key: 'note' },
+      ]
+      for (const { header, key } of appended) {
+        table.header.push(header)
+        execCols.push({ index: table.header.length - 1, key })
       }
+      // The markdown separator was captured at the OLD column count; drop it so
+      // serializeTable regenerates one matching the widened header.
+      table.mdSeparator = undefined
     }
 
     const idIdx = idColumnIndex(table.header)
@@ -327,14 +341,18 @@ export async function fillExecutedTestcases(opts: {
       expected: cell(row, expIdx),
     }))
 
-    const verdicts = await requestVerdicts({
-      rootPath: opts.rootPath,
-      projectName: opts.projectName,
-      report: opts.report,
-      cases,
-      model: opts.model,
-    })
-    if (!verdicts) return { filled: false, reason: 'the model returned no usable verdicts' }
+    // If the model returns no usable verdicts, still write the executed sheet
+    // with every planned case left Untested — so a ticket that HAS test cases
+    // always yields the run's "Test execution results" table (blank rows beat a
+    // missing table). covered stays 0 and is surfaced in the run log.
+    const verdicts =
+      (await requestVerdicts({
+        rootPath: opts.rootPath,
+        projectName: opts.projectName,
+        report: opts.report,
+        cases,
+        model: opts.model,
+      })) ?? new Map<string, Verdict>()
 
     // Merge verdicts into the execution columns — deterministic, no AI text
     // touches any other column.

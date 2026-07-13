@@ -23,6 +23,7 @@ import { getCrawlJob, listCrawlJobs, startCrawlJob } from '../crawlJobs.js'
 export const clickupRouter = Router()
 
 const MAX_CRAWL_JOB_TICKETS = 50
+const parseTicketKind = (v: unknown) => (v === 'feature' || v === 'bug' ? v : null)
 
 type IssuePayload = { title: string; description?: string }
 
@@ -177,9 +178,10 @@ clickupRouter.post('/crawl', async (req, res) => {
   const taskId = typeof req.body?.taskId === 'string' ? req.body.taskId.trim() : ''
   if (!taskId) return res.status(400).json({ error: 'taskId is required' })
   const model = typeof req.body?.model === 'string' ? req.body.model.trim() : ''
+  const ticketKind = parseTicketKind(req.body?.ticketKind)
 
   try {
-    const result = await crawlOneTicket({ taskId, rootPath: project.rootPath, model })
+    const result = await crawlOneTicket({ taskId, rootPath: project.rootPath, model, ticketKind })
     res.json(result)
   } catch (err) {
     fail(res, err)
@@ -198,19 +200,22 @@ clickupRouter.post('/crawl/jobs', (req, res) => {
 
   const raw = Array.isArray(req.body?.tickets) ? req.body.tickets : []
   const tickets = raw
-    .filter((t: unknown): t is { id: string; displayId?: string; name?: string } =>
+    .filter((t: unknown): t is { id: string; displayId?: string; name?: string; relDir?: string } =>
       Boolean(t && typeof t === 'object' && typeof (t as { id?: unknown }).id === 'string'),
     )
-    .map((t: { id: string; displayId?: string; name?: string }) => ({
+    .map((t: { id: string; displayId?: string; name?: string; relDir?: string }) => ({
       id: t.id.trim(),
       displayId: typeof t.displayId === 'string' && t.displayId.trim() ? t.displayId.trim() : t.id,
       name: typeof t.name === 'string' ? t.name : '',
+      // Optional nested folder path; crawlOneTicket re-sanitizes each segment.
+      relDir: typeof t.relDir === 'string' && t.relDir.trim() ? t.relDir.trim() : undefined,
     }))
     .filter((t: { id: string }) => t.id.length > 0)
     .slice(0, MAX_CRAWL_JOB_TICKETS)
   if (!tickets.length) return res.status(400).json({ error: 'tickets is required' })
 
   const model = typeof req.body?.model === 'string' ? req.body.model.trim() : ''
+  const ticketKind = parseTicketKind(req.body?.ticketKind)
 
   // Capture the project's ClickUp token now — the job runs after this request
   // returns, when the per-request token context no longer exists.
@@ -222,6 +227,7 @@ clickupRouter.post('/crawl/jobs', (req, res) => {
     rootPath: project.rootPath,
     token,
     model,
+    ticketKind,
     tickets,
   })
   res.json({ jobId: job.id, job })
@@ -284,61 +290,97 @@ clickupRouter.post('/open', async (req, res) => {
   return res.json({ ok: true, path: dir })
 })
 
+// Reserved subfolders inside a ticket folder that hold the ticket's own content —
+// never a nested subtask, so the recursive scan must not descend into them.
+const RESERVED_TICKET_SUBDIRS = new Set(['testcases', 'attachments'])
+
+/** A directory is a crawled ticket folder when it carries the ticket payload. */
+function isTicketFolder(absDir: string): boolean {
+  return fs.existsSync(path.join(absDir, 'ticket.json')) || fs.existsSync(path.join(absDir, 'ticket.md'))
+}
+
+function describeTicketFolder(baseDir: string, relPosix: string, parent: string | null) {
+  const absDir = path.join(baseDir, ...relPosix.split('/'))
+  let crawledAt: string | null = null
+  try {
+    crawledAt = fs.statSync(absDir).mtime.toISOString()
+  } catch {
+    /* ignore */
+  }
+  // Count test-case versions: testcases/v<N>.{md,csv} files, plus a legacy
+  // pre-versioning testcases.md if present.
+  let testcaseVersions = 0
+  try {
+    testcaseVersions = fs
+      .readdirSync(path.join(absDir, 'testcases'))
+      .filter((f) => /^v\d+\.(md|csv)$/.test(f)).length
+  } catch {
+    /* no testcases dir */
+  }
+  if (fs.existsSync(path.join(absDir, 'testcases.md'))) testcaseVersions++
+  // Surface the real ticket title / displayId / status / priority from the
+  // stored ticket.json so the list can show more than the sanitized folder name.
+  let title: string | null = null
+  let displayId: string | null = null
+  let status: string | null = null
+  let priority: string | null = null
+  let url: string | null = null
+  try {
+    const j = JSON.parse(fs.readFileSync(path.join(absDir, 'ticket.json'), 'utf8'))
+    if (typeof j.name === 'string') title = j.name
+    if (typeof j.displayId === 'string') displayId = j.displayId
+    if (typeof j.status === 'string' && j.status.trim()) status = j.status
+    if (typeof j.priority === 'string' && j.priority.trim()) priority = j.priority
+    if (typeof j.url === 'string' && j.url.trim()) url = j.url
+  } catch {
+    /* no/invalid ticket.json — fall back to the folder name */
+  }
+  return {
+    name: relPosix, // possibly-nested relative path (posix separators), the join/disk key
+    parent, // relPosix of the enclosing ticket folder, or null for top-level
+    crawledAt,
+    hasTestcases: testcaseVersions > 0,
+    testcaseVersions,
+    title,
+    displayId,
+    status,
+    priority,
+    url,
+  }
+}
+
 clickupRouter.get('/crawled', (req, res) => {
   const project = resolveProject(req)
   if (!project) return res.status(400).json({ error: 'project not found' })
   const baseDir = ticketsDirFor(project.rootPath)
+  // Walk the tree: a ticket folder may nest subtask folders inside it (a subtask
+  // crawled under its parent). Each such folder is reported with its relative path
+  // as `name` and its enclosing ticket folder as `parent`. Reserved content dirs
+  // (testcases/, attachments/) are never treated as tickets nor descended into.
+  const out: ReturnType<typeof describeTicketFolder>[] = []
+  const walk = (relPosix: string, parent: string | null): void => {
+    const absDir = relPosix ? path.join(baseDir, ...relPosix.split('/')) : baseDir
+    let entries: fs.Dirent[]
+    try {
+      entries = fs.readdirSync(absDir, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const d of entries) {
+      if (!d.isDirectory() || RESERVED_TICKET_SUBDIRS.has(d.name)) continue
+      const childRel = relPosix ? `${relPosix}/${d.name}` : d.name
+      const childAbs = path.join(baseDir, ...childRel.split('/'))
+      if (isTicketFolder(childAbs)) {
+        out.push(describeTicketFolder(baseDir, childRel, parent))
+        walk(childRel, childRel) // descend; nested tickets get this one as parent
+      } else {
+        // Not a ticket folder itself, but a subtask could still live deeper.
+        walk(childRel, parent)
+      }
+    }
+  }
   try {
-    const out = fs
-      .readdirSync(baseDir, { withFileTypes: true })
-      .filter((d) => d.isDirectory())
-      .map((d) => {
-        let crawledAt: string | null = null
-        try {
-          crawledAt = fs.statSync(path.join(baseDir, d.name)).mtime.toISOString()
-        } catch {
-          /* ignore */
-        }
-        // Count test-case versions: testcases/v<N>.{md,csv} files, plus a legacy
-        // pre-versioning testcases.md if present.
-        let testcaseVersions = 0
-        try {
-          testcaseVersions = fs
-            .readdirSync(path.join(baseDir, d.name, 'testcases'))
-            .filter((f) => /^v\d+\.(md|csv)$/.test(f)).length
-        } catch {
-          /* no testcases dir */
-        }
-        if (fs.existsSync(path.join(baseDir, d.name, 'testcases.md'))) testcaseVersions++
-        // Surface the real ticket title / displayId / status / priority from the
-        // stored ticket.json so the list can show more than the sanitized folder name.
-        let title: string | null = null
-        let displayId: string | null = null
-        let status: string | null = null
-        let priority: string | null = null
-        let url: string | null = null
-        try {
-          const j = JSON.parse(fs.readFileSync(path.join(baseDir, d.name, 'ticket.json'), 'utf8'))
-          if (typeof j.name === 'string') title = j.name
-          if (typeof j.displayId === 'string') displayId = j.displayId
-          if (typeof j.status === 'string' && j.status.trim()) status = j.status
-          if (typeof j.priority === 'string' && j.priority.trim()) priority = j.priority
-          if (typeof j.url === 'string' && j.url.trim()) url = j.url
-        } catch {
-          /* no/invalid ticket.json — fall back to the folder name */
-        }
-        return {
-          name: d.name,
-          crawledAt,
-          hasTestcases: testcaseVersions > 0,
-          testcaseVersions,
-          title,
-          displayId,
-          status,
-          priority,
-          url,
-        }
-      })
+    walk('', null)
     res.json(out)
   } catch {
     res.json([]) // directory doesn't exist yet — nothing crawled
@@ -351,8 +393,14 @@ clickupRouter.delete('/crawled/:name', (req, res) => {
   const project = resolveProject(req)
   if (!project) return res.status(400).json({ error: 'project not found' })
   const baseDir = ticketsDirFor(project.rootPath)
-  const dir = path.resolve(baseDir, safeSegment(req.params.name))
-  if (!dir.startsWith(baseDir + path.sep)) {
+  // `name` may be a nested path (PARENT/CHILD). Sanitize each segment so it can't
+  // escape baseDir, then rejoin — safeSegment() alone would collapse the separator.
+  const segments = req.params.name
+    .split(/[/\\]+/)
+    .map((s) => safeSegment(s))
+    .filter(Boolean)
+  const dir = path.resolve(baseDir, ...segments)
+  if (!segments.length || !dir.startsWith(baseDir + path.sep)) {
     return res.status(400).json({ error: 'invalid ticket path' })
   }
   try {

@@ -327,6 +327,24 @@ tickets, and **crawl** them: each ticket's description, comments, `ticket.json`,
 downloaded into `testing/tickets/<safeSegment(displayId)>/` (the `safeSegment()` displayId→folder
 map lives in `crawl.ts` and is re-imported by `routes/clickup.ts`). Notable behaviors:
 
+- **Subtask selection + nesting** — selecting a subtask auto-selects its whole parent chain
+  (`toggleSelect`), and the selection count shows a `· N parents + M subtasks` breakdown when any
+  subtask is picked. On crawl, each ticket is written to a **nested** folder mirroring the ClickUp
+  tree: the client computes a per-ticket `relDir` (`relDirFor`, `PARENT/CHILD` from selected ancestors)
+  and threads it through `startCrawlJob` → `crawlJobs.ts` → `crawlOneTicket`, which sanitizes each
+  segment and path-guards the join. Omitting `relDir` keeps the classic flat `<displayId>/` layout, so
+  single crawls and **already-crawled flat folders are unchanged**. **The on-disk folder is now the key
+  everything joins on** — it may be a nested path — so the frontend joins a ClickUp ticket to its
+  crawled folder by the real `displayId` from `ticket.json` (with a flat-name fallback for legacy
+  folders), NOT by recomputing `safeSegment(displayId)`. `GET /api/clickup/crawled` **recurses** to find
+  every folder containing `ticket.json`, returning `name` (nested relative path, posix separators) +
+  `parent` (enclosing folder or null); reserved content dirs (`testcases/`, `attachments/`) are never
+  treated as tickets. Disk ops (`/open`, testcase versions, verify-design) already resolve via
+  `path.resolve(baseDir, folder)` + escape-guard, so they're nesting-safe; the **delete** route
+  sanitizes each path segment (not `safeSegment`, which would collapse the `/`) and deleting a parent
+  removes its nested subtask folders too. `fillTestcases.ts` uses `findCrawledTicketDir` (crawl.ts) to
+  locate a possibly-nested ticket folder. `/testcases` renders these as an expandable **parent→subtask
+  tree** (see that section).
 - **Status grouping** — `buildTree()` sorts top-level tickets by ClickUp `status` (stable within a
   status), and `groupByStatus()` folds them into runs rendered under sticky, color-tinted status
   headers. Subtask order is left untouched.
@@ -375,6 +393,19 @@ tickets and have Claude draft manual test cases. Key behaviors:
 - **Multi-select up to 5 tickets** (`MAX_TICKETS`) — fewer is better (each ticket is a separate
   Claude run with its own context; the UI says so). An optional **test-case template** file and
   **instructions/rules** (`testRules.ts` + `ManageRulesDialog`) shape the prompt.
+- **Parent→subtask tree** — the crawled-ticket list nests subtasks under their parent (built from the
+  `parent` field returned by `GET /api/clickup/crawled`, which reflects the nested on-disk layout).
+  Top-level tickets group by ClickUp status as before; descendants render indented beneath them
+  (regardless of their own status) with a chevron to collapse. Filtering keeps a match's ancestor chain
+  in view so the tree stays coherent. Selection/generation still key on each ticket's folder path
+  (`c.name`, possibly nested) — `path.resolve` on the server makes that nesting-safe. The tree is shared:
+  **`buildCrawledTree(all, {match, collapsed})`** in `web/src/lib/crawled-tickets.ts` returns
+  status-grouped roots + a `rows()` flattener, and every crawled-ticket **selector** uses it —
+  `/testcases` (inline), the **Run form** picker (`CrawledTicketPicker`) + Run **queue** list
+  (`FeatureTicketsPicker`, RunPage), and the **Design Check** picker (`VerifyDesignPage`). The shared
+  `CrawledTicketRow` takes `depth`/`hasChildren`/`isOpen`/`onToggleExpand` for the indent + chevron.
+  (`GenerateFromClickUp` on Overview/Diagrams reads ClickUp **live by id**, not from disk, so it stays a
+  flat ClickUp list; `TicketPicker.tsx` is unused/dead.)
 - **Model picker** — same `haiku` / `sonnet` / `opus` options as the crawl picker on `/tickets`,
   persisted in `localStorage` (`qc.testcaseModel`), validated server-side against
   `CRAWL_SUMMARY_MODELS` with a `sonnet` fallback.

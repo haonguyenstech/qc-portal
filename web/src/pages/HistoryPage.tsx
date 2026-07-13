@@ -4,11 +4,14 @@ import { useQuery } from '@tanstack/react-query'
 import {
   AlertCircle,
   ArrowUpRight,
+  Ban,
   CalendarClock,
   CheckCircle2,
   ChevronDown,
   ChevronsDownUp,
   ChevronsUpDown,
+  CircleDashed,
+  CircleSlash,
   Clock3,
   ExternalLink,
   History as HistoryIcon,
@@ -175,33 +178,51 @@ function FilterChip({ meta, active, onClick }: { meta: FilterMeta; active: boole
   )
 }
 
-/** Pass/fail breakdown with a thin bar of AC coverage when totals are known. */
+/**
+ * Per-outcome breakdown with a thin bar of AC coverage when totals are known.
+ * Mirrors the run-detail tiles bucket-for-bucket (Passed / Failed / Blocked /
+ * Untested / Cancelled) so the numbers here always match the detail page.
+ * Passed and Failed always show; the rest appear only when non-zero to stay compact.
+ */
 function ResultCell({ run }: { run: RunSummary }) {
-  const { passCount, failCount, totalAcs } = run
+  const { passCount, failCount, blockedCount, untestedCount, cancelledCount, totalAcs } = run
   const known = totalAcs > 0
+  const buckets = [
+    { key: 'pass', n: passCount, always: true, text: 'text-emerald-700', bar: 'bg-emerald-500', Icon: CheckCircle2, label: 'passed' },
+    { key: 'fail', n: failCount, always: true, text: 'text-red-600', bar: 'bg-red-500', Icon: XCircle, label: 'failed' },
+    { key: 'blocked', n: blockedCount, always: false, text: 'text-amber-600', bar: 'bg-amber-500', Icon: Ban, label: 'blocked' },
+    { key: 'untested', n: untestedCount, always: false, text: 'text-muted-foreground', bar: 'bg-muted-foreground/40', Icon: CircleDashed, label: 'untested' },
+    { key: 'cancelled', n: cancelledCount, always: false, text: 'text-slate-500', bar: 'bg-slate-400', Icon: CircleSlash, label: 'cancelled' },
+  ]
+  const title = buckets
+    .filter((b) => b.always || b.n > 0)
+    .map((b) => `${b.n} ${b.label}`)
+    .concat(`${totalAcs} ACs`)
+    .join(' · ')
   return (
     <div className="flex items-center gap-2">
-      <span className="inline-flex items-center gap-1 text-xs font-medium tabular-nums text-emerald-700">
-        <CheckCircle2 className="size-3.5" />
-        {passCount}
-      </span>
-      <span className="inline-flex items-center gap-1 text-xs font-medium tabular-nums text-red-600">
-        <XCircle className="size-3.5" />
-        {failCount}
-      </span>
+      {buckets
+        .filter((b) => b.always || b.n > 0)
+        .map((b) => (
+          <span
+            key={b.key}
+            className={cn('inline-flex items-center gap-1 text-xs font-medium tabular-nums', b.text)}
+          >
+            <b.Icon className="size-3.5" />
+            {b.n}
+          </span>
+        ))}
       {known ? (
-        <span
-          className="flex h-1.5 w-16 overflow-hidden rounded-full bg-muted"
-          title={`${passCount} passed · ${failCount} failed · ${totalAcs} ACs`}
-        >
-          <span
-            className="h-full bg-emerald-500"
-            style={{ width: `${(passCount / totalAcs) * 100}%` }}
-          />
-          <span
-            className="h-full bg-red-500"
-            style={{ width: `${(failCount / totalAcs) * 100}%` }}
-          />
+        <span className="flex h-1.5 w-16 overflow-hidden rounded-full bg-muted" title={title}>
+          {buckets.map((b) =>
+            b.n > 0 ? (
+              <span
+                key={b.key}
+                className={cn('h-full', b.bar)}
+                style={{ width: `${(b.n / totalAcs) * 100}%` }}
+              />
+            ) : null,
+          )}
         </span>
       ) : (
         <span className="w-16 text-[11px] text-muted-foreground/60">—</span>

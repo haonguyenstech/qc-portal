@@ -589,17 +589,24 @@ export default function TicketsPage() {
     queryFn: () => listCrawledTickets(activeProjectId as string),
     enabled: !!activeProjectId,
   })
-  const crawledMap = new Map((crawled ?? []).map((c) => [c.name, c]))
-  const crawledAt = (t: ClickupTask) => crawledMap.get(safeSegment(t.displayId))?.crawledAt ?? null
-  const isCrawled = (t: ClickupTask) => crawledMap.has(safeSegment(t.displayId))
+  // Join a ClickUp ticket to its crawled folder. The folder `name` may now be a
+  // nested path (PARENT/CHILD) for subtasks, so we key primarily on the real
+  // displayId stored in ticket.json; fall back to matching the sanitized displayId
+  // against a flat folder name (legacy folders with no ticket.json).
+  const crawledByDisplayId = new Map((crawled ?? []).flatMap((c) => (c.displayId ? [[c.displayId, c] as const] : [])))
+  const crawledByName = new Map((crawled ?? []).map((c) => [c.name, c] as const))
+  const crawledFor = (t: ClickupTask) =>
+    crawledByDisplayId.get(t.displayId) ?? crawledByName.get(safeSegment(t.displayId))
+  const crawledAt = (t: ClickupTask) => crawledFor(t)?.crawledAt ?? null
+  const isCrawled = (t: ClickupTask) => !!crawledFor(t)
   // How many generated test-case versions live in a ticket's folder (0 if none).
-  const testcaseCount = (t: ClickupTask) =>
-    crawledMap.get(safeSegment(t.displayId))?.testcaseVersions ?? 0
+  const testcaseCount = (t: ClickupTask) => crawledFor(t)?.testcaseVersions ?? 0
 
   const [pendingDelete, setPendingDelete] = useState<ClickupTask | null>(null)
   const del = useMutation({
+    // Delete by the actual (possibly nested) folder path, not a recomputed flat name.
     mutationFn: (t: ClickupTask) =>
-      deleteCrawledTicket(safeSegment(t.displayId), activeProjectId as string),
+      deleteCrawledTicket(crawledFor(t)?.name ?? safeSegment(t.displayId), activeProjectId as string),
     onSuccess: (_data, t) => {
       queryClient.invalidateQueries({ queryKey: ['crawled-tickets', activeProjectId] })
       setHiddenResults((prev) => new Set(prev).add(t.displayId)) // drop from the summary panel
@@ -659,12 +666,19 @@ export default function TicketsPage() {
   // returns immediately; completion (toast + bell notification + cache refresh) is
   // owned by the global <CrawlJobWatcher/>, so it fires even if we leave this page.
   const crawl = useMutation({
-    mutationFn: (tasks: ClickupTask[]) =>
-      (source === 'jira' ? startJiraCrawlJob : startCrawlJob)({
+    mutationFn: ({ tasks }: { tasks: ClickupTask[] }) => {
+      const batch = new Map(tasks.map((t) => [t.id, t] as const))
+      return (source === 'jira' ? startJiraCrawlJob : startCrawlJob)({
         projectId: activeProjectId as string,
         model: crawlModel,
-        tickets: tasks.map((t) => ({ id: t.id, displayId: t.displayId, name: t.name })),
-      }),
+        tickets: tasks.map((t) => ({
+          id: t.id,
+          displayId: t.displayId,
+          name: t.name,
+          relDir: relDirFor(t, batch),
+        })),
+      })
+    },
     onSuccess: ({ jobId: id }) => {
       setJobId(id)
       saveActiveCrawlJobId(activeProjectId as string, id)
@@ -716,11 +730,51 @@ export default function TicketsPage() {
   function toggleSelect(t: ClickupTask) {
     setSelected((prev) => {
       const next = new Map(prev)
-      if (next.has(t.id)) next.delete(t.id)
-      else next.set(t.id, t)
+      if (next.has(t.id)) {
+        next.delete(t.id)
+      } else {
+        next.set(t.id, t)
+        // Selecting a subtask implicitly selects its parent chain — you can't QC a
+        // subtask in isolation without its parent's context. Walk up via `parent`,
+        // resolving each ancestor from the loaded parents + subtasks we know about.
+        const known = new Map<string, ClickupTask>()
+        for (const p of tasks ?? []) known.set(p.id, p)
+        for (const s of subtasks.values()) known.set(s.id, s)
+        let parentId = t.parent
+        const guard = new Set<string>([t.id]) // stop on cycles / self-parent
+        while (parentId && !guard.has(parentId)) {
+          guard.add(parentId)
+          const parent = known.get(parentId)
+          if (!parent) break // ancestor not loaded — nothing to select
+          if (!next.has(parent.id)) next.set(parent.id, parent)
+          parentId = parent.parent
+        }
+      }
       return next
     })
   }
+  // Build the nested on-disk folder path for a ticket being crawled: walk up its
+  // parent chain, and for each ancestor that is ALSO in this crawl batch, prepend
+  // that ancestor's folder segment. Result mirrors the ClickUp subtask tree, e.g.
+  // "PARENT/CHILD". Stops at the first ancestor not in the batch so every path
+  // segment is a ticket that actually gets crawled (a real folder with ticket.json).
+  function relDirFor(t: ClickupTask, batch: Map<string, ClickupTask>): string {
+    const known = new Map<string, ClickupTask>()
+    for (const p of tasks ?? []) known.set(p.id, p)
+    for (const s of subtasks.values()) known.set(s.id, s)
+    const chain = [safeSegment(t.displayId)]
+    const guard = new Set<string>([t.id]) // stop on cycles / self-parent
+    let parentId = t.parent
+    while (parentId && !guard.has(parentId) && batch.has(parentId)) {
+      guard.add(parentId)
+      const parent = batch.get(parentId) ?? known.get(parentId)
+      if (!parent) break
+      chain.unshift(safeSegment(parent.displayId))
+      parentId = parent.parent
+    }
+    return chain.join('/')
+  }
+
   function selectAll() {
     setSelected((prev) => {
       const next = new Map(prev)
@@ -753,6 +807,20 @@ export default function TicketsPage() {
   const tree = buildTree([...(tasks ?? []), ...subtasks.values()])
   const statusGroups = groupByStatus(tree)
 
+  // Breakdown of the current selection: a selected ticket counts as a "subtask"
+  // when its parent is also selected, otherwise it's a top-level ticket. Each is
+  // still crawled into its own folder — this only clarifies why the count grew when
+  // picking a subtask auto-selected its parent chain. `null` when everything is
+  // top-level (no breakdown worth showing).
+  const selectionBreakdown = ((): string | null => {
+    if (selected.size === 0) return null
+    let subs = 0
+    for (const t of selected.values()) if (t.parent && selected.has(t.parent)) subs++
+    if (subs === 0) return null
+    const parents = selected.size - subs
+    return `${parents} parent${parents === 1 ? '' : 's'} + ${subs} subtask${subs === 1 ? '' : 's'}`
+  })()
+
   async function loadSubtasks(parentId: string) {
     if (loadedParents.has(parentId) || loadingParents.has(parentId)) return
     setLoadingParents((prev) => new Set(prev).add(parentId))
@@ -765,12 +833,12 @@ export default function TicketsPage() {
         for (const s of subs) next.set(s.id, s)
         return next
       })
-      // One include_subtasks call returns the whole subtree, so mark every node in
-      // it (plus the parent) as loaded — leaves then won't show a stray chevron.
+      // Mark only the row we just probed. Some trackers/API shapes return only
+      // direct children for this call; child rows must remain expandable so the
+      // user can drill into sub-subtasks on demand.
       setLoadedParents((prev) => {
         const next = new Set(prev)
         next.add(parentId)
-        for (const s of subs) next.add(s.id)
         return next
       })
     } catch (err) {
@@ -1152,7 +1220,7 @@ export default function TicketsPage() {
                 <div className="flex items-center justify-between px-1 text-xs">
                   <span className="text-muted-foreground">
                     {selected.size > 0
-                      ? `${selected.size} selected`
+                      ? `${selected.size} selected${selectionBreakdown ? ` · ${selectionBreakdown}` : ''}`
                       : `${tasks.length} task${tasks.length === 1 ? '' : 's'}`}
                   </span>
                   <div className="flex items-center gap-3">
@@ -1257,6 +1325,9 @@ export default function TicketsPage() {
               <div className="min-w-0 flex-1">
                 <p className="text-sm font-medium leading-tight">
                   {selected.size} ticket{selected.size === 1 ? '' : 's'} selected
+                  {selectionBreakdown && (
+                    <span className="font-normal text-muted-foreground"> · {selectionBreakdown}</span>
+                  )}
                 </p>
                 {busy && progress && progress.total > 0 ? (
                   <div className="mt-1.5 h-1.5 w-full max-w-xs overflow-hidden rounded-full bg-muted">
@@ -1313,8 +1384,8 @@ export default function TicketsPage() {
                 Clear
               </Button>
               <Button
-                onClick={() => crawl.mutate([...selected.values()])}
-                disabled={busy}
+                onClick={() => crawl.mutate({ tasks: [...selected.values()] })}
+                disabled={busy || selected.size === 0}
                 className="shrink-0 rounded-full transition-all duration-200 active:scale-[0.98]"
               >
                 {busy ? (
@@ -1370,10 +1441,13 @@ export default function TicketsPage() {
             <DialogDescription>
               This removes the downloaded folder{' '}
               <span className="font-mono text-foreground">
-                testing/tickets/{pendingDelete ? safeSegment(pendingDelete.displayId) : ''}
+                testing/tickets/
+                {pendingDelete
+                  ? (crawledFor(pendingDelete)?.name ?? safeSegment(pendingDelete.displayId))
+                  : ''}
               </span>{' '}
-              (description, comments &amp; attachments) from the project. You can re-crawl the
-              ticket any time.
+              (description, comments &amp; attachments) from the project — including any subtask
+              folders nested inside it. You can re-crawl the ticket any time.
             </DialogDescription>
           </DialogHeader>
 

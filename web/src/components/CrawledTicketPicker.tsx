@@ -14,7 +14,7 @@ import { cn } from '@/lib/utils'
 import { Label } from '@/components/ui/label'
 import { listCrawledTickets, type CrawledTicket } from '@/lib/api'
 import { CrawledStatusHeader, CrawledTicketRow } from '@/components/CrawledTicketRow'
-import { groupCrawledByStatus } from '@/lib/crawled-tickets'
+import { buildCrawledTree } from '@/lib/crawled-tickets'
 
 interface Props {
   value: string
@@ -41,19 +41,31 @@ export function CrawledTicketPicker({ value, onChange, projectId, disabled }: Pr
     enabled: !!projectId,
   })
 
-  const tickets = useMemo(() => {
-    const list = crawled ?? []
-    const q = query.trim().toLowerCase()
-    const filtered = q
-      ? list.filter(
-          (t) =>
+  // Collapsed parent folders in the subtask tree (default: all expanded).
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
+  const toggleCollapse = (name: string) =>
+    setCollapsed((prev) => {
+      const next = new Set(prev)
+      if (next.has(name)) next.delete(name)
+      else next.add(name)
+      return next
+    })
+
+  const q = query.trim().toLowerCase()
+  // Roots most-recently-crawled first; subtasks nest beneath their parent.
+  const tree = useMemo(() => {
+    const sorted = [...(crawled ?? [])].sort((a, b) =>
+      (b.crawledAt ?? '').localeCompare(a.crawledAt ?? ''),
+    )
+    return buildCrawledTree(sorted, {
+      collapsed,
+      match: q
+        ? (t) =>
             (t.displayId ?? t.name).toLowerCase().includes(q) ||
-            (t.title ?? '').toLowerCase().includes(q),
-        )
-      : list
-    // Most recently crawled first.
-    return [...filtered].sort((a, b) => (b.crawledAt ?? '').localeCompare(a.crawledAt ?? ''))
-  }, [crawled, query])
+            (t.title ?? '').toLowerCase().includes(q)
+        : undefined,
+    })
+  }, [crawled, q, collapsed])
 
   const selected = useMemo(
     () => (crawled ?? []).find((t) => (t.displayId ?? t.name) === value),
@@ -181,20 +193,24 @@ export function CrawledTicketPicker({ value, onChange, projectId, disabled }: Pr
                     Go to Tickets
                   </Link>
                 </div>
-              ) : tickets.length === 0 ? (
+              ) : tree.count === 0 ? (
                 <div className="flex items-center gap-2 px-3 py-6 text-xs text-muted-foreground">
                   <Search className="size-3.5" />
                   No crawled ticket matches “{query}”.
                 </div>
               ) : (
-                groupCrawledByStatus(tickets).map((group) => (
+                tree.groups.map((group) => (
                   <div key={group.status || '∅'}>
-                    <CrawledStatusHeader status={group.status} count={group.tickets.length} />
+                    <CrawledStatusHeader status={group.status} count={group.roots.length} />
                     <ul className="divide-y">
-                      {group.tickets.map((t) => (
+                      {tree.rows(group.roots).map(({ ticket: t, depth, hasChildren }) => (
                         <li key={t.name}>
                           <CrawledTicketRow
                             ticket={t}
+                            depth={depth}
+                            hasChildren={hasChildren}
+                            isOpen={!collapsed.has(t.name)}
+                            onToggleExpand={() => toggleCollapse(t.name)}
                             selected={idOf(t) === value}
                             onSelect={() => {
                               onChange(idOf(t))

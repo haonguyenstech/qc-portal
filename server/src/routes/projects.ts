@@ -152,6 +152,24 @@ function isDir(p: string): boolean {
   }
 }
 
+/** Refuse recursive deletes for broad system/user roots. */
+function safeToDeleteProjectRoot(rootPath: string): { ok: true } | { ok: false; reason: string } {
+  const root = path.resolve(rootPath)
+  if (!isDir(root)) return { ok: true }
+  const parsed = path.parse(root)
+  if (root === parsed.root) {
+    return { ok: false, reason: 'refusing to delete a filesystem root' }
+  }
+  if (root === path.resolve(os.homedir())) {
+    return { ok: false, reason: 'refusing to delete the home folder' }
+  }
+  const parent = path.dirname(root)
+  if (parent === root || parent === parsed.root) {
+    return { ok: false, reason: 'refusing to delete a top-level folder' }
+  }
+  return { ok: true }
+}
+
 /** Turn a display name into a safe single folder-segment (no separators or
  *  illegal chars). Returns '' if nothing usable is left. */
 function safeFolderName(name: string): string {
@@ -629,6 +647,30 @@ projectsRouter.put('/:id/claude-md', (req, res) => {
 projectsRouter.delete('/:id', (req, res) => {
   const existing = getProject(req.params.id)
   if (!existing) return res.status(404).json({ error: 'project not found' })
+
+  const busy = projectBusyReason(req.params.id)
+  if (busy) {
+    return res.status(423).json({
+      error: `Can't delete the project folder while ${busy}. Stop it and try again.`,
+    })
+  }
+
+  const safety = safeToDeleteProjectRoot(existing.rootPath)
+  if (!safety.ok) return res.status(400).json({ error: safety.reason })
+
+  const root = path.resolve(existing.rootPath)
+  let deletedPath: string | null = null
+  if (isDir(root)) {
+    try {
+      fs.rmSync(root, { recursive: true, force: true })
+      deletedPath = root
+    } catch (err) {
+      return res.status(500).json({
+        error: `could not delete folder: ${err instanceof Error ? err.message : 'unknown error'}`,
+      })
+    }
+  }
+
   deleteProject(req.params.id)
-  return res.json({ ok: true })
+  return res.json({ ok: true, deletedPath })
 })

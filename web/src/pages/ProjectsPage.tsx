@@ -555,8 +555,12 @@ function ProjectCard({ project }: { project: Project }) {
 
   const deleteMutation = useMutation({
     mutationFn: () => deleteProject(project.id),
-    onSuccess: () => {
-      toast.success('Project deleted', { description: `${project.name} removed.` })
+    onSuccess: (res) => {
+      toast.success('Project deleted', {
+        description: res.deletedPath
+          ? `Removed from portal and deleted ${res.deletedPath}.`
+          : `${project.name} removed from portal. Folder was already missing.`,
+      })
       setDeleteOpen(false)
       setDeleteConfirmName('')
       afterChange()
@@ -859,12 +863,16 @@ function ProjectCard({ project }: { project: Project }) {
                         <div className="space-y-1 text-left">
                           <DialogTitle>Delete project?</DialogTitle>
                           <DialogDescription>
-                            Remove this project from QC Portal. The folder and files on disk will
-                            not be deleted.
+                            Permanently delete this project from QC Portal and remove its local
+                            folder from disk.
                           </DialogDescription>
                         </div>
                       </div>
                     </DialogHeader>
+                    <div className="rounded-2xl border border-destructive/25 bg-destructive/10 p-3 text-sm text-destructive">
+                      This deletes the folder recursively on this machine. Export the project first
+                      if you need a backup.
+                    </div>
                     <div className="rounded-2xl border border-border/60 bg-muted/60 p-3">
                       <div className="truncate text-sm font-semibold">{project.name}</div>
                       <div className="mt-1 truncate font-mono text-xs text-muted-foreground">

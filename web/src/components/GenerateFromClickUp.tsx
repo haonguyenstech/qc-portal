@@ -267,8 +267,13 @@ export function GenerateFromClickUp({
     queryFn: () => listCrawledTickets(projectId),
     enabled: configured && tab === 'tickets',
   })
-  const crawledSet = new Set((crawled ?? []).map((c) => c.name))
-  const tickets = (allTickets ?? []).filter((t) => crawledSet.has(safeSegment(t.displayId)))
+  // A crawled folder `name` may be nested (PARENT/CHILD) for subtasks, so match on
+  // the real displayId from ticket.json first, with a flat-name fallback for legacy.
+  const crawledDisplayIds = new Set((crawled ?? []).flatMap((c) => (c.displayId ? [c.displayId] : [])))
+  const crawledNames = new Set((crawled ?? []).map((c) => c.name))
+  const tickets = (allTickets ?? []).filter(
+    (t) => crawledDisplayIds.has(t.displayId) || crawledNames.has(safeSegment(t.displayId)),
+  )
 
   const docCount = selectedDocs.size
   const ticketCount = selectedTickets.size

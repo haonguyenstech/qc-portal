@@ -60,26 +60,54 @@ function startNextQueued(): void {
 
 /**
  * Parse a QC report.md into pass/fail counts.
- * Partial / Blocked count toward failCount. Robust to a missing/empty file.
+ * Partial / Blocked count toward failCount; Not-Tested is neither pass nor fail
+ * but still counts toward the total. Robust to a missing/empty file.
  *
  * Preferred source: the report's own "Result Summary" table — rows shaped
  * `| ✅ Pass | 47 |` (label + a purely numeric count cell). Counting rows across
  * the whole document over-counts badly (per-case tables, prose tables), so the
  * row-count heuristic is only the fallback when no summary table exists.
+ *
+ * Blocked and Not-Tested are kept as SEPARATE buckets — a summary table with both
+ * a "Blocked" row and a "Not Tested" row must count each, so the stored total
+ * reconciles with the report's own Total row (and with the run-detail tiles).
  */
-export function parseReport(md: string): {
+export interface ReportCounts {
   passCount: number
   failCount: number
+  blockedCount: number
+  untestedCount: number
+  cancelledCount: number
   totalAcs: number
-} {
-  if (!md) return { passCount: 0, failCount: 0, totalAcs: 0 }
+}
 
-  // 1) Summary-table extraction.
-  const summary: Record<'pass' | 'fail' | 'partial' | 'blocked', number | null> = {
+const EMPTY_COUNTS: ReportCounts = {
+  passCount: 0,
+  failCount: 0,
+  blockedCount: 0,
+  untestedCount: 0,
+  cancelledCount: 0,
+  totalAcs: 0,
+}
+
+export function parseReport(md: string): ReportCounts {
+  if (!md) return { ...EMPTY_COUNTS }
+
+  // 1) Summary-table extraction — the mandated "Execution Summary" table (see the
+  // report-format contract in claude.ts) has one row per outcome bucket:
+  // Passed / Failed / Blocked / Not Tested / Cancelled / Passed-with-issue / Total.
+  // Each is kept SEPARATE so History shows the same breakdown as the run detail.
+  const summary: Record<
+    'pass' | 'passIssue' | 'fail' | 'partial' | 'blocked' | 'notTested' | 'cancelled',
+    number | null
+  > = {
     pass: null,
+    passIssue: null,
     fail: null,
     partial: null,
     blocked: null,
+    notTested: null,
+    cancelled: null,
   }
   for (const rawLine of md.split('\n')) {
     const line = rawLine.trim()
@@ -96,19 +124,52 @@ export function parseReport(md: string): {
     const value = Number.parseInt(cells[1].replace(/[^\d]/g, ''), 10)
     if (!Number.isFinite(value)) continue
     // First occurrence wins — the summary table sits at the top of the report.
-    if ((label === 'pass' || label === 'passed') && summary.pass === null) summary.pass = value
-    else if ((label === 'fail' || label === 'failed') && summary.fail === null)
+    // Order matters: match the more specific labels before the generic ones.
+    if (label.startsWith('passwithissue') || label.startsWith('passedwithissue')) {
+      if (summary.passIssue === null) summary.passIssue = value
+    } else if ((label === 'pass' || label === 'passed') && summary.pass === null) {
+      summary.pass = value
+    } else if ((label === 'fail' || label === 'failed') && summary.fail === null) {
       summary.fail = value
-    else if (label.startsWith('partial') && summary.partial === null) summary.partial = value
-    else if (label.startsWith('blocked') && summary.blocked === null) summary.blocked = value
+    } else if (label.startsWith('partial') && summary.partial === null) {
+      summary.partial = value
+    } else if (
+      // "not tested" / "untested" / "not run" — a data/scope gap, not a fail.
+      // Matched before "blocked" so a combined "Not Tested / Blocked" row lands here.
+      (label.startsWith('nottest') || label.startsWith('untest') || label.startsWith('notrun')) &&
+      summary.notTested === null
+    ) {
+      summary.notTested = value
+    } else if (label.startsWith('blocked') && summary.blocked === null) {
+      summary.blocked = value
+    } else if (label.startsWith('cancel') && summary.cancelled === null) {
+      summary.cancelled = value
+    }
   }
-  if (summary.pass !== null || summary.fail !== null) {
-    const passCount = summary.pass ?? 0
-    const failCount = (summary.fail ?? 0) + (summary.partial ?? 0) + (summary.blocked ?? 0)
-    return { passCount, failCount, totalAcs: passCount + failCount }
+  if (
+    summary.pass !== null ||
+    summary.fail !== null ||
+    summary.passIssue !== null ||
+    summary.blocked !== null ||
+    summary.notTested !== null ||
+    summary.cancelled !== null
+  ) {
+    // Each bucket is kept distinct so History mirrors the run detail's tiles:
+    // Passed-with-issue counts as pass; Partial folds into fail (there is no
+    // "Partial" tile); Blocked / Not-Tested / Cancelled stay separate; all are
+    // summed into the total so it reconciles with the report's own Total row.
+    const passCount = (summary.pass ?? 0) + (summary.passIssue ?? 0)
+    const failCount = (summary.fail ?? 0) + (summary.partial ?? 0)
+    const blockedCount = summary.blocked ?? 0
+    const untestedCount = summary.notTested ?? 0
+    const cancelledCount = summary.cancelled ?? 0
+    const totalAcs = passCount + failCount + blockedCount + untestedCount + cancelledCount
+    return { passCount, failCount, blockedCount, untestedCount, cancelledCount, totalAcs }
   }
 
-  // 2) Fallback: count pass/fail-looking table rows document-wide.
+  // 2) Fallback: count pass/fail-looking table rows document-wide. This path can't
+  // tell Blocked/Not-Tested apart from a plain fail (no summary table to key on),
+  // so those buckets stay 0 and blocked-ish rows fold into failCount.
   let passCount = 0
   let failCount = 0
 
@@ -130,7 +191,7 @@ export function parseReport(md: string): {
     }
   }
 
-  return { passCount, failCount, totalAcs: passCount + failCount }
+  return { ...EMPTY_COUNTS, passCount, failCount, totalAcs: passCount + failCount }
 }
 
 /**
@@ -285,19 +346,23 @@ function spawnRun(
           }
         }
 
-        const { passCount, failCount, totalAcs } = parseReport(reportMd ?? '')
+        const counts = parseReport(reportMd ?? '')
+        const { passCount, failCount, blockedCount, untestedCount, cancelledCount, totalAcs } =
+          counts
 
         let status: RunSummary['status']
         if (!success) {
           status = 'error'
-        } else if (failCount === 0 && totalAcs > 0) {
+        } else if (passCount > 0 && failCount === 0 && blockedCount === 0) {
+          // A pass requires real passes and no failures OR blocks. Not-Tested /
+          // Cancelled don't fail a run, but an all-untested run isn't a pass either.
           status = 'passed'
         } else {
           status = 'failed'
         }
 
         const finishedAt = now()
-        updateRun(id, { slug, status, passCount, failCount, totalAcs, finishedAt })
+        updateRun(id, { slug, status, ...counts, finishedAt })
 
         const final: LogEvent = {
           ts: finishedAt,
@@ -417,6 +482,9 @@ export function startRun(body: CreateRunBody): RunSummary {
     status: mustQueue ? 'queued' : 'running',
     passCount: 0,
     failCount: 0,
+    blockedCount: 0,
+    untestedCount: 0,
+    cancelledCount: 0,
     totalAcs: 0,
     createdAt: now(),
     finishedAt: null,

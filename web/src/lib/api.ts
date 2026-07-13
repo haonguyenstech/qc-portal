@@ -97,7 +97,7 @@ export function updateProject(
   })
 }
 
-export function deleteProject(id: string): Promise<{ ok: true }> {
+export function deleteProject(id: string): Promise<{ ok: true; deletedPath: string | null }> {
   return request(`/api/projects/${encodeURIComponent(id)}`, { method: 'DELETE' })
 }
 
@@ -524,6 +524,7 @@ export function clickupListTasks(
 export interface CrawlResult {
   displayId: string
   name: string
+  ticketKind: 'feature' | 'bug' | null
   dir: string // path relative to the project root, e.g. testing/tickets/ABC-1
   absDir: string
   files: { path: string; bytes: number }[]
@@ -545,10 +546,11 @@ export function crawlTicket(
   taskId: string,
   projectId: string,
   model?: string,
+  ticketKind?: 'feature' | 'bug' | null,
 ): Promise<CrawlResult> {
   return request('/api/clickup/crawl', {
     method: 'POST',
-    body: JSON.stringify({ taskId, projectId, model: model ?? 'none' }),
+    body: JSON.stringify({ taskId, projectId, model: model ?? 'none', ticketKind }),
   })
 }
 
@@ -597,6 +599,7 @@ export interface CrawlJob {
   projectId: string
   status: 'running' | 'done'
   model: string
+  ticketKind: 'feature' | 'bug' | null
   total: number
   doneCount: number
   createdAt: string
@@ -608,8 +611,10 @@ export interface CrawlJob {
 /** Start a background job that crawls one or more ClickUp tickets to disk. */
 export function startCrawlJob(body: {
   projectId: string
-  tickets: { id: string; displayId: string; name: string }[]
+  // `relDir` (e.g. "PARENT/CHILD") nests a subtask under its parent on disk; omit for flat.
+  tickets: { id: string; displayId: string; name: string; relDir?: string }[]
   model?: string
+  ticketKind?: 'feature' | 'bug' | null
 }): Promise<{ jobId: string; job: CrawlJob }> {
   return request('/api/clickup/crawl/jobs', {
     method: 'POST',
@@ -646,8 +651,9 @@ export function jiraSubtasks(parent: string, projectId?: string): Promise<Clicku
 /** Start a background job that crawls one or more Jira issues to disk. */
 export function startJiraCrawlJob(body: {
   projectId: string
-  tickets: { id: string; displayId: string; name: string }[]
+  tickets: { id: string; displayId: string; name: string; relDir?: string }[]
   model?: string
+  ticketKind?: 'feature' | 'bug' | null
 }): Promise<{ jobId: string; job: CrawlJob }> {
   return request('/api/jira/crawl/jobs', {
     method: 'POST',
@@ -791,7 +797,8 @@ export function openSourceFolder(
 }
 
 export interface CrawledTicket {
-  name: string // folder name under testing/tickets/ (sanitized displayId)
+  name: string // folder path under testing/tickets/ — nested (PARENT/CHILD) for subtasks, else the sanitized displayId
+  parent?: string | null // `name` of the enclosing ticket folder when nested, else null/undefined
   crawledAt: string | null // ISO time of the last crawl
   hasTestcases: boolean // at least one test-case version has been generated
   testcaseVersions: number // how many test-case versions are stored

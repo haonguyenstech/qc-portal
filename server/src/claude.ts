@@ -169,6 +169,37 @@ export function runQc(
         ``,
         `Follow the skill literally and in order through all 7 phases. ` +
           `Write the report and issues into testing/test-result/<ticket-slug>/ as the skill specifies.`,
+        ``,
+        // Report structure contract — EVERY report.md must open with these three
+        // sections, in this order and format, before any AC-level or per-case
+        // detail. Non-negotiable regardless of the run's outcome. The Execution
+        // Summary table is also what the portal parses for pass/fail counts, so
+        // its rows must be "| <Status label> | <number> | <percent> |".
+        `REPORT FORMAT — report.md MUST begin with these three sections, in THIS order, ` +
+          `with THESE exact H2 headings and table shapes, on every run (even a blocked or ` +
+          `failed one). Fill every row; never omit a section.`,
+        ``,
+        `## 1. Test Suite Executed — a two-column "Field | Value" table with these rows: ` +
+          `**Suite / Module** (the feature/screens under test), **Ticket** (id + link + title), ` +
+          `**Tested by**, **Test Execution Date** (today), **Build / Environment** (the App URL / target), ` +
+          `**Acceptance source** (the test-case file path + AC references), **Overall Status** ` +
+          `(Pass / Partial pass / Fail with a one-line reason), and **Case counts** ` +
+          `(e.g. "N total · P Passed · F Failed · I issues · B Not Tested/Blocked").`,
+        ``,
+        `## 2. Covered Flow — a table "Flow | Covered? | Notes", one row per major flow/area you ` +
+          `exercised, with Covered? as ✅ (done) / ⚠️ (partial) / ⛔ (not covered) and a short note ` +
+          `(what was verified, or why it was skipped).`,
+        ``,
+        `## 3. Execution Summary — a table "Status | Count | %" with ONE SEPARATE row for each of ` +
+          `✅ Passed, ❌ Failed, ⛔ Blocked, ◻️ Not Tested, ⚠️ Passed-with-issue, and (only if any) 🚫 Cancelled, ` +
+          `then a bold **Total** row. Keep Blocked and Not Tested as DISTINCT rows — never merge them into a ` +
+          `single "Not Tested / Blocked" row — so the portal can report each bucket separately. The Count ` +
+          `column must be a plain number and the percentages must sum to 100%. Follow it with a **Pass Rate** ` +
+          `and a **Completion Rate** line. The counts here must reconcile exactly with the per-case results ` +
+          `later in the report.`,
+        ``,
+        `After these three sections, continue with the AC-level outcome, per-case Test Result Details, ` +
+          `and QC notes the skill specifies.`,
       )
     } else {
       lines.push(`Follow the skill literally and in order.`)

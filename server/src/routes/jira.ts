@@ -20,6 +20,7 @@ import { getCrawlJob, listCrawlJobs, startCrawlJob } from '../crawlJobs.js'
 export const jiraRouter = Router()
 
 const MAX_CRAWL_JOB_TICKETS = 50
+const parseTicketKind = (v: unknown) => (v === 'feature' || v === 'bug' ? v : null)
 
 // Resolve this project's Jira creds (.mcp.json) for the whole request, so the
 // in-app Connect creds take effect without a server restart.
@@ -83,9 +84,16 @@ jiraRouter.post('/crawl', async (req, res) => {
   const taskId = typeof req.body?.taskId === 'string' ? req.body.taskId.trim() : ''
   if (!taskId) return res.status(400).json({ error: 'taskId is required' })
   const model = typeof req.body?.model === 'string' ? req.body.model.trim() : ''
+  const ticketKind = parseTicketKind(req.body?.ticketKind)
 
   try {
-    const result = await crawlOneTicket({ taskId, rootPath: project.rootPath, model, source: 'jira' })
+    const result = await crawlOneTicket({
+      taskId,
+      rootPath: project.rootPath,
+      model,
+      ticketKind,
+      source: 'jira',
+    })
     res.json(result)
   } catch (err) {
     fail(res, err)
@@ -104,19 +112,21 @@ jiraRouter.post('/crawl/jobs', (req, res) => {
 
   const raw = Array.isArray(req.body?.tickets) ? req.body.tickets : []
   const tickets = raw
-    .filter((t: unknown): t is { id: string; displayId?: string; name?: string } =>
+    .filter((t: unknown): t is { id: string; displayId?: string; name?: string; relDir?: string } =>
       Boolean(t && typeof t === 'object' && typeof (t as { id?: unknown }).id === 'string'),
     )
-    .map((t: { id: string; displayId?: string; name?: string }) => ({
+    .map((t: { id: string; displayId?: string; name?: string; relDir?: string }) => ({
       id: t.id.trim(),
       displayId: typeof t.displayId === 'string' && t.displayId.trim() ? t.displayId.trim() : t.id,
       name: typeof t.name === 'string' ? t.name : '',
+      relDir: typeof t.relDir === 'string' && t.relDir.trim() ? t.relDir.trim() : undefined,
     }))
     .filter((t: { id: string }) => t.id.length > 0)
     .slice(0, MAX_CRAWL_JOB_TICKETS)
   if (!tickets.length) return res.status(400).json({ error: 'tickets is required' })
 
   const model = typeof req.body?.model === 'string' ? req.body.model.trim() : ''
+  const ticketKind = parseTicketKind(req.body?.ticketKind)
 
   // Capture the project's Jira creds now — the job runs after this request
   // returns, when the per-request creds context no longer exists.
@@ -129,6 +139,7 @@ jiraRouter.post('/crawl/jobs', (req, res) => {
     source: 'jira',
     jiraCreds,
     model,
+    ticketKind,
     tickets,
   })
   res.json({ jobId: job.id, job })

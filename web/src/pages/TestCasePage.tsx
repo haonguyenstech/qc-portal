@@ -7,6 +7,7 @@ import {
   Check,
   CheckCircle2,
   ChevronDown,
+  ChevronRight,
   Ban,
   ClipboardList,
   Clock,
@@ -29,7 +30,6 @@ import {
   Terminal,
   Ticket,
   Trash2,
-  Undo2,
   Wand2,
   X,
 } from 'lucide-react'
@@ -69,7 +69,6 @@ import {
   resumeTestCaseJob,
   startTestCaseJob,
   type CrawledTicket,
-  type EditTestcaseCellResult,
   type TestCaseJob,
   type TestCaseLogLine,
 } from '@/lib/api'
@@ -263,7 +262,7 @@ function parseCsv(text: string): string[][] {
   return rows
 }
 
-/** A cell the user clicked to refine: absolute CSV row (0 = header), column index. */
+/** A cell the user clicked to edit: absolute CSV row (0 = header), column index. */
 interface CellRef {
   row: number
   col: number
@@ -274,7 +273,7 @@ interface CellRef {
 /**
  * Renders CSV test cases as a scrollable table, trimming fully-empty trailing columns.
  * When `onCellClick` is supplied, body cells become interactive (hover + selectable)
- * so a QC engineer can pick one cell to refine with AI.
+ * so a QC engineer can edit one cell manually.
  */
 function CsvTable({
   csv,
@@ -347,7 +346,7 @@ function CsvTable({
                               })
                           : undefined
                       }
-                      title={interactive ? 'Click to refine this cell with AI' : undefined}
+                      title={interactive ? 'Click to edit this cell' : undefined}
                       className={cn(
                         'min-w-[12rem] max-w-[34rem] whitespace-pre-wrap break-words border px-3 py-2 align-top text-muted-foreground',
                         // Pinned first column: solid bg so other columns can't bleed
@@ -636,17 +635,26 @@ function priorityClass(priority: string): string {
   return 'border-border bg-muted text-muted-foreground' // low / unknown
 }
 
-/** A single-select crawled-ticket row, with a "test cases ready" badge + preview. */
+/** A single-select crawled-ticket row, with a "test cases ready" badge + preview.
+ *  `depth` indents nested subtasks; a chevron toggles a parent's children. */
 function TicketRow({
   ticket,
   selected,
   onSelect,
   onView,
+  depth = 0,
+  hasChildren = false,
+  isOpen = false,
+  onToggleExpand,
 }: {
   ticket: CrawledTicket
   selected: boolean
   onSelect: () => void
   onView: () => void
+  depth?: number
+  hasChildren?: boolean
+  isOpen?: boolean
+  onToggleExpand?: () => void
 }) {
   return (
     <div
@@ -655,6 +663,20 @@ function TicketRow({
         selected ? 'bg-primary/5' : 'hover:bg-muted',
       )}
     >
+      {/* Indent guide for nested subtasks + a chevron on parents. */}
+      {depth > 0 && <span aria-hidden style={{ width: depth * 16 }} className="shrink-0" />}
+      {hasChildren ? (
+        <button
+          type="button"
+          onClick={onToggleExpand}
+          aria-label={isOpen ? 'Collapse subtasks' : 'Expand subtasks'}
+          className="flex size-5 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:text-foreground"
+        >
+          {isOpen ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />}
+        </button>
+      ) : (
+        <span className="w-5 shrink-0" aria-hidden />
+      )}
       <button
         type="button"
         onClick={onSelect}
@@ -744,18 +766,13 @@ function TestCasePreviewDialog({
   const versions = list?.versions ?? []
   const latest = versions[0]?.version ?? null
 
-  // The cell the user clicked to refine with AI (CSV versions only), plus the
-  // comment box state. Reset whenever the version/folder changes (below).
+  // The CSV cell the user clicked to edit manually. Reset whenever the
+  // version/folder changes (below).
   const [selectedCell, setSelectedCell] = useState<CellRef | null>(null)
-  const [aiOpen, setAiOpen] = useState(false)
-  const [comment, setComment] = useState('')
-  // The last successful regen for the selected cell — drives the inline Undo button.
-  const [lastEdit, setLastEdit] = useState<EditTestcaseCellResult | null>(null)
+  const [cellDraft, setCellDraft] = useState('')
   function resetCell() {
     setSelectedCell(null)
-    setAiOpen(false)
-    setComment('')
-    setLastEdit(null)
+    setCellDraft('')
   }
 
   // Default the selected version to the latest; re-default when the folder or the
@@ -782,35 +799,7 @@ function TestCasePreviewDialog({
   // Delete the selected version. Two-step confirm (inline) to avoid a nested modal.
   const queryClient = useQueryClient()
 
-  // Restore a cell to a previous value WITHOUT AI (Undo). Writes the exact value
-  // back to the same version, then refetches it.
-  const undo = useMutation({
-    mutationFn: (v: { version: number; row: number; col: number; value: string }) =>
-      editTestcaseCell({
-        projectId,
-        folder: folder as string,
-        version: v.version,
-        row: v.row,
-        col: v.col,
-        value: v.value,
-      }),
-    onSuccess: (res) => {
-      queryClient.invalidateQueries({
-        queryKey: ['testcase-version', projectId, folder, res.version],
-      })
-      queryClient.invalidateQueries({ queryKey: ['testcase-versions', projectId, folder] })
-      // Reflect the restored value in the panel and drop the Undo button.
-      setSelectedCell((prev) => (prev ? { ...prev, value: res.newValue } : prev))
-      setLastEdit(null)
-      toast.success(`Reverted "${res.column}" (row ${res.row})`)
-    },
-    onError: (err) =>
-      toast.error('Could not undo', {
-        description: err instanceof Error ? err.message : 'Unknown error',
-      }),
-  })
-
-  // Refine ONE cell with AI — overwrites the same version on disk, then refetches it.
+  // Save ONE cell exactly as typed — overwrites the same version on disk, then refetches it.
   const editCell = useMutation({
     mutationFn: () =>
       editTestcaseCell({
@@ -819,7 +808,7 @@ function TestCasePreviewDialog({
         version: selectedVersion as number,
         row: (selectedCell as CellRef).row,
         col: (selectedCell as CellRef).col,
-        comment: comment.trim(),
+        value: cellDraft,
       }),
     onSuccess: (res) => {
       queryClient.invalidateQueries({
@@ -827,11 +816,7 @@ function TestCasePreviewDialog({
       })
       // The version's saved time changed; refresh the list so the dropdown updates.
       queryClient.invalidateQueries({ queryKey: ['testcase-versions', projectId, folder] })
-      // Keep the panel open showing the new value, with an inline Undo button next
-      // to Regenerate (drops the comment so they can refine again or revert).
-      setSelectedCell((prev) => (prev ? { ...prev, value: res.newValue } : prev))
-      setLastEdit(res)
-      setComment('')
+      resetCell()
       toast.success(`Updated "${res.column}" (row ${res.row})`)
     },
     onError: (err) =>
@@ -839,6 +824,16 @@ function TestCasePreviewDialog({
         description: err instanceof Error ? err.message : 'Unknown error',
       }),
   })
+
+  useEffect(() => {
+    if (!selectedCell) return
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key === 'Escape' && !editCell.isPending) resetCell()
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [selectedCell, editCell.isPending])
+
   const [confirmDelete, setConfirmDelete] = useState(false)
   const del = useMutation({
     mutationFn: () => deleteTestCaseVersion(folder as string, selectedVersion as number, projectId),
@@ -865,268 +860,235 @@ function TestCasePreviewDialog({
   })
 
   return (
-    <Dialog open={!!folder} onOpenChange={onOpenChange}>
-      <DialogContent className="flex max-h-[92vh] w-[97vw] flex-col gap-0 overflow-hidden p-0 sm:max-w-[90rem]">
-        <DialogHeader className="shrink-0 space-y-2 border-b border-border/60 bg-muted/30 px-5 py-3">
-          <DialogTitle className="flex items-center gap-2 text-base">
-            <ClipboardList className="h-4 w-4 text-muted-foreground" />
-            <span className="truncate font-mono text-sm">{folder}</span>
-          </DialogTitle>
-          <DialogDescription className="flex flex-wrap items-center gap-2">
-            {versions.length > 0 ? (
-              <>
-                <span>
-                  {versions.length} version{versions.length === 1 ? '' : 's'}
-                </span>
-                <Select
-                  value={selectedVersion != null ? String(selectedVersion) : undefined}
-                  onValueChange={(v) => {
-                    setSelectedVersion(Number(v))
-                    setConfirmDelete(false)
-                    resetCell()
-                  }}
-                >
-                  <SelectTrigger size="sm" className="h-7 w-44 rounded-full">
-                    <SelectValue placeholder="Pick a version" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {versions.map((v, i) => (
-                      <SelectItem key={v.version} value={String(v.version)}>
-                        {v.label}
-                        {v.format === 'csv' ? ' · CSV' : ''}
-                        {i === 0 ? ' · latest' : ''}
-                        {v.savedAt ? ` · ${formatDateTime(v.savedAt)}` : ''}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                {/* Full date + time the selected version was generated. */}
-                {selectedMeta?.savedAt && (
-                  <span
-                    className="inline-flex items-center gap-1 text-xs text-muted-foreground"
-                    title={`Generated ${formatDateTime(selectedMeta.savedAt)}`}
-                  >
-                    <Clock className="size-3.5" />
-                    Generated {formatDateTime(selectedMeta.savedAt)}
+    <>
+      <Dialog
+        open={!!folder}
+        onOpenChange={(open) => {
+          if (!open) resetCell()
+          onOpenChange(open)
+        }}
+      >
+        <DialogContent className="flex max-h-[92vh] w-[97vw] flex-col gap-0 overflow-hidden p-0 sm:max-w-[90rem]">
+          <DialogHeader className="shrink-0 space-y-2 border-b border-border/60 bg-muted/30 px-5 py-3">
+            <DialogTitle className="flex items-center gap-2 text-base">
+              <ClipboardList className="h-4 w-4 text-muted-foreground" />
+              <span className="truncate font-mono text-sm">{folder}</span>
+            </DialogTitle>
+            <DialogDescription className="flex flex-wrap items-center gap-2">
+              {versions.length > 0 ? (
+                <>
+                  <span>
+                    {versions.length} version{versions.length === 1 ? '' : 's'}
                   </span>
-                )}
-              </>
-            ) : (
-              <span>No versions yet</span>
-            )}
-
-            {/* Right-aligned actions: open the ticket's testcases folder + delete. */}
-            <span className="ml-auto inline-flex items-center gap-2">
-              {folder && (
-                <OpenFolderButton
-                  open={() => openTicketsFolder(projectId, folder)}
-                  label="test cases"
-                />
-              )}
-              {/* Delete the selected version — inline two-step confirm. */}
-              {versions.length > 0 &&
-                selectedVersion != null &&
-                (confirmDelete ? (
-                  <span className="inline-flex items-center gap-1.5">
-                    <span className="text-xs text-muted-foreground">
-                      Delete v{selectedVersion}?
-                    </span>
-                    <Button
-                      type="button"
-                      variant="destructive"
-                      size="sm"
-                      onClick={() => del.mutate()}
-                      disabled={del.isPending}
+                  <Select
+                    value={selectedVersion != null ? String(selectedVersion) : undefined}
+                    onValueChange={(v) => {
+                      setSelectedVersion(Number(v))
+                      setConfirmDelete(false)
+                      resetCell()
+                    }}
+                  >
+                    <SelectTrigger size="sm" className="h-7 w-44 rounded-full">
+                      <SelectValue placeholder="Pick a version" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {versions.map((v, i) => (
+                        <SelectItem key={v.version} value={String(v.version)}>
+                          {v.label}
+                          {v.format === 'csv' ? ' · CSV' : ''}
+                          {i === 0 ? ' · latest' : ''}
+                          {v.savedAt ? ` · ${formatDateTime(v.savedAt)}` : ''}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  {/* Full date + time the selected version was generated. */}
+                  {selectedMeta?.savedAt && (
+                    <span
+                      className="inline-flex items-center gap-1 text-xs text-muted-foreground"
+                      title={`Generated ${formatDateTime(selectedMeta.savedAt)}`}
                     >
-                      {del.isPending ? (
-                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                      ) : (
-                        <Trash2 className="h-3.5 w-3.5" />
-                      )}
-                      Confirm
-                    </Button>
+                      <Clock className="size-3.5" />
+                      Generated {formatDateTime(selectedMeta.savedAt)}
+                    </span>
+                  )}
+                </>
+              ) : (
+                <span>No versions yet</span>
+              )}
+
+              {/* Right-aligned actions: open the ticket's testcases folder + delete. */}
+              <span className="ml-auto inline-flex items-center gap-2">
+                {folder && (
+                  <OpenFolderButton
+                    open={() => openTicketsFolder(projectId, folder)}
+                    label="test cases"
+                  />
+                )}
+                {/* Delete the selected version — inline two-step confirm. */}
+                {versions.length > 0 &&
+                  selectedVersion != null &&
+                  (confirmDelete ? (
+                    <span className="inline-flex items-center gap-1.5">
+                      <span className="text-xs text-muted-foreground">
+                        Delete v{selectedVersion}?
+                      </span>
+                      <Button
+                        type="button"
+                        variant="destructive"
+                        size="sm"
+                        onClick={() => del.mutate()}
+                        disabled={del.isPending}
+                      >
+                        {del.isPending ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <Trash2 className="h-3.5 w-3.5" />
+                        )}
+                        Confirm
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => setConfirmDelete(false)}
+                        disabled={del.isPending}
+                      >
+                        Cancel
+                      </Button>
+                    </span>
+                  ) : (
                     <Button
                       type="button"
                       variant="outline"
                       size="sm"
-                      onClick={() => setConfirmDelete(false)}
-                      disabled={del.isPending}
+                      className="text-destructive hover:text-destructive"
+                      onClick={() => setConfirmDelete(true)}
+                      title={`Delete v${selectedVersion}`}
                     >
-                      Cancel
+                      <Trash2 className="h-3.5 w-3.5" />
+                      Delete
                     </Button>
-                  </span>
-                ) : (
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    className="text-destructive hover:text-destructive"
-                    onClick={() => setConfirmDelete(true)}
-                    title={`Delete v${selectedVersion}`}
-                  >
-                    <Trash2 className="h-3.5 w-3.5" />
-                    Delete
-                  </Button>
-                ))}
-            </span>
-          </DialogDescription>
-        </DialogHeader>
-        <div className="min-h-0 flex-1 overflow-auto px-6 py-5">
-          {isFetching && !data ? (
-            <p className="flex items-center justify-center gap-2 py-12 text-sm text-muted-foreground">
-              <Loader2 className="h-4 w-4 animate-spin" />
-              Loading…
-            </p>
-          ) : data?.testcases ? (
-            data.format === 'csv' ? (
-              <div className="space-y-2.5">
-                <p className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
-                  <Sparkles className="size-3 text-primary/70" />
-                  Click any cell to refine just that value with AI.
-                </p>
-                <CsvTable
-                  csv={data.testcases}
-                  onCellClick={(cell) => {
-                    setSelectedCell(cell)
-                    setAiOpen(false)
-                    setComment('')
-                    setLastEdit(null)
-                  }}
-                  selectedCell={
-                    selectedCell ? { row: selectedCell.row, col: selectedCell.col } : null
-                  }
-                />
-              </div>
-            ) : looksLikeCsv('x.md', data.testcases) ? (
-              // Safety net: the version is stored as Markdown but its content is really
-              // CSV (an older file, or a model that emitted the other format). Render it
-              // as a read-only table instead of a collapsed run-on markdown paragraph.
-              // Non-interactive — cell refine needs a real .csv version on disk.
-              <CsvTable csv={data.testcases} />
-            ) : (
-              <div className={MD_CLASS}>
-                <ReactMarkdown remarkPlugins={[remarkGfm]} components={MD_COMPONENTS}>
-                  {data.testcases}
-                </ReactMarkdown>
-              </div>
-            )
-          ) : (
-            <p className="py-12 text-center text-sm text-muted-foreground">
-              No test cases found for this ticket.
-            </p>
-          )}
-        </div>
-
-        {/* AI cell-refine panel — appears when a CSV cell is selected. Click a cell,
-            then "Add AI" to open the comment box and regenerate just that cell. */}
-        {selectedCell && data?.format === 'csv' && (
-          <div className="shrink-0 space-y-2 border-t border-border/60 bg-muted/30 px-5 py-3">
-            <div className="flex items-center gap-2 text-xs">
-              <Sparkles className="size-3.5 shrink-0 text-primary" />
-              <span className="font-medium">Refine cell</span>
-              <span className="rounded-full bg-background px-2 py-0.5 font-mono text-[10px] text-muted-foreground">
-                row {selectedCell.row} · {selectedCell.column}
+                  ))}
               </span>
-              <button
-                type="button"
-                onClick={resetCell}
-                className="ml-auto rounded-lg p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-                aria-label="Cancel cell refine"
-              >
-                <X className="size-3.5" />
-              </button>
-            </div>
-            <p className="line-clamp-2 whitespace-pre-wrap rounded-lg border border-border/60 bg-background px-2.5 py-1.5 text-[11px] text-muted-foreground">
-              {selectedCell.value.trim() || '(empty)'}
-            </p>
-            {!aiOpen ? (
-              <Button
-                type="button"
-                size="sm"
-                onClick={() => setAiOpen(true)}
-                className="rounded-full transition-all duration-200 active:scale-[0.98]"
-              >
-                <Sparkles className="size-3.5" />
-                Add AI
-              </Button>
+            </DialogDescription>
+          </DialogHeader>
+          <div className="min-h-0 flex-1 overflow-auto px-6 py-5">
+            {isFetching && !data ? (
+              <p className="flex items-center justify-center gap-2 py-12 text-sm text-muted-foreground">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                Loading…
+              </p>
+            ) : data?.testcases ? (
+              data.format === 'csv' ? (
+                <div className="space-y-2.5">
+                  <p className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                    Click any cell to edit that value.
+                  </p>
+                  <CsvTable
+                    csv={data.testcases}
+                    onCellClick={(cell) => {
+                      setSelectedCell(cell)
+                      setCellDraft(cell.value)
+                    }}
+                    selectedCell={
+                      selectedCell ? { row: selectedCell.row, col: selectedCell.col } : null
+                    }
+                  />
+                </div>
+              ) : looksLikeCsv('x.md', data.testcases) ? (
+                // Safety net: the version is stored as Markdown but its content is really
+                // CSV (an older file, or a model that emitted the other format). Render it
+                // as a read-only table instead of a collapsed run-on markdown paragraph.
+                // Non-interactive — cell editing needs a real .csv version on disk.
+                <CsvTable csv={data.testcases} />
+              ) : (
+                <div className={MD_CLASS}>
+                  <ReactMarkdown remarkPlugins={[remarkGfm]} components={MD_COMPONENTS}>
+                    {data.testcases}
+                  </ReactMarkdown>
+                </div>
+              )
             ) : (
-              <div className="space-y-2">
+              <p className="py-12 text-center text-sm text-muted-foreground">
+                No test cases found for this ticket.
+              </p>
+            )}
+          </div>
+
+          {selectedCell && data?.format === 'csv' && (
+            <div
+              className="absolute inset-0 z-40 flex items-center justify-center bg-black/50 p-4"
+              onClick={() => {
+                if (!editCell.isPending) resetCell()
+              }}
+            >
+              <div
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="edit-testcase-cell-title"
+                className="flex max-h-[88vh] w-[92vw] flex-col gap-4 rounded-xl border bg-background p-6 shadow-lg sm:max-w-5xl"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className="flex items-start gap-3">
+                  <div className="min-w-0 flex-1 space-y-1">
+                    <h2 id="edit-testcase-cell-title" className="text-lg font-semibold leading-none">
+                      Edit cell
+                    </h2>
+                    <p className="text-sm text-muted-foreground">
+                      Row {selectedCell.row} · {selectedCell.column}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={resetCell}
+                    disabled={editCell.isPending}
+                    className="rounded-xs opacity-70 transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:pointer-events-none"
+                    aria-label="Close edit cell"
+                  >
+                    <X className="size-4" />
+                  </button>
+                </div>
                 <Textarea
                   autoFocus
-                  value={comment}
-                  onChange={(e) => setComment(e.target.value)}
-                  placeholder={`Tell the AI how to change this cell, e.g. “make the expected result specific and measurable”.`}
-                  className="min-h-16 resize-y text-[13px]"
+                  value={cellDraft}
+                  onChange={(e) => setCellDraft(e.target.value)}
+                  className="min-h-[54vh] resize-y font-mono text-sm"
                   onKeyDown={(e) => {
-                    // Cmd/Ctrl+Enter submits, mirroring common chat affordances.
-                    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter' && comment.trim()) {
+                    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter' && selectedCell) {
                       e.preventDefault()
                       editCell.mutate()
                     }
                   }}
                 />
-                <div className="flex items-center justify-end gap-2">
+                <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
                   <Button
                     type="button"
                     variant="outline"
-                    size="sm"
                     onClick={resetCell}
-                    disabled={editCell.isPending || undo.isPending}
-                    className="rounded-full"
+                    disabled={editCell.isPending}
                   >
                     Cancel
                   </Button>
-                  {/* Undo the last regen for this cell — restores the prior value (no AI).
-                      Sits right next to Regenerate so it's easy to revert in place. */}
-                  {lastEdit &&
-                    selectedCell &&
-                    lastEdit.row === selectedCell.row &&
-                    lastEdit.col === selectedCell.col && (
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        onClick={() =>
-                          undo.mutate({
-                            version: lastEdit.version,
-                            row: lastEdit.row,
-                            col: lastEdit.col,
-                            value: lastEdit.oldValue,
-                          })
-                        }
-                        disabled={undo.isPending || editCell.isPending}
-                        className="rounded-full"
-                        title="Undo this regeneration"
-                      >
-                        {undo.isPending ? (
-                          <Loader2 className="size-3.5 animate-spin" />
-                        ) : (
-                          <Undo2 className="size-3.5" />
-                        )}
-                        Undo
-                      </Button>
-                    )}
                   <Button
                     type="button"
-                    size="sm"
                     onClick={() => editCell.mutate()}
-                    disabled={!comment.trim() || editCell.isPending || undo.isPending}
-                    className="rounded-full transition-all duration-200 active:scale-[0.98]"
+                    disabled={editCell.isPending}
                   >
                     {editCell.isPending ? (
-                      <Loader2 className="size-3.5 animate-spin" />
+                      <Loader2 className="size-4 animate-spin" />
                     ) : (
-                      <Wand2 className="size-3.5" />
+                      <Check className="size-4" />
                     )}
-                    Regenerate cell
+                    Save
                   </Button>
                 </div>
               </div>
-            )}
-          </div>
-        )}
-      </DialogContent>
-    </Dialog>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
+    </>
   )
 }
 
@@ -1387,6 +1349,15 @@ export default function TestCasePage() {
   })
   const [query, setQuery] = useState('')
   const [tcFilter, setTcFilter] = useState<TcFilter>('all')
+  // Collapsed parent folders in the crawled-ticket tree (default: all expanded).
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
+  const toggleCollapse = (name: string) =>
+    setCollapsed((prev) => {
+      const next = new Set(prev)
+      if (next.has(name)) next.delete(name)
+      else next.add(name)
+      return next
+    })
   const [previewFolder, setPreviewFolder] = useState<string | null>(null)
   const [previewTemplate, setPreviewTemplate] = useState<{ name: string; content: string } | null>(
     null,
@@ -1673,15 +1644,52 @@ export default function TestCasePage() {
   }
 
   const q = query.trim().toLowerCase()
-  const filtered = (crawled ?? [])
-    .filter((c) => `${c.name} ${c.displayId ?? ''} ${c.title ?? ''}`.toLowerCase().includes(q))
-    .filter((c) =>
-      tcFilter === 'with' ? c.hasTestcases : tcFilter === 'without' ? !c.hasTestcases : true,
-    )
+  const allCrawled = crawled ?? []
+  const byName = new Map(allCrawled.map((c) => [c.name, c] as const))
+  const matches = (c: CrawledTicket) =>
+    `${c.name} ${c.displayId ?? ''} ${c.title ?? ''}`.toLowerCase().includes(q) &&
+    (tcFilter === 'with' ? c.hasTestcases : tcFilter === 'without' ? !c.hasTestcases : true)
+  // Visible = tickets matching the filter, plus every ancestor of a match, so a
+  // nested subtask that matches keeps its parent chain in view (a coherent tree).
+  const visible = new Set<string>()
+  for (const c of allCrawled) {
+    if (!matches(c)) continue
+    visible.add(c.name)
+    let p = c.parent ?? null
+    while (p && byName.has(p) && !visible.has(p)) {
+      visible.add(p)
+      p = byName.get(p)?.parent ?? null
+    }
+  }
+  const visibleTickets = allCrawled.filter((c) => visible.has(c.name))
+  // parent `name` → its visible children (a crawled folder nested inside it).
+  const childrenByParent = new Map<string, CrawledTicket[]>()
+  for (const c of visibleTickets) {
+    if (c.parent && byName.has(c.parent)) {
+      const arr = childrenByParent.get(c.parent)
+      if (arr) arr.push(c)
+      else childrenByParent.set(c.parent, [c])
+    }
+  }
+  // Roots (grouped by status) = visible tickets with no crawled parent. Their
+  // subtask descendants render nested beneath them regardless of their own status.
+  const roots = visibleTickets.filter((c) => !c.parent || !byName.has(c.parent))
   // Tallies for the filter labels so the user sees the split at a glance.
-  const withCount = (crawled ?? []).filter((c) => c.hasTestcases).length
-  const withoutCount = (crawled ?? []).length - withCount
-  const statusGroups = groupByStatus(filtered)
+  const withCount = allCrawled.filter((c) => c.hasTestcases).length
+  const withoutCount = allCrawled.length - withCount
+  const statusGroups = groupByStatus(roots)
+
+  // Flatten a root and its (expanded) descendants into pre-order rows for rendering.
+  const flattenTree = (group: CrawledTicket[]): { ticket: CrawledTicket; depth: number; hasChildren: boolean }[] => {
+    const out: { ticket: CrawledTicket; depth: number; hasChildren: boolean }[] = []
+    const visit = (node: CrawledTicket, depth: number) => {
+      const kids = childrenByParent.get(node.name) ?? []
+      out.push({ ticket: node, depth, hasChildren: kids.length > 0 })
+      if (kids.length && !collapsed.has(node.name)) for (const k of kids) visit(k, depth + 1)
+    }
+    for (const r of group) visit(r, 0)
+    return out
+  }
 
   return (
     <div className="mx-auto max-w-6xl space-y-8">
@@ -1802,7 +1810,7 @@ export default function TestCasePage() {
                     Crawl a ticket on the Tickets page first.
                   </p>
                 </div>
-              ) : filtered.length === 0 ? (
+              ) : visibleTickets.length === 0 ? (
                 <p className="px-3 py-8 text-center text-xs text-muted-foreground">
                   {tcFilter === 'with'
                     ? 'No tickets with test cases yet.'
@@ -1830,10 +1838,14 @@ export default function TestCasePage() {
                         <span className="h-px flex-1 bg-border/60" aria-hidden />
                       </div>
                       <ul className="divide-y">
-                        {group.tickets.map((c) => (
+                        {flattenTree(group.tickets).map(({ ticket: c, depth, hasChildren }) => (
                           <li key={c.name}>
                             <TicketRow
                               ticket={c}
+                              depth={depth}
+                              hasChildren={hasChildren}
+                              isOpen={!collapsed.has(c.name)}
+                              onToggleExpand={() => toggleCollapse(c.name)}
                               selected={selectedFolders.has(c.name)}
                               onSelect={() => toggleSelectTicket(c.name)}
                               onView={() => setPreviewFolder(c.name)}

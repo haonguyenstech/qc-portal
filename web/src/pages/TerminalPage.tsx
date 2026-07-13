@@ -1,3 +1,4 @@
+import { useEffect, useRef } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
   AlertCircle,
@@ -30,6 +31,17 @@ export default function TerminalPage() {
     // shell is connected, so Connect drops the user straight into a Claude session.
     { initialCommand: 'claude --dangerously-skip-permissions' },
   )
+
+  // The shell is spawned in one project's folder at Connect time and the WebSocket
+  // stays bound to it. If the user switches the active project, that live shell is
+  // now in the wrong folder — kill it so they can Connect fresh in the new project.
+  const prevProjectId = useRef(activeProjectId)
+  useEffect(() => {
+    if (prevProjectId.current !== activeProjectId) {
+      prevProjectId.current = activeProjectId
+      disconnect()
+    }
+  }, [activeProjectId, disconnect])
 
   const unavailable = avail && !avail.ok
 

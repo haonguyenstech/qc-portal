@@ -35,6 +35,9 @@ db.exec(`
     status TEXT NOT NULL,
     passCount INTEGER NOT NULL DEFAULT 0,
     failCount INTEGER NOT NULL DEFAULT 0,
+    blockedCount INTEGER NOT NULL DEFAULT 0,
+    untestedCount INTEGER NOT NULL DEFAULT 0,
+    cancelledCount INTEGER NOT NULL DEFAULT 0,
     totalAcs INTEGER NOT NULL DEFAULT 0,
     createdAt TEXT NOT NULL,
     finishedAt TEXT
@@ -79,6 +82,18 @@ db.exec(`
   const cols = db.prepare(`PRAGMA table_info(runs)`).all() as { name: string }[]
   if (!cols.some((c) => c.name === 'sessionId')) {
     db.exec(`ALTER TABLE runs ADD COLUMN sessionId TEXT`)
+  }
+}
+
+// Migration: add the per-outcome breakdown to runs (blocked / not-tested /
+// cancelled) so the History list shows the SAME buckets as a run's detail page.
+// Existing rows default to 0 and self-heal on next detail view (routes/qc.ts).
+{
+  const cols = db.prepare(`PRAGMA table_info(runs)`).all() as { name: string }[]
+  for (const name of ['blockedCount', 'untestedCount', 'cancelledCount']) {
+    if (!cols.some((c) => c.name === name)) {
+      db.exec(`ALTER TABLE runs ADD COLUMN ${name} INTEGER NOT NULL DEFAULT 0`)
+    }
   }
 }
 
@@ -715,8 +730,8 @@ export function listDesignChecks(projectId: string, limit = 50): DesignCheckReco
 // ---------------- runs ----------------
 
 const insertRunStmt = db.prepare(`
-  INSERT INTO runs (id, projectId, ticketId, appUrl, slug, status, passCount, failCount, totalAcs, createdAt, finishedAt)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  INSERT INTO runs (id, projectId, ticketId, appUrl, slug, status, passCount, failCount, blockedCount, untestedCount, cancelledCount, totalAcs, createdAt, finishedAt)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `)
 
 const RUN_SELECT = `
@@ -738,6 +753,9 @@ function rowToSummary(row: Record<string, unknown>): RunSummary {
     status: row.status as RunSummary['status'],
     passCount: Number(row.passCount),
     failCount: Number(row.failCount),
+    blockedCount: Number(row.blockedCount ?? 0),
+    untestedCount: Number(row.untestedCount ?? 0),
+    cancelledCount: Number(row.cancelledCount ?? 0),
     totalAcs: Number(row.totalAcs),
     createdAt: row.createdAt as string,
     finishedAt: (row.finishedAt as string | null) ?? null,
@@ -754,6 +772,9 @@ export function insertRun(summary: RunSummary): void {
     summary.status,
     summary.passCount,
     summary.failCount,
+    summary.blockedCount,
+    summary.untestedCount,
+    summary.cancelledCount,
     summary.totalAcs,
     summary.createdAt,
     summary.finishedAt,
@@ -768,6 +789,9 @@ export function updateRun(id: string, partial: Partial<RunSummary>): void {
     'status',
     'passCount',
     'failCount',
+    'blockedCount',
+    'untestedCount',
+    'cancelledCount',
     'totalAcs',
     'createdAt',
     'finishedAt',

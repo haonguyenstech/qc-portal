@@ -3,6 +3,35 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.9.16 — 2026-07-13
+
+**Report results are always shown, correctly counted, and in sync between History and the run detail**
+
+### Changed
+
+- **Every report now opens with the same three sections — Test Suite Executed, Covered Flow, and
+  Execution Summary — on every run, even a blocked or failed one.** QC reports used to vary in shape,
+  which made them hard to scan and hard for the portal to total up reliably. The report format is now
+  a fixed contract: a "what was tested" header, a flow-coverage table, and a summary table whose
+  percentages add up to 100% with a Pass Rate and Completion Rate. The Execution Summary now lists
+  **Blocked** and **Not Tested** as separate rows (never merged), so each bucket is reported on its own.
+
+### Fixed
+
+- **The "Test execution results" table now appears for any ticket that has generated test cases.**
+  Previously it only showed when the test-case sheet already carried execution columns (Status /
+  Actual result / …); a sheet without them, or a run where the per-case verdicts couldn't be
+  determined, produced no table at all on some machines. The portal now adds the standard execution
+  columns itself and always writes the executed sheet, so the table is consistently there to review.
+- **Run History counts now match the run detail exactly.** History used to fold Blocked cases into
+  "Failed", so a run showing 4 failed / 60 blocked on its detail page appeared as 64 failed in the
+  list. History now shows the full breakdown — Passed · Failed · Blocked · Untested · Cancelled —
+  bucket-for-bucket identical to the detail page, and older runs reconcile themselves automatically
+  the first time they're listed or opened.
+- **Pass rate and totals are computed over the whole suite.** The acceptance-criteria total now
+  reconciles with the report's own Total row (Blocked and Not Tested are counted, not dropped), so
+  the headline percentage reflects how much of everything planned actually passed.
+
 ## 0.9.15 — 2026-07-08
 
 **Windows: canceling a run no longer leaves runs piling up on top of each other**

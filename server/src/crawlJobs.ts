@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { crawlOneTicket, type CrawlResult, type TicketSource } from './crawl.js'
+import { crawlOneTicket, type CrawlResult, type TicketKind, type TicketSource } from './crawl.js'
 import { withClickupToken } from './clickup.js'
 import { withJiraCreds, type JiraCreds } from './jira.js'
 
@@ -14,6 +14,9 @@ export interface CrawlJobItem {
   taskId: string
   displayId: string
   name: string
+  /** Nested folder path (e.g. "PARENT/CHILD") to write under testing/tickets/;
+   *  omitted → flat <displayId>/. */
+  relDir?: string
   status: CrawlItemStatus
   result?: CrawlResult
   error?: string
@@ -38,6 +41,7 @@ interface CrawlJob {
   token: string | undefined // ClickUp token captured at start (per-project .mcp.json)
   jiraCreds: JiraCreds | undefined // Jira creds captured at start (per-project .mcp.json)
   model: string
+  ticketKind: TicketKind | null
   items: CrawlJobItem[]
   logs: CrawlLogLine[]
   total: number
@@ -53,6 +57,7 @@ export interface PublicCrawlJob {
   projectId: string
   status: 'running' | 'done'
   model: string
+  ticketKind: TicketKind | null
   total: number
   doneCount: number
   createdAt: string
@@ -74,6 +79,7 @@ function toPublic(j: CrawlJob): PublicCrawlJob {
     projectId: j.projectId,
     status: j.status,
     model: j.model,
+    ticketKind: j.ticketKind,
     total: j.total,
     doneCount: j.doneCount,
     createdAt: j.createdAt,
@@ -106,6 +112,7 @@ async function runJob(job: CrawlJob): Promise<void> {
     job,
     'info',
     `Crawling ${job.total} ticket${job.total === 1 ? '' : 's'}` +
+      (job.ticketKind ? ` · ${job.ticketKind === 'bug' ? 'bug' : 'feature'} ticket` : '') +
       (job.model && job.model !== 'none' ? ` · summary model ${job.model}` : ' · download only'),
   )
   for (let i = 0; i < job.items.length; i++) {
@@ -119,7 +126,9 @@ async function runJob(job: CrawlJob): Promise<void> {
           taskId: item.taskId,
           rootPath: job.rootPath,
           model: job.model,
+          ticketKind: job.ticketKind,
           source: job.source,
+          relDir: item.relDir,
           onLog: (l) => pushLog(job, l.level, `  ${l.text}`),
         })
       const r = await (job.source === 'jira'
@@ -150,7 +159,8 @@ export function startCrawlJob(opts: {
   token?: string | undefined
   jiraCreds?: JiraCreds | undefined
   model: string
-  tickets: { id: string; displayId: string; name: string }[]
+  ticketKind?: TicketKind | null
+  tickets: { id: string; displayId: string; name: string; relDir?: string }[]
 }): PublicCrawlJob {
   const job: CrawlJob = {
     id: randomUUID(),
@@ -161,10 +171,12 @@ export function startCrawlJob(opts: {
     token: opts.token,
     jiraCreds: opts.jiraCreds,
     model: opts.model,
+    ticketKind: opts.ticketKind === 'bug' || opts.ticketKind === 'feature' ? opts.ticketKind : null,
     items: opts.tickets.map((t) => ({
       taskId: t.id,
       displayId: t.displayId,
       name: t.name,
+      relDir: t.relDir,
       status: 'pending' as const,
     })),
     logs: [],
