@@ -22,9 +22,10 @@ import { Card, CardContent } from '@/components/ui/card'
 import { Textarea } from '@/components/ui/textarea'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
-import { BrainCircuit, BrainCog, Info, Sparkles } from 'lucide-react'
+import { BrainCircuit, BrainCog, Info, KeyRound, Sparkles } from 'lucide-react'
 import { KnowledgeDocs } from '@/components/KnowledgeDocs'
 import { MemoryNotes } from '@/components/MemoryNotes'
+import { AccountsDoc } from '@/components/AccountsDoc'
 import { AiBrainMap } from '@/components/AiBrainMap'
 import {
   getProjectClaudeMd,
@@ -266,7 +267,7 @@ function OpenFolderButton({ projectId }: { projectId: string }) {
   )
 }
 
-const TABS = ['instructions', 'knowledge', 'memory', 'brain'] as const
+const TABS = ['instructions', 'knowledge', 'memory', 'accounts', 'brain'] as const
 type TabValue = (typeof TABS)[number]
 
 /** Small info icon shown inside a tab; hovering it explains what the tab is for.
@@ -412,6 +413,14 @@ export default function InstructionsPage() {
               conventions). Short and long-lived, unlike the larger uploaded Knowledge docs.
             </TabInfo>
           </TabsTrigger>
+          <TabsTrigger value="accounts" className="gap-1.5 rounded-full">
+            <KeyRound className="size-3.5" /> Accounts
+            <TabInfo>
+              The app URLs and test-account logins for this project. Upload a CSV/Excel sheet (or
+              edit by hand) so Claude uses the real environments and credentials for “log in as …”
+              steps instead of inventing placeholders. Use non-production test accounts only.
+            </TabInfo>
+          </TabsTrigger>
           <TabsTrigger value="brain" className="gap-1.5 rounded-full">
             <Sparkles className="size-3.5" /> AI Brain
             <TabInfo>
@@ -441,6 +450,12 @@ export default function InstructionsPage() {
         <TabsContent value="memory">
           {activeProject && (
             <MemoryNotes projectId={activeProjectId} projectName={activeProject.name} />
+          )}
+        </TabsContent>
+
+        <TabsContent value="accounts">
+          {activeProject && (
+            <AccountsDoc projectId={activeProjectId} projectName={activeProject.name} />
           )}
         </TabsContent>
 

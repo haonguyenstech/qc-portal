@@ -25,7 +25,8 @@ function hasMarkdown(dir: string, exclude: string[] = []): boolean {
 function buildBlock(root: string): string {
   const hasKnowledge = hasMarkdown(path.join(testingDirFor(root), 'knowledge'))
   const hasMemory = hasMarkdown(path.join(testingDirFor(root), 'memory'), ['memory.md'])
-  if (!hasKnowledge && !hasMemory) return ''
+  const hasEnvironments = fs.existsSync(path.join(testingDirFor(root), 'environments.md'))
+  if (!hasKnowledge && !hasMemory && !hasEnvironments) return ''
 
   const lines = ['## Project context (managed by QC Portal)', '']
   lines.push(
@@ -33,6 +34,13 @@ function buildBlock(root: string): string {
       'this keeps standing guidance out of this file.',
   )
   lines.push('')
+  if (hasEnvironments) {
+    lines.push(
+      '- **Environments & test accounts** — app URLs and login credentials in ' +
+        '`testing/environments.md`. Use these exact URLs and accounts for any login or ' +
+        'setup step instead of inventing placeholders.',
+    )
+  }
   if (hasKnowledge) {
     lines.push(
       '- **Knowledge** — reference docs in `testing/knowledge/*.md` ' +

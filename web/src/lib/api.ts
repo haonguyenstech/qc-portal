@@ -1075,6 +1075,40 @@ export function openKnowledgeFolder(projectId: string): Promise<{ ok: true; path
   })
 }
 
+// ---- Environments & test accounts (single per-project sheet, testing/environments.md) ----
+
+export interface AccountsDoc {
+  content: string // the sheet's markdown (URLs + test accounts)
+  exists: boolean // false when the project has no sheet yet
+  size: number // bytes on disk
+  savedAt: string | null // ISO mtime, or null when it doesn't exist
+}
+
+/** Read the project's environments & test-accounts sheet. */
+export function getAccounts(projectId: string): Promise<AccountsDoc> {
+  return request(`/api/accounts?projectId=${encodeURIComponent(projectId)}`)
+}
+
+/** Create/overwrite the sheet (blank content clears it). */
+export function saveAccounts(content: string, projectId: string): Promise<AccountsDoc> {
+  return request(`/api/accounts?projectId=${encodeURIComponent(projectId)}`, {
+    method: 'PUT',
+    body: JSON.stringify({ content }),
+  })
+}
+
+/** Remove the sheet. */
+export function deleteAccounts(projectId: string): Promise<{ ok: true }> {
+  return request(`/api/accounts?projectId=${encodeURIComponent(projectId)}`, { method: 'DELETE' })
+}
+
+/** Reveal the project's testing/ folder (where environments.md lives) in the OS file explorer. */
+export function openAccountsFolder(projectId: string): Promise<{ ok: true; path: string }> {
+  return request(`/api/accounts/open?projectId=${encodeURIComponent(projectId)}`, {
+    method: 'POST',
+  })
+}
+
 // ---- Project memory (in-portal-authored fact notes, testing/memory/*.md) ----
 
 export interface MemoryNote {

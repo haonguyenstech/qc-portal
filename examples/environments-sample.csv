@@ -1,0 +1,7 @@
+Environment,URL,Role,Username,Password,Notes
+Staging,https://staging.example.com,Admin,qa.admin@example.com,Test@1234,MFA disabled for QA
+Staging,https://staging.example.com,Manager,qa.manager@example.com,Test@1234,Can approve requests
+Staging,https://staging.example.com,User,qa.user@example.com,Test@1234,Standard end user
+QA,https://qa.example.com,Admin,qa.admin@example.com,Qa@12345,Reset nightly at 00:00
+QA,https://qa.example.com,User,qa.user@example.com,Qa@12345,No billing access
+UAT,https://uat.example.com,User,uat.user@example.com,Uat@6789,Client-facing acceptance env

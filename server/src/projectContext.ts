@@ -2,6 +2,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { knowledgeDir, listDocs } from './knowledgeStore.js'
 import { listNotes, memoryDir, parseNote } from './memoryStore.js'
+import { readAccounts } from './accountsStore.js'
 
 // Reads a project's standing context — durable Memory facts (testing/memory/*.md)
 // and reference Knowledge docs (testing/knowledge/*.md) — and packs it into one
@@ -74,6 +75,17 @@ export function readProjectContext(rootPath: string, opts?: { maxChars?: number 
     return true
   }
 
+  // Environments & test accounts first — login/setup steps depend on these exact URLs
+  // and credentials, so they must never be crowded out by a pile of knowledge docs.
+  try {
+    const acc = readAccounts(rootPath)
+    if (acc.content.trim()) {
+      push('### Environments & Test Accounts', acc.content)
+    }
+  } catch {
+    /* no environments sheet */
+  }
+
   // Memory first — small durable facts carry the most signal per character. Bounded
   // to MEMORY_MAX_CHARS so a pile of long notes can't starve the knowledge docs.
   try {
@@ -127,7 +139,9 @@ export function readProjectContext(rootPath: string, opts?: { maxChars?: number 
     'The following is standing project context the QC engineer maintains (durable Memory ' +
     'facts and reference Knowledge docs). Use it to ground your work in this project\'s real ' +
     'terminology, screens, fields, roles, business rules, and known conventions, so you get ' +
-    'details right instead of guessing. It is authoritative BACKGROUND — it does NOT widen ' +
+    'details right instead of guessing. When it lists environments and test accounts, use ' +
+    'those exact URLs and credentials for any login or setup step instead of inventing ' +
+    'placeholders. It is authoritative BACKGROUND — it does NOT widen ' +
     'scope: only cover what the ticket / feature under test actually requires.'
 
   // When something was clipped, say so INSIDE the block — the model is otherwise

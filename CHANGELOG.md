@@ -3,6 +3,28 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.9.21 — 2026-07-15
+
+**Tell Claude your environments & test accounts — no more `<System account>` placeholders**
+
+### Added
+
+- **New "Accounts" tab on the Instructions page.** Keep your app URLs and test-account logins for
+  the project in one place: upload a CSV/Excel sheet (converted to a table right in your browser) or
+  type it in by hand. A **Download example** button hands you a ready-to-fill template so you know the
+  exact columns — Environment, URL, Role, Username, Password, Notes.
+- **Claude now logs in with your real accounts.** When a test case says "log in as …" — or a QC run
+  needs to reach the app — Claude uses the exact environment URL and test account from your sheet
+  instead of inventing a placeholder. This works for both test-case generation and full QC runs
+  (the sheet is fed into generation directly, and QC runs are pointed at it and told to use it).
+  Runs pick it up the next time they start after you save.
+
+### Changed
+
+- **Use non-production accounts only.** The sheet is stored as plain text in the project
+  (`testing/environments.md`) and read by Claude, so the tab shows a clear warning: put only
+  throwaway QA/staging test accounts there — never real user or production credentials.
+
 ## 0.9.20 — 2026-07-15
 
 **Project import no longer fails with "a .zip file is required" on Windows**

@@ -23,6 +23,7 @@ import { aiRouter } from './routes/ai.js'
 import { templatesRouter } from './routes/templates.js'
 import { knowledgeRouter } from './routes/knowledge.js'
 import { memoryRouter } from './routes/memory.js'
+import { accountsRouter } from './routes/accounts.js'
 import { diagramsRouter } from './routes/diagrams.js'
 import { apiTestsRouter } from './routes/apiTests.js'
 import { versionRouter } from './routes/version.js'
@@ -64,6 +65,7 @@ app.use('/api/ai', aiRouter)
 app.use('/api/templates', templatesRouter)
 app.use('/api/knowledge', knowledgeRouter)
 app.use('/api/memory', memoryRouter)
+app.use('/api/accounts', accountsRouter)
 app.use('/api/diagrams', diagramsRouter)
 app.use('/api/api-tests', apiTestsRouter)
 app.use('/api/version', versionRouter)

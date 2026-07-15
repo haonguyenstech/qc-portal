@@ -157,7 +157,9 @@ export function runQc(
         `Before testing, read this project's standing context if present and apply it ` +
           `throughout the run (real screen/field names, roles, business rules, known gotchas): ` +
           `durable facts in testing/memory/*.md (indexed by testing/memory/MEMORY.md) and ` +
-          `reference docs in testing/knowledge/*.md.`,
+          `reference docs in testing/knowledge/*.md. If testing/environments.md exists, use the ` +
+          `exact app URLs and test-account credentials it lists for every login/setup step ` +
+          `instead of inventing placeholders.`,
         ``,
         `Also read the SOURCE CODE for the feature under test in this repository. Start from any ` +
           `testing/knowledge/source-map-*.md doc — it indexes each connected repo's screens/routes, ` +
