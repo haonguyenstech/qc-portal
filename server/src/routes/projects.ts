@@ -1,4 +1,4 @@
-import { Router } from 'express'
+import express, { Router } from 'express'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -429,67 +429,75 @@ projectsRouter.get('/:id/export', async (req, res) => {
 })
 
 /**
- * Create a project from an exported .zip. The body carries the chosen display
- * name, a parent folder to extract into, and the base64 zip (mirrors the skill
- * upload pattern). The project folder is `<parentPath>/<safeName>`.
+ * Create a project from an exported .zip. The zip is sent as the **raw request
+ * body** (binary) — not base64-in-JSON — so large exports (crawled attachments +
+ * evidence) transfer without the ~33% base64 bloat or JSON body-size fragility
+ * that broke import for real projects. The display name and destination parent
+ * folder travel as query params. The project folder is `<parentPath>/<safeName>`.
  */
-projectsRouter.post('/import', async (req, res) => {
-  const { name, parentPath, zipBase64 } = req.body ?? {}
-  if (typeof name !== 'string' || !name.trim()) {
-    return res.status(400).json({ error: 'name is required' })
-  }
-  if (typeof parentPath !== 'string' || !parentPath.trim()) {
-    return res.status(400).json({ error: 'parentPath is required' })
-  }
-  if (typeof zipBase64 !== 'string' || !zipBase64) {
-    return res.status(400).json({ error: 'a .zip file is required' })
-  }
-
-  const parent = path.resolve(parentPath.trim())
-  if (!isDir(parent)) {
-    return res.status(400).json({ error: `not a folder: ${parent}` })
-  }
-  const safe = safeFolderName(name)
-  if (!safe) return res.status(400).json({ error: 'invalid project name' })
-  const dest = path.join(parent, safe)
-  if (fs.existsSync(dest)) {
-    return res.status(409).json({ error: `a folder named "${safe}" already exists here` })
-  }
-
-  let zip: JSZip
-  try {
-    zip = await JSZip.loadAsync(Buffer.from(zipBase64, 'base64'))
-  } catch {
-    return res.status(400).json({ error: 'could not read that .zip file' })
-  }
-  const files = Object.values(zip.files).filter((f) => !f.dir)
-  if (files.length === 0) return res.status(400).json({ error: 'the .zip is empty' })
-
-  try {
-    fs.mkdirSync(dest, { recursive: true })
-    for (const file of files) {
-      const rel = file.name.replace(/\\/g, '/').replace(/^\/+/, '')
-      if (rel === EXPORT_MANIFEST) continue // manifest is metadata, not a project file
-      if (!rel || rel.split('/').some((seg) => seg === '..' || seg === '')) {
-        throw new Error(`invalid path in zip: ${file.name}`)
-      }
-      const target = path.resolve(dest, rel)
-      if (target !== dest && !target.startsWith(dest + path.sep)) {
-        throw new Error(`path escapes project folder: ${file.name}`)
-      }
-      fs.mkdirSync(path.dirname(target), { recursive: true })
-      fs.writeFileSync(target, await file.async('nodebuffer'))
+projectsRouter.post(
+  '/import',
+  express.raw({ type: () => true, limit: '1gb' }),
+  async (req, res) => {
+    const name = typeof req.query.name === 'string' ? req.query.name : ''
+    const parentPath = typeof req.query.parentPath === 'string' ? req.query.parentPath : ''
+    if (!name.trim()) {
+      return res.status(400).json({ error: 'name is required' })
     }
-  } catch (err) {
-    fs.rmSync(dest, { recursive: true, force: true }) // roll back a partial extract
-    return res
-      .status(500)
-      .json({ error: err instanceof Error ? err.message : 'failed to extract the zip' })
-  }
+    if (!parentPath.trim()) {
+      return res.status(400).json({ error: 'parentPath is required' })
+    }
+    const zipBuffer = Buffer.isBuffer(req.body) ? req.body : null
+    if (!zipBuffer || zipBuffer.length === 0) {
+      return res.status(400).json({ error: 'a .zip file is required' })
+    }
 
-  const project = createProject(name.trim(), dest, false)
-  return res.status(201).json({ ...project, ...rootInfo(project.rootPath) })
-})
+    const parent = path.resolve(parentPath.trim())
+    if (!isDir(parent)) {
+      return res.status(400).json({ error: `not a folder: ${parent}` })
+    }
+    const safe = safeFolderName(name)
+    if (!safe) return res.status(400).json({ error: 'invalid project name' })
+    const dest = path.join(parent, safe)
+    if (fs.existsSync(dest)) {
+      return res.status(409).json({ error: `a folder named "${safe}" already exists here` })
+    }
+
+    let zip: JSZip
+    try {
+      zip = await JSZip.loadAsync(zipBuffer)
+    } catch {
+      return res.status(400).json({ error: 'could not read that .zip file' })
+    }
+    const files = Object.values(zip.files).filter((f) => !f.dir)
+    if (files.length === 0) return res.status(400).json({ error: 'the .zip is empty' })
+
+    try {
+      fs.mkdirSync(dest, { recursive: true })
+      for (const file of files) {
+        const rel = file.name.replace(/\\/g, '/').replace(/^\/+/, '')
+        if (rel === EXPORT_MANIFEST) continue // manifest is metadata, not a project file
+        if (!rel || rel.split('/').some((seg) => seg === '..' || seg === '')) {
+          throw new Error(`invalid path in zip: ${file.name}`)
+        }
+        const target = path.resolve(dest, rel)
+        if (target !== dest && !target.startsWith(dest + path.sep)) {
+          throw new Error(`path escapes project folder: ${file.name}`)
+        }
+        fs.mkdirSync(path.dirname(target), { recursive: true })
+        fs.writeFileSync(target, await file.async('nodebuffer'))
+      }
+    } catch (err) {
+      fs.rmSync(dest, { recursive: true, force: true }) // roll back a partial extract
+      return res
+        .status(500)
+        .json({ error: err instanceof Error ? err.message : 'failed to extract the zip' })
+    }
+
+    const project = createProject(name.trim(), dest, false)
+    return res.status(201).json({ ...project, ...rootInfo(project.rootPath) })
+  },
+)
 
 projectsRouter.put('/:id', (req, res) => {
   const existing = getProject(req.params.id)

@@ -38,12 +38,9 @@ if (interrupted) {
 
 const app = express()
 app.use(cors())
-// Project import ships an entire project folder as a base64 zip in the JSON body,
-// which can be large (crawled ticket attachments + evidence). It needs a much
-// higher cap than everything else, so parse this one path first with its own
-// limit — body-parser marks the body parsed, so the global parser below skips it.
-app.use('/api/projects/import', express.json({ limit: '1gb' }))
 // Larger limit so drag-and-drop skill folders (base64-encoded files) fit.
+// (Project import sends the zip as a raw binary body parsed by its own route
+// middleware, so it isn't affected by this JSON limit.)
 app.use(express.json({ limit: '50mb' }))
 
 app.get('/api/health', (_req, res) => {

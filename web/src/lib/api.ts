@@ -123,13 +123,35 @@ export async function exportProject(id: string, name: string): Promise<void> {
   URL.revokeObjectURL(url)
 }
 
-/** Create a project by extracting an exported .zip into `<parentPath>/<name>`. */
-export function importProject(body: {
+/**
+ * Create a project by extracting an exported .zip into `<parentPath>/<name>`.
+ * The zip is sent as the raw request body (binary) with the name + parent folder
+ * as query params — no base64/JSON, so large exports transfer reliably.
+ */
+export async function importProject(body: {
   name: string
   parentPath: string
-  zipBase64: string
+  file: File | Blob
 }): Promise<Project> {
-  return request('/api/projects/import', { method: 'POST', body: JSON.stringify(body) })
+  const qs = new URLSearchParams({ name: body.name, parentPath: body.parentPath })
+  const res = await fetch(`/api/projects/import?${qs.toString()}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/zip' },
+    body: body.file,
+  })
+  if (!res.ok) {
+    let message = `${res.status} ${res.statusText}`
+    const text = await res.text().catch(() => '')
+    if (text) {
+      try {
+        message = (JSON.parse(text).error as string) || text
+      } catch {
+        message = text
+      }
+    }
+    throw new Error(message)
+  }
+  return res.json() as Promise<Project>
 }
 
 /**

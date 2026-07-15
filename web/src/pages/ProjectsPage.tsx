@@ -1212,20 +1212,6 @@ function AddProjectDialog({ watchAddParam = false }: { watchAddParam?: boolean }
   )
 }
 
-/** Read a File into a base64 string (without the `data:…;base64,` prefix). */
-function fileToBase64(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onload = () => {
-      const result = reader.result as string
-      const comma = result.indexOf(',')
-      resolve(comma >= 0 ? result.slice(comma + 1) : result)
-    }
-    reader.onerror = () => reject(reader.error ?? new Error('Could not read file'))
-    reader.readAsDataURL(file)
-  })
-}
-
 /** Body of the "Import project" dialog — pick a .zip, a parent folder & name. */
 function ImportProjectForm({ onDone }: { onDone: () => void }) {
   const queryClient = useQueryClient()
@@ -1236,8 +1222,10 @@ function ImportProjectForm({ onDone }: { onDone: () => void }) {
 
   const mutation = useMutation({
     mutationFn: async () => {
-      const zipBase64 = await fileToBase64(file!)
-      return importProject({ name: name.trim(), parentPath: parentPath.trim(), zipBase64 })
+      if (!file || file.size === 0) {
+        throw new Error('Choose a non-empty .zip exported from QC Portal.')
+      }
+      return importProject({ name: name.trim(), parentPath: parentPath.trim(), file })
     },
     onSuccess: (p) => {
       toast.success('Project imported', { description: `${p.name} created at ${p.rootPath}.` })

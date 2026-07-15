@@ -3,6 +3,19 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.9.20 — 2026-07-15
+
+**Project import no longer fails with "a .zip file is required" on Windows**
+
+### Fixed
+
+- **Importing a project now works reliably, including on Windows.** Import used to bundle the whole
+  zip into a text-encoded request, which for a real project (crawled ticket attachments + evidence)
+  could quietly arrive empty and fail with *"a .zip file is required"* even though a valid file was
+  chosen. The zip is now uploaded directly as-is, so large projects import dependably. The dialog
+  also refuses an empty/0-byte file up front with a clear message, and any server-side error now
+  comes back as readable text instead of a raw error page.
+
 ## 0.9.19 — 2026-07-15
 
 **Cleaner ClickUp issue cards with real screenshots, clickable evidence on the Issues tab, and reliable project import**
