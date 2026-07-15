@@ -481,6 +481,30 @@ type ParsedIssue = {
   id: string
   title: string
   description: string
+  screenshots: string[]
+}
+
+// Screenshot paths the qc-testing skill writes into an issue body, e.g.
+// `screenshots/ISSUE-ac3-cancel-confirm-dialog.png`. We attach these to the
+// ClickUp subtask as real images instead of leaving a dead local path.
+const SCREENSHOT_TOKEN = /screenshots\/[\w.\-]+\.(?:png|jpe?g|gif|webp)/gi
+
+function extractScreenshots(text: string): string[] {
+  const out = new Set<string>()
+  let m: RegExpExecArray | null
+  SCREENSHOT_TOKEN.lastIndex = 0
+  while ((m = SCREENSHOT_TOKEN.exec(text)) !== null) out.add(m[0])
+  return [...out]
+}
+
+// A body line we drop before sending to ClickUp:
+//  - the redundant "AC:" bullet (the AC is already covered by Steps/Expected)
+//  - the raw "Screenshot: <path>" line (the image is attached to the card instead)
+function isDroppedIssueLine(line: string): boolean {
+  return (
+    /^\s*[-*+]\s*\*{0,2}\s*AC\b/i.test(line) ||
+    /^\s*(?:[-*+]\s*)?\*{0,2}\s*Screenshot\b/i.test(line)
+  )
 }
 
 function stripMd(value: string): string {
@@ -520,11 +544,18 @@ function parseIssues(md: string | null): ParsedIssue[] {
   if (current) sections.push(current)
 
   const fromSections = sections
-    .map((section, index) => ({
-      id: `issue-${index}`,
-      title: section.title.slice(0, 140),
-      description: [section.title, '', section.body.join('\n').trim()].filter(Boolean).join('\n'),
-    }))
+    .map((section, index) => {
+      const screenshots = extractScreenshots(section.body.join('\n'))
+      // Note 1: the title is already the ClickUp task name — don't repeat it in the body.
+      // Notes 2 & 4: drop the "AC:" and raw "Screenshot:" lines.
+      const description = section.body.filter((line) => !isDroppedIssueLine(line)).join('\n').trim()
+      return {
+        id: `issue-${index}`,
+        title: section.title.slice(0, 140),
+        description,
+        screenshots,
+      }
+    })
     .filter((issue) => issue.title.length > 0)
 
   if (fromSections.length > 0) return fromSections.slice(0, 20)
@@ -548,10 +579,12 @@ function parseIssues(md: string | null): ParsedIssue[] {
       .slice(1)
       .map((cells, index) => {
         const title = cells[titleIndex >= 0 ? titleIndex : 0] || `QC issue ${index + 1}`
+        const description = cells.join(' | ')
         return {
           id: `issue-table-${index}`,
           title: title.slice(0, 140),
-          description: cells.join(' | '),
+          description,
+          screenshots: extractScreenshots(description),
         }
       })
       .slice(0, 20)
@@ -563,6 +596,7 @@ function parseIssues(md: string | null): ParsedIssue[] {
       id: 'issue-full',
       title: stripMd(firstContent ?? 'QC issue').slice(0, 140),
       description: md.trim().slice(0, 6000),
+      screenshots: extractScreenshots(md),
     },
   ]
 }
@@ -949,10 +983,12 @@ function IssueClickupPanel({
   issuesMd,
   projectId,
   ticketId,
+  slug,
 }: {
   issuesMd: string | null
   projectId: string
   ticketId: string
+  slug: string | null
 }) {
   const issues = parseIssues(issuesMd)
   const [parentTask, setParentTask] = useState('')
@@ -965,6 +1001,7 @@ function IssueClickupPanel({
       createClickupIssueSubtasks({
         parentTask,
         projectId,
+        slug,
         issues: selectedIssues.map((issue) => ({
           title: issue.title,
           description: [
@@ -972,6 +1009,7 @@ function IssueClickupPanel({
             '',
             `Source: QC run ${ticketId}`,
           ].join('\n'),
+          screenshots: issue.screenshots,
         })),
       }),
     onSuccess: (result) => {
@@ -2094,14 +2132,18 @@ export default function RunDetailPage() {
                 issuesMd={run.issuesMd}
                 projectId={run.projectId}
                 ticketId={run.ticketId}
+                slug={run.slug ?? null}
               />
               {!run.issuesMd && diagnosis ? (
                 <RunFailureNotice diagnosis={diagnosis} onViewLog={() => onTabChange('log')} />
               ) : (
-                <MarkdownView
+                <EvidenceReport
                   md={run.issuesMd}
                   empty="No issues were logged for this run."
                   icon={<AlertCircle className="h-5 w-5" />}
+                  projectId={run.projectId}
+                  slug={filesSlug}
+                  files={filesData?.files ?? []}
                 />
               )}
             </TabsContent>

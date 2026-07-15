@@ -38,6 +38,11 @@ if (interrupted) {
 
 const app = express()
 app.use(cors())
+// Project import ships an entire project folder as a base64 zip in the JSON body,
+// which can be large (crawled ticket attachments + evidence). It needs a much
+// higher cap than everything else, so parse this one path first with its own
+// limit — body-parser marks the body parsed, so the global parser below skips it.
+app.use('/api/projects/import', express.json({ limit: '1gb' }))
 // Larger limit so drag-and-drop skill folders (base64-encoded files) fit.
 app.use(express.json({ limit: '50mb' }))
 
@@ -65,6 +70,21 @@ app.use('/api/memory', memoryRouter)
 app.use('/api/diagrams', diagramsRouter)
 app.use('/api/api-tests', apiTestsRouter)
 app.use('/api/version', versionRouter)
+
+// JSON error handler for /api routes: turn body-parser failures (notably
+// PayloadTooLargeError, which otherwise returns an HTML page) into a clean JSON
+// message the client can surface in a toast.
+app.use('/api', (err: unknown, _req: express.Request, res: express.Response, next: express.NextFunction) => {
+  if (!err) return next()
+  const e = err as { type?: string; status?: number; statusCode?: number; message?: string }
+  if (e.type === 'entity.too.large') {
+    return res
+      .status(413)
+      .json({ error: 'The uploaded file is too large for the server to accept.' })
+  }
+  const status = e.status ?? e.statusCode ?? 500
+  return res.status(status).json({ error: e.message || 'Internal Server Error' })
+})
 
 // In a packaged install the Express server also serves the built web UI so the
 // whole portal is a single process on a single port (no Vite dev server). In dev

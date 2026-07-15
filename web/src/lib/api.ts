@@ -563,8 +563,9 @@ export function clickupSubtasks(parent: string, projectId?: string): Promise<Cli
 
 export function createClickupIssueSubtasks(body: {
   parentTask: string
-  issues: { title: string; description: string }[]
+  issues: { title: string; description: string; screenshots?: string[] }[]
   projectId?: string
+  slug?: string | null
 }): Promise<{ created: ClickupTask[] }> {
   const qs = body.projectId ? `?projectId=${encodeURIComponent(body.projectId)}` : ''
   return request(`/api/clickup/issues/subtasks${qs}`, {

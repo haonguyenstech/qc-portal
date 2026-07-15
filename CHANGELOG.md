@@ -3,6 +3,31 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.9.19 — 2026-07-15
+
+**Cleaner ClickUp issue cards with real screenshots, clickable evidence on the Issues tab, and reliable project import**
+
+### Added
+
+- **Screenshots on the Issues tab are now clickable.** Any `screenshots/…png` reference in a run's
+  Issues tab opens a preview dialog with the actual image, the same way the Report tab already worked —
+  no more hunting for the file on disk.
+
+### Changed
+
+- **ClickUp issue subtasks are tidier and carry the actual screenshot.** When you push QC issues to
+  ClickUp, each subtask no longer repeats its own title inside the description or restates the
+  acceptance-criteria line, and the "Screenshot: …" text path is now uploaded as a **real image
+  attachment** on the card instead of a dead local path. Attaching is best-effort — if an image is
+  missing the subtask is still created.
+
+### Fixed
+
+- **Importing a project no longer fails for real projects.** A project export can be large (crawled
+  ticket attachments and evidence), and import was rejecting anything over ~37 MB with a raw server
+  error page. Import now accepts large project zips, and any remaining error comes back as a clear,
+  readable message instead of a wall of HTML.
+
 ## 0.9.18 — 2026-07-13
 
 **New API Testing page, plus reports render cleanly instead of leaking raw HTML**

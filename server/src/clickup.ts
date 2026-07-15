@@ -360,6 +360,32 @@ export async function createIssueSubtask(input: CreateSubtaskInput): Promise<Cre
   }
 }
 
+/**
+ * Attach a file (e.g. a QC screenshot) to a ClickUp task. Uses the v2
+ * `POST /task/{id}/attachment` multipart endpoint — the boundary is set by
+ * fetch from the FormData body, so we must NOT send our own Content-Type.
+ */
+export async function attachTaskFile(
+  taskId: string,
+  filename: string,
+  bytes: Uint8Array,
+  contentType: string,
+): Promise<void> {
+  const form = new FormData()
+  form.append('attachment', new Blob([bytes as BlobPart], { type: contentType }), filename)
+  const res = await fetch(`${API}/task/${encodeURIComponent(taskId)}/attachment`, {
+    method: 'POST',
+    headers: { Authorization: token() },
+    body: form,
+  })
+  if (!res.ok) {
+    const body = await res.text().catch(() => '')
+    throw Object.assign(new Error(`ClickUp attachment ${res.status}: ${body.slice(0, 200)}`), {
+      status: 502,
+    })
+  }
+}
+
 // ---- Docs (ClickUp API v3) ----
 
 export interface DocRef {

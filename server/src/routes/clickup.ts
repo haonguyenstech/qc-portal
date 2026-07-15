@@ -2,6 +2,7 @@ import { Router } from 'express'
 import fs from 'node:fs'
 import path from 'node:path'
 import {
+  attachTaskFile,
   clickupConfigured,
   createIssueSubtask,
   getDocs,
@@ -14,7 +15,7 @@ import {
   searchTasks,
   withClickupToken,
 } from '../clickup.js'
-import { ticketsDirFor } from '../config.js'
+import { testResultDirFor, ticketsDirFor } from '../config.js'
 import { resolveProject } from '../projectScope.js'
 import { revealFolderNative } from '../folderPicker.js'
 import { crawlOneTicket, safeSegment } from '../crawl.js'
@@ -25,7 +26,34 @@ export const clickupRouter = Router()
 const MAX_CRAWL_JOB_TICKETS = 50
 const parseTicketKind = (v: unknown) => (v === 'feature' || v === 'bug' ? v : null)
 
-type IssuePayload = { title: string; description?: string }
+type IssuePayload = { title: string; description?: string; screenshots?: unknown }
+
+const IMAGE_CONTENT_TYPE: Record<string, string> = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+}
+
+/**
+ * Resolve a screenshot path (relative to a run's output folder) to an absolute
+ * file on disk, path-guarded so it can't escape <root>/testing/test-result/<slug>.
+ * Returns null when the slug/path escapes or the file is missing.
+ */
+function resolveRunScreenshot(rootPath: string, slug: string, rel: string): string | null {
+  const runsDir = testResultDirFor(rootPath)
+  const base = path.resolve(runsDir, slug)
+  if (base !== runsDir && !base.startsWith(runsDir + path.sep)) return null
+  const abs = path.resolve(base, rel)
+  if (!abs.startsWith(base + path.sep)) return null
+  try {
+    if (!fs.statSync(abs).isFile()) return null
+  } catch {
+    return null
+  }
+  return abs
+}
 
 // Resolve the ClickUp token from the request's project (.mcp.json) for the whole
 // request, so the in-app Connect token is used without a server restart. Falls
@@ -129,6 +157,10 @@ clickupRouter.get('/subtasks', async (req, res) => {
 clickupRouter.post('/issues/subtasks', async (req, res) => {
   if (!clickupConfigured()) return res.status(400).json({ error: 'ClickUp is not configured' })
 
+  // Optional — only needed to attach screenshots (resolved from the run's output folder).
+  const project = resolveProject(req)
+  const slug = typeof req.body?.slug === 'string' ? req.body.slug.trim() : ''
+
   const parentTask = typeof req.body?.parentTask === 'string' ? req.body.parentTask.trim() : ''
   const rawIssues = Array.isArray(req.body?.issues) ? req.body.issues : []
   const issues = rawIssues
@@ -142,8 +174,13 @@ clickupRouter.post('/issues/subtasks', async (req, res) => {
         typeof issue.description === 'string' && issue.description.trim()
           ? issue.description.trim().slice(0, 6000)
           : issue.title.trim(),
+      screenshots: Array.isArray(issue.screenshots)
+        ? issue.screenshots
+            .filter((s): s is string => typeof s === 'string' && s.trim().length > 0)
+            .slice(0, 10)
+        : [],
     }))
-    .filter((issue: IssuePayload) => issue.title.length > 0)
+    .filter((issue: { title: string }) => issue.title.length > 0)
     .slice(0, 20)
 
   if (!parentTask) return res.status(400).json({ error: 'parentTask is required' })
@@ -152,13 +189,32 @@ clickupRouter.post('/issues/subtasks', async (req, res) => {
   try {
     const created = []
     for (const issue of issues) {
-      created.push(
-        await createIssueSubtask({
-          parentTask,
-          name: issue.title,
-          description: issue.description,
-        }),
-      )
+      const task = await createIssueSubtask({
+        parentTask,
+        name: issue.title,
+        description: issue.description,
+      })
+      // Best-effort: attach the QC screenshots so the image shows on the ClickUp
+      // card instead of a dead local path. Never fail the subtask over an upload.
+      if (project && slug && issue.screenshots.length) {
+        for (const rel of issue.screenshots) {
+          const abs = resolveRunScreenshot(project.rootPath, slug, rel)
+          if (!abs) continue
+          try {
+            const bytes = fs.readFileSync(abs)
+            const ext = path.extname(abs).toLowerCase()
+            await attachTaskFile(
+              task.id,
+              path.basename(abs),
+              bytes,
+              IMAGE_CONTENT_TYPE[ext] ?? 'application/octet-stream',
+            )
+          } catch {
+            /* best-effort — keep the subtask even if an attachment fails */
+          }
+        }
+      }
+      created.push(task)
     }
     res.status(201).json({ created })
   } catch (err) {
