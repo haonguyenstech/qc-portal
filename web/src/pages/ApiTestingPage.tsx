@@ -4,6 +4,7 @@ import { toast } from 'sonner'
 import {
   AlertCircle,
   AlertTriangle,
+  Boxes,
   CheckCircle2,
   ChevronRight,
   Clipboard,
@@ -12,6 +13,7 @@ import {
   History as HistoryIcon,
   Check,
   Info,
+  KeyRound,
   Loader2,
   Pencil,
   Plus,
@@ -20,6 +22,7 @@ import {
   Sparkles,
   TerminalSquare,
   Trash2,
+  Variable,
   Wand2,
   X,
   XCircle,
@@ -52,13 +55,16 @@ import { parseCurl, toCurl } from '@/lib/curl'
 import { scanResponse, type ApiFinding, type Severity } from '@/lib/apiChecks'
 import {
   aiCheckApi,
+  captureApiVariable,
   clearApiResults,
   deleteApiRequest,
+  getApiEnvironments,
   getApiResult,
   listApiRequests,
   listApiResults,
   openApiTestsFolder,
   renameApiRequest,
+  saveApiEnvironments,
   saveApiRequest,
   saveApiResult,
   sendApiRequest,
@@ -66,10 +72,14 @@ import {
   type ApiAssertion,
   type ApiAssertionType,
   type ApiBodyMode,
+  type ApiCapture,
+  type ApiEnvironment,
+  type ApiEnvironments,
   type ApiKV,
   type ApiRequestDef,
   type ApiResultMeta,
   type ApiSendResult,
+  type ApiVariable,
 } from '@/lib/api'
 
 const METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS']
@@ -152,7 +162,28 @@ function emptyDraft(): Draft {
     body: '',
     assertions: [{ id: 'a0', type: 'status-2xx', target: '', expected: '', enabled: true }],
     aiExpect: '',
+    captures: [],
   }
+}
+
+/** The draft-relevant slice of a saved request (drops name/savedAt) for equality checks. */
+function draftOf(r: ApiRequestDef): Draft {
+  return {
+    method: r.method,
+    url: r.url,
+    query: r.query ?? [],
+    headers: r.headers ?? [],
+    bodyMode: r.bodyMode ?? 'none',
+    body: r.body ?? '',
+    assertions: r.assertions ?? [],
+    aiExpect: r.aiExpect ?? '',
+    captures: r.captures ?? [],
+  }
+}
+
+/** True when a draft is byte-identical to what's already saved — nothing to persist. */
+function sameAsSaved(saved: ApiRequestDef | undefined, draft: Draft): boolean {
+  return !!saved && JSON.stringify(draftOf(saved)) === JSON.stringify(draft)
 }
 
 /** The full URL a request actually hits — base URL plus its enabled query params. */
@@ -631,6 +662,107 @@ function AssertionEditor({
   )
 }
 
+// ---------------------------------------------------------------- Capture editor
+
+function CaptureEditor({
+  rows,
+  onChange,
+  activeEnv,
+}: {
+  rows: ApiCapture[]
+  onChange: (rows: ApiCapture[]) => void
+  activeEnv: string | null
+}) {
+  const update = (i: number, patch: Partial<ApiCapture>) =>
+    onChange(rows.map((r, idx) => (idx === i ? { ...r, ...patch } : r)))
+  const remove = (i: number) => onChange(rows.filter((_, idx) => idx !== i))
+  const nextId = () => {
+    const nums = rows
+      .map((r) => Number.parseInt(r.id.replace(/^c/, ''), 10))
+      .filter((n) => Number.isFinite(n))
+    return `c${(nums.length ? Math.max(...nums) : 0) + 1}`
+  }
+  const add = () =>
+    onChange([...rows, { id: nextId(), jsonPath: '', varName: '', secret: false }])
+
+  return (
+    <div className="space-y-3">
+      <p className="text-xs text-muted-foreground">
+        After each send, pull a value out of the JSON response by path and store it in the{' '}
+        {activeEnv ? (
+          <>
+            <span className="font-medium text-foreground">{activeEnv}</span> environment
+          </>
+        ) : (
+          'active environment'
+        )}{' '}
+        as a variable — reuse it later as <span className="font-mono">{'{{name}}'}</span>. Great for
+        login → token → authenticated calls.
+      </p>
+      {!activeEnv && (
+        <p className="flex items-center gap-1.5 rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-[11px] text-amber-700">
+          <AlertTriangle className="size-3.5 shrink-0" />
+          No active environment — captures will create one named “Default”.
+        </p>
+      )}
+      {rows.length === 0 ? (
+        <div className="rounded-xl border border-dashed border-border/60 px-3 py-6 text-center">
+          <p className="text-xs text-muted-foreground">
+            No captures yet — add one to extract a value from the response into a variable.
+          </p>
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {rows.map((c, i) => (
+            <div key={c.id} className="flex flex-wrap items-center gap-2">
+              <Input
+                value={c.jsonPath}
+                onChange={(e) => update(i, { jsonPath: e.target.value })}
+                placeholder="data.token"
+                className="h-9 min-w-0 flex-1 rounded-lg font-mono text-xs shadow-none"
+              />
+              <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />
+              <Input
+                value={c.varName}
+                onChange={(e) => update(i, { varName: e.target.value })}
+                placeholder="token"
+                className="h-9 min-w-0 flex-1 rounded-lg font-mono text-xs shadow-none"
+              />
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                onClick={() => update(i, { secret: !c.secret })}
+                className={cn(
+                  'size-9 shrink-0 rounded-lg',
+                  c.secret ? 'text-amber-600' : 'text-muted-foreground hover:text-foreground',
+                )}
+                title={c.secret ? 'Stored as a secret (masked)' : 'Store as a secret'}
+                aria-label="Toggle secret"
+              >
+                <KeyRound className="size-4" />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={() => remove(i)}
+                className="size-9 shrink-0 rounded-lg text-muted-foreground hover:text-destructive"
+                aria-label="Remove capture"
+              >
+                <Trash2 className="size-4" />
+              </Button>
+            </div>
+          ))}
+        </div>
+      )}
+      <Button variant="outline" size="sm" onClick={add} className="rounded-full active:scale-[0.98]">
+        <Plus className="size-3.5" />
+        Add capture
+      </Button>
+    </div>
+  )
+}
+
 // ---------------------------------------------------------------- Response view
 
 function ResponseView({ res }: { res: ApiSendResult }) {
@@ -747,6 +879,7 @@ function CurlImportDialog({
       body: parsed.body,
       assertions: [{ id: 'a0', type: 'status-2xx', target: '', expected: '', enabled: true }],
       aiExpect: '',
+      captures: [],
     })
     setText('')
     setError(null)
@@ -792,6 +925,280 @@ function CurlImportDialog({
             className="rounded-full active:scale-[0.98]"
           >
             Import
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+// ---------------------------------------------------------------- Environments
+
+/** Variable rows editor for one environment (key / value / secret). */
+function VariableRows({
+  vars,
+  onChange,
+}: {
+  vars: ApiVariable[]
+  onChange: (vars: ApiVariable[]) => void
+}) {
+  const update = (i: number, patch: Partial<ApiVariable>) =>
+    onChange(vars.map((v, idx) => (idx === i ? { ...v, ...patch } : v)))
+  const remove = (i: number) => onChange(vars.filter((_, idx) => idx !== i))
+  const add = () => onChange([...vars, { key: '', value: '', secret: false }])
+  return (
+    <div className="space-y-2">
+      {vars.length === 0 && (
+        <p className="px-1 py-2 text-xs text-muted-foreground">
+          No variables yet. Add <span className="font-mono">baseUrl</span>,{' '}
+          <span className="font-mono">token</span>, etc.
+        </p>
+      )}
+      {vars.map((v, i) => (
+        <div key={i} className="flex items-center gap-2">
+          <Input
+            value={v.key}
+            onChange={(e) => update(i, { key: e.target.value })}
+            placeholder="name"
+            className="h-9 w-[34%] shrink-0 rounded-lg font-mono text-xs shadow-none"
+          />
+          <Input
+            value={v.value}
+            onChange={(e) => update(i, { value: e.target.value })}
+            type={v.secret ? 'password' : 'text'}
+            placeholder={v.secret && v.hasValue && !v.value ? '•••• stored (blank = keep)' : 'value'}
+            className="h-9 flex-1 rounded-lg font-mono text-xs shadow-none"
+            spellCheck={false}
+            autoComplete="off"
+          />
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            onClick={() => update(i, { secret: !v.secret })}
+            className={cn(
+              'size-9 shrink-0 rounded-lg',
+              v.secret ? 'text-amber-600' : 'text-muted-foreground hover:text-foreground',
+            )}
+            title={v.secret ? 'Secret — masked, stays on the server' : 'Mark as secret'}
+            aria-label="Toggle secret"
+          >
+            <KeyRound className="size-4" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={() => remove(i)}
+            className="size-9 shrink-0 rounded-lg text-muted-foreground hover:text-destructive"
+            aria-label="Remove variable"
+          >
+            <Trash2 className="size-4" />
+          </Button>
+        </div>
+      ))}
+      <Button variant="outline" size="sm" onClick={add} className="rounded-full active:scale-[0.98]">
+        <Plus className="size-3.5" />
+        Add variable
+      </Button>
+    </div>
+  )
+}
+
+const ENV_NAME_RE = /^[\w .-]{1,40}$/
+
+/** Manage named environments + their variables. Mounted only while open (seeds fresh). */
+function ManageEnvironmentsDialog({
+  projectId,
+  initial,
+  onClose,
+}: {
+  projectId: string
+  initial: ApiEnvironments | undefined
+  onClose: () => void
+}) {
+  const queryClient = useQueryClient()
+  const [envs, setEnvs] = useState<ApiEnvironment[]>(() =>
+    (initial?.environments ?? []).map((e) => ({
+      name: e.name,
+      variables: e.variables.map((v) => ({ ...v })),
+    })),
+  )
+  const [active, setActive] = useState<string | null>(() => initial?.active ?? null)
+  const [sel, setSel] = useState<string | null>(
+    () => initial?.active ?? initial?.environments[0]?.name ?? null,
+  )
+  const [newEnvName, setNewEnvName] = useState('')
+
+  const selEnv = envs.find((e) => e.name === sel) ?? null
+
+  const save = useMutation({
+    mutationFn: () => saveApiEnvironments(projectId, { active, environments: envs }),
+    onSuccess: (data) => {
+      queryClient.setQueryData(['api-environments', projectId], data)
+      queryClient.invalidateQueries({ queryKey: ['api-environments', projectId] })
+      toast.success('Environments saved')
+      onClose()
+    },
+    onError: (e) =>
+      toast.error('Could not save environments', {
+        description: e instanceof Error ? e.message : 'Unknown error',
+      }),
+  })
+
+  const addEnv = () => {
+    const name = newEnvName.trim()
+    if (!name) return
+    if (!ENV_NAME_RE.test(name)) {
+      toast.error('Use letters, numbers, spaces, dots or dashes (max 40).')
+      return
+    }
+    if (envs.some((e) => e.name === name)) {
+      toast.error('An environment with that name already exists.')
+      return
+    }
+    setEnvs([...envs, { name, variables: [] }])
+    setSel(name)
+    if (!active) setActive(name)
+    setNewEnvName('')
+  }
+  const deleteEnv = (name: string) => {
+    const next = envs.filter((e) => e.name !== name)
+    setEnvs(next)
+    if (sel === name) setSel(next[0]?.name ?? null)
+    if (active === name) setActive(next[0]?.name ?? null)
+  }
+  const updateVars = (vars: ApiVariable[]) => {
+    if (!selEnv) return
+    setEnvs(envs.map((e) => (e.name === selEnv.name ? { ...e, variables: vars } : e)))
+  }
+
+  return (
+    <Dialog open onOpenChange={(v) => !v && !save.isPending && onClose()}>
+      <DialogContent className="rounded-3xl sm:max-w-2xl">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Boxes className="size-4 text-primary" />
+            Environments
+          </DialogTitle>
+          <DialogDescription>
+            Define <span className="font-mono">{'{{variables}}'}</span> per environment (e.g.
+            staging vs prod). They’re substituted into the request on the server; values marked{' '}
+            <span className="inline-flex items-center gap-0.5 align-middle">
+              <KeyRound className="size-3" /> secret
+            </span>{' '}
+            never come back to the browser.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-[200px_1fr]">
+          {/* Environment list */}
+          <div className="space-y-2">
+            <div className="space-y-1">
+              {envs.length === 0 && (
+                <p className="rounded-xl border border-dashed border-border/60 px-3 py-4 text-center text-xs text-muted-foreground">
+                  No environments yet.
+                </p>
+              )}
+              {envs.map((e) => (
+                <div
+                  key={e.name}
+                  className={cn(
+                    'group flex items-center gap-1.5 rounded-xl border px-2.5 py-2 transition-colors',
+                    sel === e.name
+                      ? 'border-primary/40 bg-primary/5'
+                      : 'border-transparent hover:border-border/60 hover:bg-muted/40',
+                  )}
+                >
+                  <button
+                    type="button"
+                    onClick={() => setSel(e.name)}
+                    className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
+                  >
+                    <span className="min-w-0 truncate text-xs font-medium" title={e.name}>
+                      {e.name}
+                    </span>
+                    {active === e.name && (
+                      <span className="shrink-0 rounded-full bg-emerald-100 px-1.5 py-0.5 text-[9px] font-semibold uppercase text-emerald-700">
+                        active
+                      </span>
+                    )}
+                  </button>
+                  {active !== e.name && (
+                    <button
+                      type="button"
+                      onClick={() => setActive(e.name)}
+                      className="shrink-0 text-[10px] font-medium text-muted-foreground opacity-0 transition-opacity hover:text-foreground group-hover:opacity-100"
+                      title="Set active"
+                    >
+                      set
+                    </button>
+                  )}
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    onClick={() => deleteEnv(e.name)}
+                    className="size-6 shrink-0 rounded-md text-muted-foreground opacity-0 transition-opacity hover:text-destructive group-hover:opacity-100"
+                    aria-label={`Delete ${e.name}`}
+                  >
+                    <Trash2 className="size-3.5" />
+                  </Button>
+                </div>
+              ))}
+            </div>
+            <div className="flex items-center gap-1.5">
+              <Input
+                value={newEnvName}
+                onChange={(e) => setNewEnvName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault()
+                    addEnv()
+                  }
+                }}
+                placeholder="New environment"
+                className="h-8 flex-1 rounded-lg text-xs shadow-none"
+              />
+              <Button
+                variant="outline"
+                size="icon"
+                onClick={addEnv}
+                disabled={!newEnvName.trim()}
+                className="size-8 shrink-0 rounded-lg"
+                aria-label="Add environment"
+              >
+                <Plus className="size-4" />
+              </Button>
+            </div>
+          </div>
+
+          {/* Variables for the selected environment */}
+          <div className="min-w-0">
+            {selEnv ? (
+              <VariableRows vars={selEnv.variables} onChange={updateVars} />
+            ) : (
+              <p className="py-8 text-center text-xs text-muted-foreground">
+                Add or select an environment to edit its variables.
+              </p>
+            )}
+          </div>
+        </div>
+
+        <DialogFooter>
+          <Button
+            variant="ghost"
+            onClick={onClose}
+            disabled={save.isPending}
+            className="rounded-full"
+          >
+            Cancel
+          </Button>
+          <Button
+            onClick={() => save.mutate()}
+            disabled={save.isPending}
+            className="gap-1.5 rounded-full active:scale-[0.98]"
+          >
+            {save.isPending ? <Loader2 className="size-4 animate-spin" /> : <Check className="size-4" />}
+            Save
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -1085,6 +1492,7 @@ function ApiTesting({ projectId }: { projectId: string }) {
   const [res, setRes] = useState<ApiSendResult | null>(null)
   const [aiResult, setAiResult] = useState<AiCheckResult | null>(null)
   const [curlOpen, setCurlOpen] = useState(false)
+  const [manageEnvOpen, setManageEnvOpen] = useState(false)
   // Inline rename of a saved request: the name being renamed + the edited value.
   const [renaming, setRenaming] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
@@ -1109,11 +1517,37 @@ function ApiTesting({ projectId }: { projectId: string }) {
     enabled: !!projectId,
   })
 
+  // Named {{variable}} environments (values substituted server-side at send time).
+  const { data: environments } = useQuery({
+    queryKey: ['api-environments', projectId],
+    queryFn: () => getApiEnvironments(projectId),
+    enabled: !!projectId,
+  })
+  const activeEnv = environments?.active ?? null
+
+  // Switch the active environment (send the current masked set back — the server
+  // preserves secret values that arrive blank).
+  const setActiveEnv = useMutation({
+    mutationFn: (name: string | null) =>
+      saveApiEnvironments(projectId, {
+        active: name,
+        environments: environments?.environments ?? [],
+      }),
+    onSuccess: (data) => queryClient.setQueryData(['api-environments', projectId], data),
+    onError: (e) =>
+      toast.error('Could not switch environment', {
+        description: e instanceof Error ? e.message : 'Unknown error',
+      }),
+  })
+
   // Auto-save: whenever the open (selected) request changes, persist the edits to
   // its file. Debounced so typing a URL/body doesn't hammer the server. New (unsaved)
   // requests aren't auto-created here — they're saved on the first Send.
   useEffect(() => {
     if (!selected) return
+    // Skip the write when the draft already matches the saved file — otherwise every
+    // load/select would rewrite the request byte-identically and churn its mtime.
+    if (sameAsSaved((saved ?? []).find((s) => s.name === selected), draft)) return
     const t = setTimeout(() => {
       saveApiRequest(projectId, selected, draft)
         .then(() => queryClient.invalidateQueries({ queryKey: ['api-requests', projectId] }))
@@ -1122,7 +1556,7 @@ function ApiTesting({ projectId }: { projectId: string }) {
         })
     }, 700)
     return () => clearTimeout(t)
-  }, [draft, selected, projectId, queryClient])
+  }, [draft, selected, projectId, queryClient, saved])
 
   // AI check — judge a response against the plain-language expectation. Takes the
   // response as an argument (not from state) so it can run straight from send's
@@ -1157,9 +1591,50 @@ function ApiTesting({ projectId }: { projectId: string }) {
     aiCheck.mutate({ response, expect: expect.trim() })
   }
 
+  // Response → environment variable capture (request chaining). Evaluates each rule's
+  // JSON-path against the response body and upserts the value into the active env.
+  const runCaptures = (r: ApiSendResult, captures: ApiCapture[]) => {
+    const usable = captures.filter((c) => c.jsonPath.trim() && c.varName.trim())
+    if (!r.ok || !usable.length) return
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(r.bodyText ?? '')
+    } catch {
+      toast.error('Capture skipped', { description: 'The response body is not valid JSON.' })
+      return
+    }
+    const done: string[] = []
+    const tasks: Promise<unknown>[] = []
+    for (const c of usable) {
+      const val = getJsonPath(parsed, c.jsonPath.trim())
+      if (val === undefined) continue
+      const value = typeof val === 'string' ? val : JSON.stringify(val)
+      done.push(c.varName.trim())
+      tasks.push(
+        captureApiVariable(projectId, {
+          env: activeEnv ?? undefined,
+          key: c.varName.trim(),
+          value,
+          secret: c.secret,
+        }),
+      )
+    }
+    if (!tasks.length) {
+      toast.error('Nothing captured', { description: 'No configured path matched the response.' })
+      return
+    }
+    Promise.all(tasks)
+      .then(() => {
+        queryClient.invalidateQueries({ queryKey: ['api-environments', projectId] })
+        toast.success(`Captured ${done.join(', ')}`)
+      })
+      .catch(() => toast.error('Could not store captured variable(s)'))
+  }
+
   const send = useMutation({
     mutationFn: (vars: { name: string; req: Draft }) =>
       sendApiRequest({
+        projectId,
         method: vars.req.method,
         url: vars.req.url,
         query: vars.req.query,
@@ -1172,6 +1647,8 @@ function ApiTesting({ projectId }: { projectId: string }) {
       // As soon as the response lands, auto-run the AI check against the request's
       // expectation (if any) — the AI runs after Send, never before it.
       runAiCheck(r, vars.req.aiExpect)
+      // Then apply any response captures into the active environment.
+      runCaptures(r, vars.req.captures)
       // Store the outcome as evidence under the request's history, with the
       // client-computed assertion + QC-scan summaries.
       if (!vars.name) return
@@ -1289,6 +1766,7 @@ function ApiTesting({ projectId }: { projectId: string }) {
           ? item.assertions
           : [{ id: 'a0', type: 'status-2xx', target: '', expected: '', enabled: true }],
       aiExpect: item.aiExpect ?? '',
+      captures: item.captures ?? [],
     })
     setSelected(item.name)
     setRes(null)
@@ -1338,6 +1816,9 @@ function ApiTesting({ projectId }: { projectId: string }) {
     try {
       const rec = await getApiResult(projectId, selected, id)
       setRes(rec.result)
+      // The stored AI verdict isn't part of the record, so clear any lingering one —
+      // a stale "AI: pass" badge next to an older response is misleading.
+      setAiResult(null)
     } catch (e) {
       toast.error('Could not load result', {
         description: e instanceof Error ? e.message : 'Unknown error',
@@ -1561,6 +2042,48 @@ function ApiTesting({ projectId }: { projectId: string }) {
 
         {/* Request builder + response */}
         <div className="min-w-0 space-y-4">
+          {/* Environment bar — the active {{variable}} set for this request. */}
+          <div className="flex flex-wrap items-center gap-2 rounded-xl border border-border/60 bg-muted/30 px-3 py-2">
+            <span className="inline-flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+              <Boxes className="size-3.5" />
+              Environment
+            </span>
+            {(environments?.environments.length ?? 0) > 0 ? (
+              <Select
+                value={activeEnv ?? '__none__'}
+                onValueChange={(v) => setActiveEnv.mutate(v === '__none__' ? null : v)}
+              >
+                <SelectTrigger className="h-8 w-[180px] rounded-lg text-xs shadow-none">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__none__" className="text-xs">
+                    No environment
+                  </SelectItem>
+                  {environments!.environments.map((e) => (
+                    <SelectItem key={e.name} value={e.name} className="text-xs">
+                      {e.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            ) : (
+              <span className="text-xs text-muted-foreground">None yet</span>
+            )}
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setManageEnvOpen(true)}
+              className="h-8 gap-1.5 rounded-full active:scale-[0.98]"
+            >
+              <Pencil className="size-3.5" />
+              Manage
+            </Button>
+            <span className="ml-auto hidden items-center gap-1 text-[11px] text-muted-foreground sm:inline-flex">
+              Use <span className="font-mono">{'{{var}}'}</span> in the URL, params, headers or body.
+            </span>
+          </div>
+
           {/* URL bar */}
           <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
             <div className="flex flex-1 items-center gap-2 rounded-xl border border-border/60 bg-card p-1.5 shadow-none">
@@ -1632,6 +2155,11 @@ function ApiTesting({ projectId }: { projectId: string }) {
                   {draft.assertions.filter((a) => a.enabled).length > 0 &&
                     ` (${draft.assertions.filter((a) => a.enabled).length})`}
                 </TabsTrigger>
+                <TabsTrigger value="capture" className="gap-1 rounded-full text-xs">
+                  <Variable className="size-3" />
+                  Capture
+                  {draft.captures.length > 0 && ` (${draft.captures.length})`}
+                </TabsTrigger>
                 <TabsTrigger value="ai" className="gap-1 rounded-full text-xs">
                   <Sparkles className="size-3" />
                   AI check
@@ -1693,6 +2221,13 @@ function ApiTesting({ projectId }: { projectId: string }) {
                   rows={draft.assertions}
                   onChange={(assertions) => patch({ assertions })}
                   results={results}
+                />
+              </TabsContent>
+              <TabsContent value="capture" className="pt-4">
+                <CaptureEditor
+                  rows={draft.captures}
+                  onChange={(captures) => patch({ captures })}
+                  activeEnv={activeEnv}
                 />
               </TabsContent>
               <TabsContent value="ai" className="space-y-3 pt-4">
@@ -1860,6 +2395,14 @@ function ApiTesting({ projectId }: { projectId: string }) {
           setAiResult(null)
         }}
       />
+
+      {manageEnvOpen && (
+        <ManageEnvironmentsDialog
+          projectId={projectId}
+          initial={environments}
+          onClose={() => setManageEnvOpen(false)}
+        />
+      )}
 
       <Dialog
         open={!!deleting}

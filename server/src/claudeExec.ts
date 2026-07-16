@@ -68,7 +68,13 @@ function writeStdin(child: { stdin?: NodeJS.WritableStream | null }, input?: str
 export function runClaude(
   args: string[],
   timeoutMs: number,
-  opts?: { cwd?: string; usageSource?: string; model?: string | null; input?: string },
+  opts?: {
+    cwd?: string
+    usageSource?: string
+    model?: string | null
+    input?: string
+    signal?: AbortSignal
+  },
 ): Promise<ClaudeResult> {
   return new Promise((resolve) => {
     let stdout = ''
@@ -94,6 +100,24 @@ export function runClaude(
       }
       resolve({ code: null, stdout, stderr, timedOut: true })
     }, timeoutMs)
+
+    // Caller-driven cancellation (e.g. the HTTP request was aborted): kill the child
+    // so a headless run doesn't keep burning tokens after nobody's listening.
+    const onAbort = () => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      try {
+        child.kill()
+      } catch {
+        /* already closed */
+      }
+      resolve({ code: null, stdout, stderr, timedOut: false })
+    }
+    if (opts?.signal) {
+      if (opts.signal.aborted) onAbort()
+      else opts.signal.addEventListener('abort', onAbort, { once: true })
+    }
 
     child.stdout?.on('data', (d) => (stdout += String(d)))
     child.stderr?.on('data', (d) => (stderr += String(d)))
@@ -151,6 +175,14 @@ export function runClaudeStream(
     model?: string | null
     cwd?: string
     input?: string
+    // Called with each incremental text chunk when the CLI is run with
+    // `--include-partial-messages` (stream_event / content_block_delta). Lets a caller
+    // surface the assistant's output token-by-token; no-op otherwise.
+    onDelta?: (text: string) => void
+    // When true, the full assistant text block isn't emitted via onLog (a caller that
+    // already consumes it through onDelta doesn't want it duplicated into the log).
+    // Tool-use and other events are still logged.
+    suppressAssistantText?: boolean
   },
 ): Promise<StreamResult> {
   return new Promise((resolve) => {
@@ -243,13 +275,29 @@ export function runClaudeStream(
     })
 
     function handleLine(line: string): void {
-      let msg: { type?: string; subtype?: string; model?: string; result?: string; is_error?: boolean; message?: { content?: { type?: string; text?: string; name?: string }[] } }
+      let msg: {
+        type?: string
+        subtype?: string
+        model?: string
+        result?: string
+        is_error?: boolean
+        message?: { content?: { type?: string; text?: string; name?: string }[] }
+        event?: { type?: string; delta?: { type?: string; text?: string } }
+      }
       try {
         msg = JSON.parse(line)
       } catch {
         return // ignore non-JSON noise
       }
       switch (msg.type) {
+        case 'stream_event': {
+          // Partial streaming (--include-partial-messages): forward text deltas live.
+          const ev = msg.event
+          if (ev?.type === 'content_block_delta' && ev.delta?.type === 'text_delta' && ev.delta.text) {
+            opts?.onDelta?.(ev.delta.text)
+          }
+          return
+        }
         case 'system':
           if (msg.subtype === 'init') {
             onLog({ level: 'info', text: `Claude session started — model ${msg.model ?? 'default'}` })
@@ -258,7 +306,9 @@ export function runClaudeStream(
         case 'assistant': {
           for (const block of msg.message?.content ?? []) {
             if (block.type === 'text' && block.text?.trim()) {
-              for (const l of block.text.trim().split('\n')) onLog({ level: 'info', text: l })
+              if (!opts?.suppressAssistantText) {
+                for (const l of block.text.trim().split('\n')) onLog({ level: 'info', text: l })
+              }
             } else if (block.type === 'tool_use' && block.name) {
               onLog({ level: 'info', text: `⚙ ${block.name}` })
             }

@@ -26,6 +26,7 @@ import { memoryRouter } from './routes/memory.js'
 import { accountsRouter } from './routes/accounts.js'
 import { diagramsRouter } from './routes/diagrams.js'
 import { apiTestsRouter } from './routes/apiTests.js'
+import { prototypeRouter } from './routes/prototype.js'
 import { versionRouter } from './routes/version.js'
 
 // Optionally seed a default project from QC_REPO_ROOT (no-op if unset / already seeded).
@@ -68,6 +69,7 @@ app.use('/api/memory', memoryRouter)
 app.use('/api/accounts', accountsRouter)
 app.use('/api/diagrams', diagramsRouter)
 app.use('/api/api-tests', apiTestsRouter)
+app.use('/api/prototype', prototypeRouter)
 app.use('/api/version', versionRouter)
 
 // JSON error handler for /api routes: turn body-parser failures (notably

@@ -54,6 +54,16 @@ interface ApiAssertion {
 
 type BodyMode = 'none' | 'json' | 'text'
 
+// A rule that, after a send, pulls a value out of the JSON response body (by dotted
+// path) and stores it into the active environment as a variable — request chaining
+// (e.g. capture `data.token` from login → reuse as {{token}} in later requests).
+interface ApiCapture {
+  id: string
+  jsonPath: string
+  varName: string
+  secret: boolean
+}
+
 interface ApiRequestDef {
   name: string
   method: string
@@ -65,6 +75,7 @@ interface ApiRequestDef {
   assertions: ApiAssertion[]
   // Free-text, natural-language expectation the AI check evaluates the response against.
   aiExpect: string
+  captures: ApiCapture[]
   savedAt?: string
 }
 
@@ -115,6 +126,19 @@ function toAssertions(v: unknown): ApiAssertion[] {
     .slice(0, 50)
 }
 
+function toCaptures(v: unknown): ApiCapture[] {
+  if (!Array.isArray(v)) return []
+  return v
+    .filter((r): r is Record<string, unknown> => !!r && typeof r === 'object')
+    .map((r, i) => ({
+      id: typeof r.id === 'string' && r.id ? r.id : `c${i}`,
+      jsonPath: typeof r.jsonPath === 'string' ? r.jsonPath.slice(0, 200) : '',
+      varName: typeof r.varName === 'string' ? r.varName.slice(0, 100) : '',
+      secret: r.secret === true,
+    }))
+    .slice(0, 20)
+}
+
 function toRequestDef(name: string, b: Record<string, unknown>): ApiRequestDef {
   const method = typeof b.method === 'string' ? b.method.toUpperCase() : 'GET'
   const bodyMode: BodyMode =
@@ -129,7 +153,174 @@ function toRequestDef(name: string, b: Record<string, unknown>): ApiRequestDef {
     body: typeof b.body === 'string' ? b.body.slice(0, MAX_BODY_BYTES) : '',
     assertions: toAssertions(b.assertions),
     aiExpect: typeof b.aiExpect === 'string' ? b.aiExpect.slice(0, 4000) : '',
+    captures: toCaptures(b.captures),
   }
+}
+
+// ---------------------------------------------------------------- environments
+
+// Named environments hold {{variable}} values (e.g. baseUrl, token) that are
+// substituted into a request SERVER-SIDE at send time. Values flagged `secret` are
+// stored on disk but never echoed back to the browser and never appear in the
+// response's requestUrl — the browser only ever sends placeholders.
+interface ApiVariable {
+  key: string
+  value: string
+  secret: boolean
+}
+interface ApiEnvironment {
+  name: string
+  variables: ApiVariable[]
+}
+interface EnvironmentsFile {
+  active: string | null
+  environments: ApiEnvironment[]
+}
+
+const ENV_FILE = '_environments.json'
+const VAR_KEY_RE = /^[\w.-]{1,100}$/
+const ENV_NAME_RE = /^[\w .-]{1,40}$/
+const MAX_ENVS = 20
+const MAX_VARS = 100
+const MAX_VAR_VALUE = 8192
+
+function toVariable(v: unknown): ApiVariable | null {
+  if (!v || typeof v !== 'object') return null
+  const r = v as Record<string, unknown>
+  const key = typeof r.key === 'string' ? r.key.trim() : ''
+  if (!VAR_KEY_RE.test(key)) return null
+  return {
+    key,
+    value: typeof r.value === 'string' ? r.value.slice(0, MAX_VAR_VALUE) : '',
+    secret: r.secret === true,
+  }
+}
+
+function toEnvironment(v: unknown): ApiEnvironment | null {
+  if (!v || typeof v !== 'object') return null
+  const r = v as Record<string, unknown>
+  const name = typeof r.name === 'string' ? r.name.trim() : ''
+  if (!ENV_NAME_RE.test(name)) return null
+  const byKey = new Map<string, ApiVariable>()
+  if (Array.isArray(r.variables)) {
+    for (const raw of r.variables.slice(0, MAX_VARS * 2)) {
+      const parsed = toVariable(raw)
+      if (parsed) byKey.set(parsed.key, parsed) // last write wins for a duplicate key
+    }
+  }
+  return { name, variables: [...byKey.values()].slice(0, MAX_VARS) }
+}
+
+function toEnvironmentsFile(v: unknown): EnvironmentsFile {
+  const r = (v && typeof v === 'object' ? v : {}) as Record<string, unknown>
+  const byName = new Map<string, ApiEnvironment>()
+  if (Array.isArray(r.environments)) {
+    for (const raw of r.environments.slice(0, MAX_ENVS * 2)) {
+      const parsed = toEnvironment(raw)
+      if (parsed) byName.set(parsed.name, parsed)
+    }
+  }
+  const environments = [...byName.values()].slice(0, MAX_ENVS)
+  const active =
+    typeof r.active === 'string' && environments.some((e) => e.name === r.active)
+      ? r.active
+      : (environments[0]?.name ?? null)
+  return { active, environments }
+}
+
+function environmentsFilePath(root: string): string {
+  return path.join(collectionDir(root), ENV_FILE)
+}
+
+function readEnvironments(root: string): EnvironmentsFile {
+  try {
+    return toEnvironmentsFile(JSON.parse(fs.readFileSync(environmentsFilePath(root), 'utf8')))
+  } catch {
+    return { active: null, environments: [] }
+  }
+}
+
+function writeEnvironments(root: string, file: EnvironmentsFile): void {
+  fs.mkdirSync(collectionDir(root), { recursive: true })
+  fs.writeFileSync(environmentsFilePath(root), JSON.stringify(file, null, 2), 'utf8')
+}
+
+/** Public (browser-facing) env shape: secret values are blanked, with a hasValue flag. */
+function maskEnvironments(file: EnvironmentsFile) {
+  return {
+    active: file.active,
+    environments: file.environments.map((e) => ({
+      name: e.name,
+      variables: e.variables.map((v) => ({
+        key: v.key,
+        value: v.secret ? '' : v.value,
+        secret: v.secret,
+        hasValue: v.secret ? v.value.length > 0 : undefined,
+      })),
+    })),
+  }
+}
+
+/**
+ * A secret variable submitted with an empty value means "unchanged" (the UI never
+ * received the real value), so carry the stored value forward. To clear a secret the
+ * user deletes the row.
+ */
+function mergeSecrets(incoming: EnvironmentsFile, existing: EnvironmentsFile): EnvironmentsFile {
+  for (const env of incoming.environments) {
+    const prev = existing.environments.find((e) => e.name === env.name)
+    if (!prev) continue
+    for (const v of env.variables) {
+      if (v.secret && v.value === '') {
+        const prevVar = prev.variables.find((p) => p.key === v.key)
+        if (prevVar && prevVar.value) v.value = prevVar.value
+      }
+    }
+  }
+  return incoming
+}
+
+/** The active environment's variables as key → {value, secret}. Empty when none. */
+function resolveActiveVars(root: string): Map<string, { value: string; secret: boolean }> {
+  const file = readEnvironments(root)
+  const env = file.environments.find((e) => e.name === file.active)
+  const map = new Map<string, { value: string; secret: boolean }>()
+  if (env) for (const v of env.variables) map.set(v.key, { value: v.value, secret: v.secret })
+  return map
+}
+
+const VAR_TOKEN_RE = /\{\{\s*([\w.-]+)\s*\}\}/g
+
+/**
+ * Substitute {{key}} tokens using the given vars.
+ *  - `display` mode keeps secret vars as their {{placeholder}} so real values never
+ *    surface in anything echoed back to the browser.
+ *  - Unknown keys are left as-is and reported in `unresolved` so callers can flag them.
+ */
+function substituteVars(
+  input: string,
+  vars: Map<string, { value: string; secret: boolean }>,
+  opts: { display?: boolean } = {},
+): { out: string; unresolved: Set<string> } {
+  const unresolved = new Set<string>()
+  const out = input.replace(VAR_TOKEN_RE, (m, key: string) => {
+    const v = vars.get(key)
+    if (!v) {
+      unresolved.add(key)
+      return m
+    }
+    return opts.display && v.secret ? m : v.value
+  })
+  return { out, unresolved }
+}
+
+/** Put {{key}} back wherever a secret value appears — for anything echoed to the UI. */
+function maskSecrets(s: string, vars: Map<string, { value: string; secret: boolean }>): string {
+  let out = s
+  for (const [key, v] of vars) {
+    if (v.secret && v.value) out = out.split(v.value).join(`{{${key}}}`)
+  }
+  return out
 }
 
 // ---------------------------------------------------------------- send (proxy)
@@ -140,25 +331,48 @@ apiTestsRouter.post('/send', async (req, res) => {
   if (!HTTP_METHODS.has(method)) {
     return res.status(400).json({ error: `unsupported method: ${method}` })
   }
-  const rawUrl = typeof body.url === 'string' ? body.url.trim() : ''
+  // Resolve the active environment's {{variables}} SERVER-SIDE — the browser only ever
+  // sends placeholders, so secret values (tokens/passwords) never travel to the client.
+  const project = resolveProject(req)
+  const vars = project
+    ? resolveActiveVars(project.rootPath)
+    : new Map<string, { value: string; secret: boolean }>()
+
+  const rawUrlInput = typeof body.url === 'string' ? body.url.trim() : ''
+  const urlSub = substituteVars(rawUrlInput, vars)
+  // Unknown {{tokens}} in the URL/query break routing — fail loud with the names.
+  const unresolved = new Set(urlSub.unresolved)
   let url: URL
   try {
-    url = new URL(rawUrl)
+    url = new URL(urlSub.out)
     if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new Error('bad protocol')
   } catch {
     return res.status(400).json({ error: 'Enter a full http:// or https:// URL.' })
   }
 
-  // Append enabled query params onto whatever the URL already carries.
+  // Append enabled query params (both key and value support {{variables}}).
   for (const p of toKV(body.query)) {
-    if (p.enabled && p.key) url.searchParams.append(p.key, p.value)
+    if (!p.enabled || !p.key) continue
+    const k = substituteVars(p.key, vars)
+    const v = substituteVars(p.value, vars)
+    k.unresolved.forEach((u) => unresolved.add(u))
+    v.unresolved.forEach((u) => unresolved.add(u))
+    url.searchParams.append(k.out, v.out)
+  }
+
+  if (unresolved.size) {
+    return res.status(400).json({
+      error: `Unknown variable(s): ${[...unresolved].map((k) => `{{${k}}}`).join(', ')} — define them in the active environment.`,
+    })
   }
 
   const headers = new Headers()
   for (const h of toKV(body.headers)) {
     if (h.enabled && h.key) {
       try {
-        headers.set(h.key, h.value)
+        // append, not set — a request may legitimately carry repeated header keys
+        // (e.g. multiple Cookie / X-Forwarded-For rows); set() would drop all but one.
+        headers.append(substituteVars(h.key, vars).out, substituteVars(h.value, vars).out)
       } catch {
         /* skip an invalid header name rather than failing the whole request */
       }
@@ -169,11 +383,14 @@ apiTestsRouter.post('/send', async (req, res) => {
     body.bodyMode === 'json' || body.bodyMode === 'text' ? (body.bodyMode as BodyMode) : 'none'
   let sendBody: string | undefined
   if (method !== 'GET' && method !== 'HEAD' && bodyMode !== 'none') {
-    sendBody = typeof body.body === 'string' ? body.body : ''
+    sendBody = typeof body.body === 'string' ? substituteVars(body.body, vars).out : ''
     if (bodyMode === 'json' && !headers.has('content-type')) {
       headers.set('content-type', 'application/json')
     }
   }
+
+  // What we echo back / store must never contain a secret value — re-mask them.
+  const displayUrl = maskSecrets(url.toString(), vars)
 
   const timeoutMs = Math.min(
     MAX_TIMEOUT,
@@ -197,6 +414,12 @@ apiTestsRouter.post('/send', async (req, res) => {
     resp.headers.forEach((value, key) => {
       respHeaders[key] = value
     })
+    // forEach comma-joins repeated headers, which mangles Set-Cookie (cookie values
+    // contain commas, e.g. `Expires=Wed, 09 Jun ...`). Rebuild it from the discrete
+    // cookies, newline-joined, so downstream cookie-flag checks parse each one.
+    const setCookies =
+      typeof resp.headers.getSetCookie === 'function' ? resp.headers.getSetCookie() : []
+    if (setCookies.length) respHeaders['set-cookie'] = setCookies.join('\n')
     return res.json({
       ok: true,
       status: resp.status,
@@ -207,7 +430,7 @@ apiTestsRouter.post('/send', async (req, res) => {
       sizeBytes: buf.length,
       truncated,
       timeMs: Date.now() - started,
-      requestUrl: url.toString(),
+      requestUrl: displayUrl,
       method,
     })
   } catch (err) {
@@ -229,7 +452,7 @@ apiTestsRouter.post('/send', async (req, res) => {
       ok: false,
       error,
       timeMs: Date.now() - started,
-      requestUrl: url.toString(),
+      requestUrl: displayUrl,
       method,
     })
   } finally {
@@ -357,12 +580,74 @@ apiTestsRouter.post('/ai-check', async (req, res) => {
   })
 })
 
+// ---------------------------------------------------------------- environments (routes)
+// Registered BEFORE the `/:name` collection routes so `PUT /environments` isn't
+// captured as a saved-request name.
+
+/** GET /api/api-tests/environments — active env + all envs (secret values masked). */
+apiTestsRouter.get('/environments', (req, res) => {
+  const project = resolveProject(req)
+  if (!project) return res.status(400).json({ error: 'project not found' })
+  res.json(maskEnvironments(readEnvironments(project.rootPath)))
+})
+
+/** PUT /api/api-tests/environments — replace the env set (secret values preserved). */
+apiTestsRouter.put('/environments', (req, res) => {
+  const project = resolveProject(req)
+  if (!project) return res.status(400).json({ error: 'project not found' })
+  const existing = readEnvironments(project.rootPath)
+  const merged = mergeSecrets(toEnvironmentsFile(req.body ?? {}), existing)
+  writeEnvironments(project.rootPath, merged)
+  res.json(maskEnvironments(merged))
+})
+
+/**
+ * POST /api/api-tests/environments/capture — upsert one variable from a response
+ * capture. Targets the named env, else the active env, else a new "Default".
+ */
+apiTestsRouter.post('/environments/capture', (req, res) => {
+  const project = resolveProject(req)
+  if (!project) return res.status(400).json({ error: 'project not found' })
+  const b = (req.body ?? {}) as Record<string, unknown>
+  const key = typeof b.key === 'string' ? b.key.trim() : ''
+  if (!VAR_KEY_RE.test(key)) return res.status(400).json({ error: 'invalid variable name' })
+  const value = typeof b.value === 'string' ? b.value.slice(0, MAX_VAR_VALUE) : ''
+  const secret = b.secret === true
+  const wantEnv = typeof b.env === 'string' && b.env.trim() ? b.env.trim() : ''
+
+  const file = readEnvironments(project.rootPath)
+  let targetName = wantEnv || file.active || 'Default'
+  if (!ENV_NAME_RE.test(targetName)) targetName = 'Default'
+  let env = file.environments.find((e) => e.name === targetName)
+  if (!env) {
+    if (file.environments.length >= MAX_ENVS) {
+      return res.status(422).json({ error: 'environment limit reached' })
+    }
+    env = { name: targetName, variables: [] }
+    file.environments.push(env)
+  }
+  const existingVar = env.variables.find((v) => v.key === key)
+  if (existingVar) {
+    existingVar.value = value
+    existingVar.secret = secret || existingVar.secret
+  } else {
+    if (env.variables.length >= MAX_VARS) {
+      return res.status(422).json({ error: 'variable limit reached' })
+    }
+    env.variables.push({ key, value, secret })
+  }
+  if (!file.active) file.active = targetName
+  writeEnvironments(project.rootPath, file)
+  res.json({ ok: true, env: targetName, key })
+})
+
 // ---------------------------------------------------------------- collection (disk)
 
 const NAME_RE = /^[\w .-]{1,60}$/
 const MAX_ITEM_BYTES = 256 * 1024 // a saved request is small metadata, not an asset
-// `results` is the per-request run-history subfolder — reserve it as a request name.
-const RESERVED_NAMES = new Set(['results'])
+// `results` is the per-request run-history subfolder, `_environments` is the env
+// store — reserve both so a saved request can't clobber them.
+const RESERVED_NAMES = new Set(['results', '_environments'])
 
 function collectionDir(root: string): string {
   return path.join(testingDirFor(root), 'api-tests')
@@ -421,7 +706,7 @@ apiTestsRouter.get('/', (req, res) => {
   try {
     const out = fs
       .readdirSync(dir, { withFileTypes: true })
-      .filter((d) => d.isFile() && d.name.endsWith('.json'))
+      .filter((d) => d.isFile() && d.name.endsWith('.json') && d.name !== ENV_FILE)
       .map((d): ApiRequestDef | null => {
         const full = path.join(dir, d.name)
         const name = d.name.replace(/\.json$/, '')

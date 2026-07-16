@@ -114,10 +114,15 @@ export function scanResponse(res: ApiSendResult, req: { url: string; method: str
   // ---- security: cookies -------------------------------------------------
   const setCookie = header(res, 'set-cookie')
   if (setCookie) {
-    const c = setCookie.toLowerCase()
-    if (!c.includes('httponly')) add('cookie-httponly', 'warn', 'security', 'Cookie without HttpOnly', 'A Set-Cookie is missing HttpOnly — readable by JavaScript (XSS token theft).')
-    if (isHttps && !c.includes('secure')) add('cookie-secure', 'warn', 'security', 'Cookie without Secure', 'A Set-Cookie is missing Secure — it can be sent over plain HTTP.')
-    if (!c.includes('samesite')) add('cookie-samesite', 'info', 'security', 'Cookie without SameSite', 'A Set-Cookie is missing SameSite — weaker CSRF protection.')
+    // The server newline-joins discrete Set-Cookie headers; check each cookie on its
+    // own so one hardened cookie can't mask another that's missing a flag.
+    const cookies = setCookie.split('\n').map((c) => c.trim()).filter(Boolean)
+    if (cookies.some((c) => !/httponly/i.test(c)))
+      add('cookie-httponly', 'warn', 'security', 'Cookie without HttpOnly', 'A Set-Cookie is missing HttpOnly — readable by JavaScript (XSS token theft).')
+    if (isHttps && cookies.some((c) => !/secure/i.test(c)))
+      add('cookie-secure', 'warn', 'security', 'Cookie without Secure', 'A Set-Cookie is missing Secure — it can be sent over plain HTTP.')
+    if (cookies.some((c) => !/samesite/i.test(c)))
+      add('cookie-samesite', 'info', 'security', 'Cookie without SameSite', 'A Set-Cookie is missing SameSite — weaker CSRF protection.')
   }
 
   // ---- security: sensitive data / error leakage in the body -------------

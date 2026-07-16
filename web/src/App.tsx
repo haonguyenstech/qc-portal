@@ -7,6 +7,7 @@ import {
   ArrowUpCircle,
   BookOpen,
   BookText,
+  CheckCircle2,
   ClipboardList,
   Code2,
   FileCog,
@@ -14,6 +15,7 @@ import {
   FolderGit2,
   History,
   Loader2,
+  Layout,
   PanelLeftClose,
   PanelLeftOpen,
   PlayCircle,
@@ -56,6 +58,7 @@ import SkillsPage from '@/pages/SkillsPage'
 import TicketsPage from '@/pages/TicketsPage'
 import TestCasePage from '@/pages/TestCasePage'
 import ApiTestingPage from '@/pages/ApiTestingPage'
+import PrototypePage from '@/pages/PrototypePage'
 import McpPage from '@/pages/McpPage'
 import ProjectsPage from '@/pages/ProjectsPage'
 import ProjectSettingsPage from '@/pages/ProjectSettingsPage'
@@ -141,7 +144,10 @@ const navGroups: { label: string; items: NavItemDef[] }[] = [
   },
   {
     label: 'Tools',
-    items: [{ to: '/terminal', label: 'Terminal', icon: TerminalSquare, end: false }],
+    items: [
+      { to: '/prototype', label: 'Prototype', icon: Layout, end: false },
+      { to: '/terminal', label: 'Terminal', icon: TerminalSquare, end: false },
+    ],
   },
   {
     label: 'System',
@@ -402,26 +408,56 @@ async function waitForRestart(): Promise<boolean> {
   return false
 }
 
+/** Compact "how long ago" label for the last update check (e.g. "3m ago"). */
+function timeAgoShort(iso?: string | null): string {
+  if (!iso) return ''
+  const then = new Date(iso).getTime()
+  if (Number.isNaN(then)) return ''
+  const s = Math.max(0, Math.round((Date.now() - then) / 1000))
+  if (s < 60) return 'just now'
+  const m = Math.round(s / 60)
+  if (m < 60) return `${m}m ago`
+  const h = Math.round(m / 60)
+  if (h < 24) return `${h}h ago`
+  return `${Math.round(h / 24)}d ago`
+}
+
 function VersionFooter({ collapsed }: { collapsed: boolean }) {
   const { data: versionData } = useQuery({ queryKey: ['app-version'], queryFn: getVersion })
   const version = versionData?.current ?? __APP_VERSION__
 
-  const check = useMutation({
-    mutationFn: checkForUpdate,
-    onSuccess: (r) => {
+  // Auto-check for a newer release: on mount (every page load/reload), every 30 minutes,
+  // and when the window regains focus — throttled by staleTime so tab-switching doesn't
+  // hammer the upstream git fetch. Silent (drives the badge only); the button below
+  // re-checks on demand with a toast.
+  const updateCheck = useQuery({
+    queryKey: ['update-check'],
+    queryFn: checkForUpdate,
+    refetchInterval: 30 * 60_000,
+    refetchOnWindowFocus: true,
+    staleTime: 15 * 60_000,
+  })
+  const [manualChecking, setManualChecking] = useState(false)
+
+  async function runCheck() {
+    setManualChecking(true)
+    try {
+      const { data: r } = await updateCheck.refetch()
+      if (!r) return
       if (r.error) {
         toast.error('Update check failed', { description: r.error })
       } else if (r.updateAvailable) {
         toast.info(`Update available: v${r.current} → v${r.latest}`, {
-          description: 'Click “Update now” in the sidebar to upgrade and reload.',
+          description: 'Click “Update now” to upgrade and reload.',
           duration: 8000,
         })
       } else {
         toast.success(`You're on the latest version (v${r.current}).`)
       }
-    },
-    onError: (e) => toast.error('Update check failed', { description: String(e) }),
-  })
+    } finally {
+      setManualChecking(false)
+    }
+  }
 
   const update = useMutation({
     mutationFn: triggerUpdate,
@@ -451,8 +487,11 @@ function VersionFooter({ collapsed }: { collapsed: boolean }) {
     onError: (e) => toast.error('Update failed to start', { description: String(e) }),
   })
 
-  const updateAvailable = check.data?.updateAvailable && !check.data.error
-  const latest = check.data?.latest
+  const checkData = updateCheck.data
+  const updateAvailable = !!checkData?.updateAvailable && !checkData.error
+  const latest = checkData?.latest
+  const checking = manualChecking || updateCheck.isFetching
+  const checkedAgo = timeAgoShort(checkData?.checkedAt)
   const updating = update.isPending || (update.isSuccess && update.data?.ok)
   const { pathname } = useLocation()
 
@@ -500,20 +539,20 @@ function VersionFooter({ collapsed }: { collapsed: boolean }) {
           <TooltipTrigger asChild>
             <button
               type="button"
-              onClick={() => check.mutate()}
-              disabled={check.isPending}
+              onClick={() => runCheck()}
+              disabled={checking}
               aria-label="Check for updates"
               className="inline-flex size-9 shrink-0 items-center justify-center rounded-xl text-muted-foreground transition-all duration-200 hover:bg-muted hover:text-foreground active:scale-95 disabled:opacity-50"
             >
               {updateAvailable ? (
                 <ArrowUpCircle className="h-4 w-4 text-amber-500" />
               ) : (
-                <RefreshCw className={cn('h-4 w-4', check.isPending && 'animate-spin')} />
+                <RefreshCw className={cn('h-4 w-4', checking && 'animate-spin')} />
               )}
             </button>
           </TooltipTrigger>
           <TooltipContent side="right" className="font-medium">
-            {updateAvailable ? `Update available: v${check.data?.latest}` : 'Check for updates'}
+            {updateAvailable ? `Update available: v${latest}` : 'Check for updates'}
           </TooltipContent>
         </Tooltip>
         {updateAvailable && (
@@ -543,49 +582,97 @@ function VersionFooter({ collapsed }: { collapsed: boolean }) {
   }
 
   return (
-    <div className="mt-auto flex shrink-0 flex-col gap-2 border-t border-sidebar-border/60 px-4 py-4 text-xs text-muted-foreground/70">
-      <div className="flex items-center gap-1.5">
-        <NavLink
-          to="/releases"
-          className={({ isActive }) =>
-            cn(
-              'flex min-w-0 items-center gap-1.5 rounded-md px-2 py-1 font-medium transition-colors hover:bg-muted hover:text-foreground',
-              isActive && 'bg-muted text-foreground',
-            )
-          }
-        >
-          <ScrollText className="size-3.5 shrink-0" />
-          Release notes
-        </NavLink>
-        <span
-          className={cn(
-            'ml-auto shrink-0 rounded-full px-1.5 py-0.5 font-mono text-[10px] tracking-tight',
-            updateAvailable ? 'bg-amber-500/15 text-amber-600 dark:text-amber-400' : 'bg-muted',
-          )}
-          title={updateAvailable ? `Update available: v${check.data?.latest}` : `Version ${version}`}
-        >
-          v{version}
-        </span>
-        <button
-          type="button"
-          onClick={() => check.mutate()}
-          disabled={check.isPending || updating}
-          title={updateAvailable ? 'Update available — click to re-check' : 'Check for updates'}
-          aria-label="Check for updates"
-          className="inline-flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-all duration-200 hover:bg-muted hover:text-foreground active:scale-95 disabled:opacity-50"
-        >
-          {updateAvailable ? (
-            <ArrowUpCircle className="h-3.5 w-3.5 text-amber-500" />
+    <div className="mt-auto flex shrink-0 flex-col gap-1.5 border-t border-sidebar-border/60 px-3 py-3.5 text-xs text-muted-foreground">
+      {/* Version + live update status */}
+      <div
+        className={cn(
+          'rounded-2xl border p-1.5 transition-colors',
+          updateAvailable
+            ? 'border-amber-500/40 bg-amber-500/5'
+            : 'border-sidebar-border/60 bg-muted/40',
+        )}
+      >
+        <div className="flex items-center gap-1">
+          <NavLink
+            to="/releases"
+            className={({ isActive }) =>
+              cn(
+                'flex min-w-0 flex-1 items-center gap-2 rounded-xl px-2 py-1.5 transition-colors hover:bg-muted hover:text-foreground',
+                isActive && 'bg-muted text-foreground',
+              )
+            }
+          >
+            <span className="flex size-7 shrink-0 items-center justify-center rounded-lg border border-sidebar-border/60 bg-background text-muted-foreground">
+              <ScrollText className="size-3.5" />
+            </span>
+            <span className="min-w-0 leading-tight">
+              <span className="block truncate font-medium text-foreground">Release notes</span>
+              <span className="block font-mono text-[10px] text-muted-foreground">v{version}</span>
+            </span>
+          </NavLink>
+          <button
+            type="button"
+            onClick={() => runCheck()}
+            disabled={checking || updating}
+            title={
+              checkedAgo ? `Last checked ${checkedAgo} — click to re-check` : 'Check for updates'
+            }
+            aria-label="Check for updates"
+            className="inline-flex size-7 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-all duration-200 hover:bg-muted hover:text-foreground active:scale-95 disabled:opacity-50"
+          >
+            <RefreshCw className={cn('h-3.5 w-3.5', checking && 'animate-spin')} />
+          </button>
+        </div>
+
+        {/* Status line — auto-updates from the background check. */}
+        <div className="flex items-center gap-1.5 px-2 pb-0.5 pt-1 text-[10px]">
+          {checking ? (
+            <span className="flex items-center gap-1 text-muted-foreground">
+              <Loader2 className="size-3 animate-spin" /> Checking for updates…
+            </span>
+          ) : updateAvailable ? (
+            <span className="flex items-center gap-1 font-medium text-amber-600 dark:text-amber-400">
+              <ArrowUpCircle className="size-3" /> Update available → v{latest}
+            </span>
+          ) : checkData ? (
+            <span className="flex items-center gap-1 text-emerald-600 dark:text-emerald-400">
+              <CheckCircle2 className="size-3" /> Up to date
+            </span>
           ) : (
-            <RefreshCw className={cn('h-3.5 w-3.5', check.isPending && 'animate-spin')} />
+            <span className="text-muted-foreground">Checking…</span>
           )}
-        </button>
+          {!checking && checkedAgo && (
+            <span className="ml-auto text-muted-foreground/60">{checkedAgo}</span>
+          )}
+        </div>
+
+        {updateAvailable && (
+          <button
+            type="button"
+            onClick={() => update.mutate()}
+            disabled={updating}
+            className="mt-1 flex w-full items-center justify-center gap-1.5 rounded-xl bg-amber-500/15 px-3 py-1.5 text-xs font-medium text-amber-600 transition-all duration-200 hover:bg-amber-500/25 active:scale-[0.98] disabled:opacity-60 dark:text-amber-400"
+          >
+            {updating ? (
+              <>
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                Updating…
+              </>
+            ) : (
+              <>
+                <ArrowUpCircle className="h-3.5 w-3.5" />
+                Update now → v{latest}
+              </>
+            )}
+          </button>
+        )}
       </div>
+
       <NavLink
         to="/document"
         className={({ isActive }) =>
           cn(
-            'flex min-w-0 items-center gap-1.5 rounded-md px-2 py-1 font-medium transition-colors hover:bg-muted hover:text-foreground',
+            'flex min-w-0 items-center gap-2 rounded-xl px-2.5 py-1.5 font-medium transition-colors hover:bg-muted hover:text-foreground',
             isActive && 'bg-muted text-foreground',
           )
         }
@@ -593,26 +680,6 @@ function VersionFooter({ collapsed }: { collapsed: boolean }) {
         <BookText className="size-3.5 shrink-0" />
         Documentation
       </NavLink>
-      {updateAvailable && (
-        <button
-          type="button"
-          onClick={() => update.mutate()}
-          disabled={updating}
-          className="inline-flex items-center justify-center gap-1.5 rounded-full bg-amber-500/15 px-3 py-1.5 text-xs font-medium text-amber-600 transition-all duration-200 hover:bg-amber-500/25 active:scale-[0.98] disabled:opacity-60 dark:text-amber-400"
-        >
-          {updating ? (
-            <>
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              Updating…
-            </>
-          ) : (
-            <>
-              <ArrowUpCircle className="h-3.5 w-3.5" />
-              Update now → v{latest}
-            </>
-          )}
-        </button>
-      )}
     </div>
   )
 }
@@ -794,7 +861,14 @@ function App() {
           collapsed ? 'lg:pl-[72px]' : 'lg:pl-60',
         )}
       >
-        <div className="mx-auto max-w-6xl px-4 py-4 sm:px-6 sm:py-6 lg:px-8 lg:py-8">
+        <div
+          className={cn(
+            'mx-auto px-4 py-4 sm:px-6 sm:py-6 lg:px-8 lg:py-8',
+            // The Prototype workspace (chat + live preview) needs the full width;
+            // every other page stays comfortably capped.
+            pathname === '/prototype' ? 'max-w-none' : 'max-w-6xl',
+          )}
+        >
           {!projectsLoading && projects.length === 0 && !isProjectAgnostic(pathname) ? (
             <NoProjectsScreen />
           ) : (
@@ -811,6 +885,7 @@ function App() {
             <Route path="/testcases" element={<TestCasePage />} />
             <Route path="/verify" element={<VerifyDesignPage />} />
             <Route path="/api-testing" element={<ApiTestingPage />} />
+            <Route path="/prototype" element={<PrototypePage />} />
             <Route path="/terminal" element={<TerminalPage />} />
             <Route path="/skills" element={<SkillsPage />} />
             <Route path="/mcp" element={<McpPage />} />

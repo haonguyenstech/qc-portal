@@ -1272,6 +1272,56 @@ export function editTestcaseCell(body: {
   return request('/api/ai/testcases/cell', { method: 'POST', body: JSON.stringify(body) })
 }
 
+/** Result of overwriting a whole CSV test-case row. */
+export interface EditTestcaseRowResult {
+  testcases: string // the full updated CSV
+  version: number
+  format: 'csv'
+  row: number
+}
+
+/**
+ * Overwrite an entire data row of a CSV test-case version with exact values
+ * (one per header column, in order) — no AI. Overwrites that version.
+ */
+export function editTestcaseRow(body: {
+  projectId: string
+  folder: string
+  version: number
+  row: number
+  values: string[]
+}): Promise<EditTestcaseRowResult> {
+  return request('/api/ai/testcases/row', { method: 'POST', body: JSON.stringify(body) })
+}
+
+/**
+ * Delete one or more data rows of a CSV test-case version (overwrites that version).
+ * `rows` are absolute parsed-CSV row indices (0 = header, so data rows start at 1);
+ * at least one data row must remain. Returns the full updated CSV.
+ */
+export function deleteTestcaseRows(body: {
+  projectId: string
+  folder: string
+  version: number
+  rows: number[]
+}): Promise<EditTestcaseRowResult> {
+  return request('/api/ai/testcases/rows/delete', { method: 'POST', body: JSON.stringify(body) })
+}
+
+/**
+ * Insert a data row into a CSV test-case version at absolute index `row` (used to undo
+ * a delete — puts the removed row back where it was). Returns the full updated CSV.
+ */
+export function insertTestcaseRow(body: {
+  projectId: string
+  folder: string
+  version: number
+  row: number
+  values: string[]
+}): Promise<EditTestcaseRowResult> {
+  return request('/api/ai/testcases/rows/insert', { method: 'POST', body: JSON.stringify(body) })
+}
+
 // ---- Test-case background jobs ----
 // Generation runs server-side so a batch finishes even if the browser reloads or
 // navigates away; the client polls the job by id for progress.
@@ -1622,6 +1672,14 @@ export interface ApiAssertion {
 
 export type ApiBodyMode = 'none' | 'json' | 'text'
 
+/** A rule that pulls a JSON-path value out of a response into an environment variable. */
+export interface ApiCapture {
+  id: string
+  jsonPath: string
+  varName: string
+  secret: boolean
+}
+
 export interface ApiRequestDef {
   name: string
   method: string
@@ -1632,7 +1690,53 @@ export interface ApiRequestDef {
   body: string
   assertions: ApiAssertion[]
   aiExpect: string // plain-language expectation the AI check evaluates the response against
+  captures: ApiCapture[]
   savedAt?: string
+}
+
+// ---- API environments (named {{variable}} sets, substituted server-side) ----
+
+export interface ApiVariable {
+  key: string
+  value: string
+  secret: boolean
+  /** For a secret var: whether a value is stored (the value itself is masked to ''). */
+  hasValue?: boolean
+}
+export interface ApiEnvironment {
+  name: string
+  variables: ApiVariable[]
+}
+export interface ApiEnvironments {
+  active: string | null
+  environments: ApiEnvironment[]
+}
+
+/** Get the project's environments (secret values arrive blanked, with hasValue). */
+export function getApiEnvironments(projectId: string): Promise<ApiEnvironments> {
+  return request(`/api/api-tests/environments?projectId=${encodeURIComponent(projectId)}`)
+}
+
+/** Replace the project's environments (empty secret values are preserved server-side). */
+export function saveApiEnvironments(
+  projectId: string,
+  body: ApiEnvironments,
+): Promise<ApiEnvironments> {
+  return request(`/api/api-tests/environments?projectId=${encodeURIComponent(projectId)}`, {
+    method: 'PUT',
+    body: JSON.stringify(body),
+  })
+}
+
+/** Upsert one variable (from a response capture) into an environment. */
+export function captureApiVariable(
+  projectId: string,
+  body: { env?: string; key: string; value: string; secret: boolean },
+): Promise<{ ok: true; env: string; key: string }> {
+  return request('/api/api-tests/environments/capture', {
+    method: 'POST',
+    body: JSON.stringify({ projectId, ...body }),
+  })
 }
 
 export interface AiCheckResult {
@@ -1659,8 +1763,10 @@ export interface ApiSendResult {
   error?: string // network-level error when ok=false
 }
 
-/** Proxy an HTTP request through the server (avoids browser CORS) and return the response. */
+/** Proxy an HTTP request through the server (avoids browser CORS) and return the response.
+ *  `projectId` lets the server resolve the active environment's {{variables}}. */
 export function sendApiRequest(body: {
+  projectId: string
   method: string
   url: string
   query: ApiKV[]
@@ -1802,6 +1908,194 @@ export function clearApiResults(projectId: string, name: string): Promise<{ ok: 
     `/api/api-tests/results/${encodeURIComponent(name)}?projectId=${encodeURIComponent(projectId)}`,
     { method: 'DELETE' },
   )
+}
+
+// ---- Prototype builder (Claude-style chat → self-contained HTML prototype) ----
+
+export interface PrototypeMessage {
+  role: 'user' | 'assistant'
+  text: string
+  at: string
+}
+export interface PrototypeMeta {
+  slug: string
+  name: string
+  createdAt: string
+  updatedAt: string
+  messageCount: number
+}
+export interface Prototype {
+  slug: string
+  name: string
+  createdAt: string
+  updatedAt: string
+  model: string
+  messages: PrototypeMessage[]
+  html: string
+  /** Short follow-up improvement ideas the model proposed for the latest version. */
+  suggestions?: string[]
+}
+
+/** List the project's saved prototypes (metadata only, newest first). */
+export function listPrototypes(projectId: string): Promise<PrototypeMeta[]> {
+  return request(`/api/prototype?projectId=${encodeURIComponent(projectId)}`)
+}
+
+/** Fetch one prototype in full (conversation + current HTML). */
+export function getPrototype(projectId: string, slug: string): Promise<Prototype> {
+  return request(
+    `/api/prototype/${encodeURIComponent(slug)}?projectId=${encodeURIComponent(projectId)}`,
+  )
+}
+
+/** Create a new prototype from the first prompt. Pass a signal to cancel the build. */
+export function createPrototype(
+  projectId: string,
+  body: { prompt: string; model: string; name?: string },
+  signal?: AbortSignal,
+): Promise<Prototype> {
+  return request('/api/prototype', {
+    method: 'POST',
+    body: JSON.stringify({ projectId, ...body }),
+    signal,
+  })
+}
+
+/** Send a follow-up prompt that refines an existing prototype. Pass a signal to cancel. */
+export function sendPrototypeMessage(
+  projectId: string,
+  slug: string,
+  body: { prompt: string; model: string },
+  signal?: AbortSignal,
+): Promise<Prototype> {
+  return request(`/api/prototype/${encodeURIComponent(slug)}/message`, {
+    method: 'POST',
+    body: JSON.stringify({ projectId, ...body }),
+    signal,
+  })
+}
+
+/**
+ * Build/refine a prototype and stream the HTML as it's written (Server-Sent Events).
+ * `onDelta` fires with each incremental text chunk; `onDone` with the saved prototype;
+ * `onError` with a message. Pass a signal to stop (also kills the server-side build).
+ * Resolves when the stream ends; rejects (AbortError) if the caller aborts.
+ */
+export interface PrototypeImage {
+  mediaType: string
+  dataBase64: string
+}
+
+export interface PrototypeStyleSettings {
+  style: string
+  theme: 'light' | 'dark'
+  accent: string
+}
+
+export async function streamPrototype(
+  projectId: string,
+  body: {
+    slug?: string
+    prompt: string
+    model: string
+    name?: string
+    images?: PrototypeImage[]
+    style?: PrototypeStyleSettings
+  },
+  handlers: {
+    onDelta: (text: string) => void
+    onDone: (p: Prototype) => void
+    onError: (message: string) => void
+    onLog?: (level: 'info' | 'success' | 'error', text: string) => void
+  },
+  signal: AbortSignal,
+): Promise<void> {
+  const res = await fetch('/api/prototype/stream', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ projectId, ...body }),
+    signal,
+  })
+  if (!res.ok || !res.body) {
+    handlers.onError((await res.text().catch(() => '')) || `${res.status} ${res.statusText}`)
+    return
+  }
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buf = ''
+  let settled = false // saw a terminal (done/error) frame
+  for (;;) {
+    const { value, done } = await reader.read()
+    if (done) break
+    buf += decoder.decode(value, { stream: true })
+    let idx: number
+    while ((idx = buf.indexOf('\n\n')) !== -1) {
+      const frame = buf.slice(0, idx)
+      buf = buf.slice(idx + 2)
+      const dataLine = frame.split('\n').find((l) => l.startsWith('data:'))
+      if (!dataLine) continue
+      let msg: {
+        type?: string
+        text?: string
+        level?: 'info' | 'success' | 'error'
+        prototype?: Prototype
+        error?: string
+      }
+      try {
+        msg = JSON.parse(dataLine.slice(5).trim())
+      } catch {
+        continue
+      }
+      if (msg.type === 'delta') handlers.onDelta(msg.text ?? '')
+      else if (msg.type === 'log') handlers.onLog?.(msg.level ?? 'info', msg.text ?? '')
+      else if (msg.type === 'done' && msg.prototype) {
+        settled = true
+        handlers.onDone(msg.prototype)
+      } else if (msg.type === 'error') {
+        settled = true
+        handlers.onError(msg.error ?? 'Generation failed')
+      }
+    }
+  }
+  // The stream closed without a done/error frame (server ended early) — don't leave
+  // the caller stuck in a loading state.
+  if (!settled) handlers.onError('The build ended before finishing. Please try again.')
+}
+
+/** Duplicate a prototype into a new "(copy)" entry (same HTML + conversation). */
+export function duplicatePrototype(projectId: string, slug: string): Promise<Prototype> {
+  return request(
+    `/api/prototype/${encodeURIComponent(slug)}/duplicate?projectId=${encodeURIComponent(projectId)}`,
+    { method: 'POST' },
+  )
+}
+
+/** Rename a prototype (display name only). */
+export function renamePrototype(
+  projectId: string,
+  slug: string,
+  newName: string,
+): Promise<Prototype> {
+  return request(`/api/prototype/${encodeURIComponent(slug)}/rename`, {
+    method: 'POST',
+    body: JSON.stringify({ projectId, newName }),
+  })
+}
+
+/** Delete a prototype. */
+export function deletePrototype(projectId: string, slug: string): Promise<{ ok: true }> {
+  return request(
+    `/api/prototype/${encodeURIComponent(slug)}?projectId=${encodeURIComponent(projectId)}`,
+    { method: 'DELETE' },
+  )
+}
+
+/** Reveal the project's testing/prototypes folder in the OS file explorer. */
+export function openPrototypesFolder(projectId: string): Promise<{ ok: true; path: string }> {
+  return request('/api/prototype/open', {
+    method: 'POST',
+    body: JSON.stringify({ projectId }),
+  })
 }
 
 // ---- Terminal ----

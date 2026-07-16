@@ -30,6 +30,7 @@ import {
   Terminal,
   Ticket,
   Trash2,
+  Undo2,
   Wand2,
   X,
 } from 'lucide-react'
@@ -58,7 +59,9 @@ import { ManageRulesDialog } from '@/components/ManageRulesDialog'
 import {
   cancelTestCaseJob,
   deleteTestCaseVersion,
-  editTestcaseCell,
+  deleteTestcaseRows,
+  editTestcaseRow,
+  insertTestcaseRow,
   getTestCaseJob,
   getTestCaseVersion,
   listCrawledTickets,
@@ -278,10 +281,13 @@ interface CellRef {
 function CsvTable({
   csv,
   onCellClick,
+  onDeleteRow,
   selectedCell,
 }: {
   csv: string
   onCellClick?: (cell: CellRef) => void
+  /** When set, each data row shows a hover-revealed delete button (absRow = parsed-CSV index, 1-based). */
+  onDeleteRow?: (absRow: number) => void
   selectedCell?: { row: number; col: number } | null
 }) {
   const rows = parseCsv(csv)
@@ -346,18 +352,33 @@ function CsvTable({
                               })
                           : undefined
                       }
-                      title={interactive ? 'Click to edit this cell' : undefined}
+                      title={interactive ? 'Click to edit this test case' : undefined}
                       className={cn(
                         'min-w-[12rem] max-w-[34rem] whitespace-pre-wrap break-words border px-3 py-2 align-top text-muted-foreground',
                         // Pinned first column: solid bg so other columns can't bleed
                         // through it while scrolling horizontally.
-                        ci === 0 && 'sticky left-0 z-10 bg-muted font-medium text-foreground',
+                        ci === 0 && 'group sticky left-0 z-10 bg-muted font-medium text-foreground',
+                        // Room for the hover delete button in the pinned first cell.
+                        ci === 0 && onDeleteRow && 'pr-9',
                         interactive && 'cursor-pointer transition-colors hover:bg-primary/5',
                         // Selection styling wins over the pinned-column bg.
                         isSel && 'bg-primary/10 text-foreground ring-2 ring-inset ring-primary',
                       )}
                     >
                       {r[ci] ?? ''}
+                      {ci === 0 && onDeleteRow && (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            onDeleteRow(absRow)
+                          }}
+                          title="Delete this test case"
+                          className="absolute right-1 top-1 inline-flex size-6 items-center justify-center rounded-md text-muted-foreground transition-all hover:bg-destructive/10 hover:text-destructive"
+                        >
+                          <Trash2 className="size-3.5" />
+                        </button>
+                      )}
                     </td>
                   )
                 })}
@@ -768,11 +789,31 @@ function TestCasePreviewDialog({
 
   // The CSV cell the user clicked to edit manually. Reset whenever the
   // version/folder changes (below).
-  const [selectedCell, setSelectedCell] = useState<CellRef | null>(null)
-  const [cellDraft, setCellDraft] = useState('')
-  function resetCell() {
-    setSelectedCell(null)
-    setCellDraft('')
+  // Clicking any cell opens a dialog to edit the WHOLE test case (that row); the
+  // dialog auto-scrolls to the clicked column. `editingRow` is the absolute CSV row
+  // (0 = header); `focusCol` is the column index to scroll to / focus.
+  const [editingRow, setEditingRow] = useState<number | null>(null)
+  const [rowHeader, setRowHeader] = useState<string[]>([])
+  const [rowDraft, setRowDraft] = useState<string[]>([])
+  const [focusCol, setFocusCol] = useState<number | null>(null)
+  // The data row (absolute parsed-CSV index, 1-based) queued for deletion — drives the
+  // confirm dialog. Reset alongside the row editor on any version/folder change.
+  const [pendingDeleteRow, setPendingDeleteRow] = useState<number | null>(null)
+  // The most recently deleted row, kept so an inline "Undo" banner can restore it.
+  // (A toast action isn't reliably clickable behind the modal preview dialog.)
+  const [lastDeleted, setLastDeleted] = useState<{
+    version: number
+    row: number
+    values: string[]
+    label: string
+  } | null>(null)
+  function resetRow() {
+    setEditingRow(null)
+    setRowHeader([])
+    setRowDraft([])
+    setFocusCol(null)
+    setPendingDeleteRow(null)
+    setLastDeleted(null)
   }
 
   // Default the selected version to the latest; re-default when the folder or the
@@ -783,7 +824,7 @@ function TestCasePreviewDialog({
   if (seenKey !== key) {
     setSeenKey(key)
     setSelectedVersion(latest)
-    resetCell()
+    resetRow()
   }
 
   const { data, isFetching } = useQuery({
@@ -796,43 +837,106 @@ function TestCasePreviewDialog({
   // "Generated <date time>" label in the header.
   const selectedMeta = versions.find((v) => v.version === selectedVersion) ?? null
 
+  // In the row editor, hide execution/result columns: everything from the first
+  // "Actual result" column onward (Actual result, Status, …) is filled during test
+  // execution, not while authoring the case. -1 = no such column (show all).
+  const resultColStart = rowHeader.findIndex((h) => /actual\s*result/i.test(h.trim()))
+
   // Delete the selected version. Two-step confirm (inline) to avoid a nested modal.
   const queryClient = useQueryClient()
 
-  // Save ONE cell exactly as typed — overwrites the same version on disk, then refetches it.
-  const editCell = useMutation({
+  // Save EVERY field of one test case (the clicked row) verbatim — overwrites the
+  // same version on disk, then refetches it.
+  const editRow = useMutation({
     mutationFn: () =>
-      editTestcaseCell({
+      editTestcaseRow({
         projectId,
         folder: folder as string,
         version: selectedVersion as number,
-        row: (selectedCell as CellRef).row,
-        col: (selectedCell as CellRef).col,
-        value: cellDraft,
+        row: editingRow as number,
+        values: rowDraft,
       }),
-    onSuccess: (res) => {
+    onSuccess: () => {
       queryClient.invalidateQueries({
         queryKey: ['testcase-version', projectId, folder, selectedVersion],
       })
-      // The version's saved time changed; refresh the list so the dropdown updates.
       queryClient.invalidateQueries({ queryKey: ['testcase-versions', projectId, folder] })
-      resetCell()
-      toast.success(`Updated "${res.column}" (row ${res.row})`)
+      resetRow()
+      toast.success('Test case updated')
     },
     onError: (err) =>
-      toast.error('Could not update cell', {
+      toast.error('Could not update test case', {
         description: err instanceof Error ? err.message : 'Unknown error',
       }),
   })
 
+  // Restore a previously-deleted row by inserting its captured values back at the
+  // same index — the "Undo" action on the delete toast.
+  const restoreRow = useMutation({
+    mutationFn: (vars: { version: number; row: number; values: string[] }) =>
+      insertTestcaseRow({
+        projectId,
+        folder: folder as string,
+        version: vars.version,
+        row: vars.row,
+        values: vars.values,
+      }),
+    onSuccess: (_res, vars) => {
+      queryClient.invalidateQueries({
+        queryKey: ['testcase-version', projectId, folder, vars.version],
+      })
+      queryClient.invalidateQueries({ queryKey: ['testcase-versions', projectId, folder] })
+      queryClient.invalidateQueries({ queryKey: ['crawled', projectId] })
+      setLastDeleted(null)
+      toast.success('Test case restored')
+    },
+    onError: (err) =>
+      toast.error('Could not restore test case', {
+        description: err instanceof Error ? err.message : 'Unknown error',
+      }),
+  })
+
+  // Delete one test-case row (absolute parsed-CSV index, 1-based). `pendingDeleteRow`
+  // (declared above with the row-editor state) holds the row while the confirm dialog
+  // is open so an accidental click can't drop a case. The row's values + index + version
+  // are captured in the mutation variables so the success toast can offer an Undo.
+  const delRow = useMutation({
+    mutationFn: (vars: { version: number; row: number; values: string[] }) =>
+      deleteTestcaseRows({
+        projectId,
+        folder: folder as string,
+        version: vars.version,
+        rows: [vars.row],
+      }),
+    onSuccess: (_res, vars) => {
+      queryClient.invalidateQueries({
+        queryKey: ['testcase-version', projectId, folder, vars.version],
+      })
+      queryClient.invalidateQueries({ queryKey: ['testcase-versions', projectId, folder] })
+      queryClient.invalidateQueries({ queryKey: ['crawled', projectId] })
+      setPendingDeleteRow(null)
+      const label = [vars.values[0], vars.values[1]].filter((v) => v && v.trim()).join(' · ')
+      // Surface an inline Undo banner (reliably clickable inside the modal dialog).
+      setLastDeleted({ ...vars, label })
+      toast.success(label ? `Deleted “${label}”` : 'Test case deleted')
+    },
+    onError: (err) =>
+      toast.error('Could not delete test case', {
+        description: err instanceof Error ? err.message : 'Unknown error',
+      }),
+  })
+
+  // When the row dialog opens, scroll the clicked column's field into view + focus it.
   useEffect(() => {
-    if (!selectedCell) return
-    function onKeyDown(e: KeyboardEvent) {
-      if (e.key === 'Escape' && !editCell.isPending) resetCell()
-    }
-    window.addEventListener('keydown', onKeyDown)
-    return () => window.removeEventListener('keydown', onKeyDown)
-  }, [selectedCell, editCell.isPending])
+    if (editingRow == null || focusCol == null) return
+    const raf = requestAnimationFrame(() => {
+      const el = document.getElementById(`tc-row-field-${focusCol}`) as HTMLTextAreaElement | null
+      if (!el) return
+      el.scrollIntoView({ block: 'center' })
+      el.focus()
+    })
+    return () => cancelAnimationFrame(raf)
+  }, [editingRow, focusCol])
 
   const [confirmDelete, setConfirmDelete] = useState(false)
   const del = useMutation({
@@ -864,11 +968,20 @@ function TestCasePreviewDialog({
       <Dialog
         open={!!folder}
         onOpenChange={(open) => {
-          if (!open) resetCell()
+          if (!open) resetRow()
           onOpenChange(open)
         }}
       >
-        <DialogContent className="flex max-h-[92vh] w-[97vw] flex-col gap-0 overflow-hidden p-0 sm:max-w-[90rem]">
+        <DialogContent
+          className="flex max-h-[92vh] w-[97vw] flex-col gap-0 overflow-hidden p-0 sm:max-w-[90rem]"
+          // The row-editor and delete-confirm dialogs live in their own portals, so
+          // interacting with them (and the focus restore when they close) registers as
+          // an "outside" interaction here and would dismiss this preview too. Never
+          // close the preview from an outside interaction — it still closes via its X
+          // button or Escape. (A state guard can't catch the focus-out fired AFTER the
+          // nested dialog's state has already been cleared.)
+          onInteractOutside={(e) => e.preventDefault()}
+        >
           <DialogHeader className="shrink-0 space-y-2 border-b border-border/60 bg-muted/30 px-5 py-3">
             <DialogTitle className="flex items-center gap-2 text-base">
               <ClipboardList className="h-4 w-4 text-muted-foreground" />
@@ -885,7 +998,7 @@ function TestCasePreviewDialog({
                     onValueChange={(v) => {
                       setSelectedVersion(Number(v))
                       setConfirmDelete(false)
-                      resetCell()
+                      resetRow()
                     }}
                   >
                     <SelectTrigger size="sm" className="h-7 w-44 rounded-full">
@@ -974,6 +1087,37 @@ function TestCasePreviewDialog({
             </DialogDescription>
           </DialogHeader>
           <div className="min-h-0 flex-1 overflow-auto px-6 py-5">
+            {lastDeleted && (
+              <div className="mb-3 flex items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                <Trash2 className="size-3.5 shrink-0" />
+                <span className="min-w-0 flex-1 truncate">
+                  Deleted{lastDeleted.label ? ` “${lastDeleted.label}”` : ' a test case'}.
+                </span>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-7 shrink-0 rounded-full border-amber-300 bg-white/70 text-amber-800 hover:bg-white"
+                  onClick={() => lastDeleted && restoreRow.mutate(lastDeleted)}
+                  disabled={restoreRow.isPending}
+                >
+                  {restoreRow.isPending ? (
+                    <Loader2 className="size-3.5 animate-spin" />
+                  ) : (
+                    <Undo2 className="size-3.5" />
+                  )}
+                  Undo
+                </Button>
+                <button
+                  type="button"
+                  onClick={() => setLastDeleted(null)}
+                  title="Dismiss"
+                  className="shrink-0 rounded-md p-1 text-amber-700/70 transition-colors hover:bg-amber-100 hover:text-amber-900"
+                >
+                  <X className="size-3.5" />
+                </button>
+              </div>
+            )}
             {isFetching && !data ? (
               <p className="flex items-center justify-center gap-2 py-12 text-sm text-muted-foreground">
                 <Loader2 className="h-4 w-4 animate-spin" />
@@ -983,17 +1127,23 @@ function TestCasePreviewDialog({
               data.format === 'csv' ? (
                 <div className="space-y-2.5">
                   <p className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
-                    Click any cell to edit that value.
+                    Click any cell to edit the whole test case, or click the trash icon on a row to
+                    delete it.
                   </p>
                   <CsvTable
                     csv={data.testcases}
                     onCellClick={(cell) => {
-                      setSelectedCell(cell)
-                      setCellDraft(cell.value)
+                      // Any cell → edit every field of this test-case row, scrolled to
+                      // the clicked column.
+                      const rows = parseCsv(data.testcases ?? '')
+                      const header = rows[0] ?? []
+                      const vals = rows[cell.row] ?? []
+                      setRowHeader(header)
+                      setRowDraft(header.map((_, i) => vals[i] ?? ''))
+                      setEditingRow(cell.row)
+                      setFocusCol(cell.col)
                     }}
-                    selectedCell={
-                      selectedCell ? { row: selectedCell.row, col: selectedCell.col } : null
-                    }
+                    onDeleteRow={(absRow) => setPendingDeleteRow(absRow)}
                   />
                 </div>
               ) : looksLikeCsv('x.md', data.testcases) ? (
@@ -1016,76 +1166,147 @@ function TestCasePreviewDialog({
             )}
           </div>
 
-          {selectedCell && data?.format === 'csv' && (
-            <div
-              className="absolute inset-0 z-40 flex items-center justify-center bg-black/50 p-4"
-              onClick={() => {
-                if (!editCell.isPending) resetCell()
-              }}
-            >
-              <div
-                role="dialog"
-                aria-modal="true"
-                aria-labelledby="edit-testcase-cell-title"
-                className="flex max-h-[88vh] w-[92vw] flex-col gap-4 rounded-xl border bg-background p-6 shadow-lg sm:max-w-5xl"
-                onClick={(e) => e.stopPropagation()}
-              >
-                <div className="flex items-start gap-3">
-                  <div className="min-w-0 flex-1 space-y-1">
-                    <h2 id="edit-testcase-cell-title" className="text-lg font-semibold leading-none">
-                      Edit cell
-                    </h2>
-                    <p className="text-sm text-muted-foreground">
-                      Row {selectedCell.row} · {selectedCell.column}
-                    </p>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={resetCell}
-                    disabled={editCell.isPending}
-                    className="rounded-xs opacity-70 transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:pointer-events-none"
-                    aria-label="Close edit cell"
-                  >
-                    <X className="size-4" />
-                  </button>
-                </div>
-                <Textarea
-                  autoFocus
-                  value={cellDraft}
-                  onChange={(e) => setCellDraft(e.target.value)}
-                  className="min-h-[54vh] resize-y font-mono text-sm"
-                  onKeyDown={(e) => {
-                    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter' && selectedCell) {
-                      e.preventDefault()
-                      editCell.mutate()
-                    }
-                  }}
-                />
-                <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
-                  <Button
-                    type="button"
-                    variant="outline"
-                    onClick={resetCell}
-                    disabled={editCell.isPending}
-                  >
-                    Cancel
-                  </Button>
-                  <Button
-                    type="button"
-                    onClick={() => editCell.mutate()}
-                    disabled={editCell.isPending}
-                  >
-                    {editCell.isPending ? (
-                      <Loader2 className="size-4 animate-spin" />
-                    ) : (
-                      <Check className="size-4" />
+        </DialogContent>
+      </Dialog>
+
+      {/* Row (whole test-case) editor — a SEPARATE Dialog so it centers on the
+          viewport and stacks above the preview, instead of being clipped inside the
+          preview's transformed content box. */}
+      <Dialog
+        open={editingRow != null && data?.format === 'csv'}
+        onOpenChange={(open) => {
+          if (!open && !editRow.isPending) resetRow()
+        }}
+      >
+        <DialogContent
+          className="flex max-h-[88vh] w-[95vw] flex-col gap-0 overflow-hidden p-0 sm:max-w-4xl"
+          onOpenAutoFocus={(e) => e.preventDefault()}
+        >
+          <DialogHeader className="shrink-0 space-y-1 border-b border-border/60 px-6 py-4">
+            <DialogTitle className="text-lg">Edit test case</DialogTitle>
+            <DialogDescription className="truncate">
+              {(rowHeader[0]?.trim() || 'Row')}: {rowDraft[0]?.trim() || `Row ${editingRow}`}
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-6 py-5">
+            {rowHeader.map((h, i) => {
+              // Hide execution/result columns (from "Actual result" to the end) —
+              // those are filled during test execution, not while authoring.
+              if (resultColStart !== -1 && i >= resultColStart) return null
+              return (
+                <div key={i} className="space-y-1.5">
+                  <label
+                    htmlFor={`tc-row-field-${i}`}
+                    className={cn(
+                      'block text-xs font-semibold',
+                      focusCol === i ? 'text-primary' : 'text-foreground',
                     )}
-                    Save
-                  </Button>
+                  >
+                    {h.trim() || `Column ${i + 1}`}
+                  </label>
+                  <Textarea
+                    id={`tc-row-field-${i}`}
+                    value={rowDraft[i] ?? ''}
+                    onChange={(e) =>
+                      setRowDraft((prev) => {
+                        const next = [...prev]
+                        next[i] = e.target.value
+                        return next
+                      })
+                    }
+                    rows={i === 0 ? 1 : 3}
+                    className={cn(
+                      'resize-y font-mono text-sm',
+                      focusCol === i && 'ring-2 ring-primary/40',
+                    )}
+                    onKeyDown={(e) => {
+                      if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+                        e.preventDefault()
+                        editRow.mutate()
+                      }
+                    }}
+                  />
                 </div>
-              </div>
-            </div>
-          )}
+              )
+            })}
+          </div>
+
+          <DialogFooter className="border-t border-border/60 px-6 py-4">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={resetRow}
+              disabled={editRow.isPending}
+            >
+              Cancel
+            </Button>
+            <Button type="button" onClick={() => editRow.mutate()} disabled={editRow.isPending}>
+              {editRow.isPending ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : (
+                <Check className="size-4" />
+              )}
+              Save
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Delete-one-test-case confirm — a small modal so a stray trash click can't
+          silently drop a row. Deletes the row in place and refetches the version. */}
+      <Dialog
+        open={pendingDeleteRow != null && data?.format === 'csv'}
+        onOpenChange={(open) => {
+          if (!open && !delRow.isPending) setPendingDeleteRow(null)
+        }}
+      >
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-base">
+              <Trash2 className="size-4 text-destructive" />
+              Delete this test case?
+            </DialogTitle>
+            <DialogDescription>
+              {(() => {
+                if (pendingDeleteRow == null || !data?.testcases) return null
+                const rows = parseCsv(data.testcases)
+                const vals = rows[pendingDeleteRow] ?? []
+                const label = [vals[0], vals[1]].filter((v) => v && v.trim()).join(' · ')
+                return label
+                  ? `“${label}” will be removed from v${selectedVersion}. This can't be undone.`
+                  : `This row will be removed from v${selectedVersion}. This can't be undone.`
+              })()}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setPendingDeleteRow(null)}
+              disabled={delRow.isPending}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              variant="destructive"
+              onClick={() => {
+                if (pendingDeleteRow == null || !data?.testcases || selectedVersion == null) return
+                // Capture the row's values now so Undo can re-insert it verbatim.
+                const values = parseCsv(data.testcases)[pendingDeleteRow] ?? []
+                delRow.mutate({ version: selectedVersion, row: pendingDeleteRow, values })
+              }}
+              disabled={delRow.isPending}
+            >
+              {delRow.isPending ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : (
+                <Trash2 className="size-4" />
+              )}
+              Delete
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
     </>

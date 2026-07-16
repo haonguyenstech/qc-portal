@@ -793,6 +793,199 @@ export interface EditCellResult {
   newValue: string
 }
 
+export interface EditRowResult {
+  testcases: string // the full updated CSV (so the UI can re-render the table)
+  version: number
+  format: TestcaseFormat // always 'csv'
+  row: number // absolute row index that changed (0 = header)
+}
+
+/**
+ * Overwrite an ENTIRE data row of a stored CSV test-case version with exact values
+ * (no AI) — one value per header column, in order — then save the same version file
+ * in place. `row` is the absolute row index in the parsed CSV (0 = header, so the
+ * first data row is 1). Missing/short `values` leave that column unchanged; extra
+ * values beyond the header width are ignored. Throws an Error (with `.status`).
+ */
+export async function editTestcaseRow(opts: {
+  rootPath: string
+  folder: string
+  version: number
+  row: number
+  values: string[]
+}): Promise<EditRowResult> {
+  const folder = opts.folder.trim()
+  if (!folder) throw statusError('folder is required', 400)
+  if (!Number.isInteger(opts.version)) throw statusError('invalid version', 400)
+  if (!Array.isArray(opts.values)) throw statusError('values is required', 400)
+
+  const dir = ticketDir(opts.rootPath, folder)
+  const meta = listTestcaseVersions(dir).find((v) => v.version === opts.version)
+  if (!meta) throw statusError('test-case version not found', 404)
+  if (meta.format !== 'csv') {
+    throw statusError('Row editing is only available for CSV test cases.', 422)
+  }
+
+  const filePath = path.join(dir, meta.file)
+  let raw: string
+  try {
+    raw = fs.readFileSync(filePath, 'utf8')
+  } catch (err) {
+    throw statusError(`Could not read version: ${(err as Error).message}`, 500)
+  }
+
+  const rows = parseCsvRows(raw)
+  if (rows.length === 0) throw statusError('This version is empty.', 422)
+  const header = rows[0]
+  if (!Number.isInteger(opts.row) || opts.row < 1 || opts.row >= rows.length) {
+    throw statusError('invalid row', 400)
+  }
+
+  const targetRow = rows[opts.row]
+  while (targetRow.length < header.length) targetRow.push('') // pad short rows
+  for (let i = 0; i < header.length; i++) {
+    const v = opts.values[i]
+    if (typeof v === 'string') targetRow[i] = v.slice(0, MAX_CELL_VALUE_CHARS)
+  }
+
+  const updated = serializeCsv(rows)
+  try {
+    fs.writeFileSync(filePath, updated + '\n', 'utf8')
+  } catch (err) {
+    throw statusError(`Updated, but could not save: ${(err as Error).message}`, 500)
+  }
+
+  return { testcases: updated, version: opts.version, format: 'csv', row: opts.row }
+}
+
+/**
+ * Delete one or more DATA rows of a stored CSV test-case version (no AI), then save
+ * the same version file in place. `rows` are absolute row indices in the parsed CSV
+ * (0 = header, so the first data row is 1); the header row can never be deleted.
+ * At least one data row must remain. Throws an Error (with `.status`) on any failure.
+ */
+export async function deleteTestcaseRows(opts: {
+  rootPath: string
+  folder: string
+  version: number
+  rows: number[]
+}): Promise<EditRowResult> {
+  const folder = opts.folder.trim()
+  if (!folder) throw statusError('folder is required', 400)
+  if (!Number.isInteger(opts.version)) throw statusError('invalid version', 400)
+  if (!Array.isArray(opts.rows) || opts.rows.length === 0) {
+    throw statusError('rows is required', 400)
+  }
+
+  const dir = ticketDir(opts.rootPath, folder)
+  const meta = listTestcaseVersions(dir).find((v) => v.version === opts.version)
+  if (!meta) throw statusError('test-case version not found', 404)
+  if (meta.format !== 'csv') {
+    throw statusError('Row deletion is only available for CSV test cases.', 422)
+  }
+
+  const filePath = path.join(dir, meta.file)
+  let raw: string
+  try {
+    raw = fs.readFileSync(filePath, 'utf8')
+  } catch (err) {
+    throw statusError(`Could not read version: ${(err as Error).message}`, 500)
+  }
+
+  const rows = parseCsvRows(raw)
+  if (rows.length === 0) throw statusError('This version is empty.', 422)
+
+  // Validate every index is a real data row (never the header at 0).
+  const toDelete = new Set<number>()
+  for (const r of opts.rows) {
+    if (!Number.isInteger(r) || r < 1 || r >= rows.length) {
+      throw statusError('invalid row', 400)
+    }
+    toDelete.add(r)
+  }
+  const dataRowCount = rows.length - 1
+  if (toDelete.size >= dataRowCount) {
+    throw statusError('At least one test case must remain — delete the version instead.', 422)
+  }
+
+  const kept = rows.filter((_, i) => i === 0 || !toDelete.has(i))
+  const updated = serializeCsv(kept)
+  try {
+    fs.writeFileSync(filePath, updated + '\n', 'utf8')
+  } catch (err) {
+    throw statusError(`Deleted, but could not save: ${(err as Error).message}`, 500)
+  }
+
+  // Report the first deleted row index (for parity with EditRowResult).
+  return {
+    testcases: updated,
+    version: opts.version,
+    format: 'csv',
+    row: Math.min(...toDelete),
+  }
+}
+
+/**
+ * Insert a DATA row into a stored CSV test-case version at absolute index `row`
+ * (1 = first data row; the header at 0 is untouched). Used to UNDO a row deletion by
+ * putting the removed row back where it was. The insertion index is clamped into the
+ * data region [1, rows.length]; `values` are padded/clipped to the header width.
+ * Throws an Error (with `.status`) on any failure.
+ */
+export async function insertTestcaseRow(opts: {
+  rootPath: string
+  folder: string
+  version: number
+  row: number
+  values: string[]
+}): Promise<EditRowResult> {
+  const folder = opts.folder.trim()
+  if (!folder) throw statusError('folder is required', 400)
+  if (!Number.isInteger(opts.version)) throw statusError('invalid version', 400)
+  if (!Array.isArray(opts.values)) throw statusError('values is required', 400)
+
+  const dir = ticketDir(opts.rootPath, folder)
+  const meta = listTestcaseVersions(dir).find((v) => v.version === opts.version)
+  if (!meta) throw statusError('test-case version not found', 404)
+  if (meta.format !== 'csv') {
+    throw statusError('Row insertion is only available for CSV test cases.', 422)
+  }
+
+  const filePath = path.join(dir, meta.file)
+  let raw: string
+  try {
+    raw = fs.readFileSync(filePath, 'utf8')
+  } catch (err) {
+    throw statusError(`Could not read version: ${(err as Error).message}`, 500)
+  }
+
+  const rows = parseCsvRows(raw)
+  if (rows.length === 0) throw statusError('This version is empty.', 422)
+  const header = rows[0]
+
+  // Clamp the insertion point into the data region [1, rows.length] (rows.length
+  // appends after the last data row).
+  let at = Number.isInteger(opts.row) ? opts.row : rows.length
+  if (at < 1) at = 1
+  if (at > rows.length) at = rows.length
+
+  const newRow: string[] = []
+  for (let i = 0; i < header.length; i++) {
+    const v = opts.values[i]
+    newRow.push(typeof v === 'string' ? v.slice(0, MAX_CELL_VALUE_CHARS) : '')
+  }
+  rows.splice(at, 0, newRow)
+
+  const updated = serializeCsv(rows)
+  try {
+    fs.writeFileSync(filePath, updated + '\n', 'utf8')
+  } catch (err) {
+    throw statusError(`Restored, but could not save: ${(err as Error).message}`, 500)
+  }
+
+  return { testcases: updated, version: opts.version, format: 'csv', row: at }
+}
+
 /**
  * Rewrite a single cell of a stored CSV test-case version with Claude, overwriting
  * the same version file in place. `row` is the absolute row index in the parsed CSV

@@ -3,6 +3,45 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.9.22 — 2026-07-16
+
+**Prototype builder — describe a screen and watch Claude build the UI**
+
+### Added
+
+- **New Prototype page (under Tools).** Describe a screen in plain language and Claude builds a working
+  HTML/CSS mock-up you can see immediately — then keep chatting to refine it ("make the header sticky",
+  "add a pricing table"). Each prototype is saved per project, so you can come back to it, and you can
+  duplicate, rename, or delete one from its **settings** dialog.
+- **Watch it build in real time.** The generated code streams in live with an elapsed-time readout and a
+  **Stop** button, and you can expand the **Claude logs** panel to see what it's doing. A skeleton +
+  overlay shows while it's building or updating so the old preview never looks broken mid-change.
+- **Start settings for a fresh build.** On the first message you can pick a **design style** (with visual
+  preview thumbnails — clean, modern SaaS, glassmorphism, brutalist, playful, corporate, elegant),
+  a light/dark **theme**, and an **accent colour**, so the very first draft already looks the way you want.
+  Claude is also instructed to always produce a polished, fully responsive layout that never breaks on
+  small screens.
+- **Preview like a real device.** The preview toolbar lets you view the design at **Desktop, Laptop,
+  Tablet, or Mobile** widths — tablet and phone render inside a device frame you can **rotate between
+  portrait and landscape**. Each control has a hover tooltip explaining what it does.
+- **Capture & copy.** On the Preview tab, a **camera** button copies a PNG snapshot of the rendered
+  design to your clipboard; on the Code tab, a **copy** button copies the full HTML. You can also open
+  the prototype in a new browser tab.
+- **Attach images to guide the design.** Drag-and-drop (or paste) reference images into the chat and
+  Claude uses them when building the UI.
+
+### Changed
+
+- **API Testing — reusable environments & response capture.** Save multiple named environments (e.g.
+  Local / Staging) with their own base URL and variables, reference them anywhere with `{{variable}}`,
+  and **capture a value straight from a response** into a variable to reuse in later requests. Values you
+  mark **secret** are stored on the server and masked in the UI.
+
+### Fixed
+
+- **API Testing request bugs.** Duplicate request headers and `Set-Cookie` responses are now handled
+  correctly, and a redundant save that could show a stale "AI" badge was removed.
+
 ## 0.9.21 — 2026-07-15
 
 **Tell Claude your environments & test accounts — no more `<System account>` placeholders**

@@ -16,7 +16,10 @@ import { resolveProject } from '../projectScope.js'
 import { revealFolderNative } from '../folderPicker.js'
 import {
   deleteTestcaseVersion,
+  deleteTestcaseRows,
   editTestcaseCell,
+  editTestcaseRow,
+  insertTestcaseRow,
   generateTestcaseVersion,
   listTestcaseVersions,
 } from '../testcaseGen.js'
@@ -776,6 +779,107 @@ aiRouter.post('/testcases/cell', async (req, res) => {
       comment,
       value,
       model: typeof req.body?.model === 'string' ? req.body.model : undefined,
+    })
+    res.json(result)
+  } catch (err) {
+    const status = (err as { status?: number }).status ?? 500
+    res.status(status).json({ error: (err as Error).message })
+  }
+})
+
+/**
+ * Overwrite an entire data row of a stored CSV test-case version with exact values
+ * (no AI), overwriting that same version in place. The /testcases preview lets a QC
+ * engineer click the row's ID cell and edit every field of that one test case. Body:
+ *   { projectId, folder, version, row, values: string[] }
+ *   - row: absolute row index in the CSV (0 = header); values: one per header column.
+ */
+aiRouter.post('/testcases/row', async (req, res) => {
+  const project = resolveProject(req)
+  if (!project) return res.status(400).json({ error: 'project not found' })
+
+  const folder = typeof req.body?.folder === 'string' ? req.body.folder.trim() : ''
+  if (!folder) return res.status(400).json({ error: 'folder is required' })
+  const version = Number(req.body?.version)
+  if (!Number.isInteger(version)) return res.status(400).json({ error: 'version is required' })
+  const values = Array.isArray(req.body?.values)
+    ? req.body.values.map((v: unknown) => (typeof v === 'string' ? v : String(v ?? '')))
+    : null
+  if (!values) return res.status(400).json({ error: 'values is required' })
+
+  try {
+    const result = await editTestcaseRow({
+      rootPath: project.rootPath,
+      folder,
+      version,
+      row: Number(req.body?.row),
+      values,
+    })
+    res.json(result)
+  } catch (err) {
+    const status = (err as { status?: number }).status ?? 500
+    res.status(status).json({ error: (err as Error).message })
+  }
+})
+
+/**
+ * Delete one or more DATA rows of a CSV test-case version, overwriting that version
+ * in place (no AI). Body: { projectId, folder, version, rows: number[] } where each
+ * row is an absolute parsed-CSV index (0 = header, so data rows start at 1). At least
+ * one data row must survive — delete the whole version instead to remove them all.
+ */
+aiRouter.post('/testcases/rows/delete', async (req, res) => {
+  const project = resolveProject(req)
+  if (!project) return res.status(400).json({ error: 'project not found' })
+
+  const folder = typeof req.body?.folder === 'string' ? req.body.folder.trim() : ''
+  if (!folder) return res.status(400).json({ error: 'folder is required' })
+  const version = Number(req.body?.version)
+  if (!Number.isInteger(version)) return res.status(400).json({ error: 'version is required' })
+  const rows = Array.isArray(req.body?.rows)
+    ? req.body.rows.map((r: unknown) => Number(r)).filter((r: number) => Number.isInteger(r))
+    : null
+  if (!rows || rows.length === 0) return res.status(400).json({ error: 'rows is required' })
+
+  try {
+    const result = await deleteTestcaseRows({
+      rootPath: project.rootPath,
+      folder,
+      version,
+      rows,
+    })
+    res.json(result)
+  } catch (err) {
+    const status = (err as { status?: number }).status ?? 500
+    res.status(status).json({ error: (err as Error).message })
+  }
+})
+
+/**
+ * Insert a data row into a CSV test-case version at absolute index `row` (used to UNDO
+ * a delete). Body: { projectId, folder, version, row, values: string[] }. The index is
+ * clamped into the data region; values are padded/clipped to the header width.
+ */
+aiRouter.post('/testcases/rows/insert', async (req, res) => {
+  const project = resolveProject(req)
+  if (!project) return res.status(400).json({ error: 'project not found' })
+
+  const folder = typeof req.body?.folder === 'string' ? req.body.folder.trim() : ''
+  if (!folder) return res.status(400).json({ error: 'folder is required' })
+  const version = Number(req.body?.version)
+  if (!Number.isInteger(version)) return res.status(400).json({ error: 'version is required' })
+  const values = Array.isArray(req.body?.values)
+    ? req.body.values.map((v: unknown) => (typeof v === 'string' ? v : String(v ?? '')))
+    : null
+  if (!values) return res.status(400).json({ error: 'values is required' })
+
+  try {
+    const result = await insertTestcaseRow({
+      rootPath: project.rootPath,
+      folder,
+      version,
+      row: Number(req.body?.row),
+      values,
     })
     res.json(result)
   } catch (err) {
