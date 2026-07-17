@@ -11,6 +11,7 @@ import {
   getSpaces,
   getSubtasks,
   getWorkspaces,
+  postTaskComment,
   resolveProjectClickupToken,
   searchTasks,
   withClickupToken,
@@ -196,6 +197,7 @@ clickupRouter.post('/issues/subtasks', async (req, res) => {
       })
       // Best-effort: attach the QC screenshots so the image shows on the ClickUp
       // card instead of a dead local path. Never fail the subtask over an upload.
+      const uploaded: { title: string; url: string }[] = []
       if (project && slug && issue.screenshots.length) {
         for (const rel of issue.screenshots) {
           const abs = resolveRunScreenshot(project.rootPath, slug, rel)
@@ -203,15 +205,31 @@ clickupRouter.post('/issues/subtasks', async (req, res) => {
           try {
             const bytes = fs.readFileSync(abs)
             const ext = path.extname(abs).toLowerCase()
-            await attachTaskFile(
+            const att = await attachTaskFile(
               task.id,
               path.basename(abs),
               bytes,
               IMAGE_CONTENT_TYPE[ext] ?? 'application/octet-stream',
             )
+            if (att.url) uploaded.push({ title: att.title, url: att.url })
           } catch {
             /* best-effort — keep the subtask even if an attachment fails */
           }
+        }
+      }
+      // Also drop the image evidence into a comment on the subtask, so it's
+      // visible inline in the discussion thread (not just the attachments panel).
+      // Best-effort — never fail the subtask over a comment.
+      if (uploaded.length) {
+        try {
+          const body = [
+            `🔍 **QC evidence** — ${uploaded.length} screenshot${uploaded.length === 1 ? '' : 's'} from the automated run:`,
+            '',
+            ...uploaded.map((a) => `![${a.title}](${a.url})`),
+          ].join('\n')
+          await postTaskComment(task.id, body)
+        } catch {
+          /* best-effort — keep the subtask even if the comment fails */
         }
       }
       created.push(task)

@@ -3,6 +3,25 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.9.24 — 2026-07-17
+
+**Connect Azure DevOps Boards, and QC screenshots now show inline on ClickUp cards**
+
+### Added
+
+- **Azure DevOps Boards is now a connectable MCP server.** On the **MCP** page you can connect Azure
+  DevOps with your **organization URL** and a **Personal Access Token** (plus an optional default
+  project) — the same paste-a-token flow as Jira. Once connected, QC runs and test-case work can read
+  bugs, user stories, and tasks straight from your Boards. The step-by-step token guide (how to create
+  the PAT and which scope to grant) is on the in-app **Getting API tokens** doc page.
+
+### Changed
+
+- **QC bug screenshots now appear inline on the ClickUp card.** When the portal files a QC issue as a
+  ClickUp subtask, it uploads the run's screenshots and posts them as an inline **QC evidence** comment,
+  so the images show right in the card's thread instead of as a dead local path. Best-effort — a failed
+  upload or comment never blocks creating the subtask.
+
 ## 0.9.23 — 2026-07-17
 
 **Faster MCP status, a run guard for missing browser MCP, and Prototype polish**

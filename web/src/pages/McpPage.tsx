@@ -9,6 +9,7 @@ import {
   Check,
   CheckCircle2,
   Clock,
+  Cloud,
   Copy,
   ExternalLink,
   Figma,
@@ -79,6 +80,12 @@ const OAUTH_META: Record<
     blurb: 'Issues & boards',
     tokenHint: 'Get a token — Atlassian → Security → API tokens',
   },
+  azure: {
+    label: 'Azure DevOps',
+    icon: Cloud,
+    blurb: 'Boards & work items',
+    tokenHint: 'Get a PAT — Azure DevOps → User settings → Personal access tokens',
+  },
 }
 
 // One-line "what is this server for?" copy, surfaced via the header info tooltip
@@ -90,6 +97,8 @@ const SERVER_PURPOSE: Record<string, string> = {
     'Opens Figma design files so Design Check can compare the built UI against the intended design.',
   jira:
     'Pulls QC issues, stories, and their status from Jira so runs and test-case work read requirements straight from the tracker.',
+  azure:
+    'Pulls QC work items (bugs, user stories, tasks) from Azure DevOps Boards so runs and test-case work read requirements straight from the tracker.',
   playwright:
     'Drives a real browser — navigating, clicking, typing, screenshotting — so QC runs can exercise and verify the web app.',
   'mobile-mcp':
@@ -450,6 +459,9 @@ function ConnectServices({
   // Jira needs a site URL + account email alongside the API token (mcp-atlassian).
   const [jiraUrl, setJiraUrl] = useState('')
   const [jiraEmail, setJiraEmail] = useState('')
+  // Azure DevOps needs an organization URL (+ optional default project) with the PAT.
+  const [azureOrgUrl, setAzureOrgUrl] = useState('')
+  const [azureProject, setAzureProject] = useState('')
   const [copiedEnv, setCopiedEnv] = useState<string | null>(null)
   // Default to headed (headless = false) so QC can watch the browser during runs;
   // the checkbox below still lets them opt into headless before connecting.
@@ -478,13 +490,17 @@ function ConnectServices({
     setToken('')
     setJiraUrl('')
     setJiraEmail('')
+    setAzureOrgUrl('')
+    setAzureProject('')
     setOpenProvider(provider)
   }
 
-  // Whether the connect form has everything it needs to save (Jira also needs URL + email).
+  // Whether the connect form has everything it needs to save (Jira also needs URL +
+  // email; Azure DevOps needs the organization URL).
   function canSaveToken(provider: McpOauthProvider): boolean {
     if (!token.trim()) return false
     if (provider === 'jira') return !!jiraUrl.trim() && !!jiraEmail.trim()
+    if (provider === 'azure') return !!azureOrgUrl.trim()
     return true
   }
 
@@ -494,7 +510,11 @@ function ConnectServices({
         provider,
         token.trim(),
         projectId,
-        provider === 'jira' ? { url: jiraUrl.trim(), email: jiraEmail.trim() } : undefined,
+        provider === 'jira'
+          ? { url: jiraUrl.trim(), email: jiraEmail.trim() }
+          : provider === 'azure'
+            ? { orgUrl: azureOrgUrl.trim(), project: azureProject.trim() || undefined }
+            : undefined,
       ),
     onSuccess: (_, provider) => {
       toast.success(`${OAUTH_META[provider].label} connected`, {
@@ -504,6 +524,8 @@ function ConnectServices({
       setToken('')
       setJiraUrl('')
       setJiraEmail('')
+      setAzureOrgUrl('')
+      setAzureProject('')
       return refresh()
     },
     onError: (err) =>
@@ -907,10 +929,31 @@ function ConnectServices({
                 />
               </>
             )}
+            {provider === 'azure' && (
+              <>
+                <Input
+                  autoFocus
+                  type="url"
+                  placeholder="Org URL — https://dev.azure.com/your-org"
+                  value={azureOrgUrl}
+                  onChange={(e) => setAzureOrgUrl(e.target.value)}
+                  aria-label="Azure DevOps organization URL"
+                  className="h-9 text-xs"
+                />
+                <Input
+                  type="text"
+                  placeholder="Default project (optional)"
+                  value={azureProject}
+                  onChange={(e) => setAzureProject(e.target.value)}
+                  aria-label="Azure DevOps default project"
+                  className="h-9 text-xs"
+                />
+              </>
+            )}
             <Input
-              autoFocus={provider !== 'jira'}
+              autoFocus={provider !== 'jira' && provider !== 'azure'}
               type="password"
-              placeholder="Paste your API token"
+              placeholder={provider === 'azure' ? 'Paste your PAT' : 'Paste your API token'}
               value={token}
               onChange={(e) => setToken(e.target.value)}
               onKeyDown={(e) => {
@@ -941,6 +984,8 @@ function ConnectServices({
                   setToken('')
                   setJiraUrl('')
                   setJiraEmail('')
+                  setAzureOrgUrl('')
+                  setAzureProject('')
                 }}
                 disabled={saving}
               >
@@ -1110,6 +1155,7 @@ function ConnectServices({
       >
         {providerCard('clickup')}
         {providerCard('jira')}
+        {providerCard('azure')}
       </McpGroup>
 
       <McpGroup

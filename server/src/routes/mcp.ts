@@ -591,7 +591,7 @@ mcpRouter.delete('/:name', (req, res) => {
 
 // ============================ OAuth ("click → authenticate") ============================
 
-type ProviderId = 'clickup' | 'figma' | 'jira'
+type ProviderId = 'clickup' | 'figma' | 'jira' | 'azure'
 
 interface ProviderDef {
   /** Server name written into .mcp.json. */
@@ -702,10 +702,25 @@ const PROVIDERS: Record<ProviderId, ProviderDef> = {
       throw new Error('Jira uses token connect, not OAuth')
     },
   },
+  // Azure DevOps Boards — token-connect only (org URL + Personal Access Token).
+  // Same OAuth stubs-throw shape as Jira.
+  azure: {
+    serverName: 'azure',
+    hasApp: () => false,
+    authorizeUrl: () => {
+      throw new Error('Azure DevOps uses token connect, not OAuth')
+    },
+    exchange: async () => {
+      throw new Error('Azure DevOps uses token connect, not OAuth')
+    },
+    buildEntry: () => {
+      throw new Error('Azure DevOps uses token connect, not OAuth')
+    },
+  },
 }
 
 function isProviderId(v: string): v is ProviderId {
-  return v === 'clickup' || v === 'figma' || v === 'jira'
+  return v === 'clickup' || v === 'figma' || v === 'jira' || v === 'azure'
 }
 
 // Where the user grabs a personal API token for each provider (token-connect flow).
@@ -713,6 +728,8 @@ const TOKEN_URLS: Record<ProviderId, string> = {
   clickup: 'https://app.clickup.com/settings/apps',
   figma: 'https://www.figma.com/settings',
   jira: 'https://id.atlassian.com/manage-profile/security/api-tokens',
+  // ADO PATs are created per-organization; this is the generic tokens page.
+  azure: 'https://dev.azure.com',
 }
 
 /**
@@ -724,7 +741,7 @@ const TOKEN_URLS: Record<ProviderId, string> = {
 function buildTokenEntry(
   provider: ProviderId,
   token: string,
-  extra?: { url?: string; email?: string },
+  extra?: { url?: string; email?: string; orgUrl?: string; project?: string },
 ): McpEntry {
   if (provider === 'clickup') {
     return {
@@ -745,6 +762,22 @@ function buildTokenEntry(
         JIRA_USERNAME: extra?.email ?? '',
         JIRA_API_TOKEN: token,
       },
+    }
+  }
+  if (provider === 'azure') {
+    // Azure DevOps Boards via the PAT-based community server (works headless,
+    // unlike the official server's default interactive browser login).
+    const env: Record<string, string> = {
+      AZURE_DEVOPS_ORG_URL: extra?.orgUrl ?? '',
+      AZURE_DEVOPS_AUTH_METHOD: 'pat',
+      AZURE_DEVOPS_PAT: token,
+    }
+    if (extra?.project) env.AZURE_DEVOPS_DEFAULT_PROJECT = extra.project
+    return {
+      type: 'stdio',
+      command: 'npx',
+      args: ['-y', '@tiberriver256/mcp-server-azure-devops'],
+      env,
     }
   }
   return {
@@ -814,7 +847,7 @@ mcpRouter.post('/oauth/:provider/token', (req, res) => {
   const token = typeof req.body?.token === 'string' ? req.body.token.trim() : ''
   if (!token) return res.status(400).json({ error: 'token is required' })
 
-  let extra: { url?: string; email?: string } | undefined
+  let extra: { url?: string; email?: string; orgUrl?: string; project?: string } | undefined
   if (providerId === 'jira') {
     const url = typeof req.body?.url === 'string' ? req.body.url.trim() : ''
     const email = typeof req.body?.email === 'string' ? req.body.email.trim() : ''
@@ -822,6 +855,15 @@ mcpRouter.post('/oauth/:provider/token', (req, res) => {
       return res.status(400).json({ error: 'Jira needs a site URL and account email' })
     }
     extra = { url: url.replace(/\/+$/, ''), email } // drop any trailing slash on the site URL
+  } else if (providerId === 'azure') {
+    const orgUrl = typeof req.body?.orgUrl === 'string' ? req.body.orgUrl.trim() : ''
+    const project = typeof req.body?.project === 'string' ? req.body.project.trim() : ''
+    if (!orgUrl) {
+      return res
+        .status(400)
+        .json({ error: 'Azure DevOps needs an organization URL, e.g. https://dev.azure.com/your-org' })
+    }
+    extra = { orgUrl: orgUrl.replace(/\/+$/, ''), project: project || undefined }
   }
 
   const file = mcpJsonFor(project.rootPath)

@@ -333,11 +333,12 @@ actual field names and behavior. Access tokens are kept in a protected on-disk c
     id: 'mcp-tokens',
     title: 'Getting API tokens',
     icon: KeyRound,
-    blurb: 'Create ClickUp, Figma & Jira tokens step by step.',
+    blurb: 'Create ClickUp, Figma, Jira & Azure DevOps tokens step by step.',
     body: `
-The **MCP** page connects ClickUp, Figma, and Jira with a **personal API token** — you create the
-token on the provider's site, then paste it into the matching card. The **Connect** button on each
-card already opens the right settings page in a new tab; this page walks through what to do there.
+The **MCP** page connects ClickUp, Figma, Jira, and Azure DevOps with a **personal API token** — you
+create the token on the provider's site, then paste it into the matching card. The **Connect** button
+on each card already opens the right settings page in a new tab; this page walks through what to do
+there.
 
 Tokens are saved into the **active project's \`.mcp.json\`** on your own machine — they are scoped
 per project, shown only masked afterwards, and **never logged**.
@@ -392,6 +393,33 @@ Jira needs **three** things, all entered on the card's connect form:
 
 ---
 
+## Azure DevOps — step by step
+
+Azure DevOps needs **two** things (a third is optional), all entered on the card's connect form:
+
+- **Organization URL** — your Azure DevOps org address, e.g. \`https://dev.azure.com/your-org\`.
+- **Personal Access Token (PAT)** — created as follows.
+- **Default project** *(optional)* — the board/project to read from by default; leave empty to
+  work across all projects in the org.
+
+1. Click **Connect** on the Azure DevOps card (or open
+   **[dev.azure.com](https://dev.azure.com)** and sign in to your org).
+2. Top right, click the **User settings** gear → **Personal access tokens** (URL shape:
+   \`https://dev.azure.com/your-org/_usersSettings/tokens\`).
+3. Click **New Token**. Name it (e.g. \`qc-portal\`), pick the **Organization** it applies to, and set
+   an expiration.
+4. Under **Scopes**, choose **Custom defined** and grant **Work Items → Read** (this is enough to pull
+   bugs, user stories, and tasks from Boards). Add **Code → Read** too only if you also want it to read
+   repos.
+5. Click **Create** and **copy it now** — the PAT is shown once (a long opaque string, no fixed prefix).
+6. Back on the MCP page: fill in **Organization URL** + PAT (+ optional **Default project**) on the
+   Azure DevOps card and click **Save**.
+
+The PAT acts as **you** — it sees the same organizations, projects, and work items your Azure DevOps
+account sees, limited to the scopes you granted.
+
+---
+
 ### Where your token goes (security)
 
 - Tokens are written into the project's **\`.mcp.json\`** (env vars for that MCP server) on the
@@ -408,6 +436,13 @@ Jira needs **three** things, all entered on the card's connect form:
   warning with a copy-able install command when it's missing.
 - **Jira connects but lists no tickets / 401** — the token is a *scoped* "API token with scopes".
   Create a plain (classic) API token instead, per the steps above.
+- **Azure DevOps shows \`failed\` right after connecting** — this server runs via \`npx\` (Node, not
+  \`uv\`), so **Node.js** must be installed, and the first connection **downloads the server package**,
+  which can briefly show \`failed\`/\`pending\` until it finishes. Wait a moment and use **Functional
+  test** again.
+- **Azure DevOps connects but returns nothing / 401 or 403** — the PAT is missing the **Work Items →
+  Read** scope, is scoped to the wrong **organization**, or the **Organization URL** doesn't match the
+  org the PAT was created in. Recreate the PAT with Work Items Read and confirm the org URL.
 - **Figma test fails** — the token may be expired or missing the **File content: Read** scope;
   generate a fresh one.
 - Use each card's **Functional test** to verify the connection with a real action (fetch a ticket,

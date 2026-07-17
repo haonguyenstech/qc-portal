@@ -1504,7 +1504,7 @@ export function openMcpFolder(projectId: string): Promise<{ ok: true; path: stri
 
 // ---- MCP OAuth (one-click connect for ClickUp / Figma) ----
 
-export type McpOauthProvider = 'clickup' | 'figma' | 'jira'
+export type McpOauthProvider = 'clickup' | 'figma' | 'jira' | 'azure'
 
 export interface McpOauthStatus {
   redirectBase: string
@@ -1522,13 +1522,14 @@ export function mcpOauthStatus(projectId: string): Promise<McpOauthStatus> {
 
 /**
  * Token-connect: save a pasted personal API token into the project's .mcp.json.
- * Jira additionally needs a site URL + account email, passed via `extra`.
+ * Jira additionally needs a site URL + account email; Azure DevOps needs an
+ * organization URL (+ optional default project). Passed via `extra`.
  */
 export function saveMcpToken(
   provider: McpOauthProvider,
   token: string,
   projectId: string,
-  extra?: { url?: string; email?: string },
+  extra?: { url?: string; email?: string; orgUrl?: string; project?: string },
 ): Promise<void> {
   return request(
     `/api/mcp/oauth/${encodeURIComponent(provider)}/token?projectId=${encodeURIComponent(projectId)}`,

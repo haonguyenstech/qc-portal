@@ -365,12 +365,19 @@ export async function createIssueSubtask(input: CreateSubtaskInput): Promise<Cre
  * `POST /task/{id}/attachment` multipart endpoint — the boundary is set by
  * fetch from the FormData body, so we must NOT send our own Content-Type.
  */
+export interface UploadedAttachment {
+  id: string
+  /** Presigned URL ClickUp returns for the stored file (usable in markdown). */
+  url: string
+  title: string
+}
+
 export async function attachTaskFile(
   taskId: string,
   filename: string,
   bytes: Uint8Array,
   contentType: string,
-): Promise<void> {
+): Promise<UploadedAttachment> {
   const form = new FormData()
   form.append('attachment', new Blob([bytes as BlobPart], { type: contentType }), filename)
   const res = await fetch(`${API}/task/${encodeURIComponent(taskId)}/attachment`, {
@@ -384,6 +391,27 @@ export async function attachTaskFile(
       status: 502,
     })
   }
+  const data = await res.json().catch(() => ({}))
+  return {
+    id: String(data?.id ?? ''),
+    url: String(data?.url ?? ''),
+    title: String(data?.title ?? filename),
+  }
+}
+
+/**
+ * Post a comment on a task. ClickUp renders `comment_text` with markdown, so an
+ * embedded `![alt](url)` shows the image inline in the comment thread. Best used
+ * with an attachment's presigned URL from {@link attachTaskFile}. `notifyAll:false`
+ * keeps it quiet (no email/notification storm for automated QC evidence).
+ */
+export async function postTaskComment(taskId: string, commentText: string): Promise<void> {
+  const text = commentText.trim()
+  if (!text) return
+  await cuPost(`/task/${encodeURIComponent(taskId)}/comment`, {
+    comment_text: text,
+    notify_all: false,
+  })
 }
 
 // ---- Docs (ClickUp API v3) ----
