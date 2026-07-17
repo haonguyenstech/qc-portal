@@ -52,6 +52,8 @@ sidebar footer matches the `version` in the repo root `package.json`.
   status text replaces the plain spinner, and the empty-state onboarding text is no longer clipped in the
   smaller floating chat.
 
+## 0.9.22 — 2026-07-16
+
 **Prototype builder — describe a screen and watch Claude build the UI**
 
 ### Added
