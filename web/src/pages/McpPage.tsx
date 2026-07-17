@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { Link } from 'react-router-dom'
@@ -43,6 +43,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import {
   addMcp,
   listMcp,
+  mcpHealth,
   mcpOauthStatus,
   mcpUvStatus,
   openMcpFolder,
@@ -461,6 +462,7 @@ function ConnectServices({
   function refresh() {
     return Promise.all([
       queryClient.invalidateQueries({ queryKey: ['mcp', projectId] }),
+      queryClient.invalidateQueries({ queryKey: ['mcp-health', projectId] }),
       queryClient.invalidateQueries({ queryKey: ['mcp-oauth', projectId] }),
     ])
   }
@@ -1222,14 +1224,32 @@ function UvWarning() {
 
 export default function McpPage() {
   const { activeProjectId, activeProject } = useProjects()
-  const { data, isLoading, isError, error } = useQuery({
+  // Two-phase load: the structural list comes back instantly (health=false), so
+  // the cards render immediately; live health is a separate, slower query whose
+  // result is merged in below. This keeps the page from blocking on the probe.
+  const { data: listData, isLoading, isError, error } = useQuery({
     queryKey: ['mcp', activeProjectId],
-    queryFn: () => listMcp(activeProjectId as string),
+    queryFn: () => listMcp(activeProjectId as string, { health: false }),
     enabled: !!activeProjectId,
     staleTime: Infinity,
     refetchOnMount: false,
     refetchOnWindowFocus: false,
   })
+  const { data: health, isFetching: healthChecking } = useQuery({
+    queryKey: ['mcp-health', activeProjectId],
+    queryFn: () => mcpHealth(activeProjectId as string),
+    enabled: !!activeProjectId,
+    staleTime: Infinity,
+    refetchOnMount: false,
+    refetchOnWindowFocus: false,
+  })
+  // Merge live statuses onto the structural list. Until health resolves, servers
+  // keep their "unknown" status and the cards show a "Checking" badge.
+  const data = useMemo(
+    () =>
+      listData?.map((s) => ({ ...s, status: health?.[s.name] ?? s.status })),
+    [listData, health],
+  )
 
   if (!activeProjectId) {
     return (
@@ -1326,7 +1346,7 @@ export default function McpPage() {
         existingNames={servers.map((s) => s.name)}
         statusByName={Object.fromEntries(servers.map((s) => [s.name, s.status]))}
         envByName={Object.fromEntries(servers.map((s) => [s.name, s.env]))}
-        checkingStatus={isLoading}
+        checkingStatus={isLoading || healthChecking}
       />
     </div>
   )

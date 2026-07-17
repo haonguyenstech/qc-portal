@@ -172,6 +172,31 @@ function uniqueSlug(root: string, base: string): string {
   return slug
 }
 
+/**
+ * Default display name for a new prototype: "Prototype 1", "Prototype 2", …
+ * Picks one past the highest existing "Prototype N" so names stay sequential and
+ * don't collide even after deletes.
+ */
+function nextPrototypeName(root: string): string {
+  const dir = protoDir(root)
+  let max = 0
+  try {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (!e.isFile() || !e.name.endsWith('.json')) continue
+      try {
+        const p = JSON.parse(fs.readFileSync(path.join(dir, e.name), 'utf8')) as Prototype
+        const m = /^Prototype (\d+)$/.exec((p.name ?? '').trim())
+        if (m) max = Math.max(max, Number(m[1]))
+      } catch {
+        /* skip unreadable file */
+      }
+    }
+  } catch {
+    /* no prototypes dir yet → start at 1 */
+  }
+  return `Prototype ${max + 1}`
+}
+
 // ---------------------------------------------------------------- generation
 
 /** Pull the HTML document + the leading SUMMARY / SUGGESTIONS comments out of the reply. */
@@ -371,7 +396,9 @@ prototypeRouter.post('/', async (req, res) => {
   if (!prompt) return res.status(400).json({ error: 'prompt is required' })
   const model = pickModel(b.model)
   const name =
-    typeof b.name === 'string' && b.name.trim() ? b.name.trim().slice(0, 60) : prompt.slice(0, 48)
+    typeof b.name === 'string' && b.name.trim()
+      ? b.name.trim().slice(0, 60)
+      : nextPrototypeName(project.rootPath)
 
   const ac = new AbortController()
   // Detect a real client disconnect via the RESPONSE stream. (req 'close' fires as
@@ -473,7 +500,9 @@ prototypeRouter.post('/stream', async (req, res) => {
       proto = existing
     } else {
       const name =
-        typeof b.name === 'string' && b.name.trim() ? b.name.trim().slice(0, 60) : prompt.slice(0, 48)
+        typeof b.name === 'string' && b.name.trim()
+          ? b.name.trim().slice(0, 60)
+          : nextPrototypeName(project.rootPath)
       const s = uniqueSlug(project.rootPath, slugify(name))
       proto = {
         slug: s,

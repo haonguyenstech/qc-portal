@@ -55,6 +55,7 @@ import {
   checkAppUrl,
   createRun,
   listCrawledTickets,
+  listMcp,
   listRuns,
   listSkills,
   type CrawledTicket,
@@ -615,6 +616,15 @@ export default function RunPage() {
     queryFn: () => listCrawledTickets(activeProject!.id),
     enabled: !!activeProject,
   })
+  // Configured MCP servers — a web run drives a real browser via the Playwright
+  // MCP (mobile targets use Mobile MCP), so the run is blocked until the required
+  // server is in the project's .mcp.json. Shares the McpRequiredNotice query cache.
+  const { data: mcpServers } = useQuery({
+    queryKey: ['mcp', activeProject?.id],
+    queryFn: () => listMcp(activeProject!.id, { health: false }),
+    enabled: !!activeProject,
+  })
+
   // Test-case selection only applies when exactly ONE ticket is chosen — with a
   // multi-ticket queue there is no single test-case file to verify against.
   const soloTicketId = simpleTickets.length === 1 ? simpleTickets[0] : ''
@@ -682,6 +692,14 @@ export default function RunPage() {
   // app-mobile drives a native app already installed on the device — there's no URL,
   // so the URL field is hidden and never required/validated in that mode.
   const isAppTarget = testTarget === 'app-mobile'
+  // The MCP server this target drives the browser/device with. Web → Playwright;
+  // mobile targets → Mobile MCP. The run can't proceed until it's configured.
+  const requiredMcpServer = testTarget === 'web' ? 'playwright' : 'mobile-mcp'
+  const requiredMcpLabel = testTarget === 'web' ? 'Playwright' : 'Mobile'
+  // Only block once we've actually loaded the config (mcpServers !== undefined);
+  // don't gate the button on a still-loading query.
+  const mcpMissing =
+    mcpServers !== undefined && !mcpServers.some((s) => s.name === requiredMcpServer)
   const appUrlInvalid =
     !isAppTarget && appUrl.trim().length > 0 && !isValidHttpUrl(appUrl)
   const appUrlHelp =
@@ -825,7 +843,8 @@ export default function RunPage() {
     !sharedUrlInvalid &&
     invalidTicketUrls.length === 0 &&
     !!activeProject &&
-    unrunnableTickets.length === 0
+    unrunnableTickets.length === 0 &&
+    !mcpMissing
   const recent = recentRuns ?? []
   const liveRuns = recent.filter((run) => run.status === 'running' || run.status === 'queued').length
   const completedRuns = recent.filter((run) => run.status === 'passed' || run.status === 'failed').length
@@ -866,11 +885,24 @@ export default function RunPage() {
               : 'Required',
     },
     { label: 'Skill', ok: !!skill, value: skill || 'Choose skill' },
+    {
+      label: 'Browser MCP',
+      ok: !mcpMissing,
+      value: mcpMissing ? `Configure ${requiredMcpLabel}` : requiredMcpLabel,
+    },
   ]
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault()
     if (!leadTicket || !activeProject || !appUrlReady) return
+    if (mcpMissing) {
+      toast.error(`${requiredMcpLabel} MCP not configured`, {
+        description: `A ${testTarget === 'web' ? 'web' : 'mobile'} run drives the ${
+          testTarget === 'web' ? 'browser' : 'device'
+        } through the ${requiredMcpLabel} MCP server. Add it on the MCP page, then start the run.`,
+      })
+      return
+    }
     if (!isAppTarget && appUrl.trim() && !isValidHttpUrl(appUrl)) {
       toast.error('Invalid App URL', { description: 'Enter a full http:// or https:// address.' })
       return

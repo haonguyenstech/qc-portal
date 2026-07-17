@@ -86,7 +86,8 @@ function getStatuses(cwd: string): Promise<Record<string, McpServer['status']>> 
       env: spawnEnv(),
       windowsHide: true, // no cmd window flash on Windows
     })
-    // Health-checking remote servers can take ~10s; give it generous headroom.
+    // Health-checking remote servers can take ~10s; cap the wait so one hung
+    // server can't stall the whole status probe (best-effort → {} on timeout).
     const timer = setTimeout(() => {
       try {
         child.kill()
@@ -94,7 +95,7 @@ function getStatuses(cwd: string): Promise<Record<string, McpServer['status']>> 
         /* already gone */
       }
       resolve({})
-    }, 25000)
+    }, 15000)
     child.stdout?.on('data', (d) => (out += String(d)))
     child.on('error', () => {
       clearTimeout(timer)
@@ -375,15 +376,48 @@ export function approveMcpJsonServer(rootPath: string, name: string): boolean {
   return true
 }
 
+/**
+ * Live health for every configured server in a project. Runs the (slow) Claude
+ * CLI `mcp list` and the ClickUp token check **in parallel** — they're
+ * independent, so the total wait is the slower of the two rather than their sum.
+ * `configuredNames` is the set of servers actually in config, so the ClickUp
+ * override only applies when clickup is configured. Best-effort throughout.
+ */
+async function computeStatuses(
+  rootPath: string,
+  configuredNames: Set<string>,
+): Promise<Record<string, McpServer['status']>> {
+  const hasClickup = configuredNames.has('clickup')
+  const [statuses, clickupOk] = await Promise.all([
+    getStatuses(rootPath),
+    // `claude mcp list` reports clickup "connected" off the stdio handshake
+    // alone — the token is never exercised there. Do a real auth check so a
+    // dead/expired token shows "needs-auth" instead of a misleading "connected".
+    hasClickup
+      ? withClickupToken(resolveProjectClickupToken(rootPath), verifyToken)
+          .then((v) => v.ok)
+          .catch(() => true)
+      : Promise.resolve(true),
+  ])
+  if (hasClickup && !clickupOk) statuses.clickup = 'needs-auth'
+  return statuses
+}
+
 mcpRouter.get('/', async (req, res) => {
   const project = resolveProject(req)
   if (!project) return res.status(400).json({ error: 'project not found' })
 
   const projectServers = readMcp(mcpJsonFor(project.rootPath)).mcpServers ?? {}
   const localServers = localProjectMcpServers(project.rootPath)
+  const configuredNames = new Set([
+    ...Object.keys(projectServers),
+    ...Object.keys(localServers),
+  ])
   // Live health from the Claude CLI (best-effort) unless the caller opts out.
+  // The page loads this with health=false for an instant render, then fetches
+  // /health separately so the (slow) probe fills statuses in progressively.
   const statuses =
-    req.query.health === 'false' ? {} : await getStatuses(project.rootPath)
+    req.query.health === 'false' ? {} : await computeStatuses(project.rootPath, configuredNames)
 
   const list: McpServer[] = Object.entries(projectServers).map(([name, entry]) => ({
     name,
@@ -409,18 +443,25 @@ mcpRouter.get('/', async (req, res) => {
     })
   }
 
-  // `claude mcp list` reports clickup "connected" off the stdio handshake alone —
-  // the token is never exercised there. Do a real auth check so a dead/expired
-  // token shows "needs-auth" instead of a misleading "connected".
-  if (req.query.health !== 'false') {
-    const clickup = list.find((s) => s.name === 'clickup')
-    if (clickup) {
-      const v = await withClickupToken(resolveProjectClickupToken(project.rootPath), verifyToken)
-      if (!v.ok) clickup.status = 'needs-auth'
-    }
-  }
-
   res.json(list)
+})
+
+/**
+ * Live health only — a `{ name: status }` map. Split out of `GET /` so the page
+ * can render the server cards instantly and stream statuses in afterwards.
+ */
+mcpRouter.get('/health', async (req, res) => {
+  const project = resolveProject(req)
+  if (!project) return res.status(400).json({ error: 'project not found' })
+
+  const projectServers = readMcp(mcpJsonFor(project.rootPath)).mcpServers ?? {}
+  const localServers = localProjectMcpServers(project.rootPath)
+  const configuredNames = new Set([
+    ...Object.keys(projectServers),
+    ...Object.keys(localServers),
+  ])
+  const statuses = await computeStatuses(project.rootPath, configuredNames)
+  res.json(statuses)
 })
 
 /**

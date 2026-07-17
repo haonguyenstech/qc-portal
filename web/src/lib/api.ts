@@ -1404,8 +1404,23 @@ export function cancelTestCaseJob(jobId: string): Promise<{ job: TestCaseJob }> 
 
 // ---- MCP ----
 
-export function listMcp(projectId: string): Promise<McpServer[]> {
-  return request(`/api/mcp?projectId=${encodeURIComponent(projectId)}`)
+/**
+ * The configured MCP servers. Pass `{ health: false }` for an instant response
+ * that skips the slow live probe (statuses come back "unknown"); fetch live
+ * health separately with `mcpHealth`.
+ */
+export function listMcp(
+  projectId: string,
+  opts?: { health?: boolean },
+): Promise<McpServer[]> {
+  const health = opts?.health === false ? '&health=false' : ''
+  return request(`/api/mcp?projectId=${encodeURIComponent(projectId)}${health}`)
+}
+
+/** Live health only — a `{ name: status }` map. The slow probe, split out so the
+ *  page renders cards instantly and fills in statuses when this resolves. */
+export function mcpHealth(projectId: string): Promise<Record<string, McpServer['status']>> {
+  return request(`/api/mcp/health?projectId=${encodeURIComponent(projectId)}`)
 }
 
 /**

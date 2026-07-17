@@ -218,9 +218,59 @@
   }
 }
 
+/* Moving light sweep for loading skeletons (Prototype builder, etc.). */
+@keyframes qc-shimmer {
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+/* Isometric "building" loader — blocks drop into place, hold, then rebuild. */
+@keyframes qc-build-block {
+  0% {
+    opacity: 0;
+    transform: translateY(-9px);
+  }
+  16% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  82% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(-9px);
+  }
+}
+.qc-build-block {
+  animation: qc-build-block 2s cubic-bezier(0.22, 1, 0.36, 1) infinite;
+}
+.qc-shimmer {
+  position: relative;
+  overflow: hidden;
+}
+.qc-shimmer::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(255, 255, 255, 0.55) 50%,
+    transparent 100%
+  );
+  animation: qc-shimmer 1.6s ease-in-out infinite;
+}
+
 @media (prefers-reduced-motion: reduce) {
   html {
     scroll-behavior: auto;
+  }
+  .qc-shimmer::after {
+    animation: none;
   }
   *,
   *::before,

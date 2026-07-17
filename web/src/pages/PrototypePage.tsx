@@ -6,13 +6,17 @@ import {
   Camera,
   Check,
   ChevronDown,
+  Clock,
   Copy,
   ExternalLink,
   ImagePlus,
   Laptop,
   Layout,
   Loader2,
+  MessageCircle,
+  Minus,
   Monitor,
+  PanelRight,
   Plus,
   RefreshCw,
   RotateCw,
@@ -27,14 +31,12 @@ import {
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
-import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
-  SelectValue,
 } from '@/components/ui/select'
 import {
   Dialog,
@@ -59,8 +61,25 @@ import {
 } from '@/lib/api'
 
 const MODELS = ['haiku', 'sonnet', 'opus'] as const
-const MODEL_KEY = 'qc.prototypeModel'
+const MODEL_INFO: Record<(typeof MODELS)[number], { label: string; desc: string }> = {
+  haiku: { label: 'Haiku', desc: 'Fastest & cheapest — great for quick drafts and simple screens.' },
+  sonnet: { label: 'Sonnet', desc: 'Balanced speed and quality — the everyday default for most UIs.' },
+  opus: { label: 'Opus', desc: 'Most capable — richest design detail for complex, polished layouts (slower).' },
+}
+// Bumped to reset any previously-remembered model so everyone starts on the
+// Sonnet default again; new picks are remembered under this key.
+const MODEL_KEY = 'qc.prototypeModel.v2'
 const STYLE_KEY = 'qc.prototypeStyle'
+const CHAT_FLOAT_KEY = 'qc.prototypeChatFloat'
+
+function loadChatFloating(): boolean {
+  try {
+    // Default to floating (bubble) mode unless the user explicitly docked it.
+    return localStorage.getItem(CHAT_FLOAT_KEY) !== '0'
+  } catch {
+    return true
+  }
+}
 
 // Start settings offered on the first chat (design direction for the initial build).
 const STYLE_OPTIONS = [
@@ -249,6 +268,18 @@ function StyleThumb({ value }: { value: string }) {
 }
 
 /** Open the prototype HTML in a new browser tab (revoke the blob shortly after). */
+/** Compact absolute date + time a prototype was created (e.g. "Jul 16, 02:30 PM"). */
+function formatCreated(iso: string): string {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return ''
+  return d.toLocaleString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+}
+
 function openInNewTab(html: string) {
   const url = URL.createObjectURL(new Blob([html], { type: 'text/html' }))
   window.open(url, '_blank', 'noopener')
@@ -420,7 +451,7 @@ function DeviceStage({
 function PreviewSkeleton() {
   const bar = 'rounded bg-zinc-200'
   return (
-    <div className="mx-auto flex h-full min-h-[84vh] w-full max-w-full flex-col overflow-hidden rounded-xl border border-border/60 bg-white">
+    <div className="qc-shimmer mx-auto flex h-full min-h-[84vh] w-full max-w-full flex-col overflow-hidden rounded-xl border border-border/60 bg-white">
       <div className="flex flex-1 animate-pulse flex-col gap-5 p-5">
         {/* top bar */}
         <div className="flex items-center gap-3">
@@ -463,30 +494,116 @@ function PreviewSkeleton() {
   )
 }
 
+const BUILD_PHASES = [
+  'Sketching the layout…',
+  'Choosing colors & typography…',
+  'Building the components…',
+  'Adding realistic content…',
+  'Making it responsive…',
+  'Polishing the details…',
+]
+const UPDATE_PHASES = [
+  'Reading your request…',
+  'Locating what to change…',
+  'Applying your changes…',
+  'Refining the design…',
+  'Polishing the details…',
+]
+
+/** Cycles through short progress phrases so the wait feels active, not stuck. */
+function RotatingStatus({ phases }: { phases: string[] }) {
+  const [i, setI] = useState(0)
+  useEffect(() => {
+    const id = window.setInterval(() => setI((n) => n + 1), 3400)
+    return () => window.clearInterval(id)
+  }, [])
+  const idx = i % phases.length
+  return (
+    <span
+      key={idx}
+      className="inline-block animate-in fade-in slide-in-from-bottom-1 text-sm text-muted-foreground duration-300"
+    >
+      {phases[idx]}
+    </span>
+  )
+}
+
+/**
+ * Animated isometric 3D block loader — three cubes drop into place bottom-to-top
+ * (like something being built), hold, then rebuild in a loop. Uses `currentColor`
+ * at three opacities for the top/left/right faces so it shades like a 3D cube and
+ * adapts to light/dark. Set the colour via a `text-*` class on the wrapper.
+ */
+function BuildingCubes() {
+  // One isometric cube (top + two side faces) at top-vertex (x, y).
+  const HW = 15
+  const Q = 7
+  const BH = 14
+  const cube = (x: number, y: number, delay: number) => (
+    <g className="qc-build-block" style={{ animationDelay: `${delay}ms` }}>
+      {/* top face — brightest */}
+      <polygon
+        points={`${x},${y} ${x + HW},${y + Q} ${x},${y + 2 * Q} ${x - HW},${y + Q}`}
+        fill="currentColor"
+        opacity={0.95}
+      />
+      {/* left face — mid */}
+      <polygon
+        points={`${x - HW},${y + Q} ${x},${y + 2 * Q} ${x},${y + 2 * Q + BH} ${x - HW},${y + Q + BH}`}
+        fill="currentColor"
+        opacity={0.55}
+      />
+      {/* right face — darkest */}
+      <polygon
+        points={`${x + HW},${y + Q} ${x},${y + 2 * Q} ${x},${y + 2 * Q + BH} ${x + HW},${y + Q + BH}`}
+        fill="currentColor"
+        opacity={0.32}
+      />
+    </g>
+  )
+  return (
+    <svg viewBox="0 0 72 72" className="size-16 text-primary" role="img" aria-label="Building">
+      {/* bottom → middle → top, each delayed so the tower assembles upward */}
+      {cube(36, 40, 0)}
+      {cube(36, 26, 260)}
+      {cube(36, 12, 520)}
+    </svg>
+  )
+}
+
+/** Three bouncing dots — small motion cue that "something's happening". */
+function TypingDots() {
+  return (
+    <span className="inline-flex items-center gap-1">
+      {[0, 1, 2].map((i) => (
+        <span
+          key={i}
+          className="size-1.5 animate-bounce rounded-full bg-foreground/60"
+          style={{ animationDelay: `${i * 150}ms` }}
+        />
+      ))}
+    </span>
+  )
+}
+
 /** Centered loading card shown over the skeleton while building/updating. */
-function BuildingOverlay({ label, onWatchCode }: { label: string; onWatchCode: () => void }) {
+function BuildingOverlay({ updating }: { updating: boolean }) {
+  const phases = updating ? UPDATE_PHASES : BUILD_PHASES
   return (
     <div className="absolute inset-0 z-10 flex items-center justify-center rounded-b-2xl bg-background/40 backdrop-blur-[1px]">
-      <div className="flex flex-col items-center gap-3 rounded-3xl border border-border/60 bg-card px-6 py-5 shadow-xl">
-        <span className="relative flex size-11 items-center justify-center">
-          <span className="absolute inset-0 animate-ping rounded-2xl bg-foreground/20" />
-          <span className="relative flex size-11 items-center justify-center rounded-2xl bg-foreground text-background">
-            <Loader2 className="size-5 animate-spin" />
-          </span>
-        </span>
-        <div className="text-center">
-          <p className="text-sm font-semibold">{label}</p>
-          <p className="mt-0.5 text-xs tabular-nums text-muted-foreground">
+      <div className="flex w-[min(92%,26rem)] flex-col items-center gap-5 rounded-3xl border border-border/60 bg-card px-10 py-9 shadow-xl">
+        <BuildingCubes />
+        <div className="flex flex-col items-center gap-2 text-center">
+          <p className="flex items-center gap-2.5 text-lg font-semibold">
+            {updating ? 'Updating your prototype' : 'Building your prototype'}
+            <TypingDots />
+          </p>
+          {/* Rotating phrase keeps the wait feeling like progress. */}
+          <RotatingStatus phases={phases} />
+          <p className="mt-1 text-xs tabular-nums text-muted-foreground/70">
             <ElapsedTimer /> elapsed
           </p>
         </div>
-        <button
-          type="button"
-          onClick={onWatchCode}
-          className="rounded-full border border-border/60 px-3 py-1 text-xs font-medium text-muted-foreground transition-colors hover:border-border hover:text-foreground"
-        >
-          Watch it build →
-        </button>
       </div>
     </div>
   )
@@ -682,10 +799,7 @@ function PreviewPane({
             // never the stale/old preview.
             <>
               <PreviewSkeleton />
-              <BuildingOverlay
-                label={html ? 'Updating your prototype…' : 'Building your prototype…'}
-                onWatchCode={() => onView('code')}
-              />
+              <BuildingOverlay updating={!!html} />
             </>
           ) : html ? (
             <DeviceStage device={device} orientation={orientation} html={html} nonce={nonce} />
@@ -833,6 +947,9 @@ function PrototypePage({ projectId }: { projectId: string }) {
   // Preview vs Code view. During a build we show Code (smooth streaming), then flip
   // back to Preview when the finished HTML is ready (rendered once — no flicker).
   const [view, setView] = useState<'preview' | 'code'>('preview')
+  // Chat placement: docked (in the workspace) or a floating bubble bottom-right.
+  const [chatFloating, setChatFloating] = useState<boolean>(() => loadChatFloating())
+  const [floatOpen, setFloatOpen] = useState(true)
   // Throttle iframe updates so the live preview visibly grows without thrashing.
   const accRef = useRef('')
   const flushRef = useRef<number | null>(null)
@@ -859,6 +976,14 @@ function PrototypePage({ projectId }: { projectId: string }) {
       /* ignore */
     }
   }, [model])
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(CHAT_FLOAT_KEY, chatFloating ? '1' : '0')
+    } catch {
+      /* ignore */
+    }
+  }, [chatFloating])
 
   const { data: list } = useQuery({
     queryKey: ['prototypes', projectId],
@@ -1077,12 +1202,16 @@ function PrototypePage({ projectId }: { projectId: string }) {
   const modelPicker = (
     <Select value={model} onValueChange={setModel}>
       <SelectTrigger className="h-8 w-[104px] rounded-lg text-xs shadow-none">
-        <SelectValue />
+        {/* Compact trigger: just the model name, not the full description. */}
+        <span className="truncate">{MODEL_INFO[model as keyof typeof MODEL_INFO]?.label ?? model}</span>
       </SelectTrigger>
-      <SelectContent>
+      <SelectContent className="max-w-[300px]">
         {MODELS.map((m) => (
-          <SelectItem key={m} value={m} className="text-xs capitalize">
-            {m}
+          <SelectItem key={m} value={m} textValue={MODEL_INFO[m].label} className="text-xs">
+            <div className="flex flex-col gap-0.5 py-0.5">
+              <span className="font-medium">{MODEL_INFO[m].label}</span>
+              <span className="text-[11px] leading-snug text-muted-foreground">{MODEL_INFO[m].desc}</span>
+            </div>
           </SelectItem>
         ))}
       </SelectContent>
@@ -1110,10 +1239,19 @@ function PrototypePage({ projectId }: { projectId: string }) {
         </div>
       </header>
 
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-[240px_1fr]">
-        {/* Saved prototypes — on small screens it drops below the workspace so the
-            preview gets the top of the viewport. */}
-        <aside className="order-2 space-y-2 lg:order-1">
+      <div className={cn('grid grid-cols-1 gap-6', !chatFloating && 'lg:grid-cols-[240px_1fr]')}>
+        {/* Saved prototypes. Docked: a left column (drops below the workspace on small
+            screens). Ball mode: floats just to the LEFT of the chat box (lg+ only,
+            where there's room); hidden while the chat is minimized to a bubble. */}
+        <aside
+          className={cn(
+            chatFloating
+              ? floatOpen
+                ? 'fixed bottom-4 right-[calc(min(92vw,400px)+1.5rem)] z-40 hidden h-[min(80vh,640px)] w-[210px] flex-col space-y-2 overflow-auto rounded-2xl border border-border/60 bg-card p-2 shadow-2xl animate-in fade-in slide-in-from-right-4 duration-300 ease-out lg:flex'
+                : 'hidden'
+              : 'order-2 space-y-2 lg:order-1',
+          )}
+        >
           <div className="flex items-center justify-between px-1">
             <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
               Prototypes
@@ -1147,18 +1285,21 @@ function PrototypePage({ projectId }: { projectId: string }) {
                   }
                 }}
                 className={cn(
-                  'group flex cursor-pointer items-center gap-1.5 rounded-xl border px-2.5 py-2 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+                  'group flex cursor-pointer items-center gap-1 rounded-lg border px-2 py-1 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
                   selected === item.slug
                     ? 'border-primary/40 bg-primary/5'
                     : 'border-transparent hover:border-border/60 hover:bg-muted/40',
                 )}
               >
-                <span
-                  className="min-w-0 flex-1 break-words text-sm font-medium leading-snug line-clamp-2"
-                  title={item.name}
-                >
-                  {item.name}
-                </span>
+                <div className="min-w-0 flex-1">
+                  <span className="block truncate text-xs font-medium leading-tight" title={item.name}>
+                    {item.name}
+                  </span>
+                  <span className="flex items-center gap-1 text-[10px] leading-tight text-muted-foreground">
+                    <Clock className="size-2.5 shrink-0" />
+                    {formatCreated(item.createdAt)}
+                  </span>
+                </div>
                 <Button
                   variant="ghost"
                   size="icon"
@@ -1167,25 +1308,75 @@ function PrototypePage({ projectId }: { projectId: string }) {
                     setRenameValue(item.name)
                     setSettingsFor(item.slug)
                   }}
-                  className="size-6 shrink-0 rounded-md text-muted-foreground opacity-60 transition-opacity hover:text-foreground group-hover:opacity-100"
+                  className="size-5 shrink-0 rounded-md text-muted-foreground opacity-60 transition-opacity hover:text-foreground group-hover:opacity-100"
                   aria-label={`Settings for ${item.name}`}
                   title="Settings"
                 >
-                  <Settings2 className="size-3.5" />
+                  <Settings2 className="size-3" />
                 </Button>
               </div>
             ))}
           </div>
         </aside>
 
-        {/* Chat (compact) + preview (priority — takes the rest of the width) */}
-        <div className="order-1 grid min-w-0 grid-cols-1 gap-4 lg:order-2 2xl:grid-cols-[380px_minmax(0,1fr)]">
+        {/* Chat (compact) + preview (priority — takes the rest of the width).
+            In floating mode the chat detaches to a bottom-right bubble and the
+            preview spans the full width. */}
+        <div
+          className={cn(
+            'order-1 grid min-w-0 grid-cols-1 gap-4 lg:order-2',
+            !chatFloating && '2xl:grid-cols-[380px_minmax(0,1fr)]',
+          )}
+        >
           {/* Chat — on a narrow screen it sits ON TOP of the preview (the preview needs
-              full width below to be usable); side-by-side (chat left) from lg up. */}
-          <div className="order-1 flex min-h-[52vh] flex-col rounded-2xl border border-border/60 bg-card shadow-none 2xl:order-1 2xl:min-h-[84vh]">
+              full width below to be usable); side-by-side (chat left) from lg up.
+              Floating: a fixed bottom-right panel (or hidden behind the bubble). */}
+          <div
+            className={cn(
+              'flex flex-col rounded-2xl border border-border/60 bg-card',
+              chatFloating
+                ? floatOpen
+                  ? 'fixed bottom-4 right-4 z-40 h-[min(80vh,640px)] w-[min(92vw,400px)] origin-bottom-right shadow-2xl animate-in fade-in slide-in-from-bottom-4 zoom-in-95 duration-300 ease-out'
+                  : 'hidden'
+                : 'order-1 h-[72vh] min-h-[52vh] shadow-none 2xl:order-1 2xl:h-[84vh]',
+            )}
+          >
+            {/* Header bar: chat title + dock/float toggle (+ minimize when floating). */}
+            <div className="flex items-center justify-between gap-2 border-b border-border/60 px-3 py-1.5">
+              <span className="text-xs font-semibold text-muted-foreground">Chat</span>
+              <div className="flex items-center gap-0.5">
+                {chatFloating && (
+                  <Tip label="Minimize to a bubble">
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      onClick={() => setFloatOpen(false)}
+                      className="size-7 rounded-md text-muted-foreground hover:text-foreground"
+                      aria-label="Minimize chat"
+                    >
+                      <Minus className="size-4" />
+                    </Button>
+                  </Tip>
+                )}
+                <Tip label={chatFloating ? 'Dock chat back to the side' : 'Pop chat out as a floating bubble'}>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    onClick={() => {
+                      setChatFloating((f) => !f)
+                      setFloatOpen(true)
+                    }}
+                    className="size-7 rounded-md text-muted-foreground hover:text-foreground"
+                    aria-label="Toggle chat placement"
+                  >
+                    {chatFloating ? <PanelRight className="size-4" /> : <MessageCircle className="size-4" />}
+                  </Button>
+                </Tip>
+              </div>
+            </div>
             <div ref={scrollRef} className="min-h-0 flex-1 space-y-3 overflow-auto p-4">
               {messages.length === 0 ? (
-                <div className="flex h-full flex-col items-center justify-center gap-4 text-center">
+                <div className="flex min-h-full flex-col items-center justify-center gap-4 py-2 text-center">
                   <span className="flex size-12 items-center justify-center rounded-2xl bg-muted text-foreground">
                     <Sparkles className="size-6" />
                   </span>
@@ -1492,13 +1683,32 @@ function PrototypePage({ projectId }: { projectId: string }) {
         <LogPanel logs={logs} open={logsOpen} onToggle={() => setLogsOpen((o) => !o)} busy={busy} />
       )}
 
+      {/* Floating chat bubble — shown when chat is in floating mode and collapsed. */}
+      {chatFloating && !floatOpen && (
+        <button
+          type="button"
+          onClick={() => setFloatOpen(true)}
+          className="fixed bottom-5 right-5 z-40 flex size-14 items-center justify-center rounded-full bg-foreground text-background shadow-xl transition-transform duration-200 animate-in fade-in zoom-in-50 hover:scale-105 active:scale-95"
+          aria-label="Open chat"
+          title="Open chat"
+        >
+          <MessageCircle className="size-6" />
+          {busy && (
+            <span className="absolute -right-0.5 -top-0.5 flex size-3.5 items-center justify-center">
+              <span className="absolute inset-0 animate-ping rounded-full bg-primary/60" />
+              <span className="relative size-2.5 rounded-full bg-primary" />
+            </span>
+          )}
+        </button>
+      )}
+
       <Dialog
         open={!!settingsFor}
         onOpenChange={(v) => {
           if (!v && !renameMut.isPending && !duplicateMut.isPending) setSettingsFor(null)
         }}
       >
-        <DialogContent className="rounded-3xl sm:max-w-md">
+        <DialogContent className="rounded-3xl sm:max-w-2xl">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Settings2 className="size-4" />
@@ -1509,24 +1719,26 @@ function PrototypePage({ projectId }: { projectId: string }) {
           <div className="space-y-4">
             <div className="space-y-1.5">
               <label className="text-xs font-medium text-muted-foreground">Name</label>
-              <div className="flex items-center gap-2">
-                <Input
-                  autoFocus
-                  value={renameValue}
-                  onChange={(e) => setRenameValue(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && settingsFor) commitRename(settingsFor)
-                  }}
-                  placeholder="Prototype name"
-                  className="rounded-lg"
-                />
+              <Textarea
+                autoFocus
+                value={renameValue}
+                onChange={(e) => setRenameValue(e.target.value)}
+                onKeyDown={(e) => {
+                  // ⌘/Ctrl+Enter saves; plain Enter inserts a newline.
+                  if ((e.metaKey || e.ctrlKey) && e.key === 'Enter' && settingsFor) commitRename(settingsFor)
+                }}
+                placeholder="Prototype name"
+                rows={2}
+                className="min-h-[64px] w-full resize-y rounded-lg"
+              />
+              <div className="flex justify-end">
                 <Button
                   onClick={() => settingsFor && commitRename(settingsFor)}
                   disabled={renameMut.isPending || !renameValue.trim()}
                   className="shrink-0 gap-1.5 rounded-full active:scale-[0.98]"
                 >
                   {renameMut.isPending ? <Loader2 className="size-4 animate-spin" /> : <Check className="size-4" />}
-                  Save
+                  Save name
                 </Button>
               </div>
             </div>

@@ -3,7 +3,35 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
-## 0.9.22 — 2026-07-16
+## 0.9.23 — 2026-07-17
+
+**Faster MCP status, a run guard for missing browser MCP, and Prototype polish**
+
+### Added
+
+- **Web runs won't start without their browser MCP.** A web test drives a real browser through the
+  **Playwright** MCP server (mobile targets use **Mobile MCP**). If that server isn't set up for the
+  active project, the Run page now disables **Start**, adds a **Browser MCP** row to the readiness
+  checklist, and shows a clear message pointing you to the MCP page — so a run can no longer fail deep
+  inside Claude just because the browser was never configured.
+
+### Changed
+
+- **MCP page checks status faster.** The server list now appears instantly and each server's live
+  connection status fills in right after, instead of the whole page waiting on the health probe. Behind
+  the scenes the Claude health check and the ClickUp token check run at the same time (not one after the
+  other), and a stuck server can no longer hold the check up as long. What gets checked is unchanged —
+  it's just quicker and no longer blocks the page.
+
+### Fixed
+
+- **Prototype builder polish.** New prototypes are auto-named *Prototype 1, 2, 3…*; the list shows each
+  one's created time and is more compact; the settings dialog is wider with a roomier name field; the
+  model picker explains each model and defaults to **Sonnet**. The chat can now float as a bubble in the
+  bottom-right corner (the default) or dock beside the preview, with smooth open/close animation and the
+  Prototypes list tucked alongside it. While building, an animated 3D "building" loader with rotating
+  status text replaces the plain spinner, and the empty-state onboarding text is no longer clipped in the
+  smaller floating chat.
 
 **Prototype builder — describe a screen and watch Claude build the UI**
 
