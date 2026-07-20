@@ -438,23 +438,6 @@ function TemplatePreviewDialog({
 
 // Remember the last live app URL per project so the Generate dialog can prefill the
 // "set for all" field — QC engineers usually test many tickets against one staging URL.
-const APP_URL_PREFIX = 'qc.testcaseAppUrl.'
-function loadDefaultAppUrl(projectId: string | null): string {
-  if (!projectId) return ''
-  try {
-    return localStorage.getItem(APP_URL_PREFIX + projectId) ?? ''
-  } catch {
-    return ''
-  }
-}
-function saveDefaultAppUrl(projectId: string, url: string): void {
-  try {
-    if (url.trim()) localStorage.setItem(APP_URL_PREFIX + projectId, url.trim())
-  } catch {
-    /* storage unavailable */
-  }
-}
-
 /** Looks like a usable http(s) URL? (light client check; the server re-validates). */
 function isLikelyUrl(s: string): boolean {
   const t = s.trim()
@@ -482,7 +465,6 @@ function GenerateDialog({
   onConfirm,
   pending,
   modelLabel,
-  defaultAllUrl,
 }: {
   open: boolean
   onOpenChange: (open: boolean) => void
@@ -493,9 +475,13 @@ function GenerateDialog({
   onConfirm: () => void
   pending: boolean
   modelLabel: string
-  defaultAllUrl: string
 }) {
-  const [allUrl, setAllUrl] = useState(defaultAllUrl)
+  // Always starts blank — a live app URL is opt-in per generation. Reset each time
+  // the dialog opens so a value typed earlier in the session doesn't linger.
+  const [allUrl, setAllUrl] = useState('')
+  useEffect(() => {
+    if (open) setAllUrl('')
+  }, [open])
   const count = tickets.length
   const withUrl = tickets.filter((t) => (appUrls[t.name] ?? '').trim()).length
 
@@ -1706,11 +1692,6 @@ export default function TestCasePage() {
       // generation right away (the previous one keeps running).
       setSelectedFolders(new Set())
       setAppUrls({})
-      // Remember a used app URL to prefill next time (the first non-empty one).
-      const firstUrl = [...selectedFolders]
-        .map((f) => (appUrls[f] ?? '').trim())
-        .find((u) => u && isLikelyUrl(u))
-      if (firstUrl) saveDefaultAppUrl(activeProjectId as string, firstUrl)
       // Persist so a reload reconnects, and so the global TestCaseJobWatcher will
       // announce completion even if we navigate away from this page.
       addActiveJobId(activeProjectId as string, id)
@@ -2332,7 +2313,6 @@ export default function TestCasePage() {
         onConfirm={() => start.mutate()}
         pending={start.isPending}
         modelLabel={modelInfo.label}
-        defaultAllUrl={loadDefaultAppUrl(activeProjectId)}
       />
 
       <TestCasePreviewDialog

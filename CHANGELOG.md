@@ -3,6 +3,17 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.9.33 — 2026-07-20
+
+**Test-case generation's "Set one URL for all" starts empty**
+
+### Changed
+
+- **The "Set one URL for all" field in Generate test cases no longer pre-fills.** It used to remember
+  the last live-app URL you used and pre-populate it, which meant an old URL could quietly carry into a
+  new batch. It now starts blank every time the dialog opens — a live app URL is opt-in per generation,
+  matching "leave blank to generate from the ticket alone."
+
 ## 0.9.32 — 2026-07-20
 
 **Token-guide links open in a new tab (no more losing what you typed)**
