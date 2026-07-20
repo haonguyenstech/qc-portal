@@ -3,6 +3,17 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.9.31 — 2026-07-20
+
+**Copy now puts the real token on the clipboard, not the masked one**
+
+### Fixed
+
+- **Copying a secret from MCP "View details" copied the mask (`••••9B6B`) instead of the real value.**
+  The copy button now always fetches and copies the full value, whether or not you've clicked Reveal —
+  so copying an API token or PAT gives you the actual token. Copying the whole `.mcp.json` entry
+  likewise yields a usable config with real secret values.
+
 ## 0.9.30 — 2026-07-20
 
 **Only real secrets are masked in MCP config**

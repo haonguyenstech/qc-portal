@@ -521,10 +521,12 @@ function ConnectServices({
   const [azureOrgUrl, setAzureOrgUrl] = useState('')
   const [azureProject, setAzureProject] = useState('')
   const [copiedEnv, setCopiedEnv] = useState<string | null>(null)
-  // "View details" dialog: which server, plus its revealed (unmasked) env once the
-  // user clicks Reveal (null = still masked).
+  // "View details" dialog: which server, a cache of its full (unmasked) env fetched
+  // on demand — used BOTH for the Reveal display and for copying real values — and
+  // whether the display is currently unmasked.
   const [detailsName, setDetailsName] = useState<string | null>(null)
-  const [revealedEnv, setRevealedEnv] = useState<Record<string, string> | null>(null)
+  const [fullEnv, setFullEnv] = useState<Record<string, string> | null>(null)
+  const [showReveal, setShowReveal] = useState(false)
   const [revealingEnv, setRevealingEnv] = useState(false)
   const [copiedField, setCopiedField] = useState<string | null>(null)
   // Default to headed (headless = false) so QC can watch the browser during runs;
@@ -860,20 +862,34 @@ function ConnectServices({
     )
   }
 
-  // Open the "View details" dialog for a server (starts masked).
+  // Open the "View details" dialog for a server (starts masked, no cached env).
   function openDetails(name: string) {
-    setRevealedEnv(null)
+    setFullEnv(null)
+    setShowReveal(false)
     setCopiedField(null)
     setDetailsName(name)
   }
 
-  // Fetch the real (unmasked) env for the open details dialog.
-  async function revealDetailsEnv() {
-    if (!detailsName) return
+  // Fetch the server's full (unmasked) env once and cache it. Used for both the
+  // Reveal display and for copying real values to the clipboard.
+  async function ensureFullEnv(): Promise<Record<string, string>> {
+    if (fullEnv) return fullEnv
+    if (!detailsName) return {}
+    const { env } = await revealMcpEnv(detailsName, projectId)
+    setFullEnv(env)
+    return env
+  }
+
+  // Reveal / hide the real values in the dialog display.
+  async function toggleReveal() {
+    if (showReveal) {
+      setShowReveal(false)
+      return
+    }
     setRevealingEnv(true)
     try {
-      const { env } = await revealMcpEnv(detailsName, projectId)
-      setRevealedEnv(env)
+      await ensureFullEnv()
+      setShowReveal(true)
     } catch (err) {
       toast.error('Failed to reveal values', {
         description: err instanceof Error ? err.message : 'Unknown error',
@@ -893,6 +909,42 @@ function ConnectServices({
     }
   }
 
+  // Copy an env var's REAL value — a masked secret is fetched in full first, so the
+  // clipboard never gets the "••••" placeholder. Non-secrets are already full.
+  async function copyEnvValue(key: string) {
+    const masked = (detailsName && envByName[detailsName]?.[key]) || ''
+    try {
+      const value = masked.includes('••••') ? ((await ensureFullEnv())[key] ?? '') : masked
+      await copyField(`env:${key}`, value)
+    } catch (err) {
+      toast.error('Failed to copy value', {
+        description: err instanceof Error ? err.message : 'Unknown error',
+      })
+    }
+  }
+
+  // Copy the full .mcp.json entry with REAL secret values (a usable config).
+  async function copyJsonEntry() {
+    if (!detailsName) return
+    const server = serverByName[detailsName]
+    const masked = envByName[detailsName] ?? {}
+    const keys = Object.keys(masked)
+    try {
+      const env = keys.length ? await ensureFullEnv() : {}
+      const entry: Record<string, unknown> = {}
+      if (server?.type) entry.type = server.type
+      if (server?.command) entry.command = server.command
+      if (server?.args?.length) entry.args = server.args
+      if (server?.url) entry.url = server.url
+      if (keys.length) entry.env = Object.fromEntries(keys.map((k) => [k, env[k] ?? masked[k]]))
+      await copyField('json', JSON.stringify({ [detailsName]: entry }, null, 2))
+    } catch (err) {
+      toast.error('Failed to copy config', {
+        description: err instanceof Error ? err.message : 'Unknown error',
+      })
+    }
+  }
+
   // Full-configuration dialog for a connected server. Shows the transport, the
   // spawn command/args (or URL), and every env var — masked, with a Reveal toggle
   // that fetches the real values on explicit request (localhost-only, never logged).
@@ -905,9 +957,9 @@ function ConnectServices({
     const envKeys = Object.keys(maskedEnv)
     // Fields shown in the readable list = user-entered env, minus fixed constants.
     const fieldKeys = envKeys.filter((k) => !HIDDEN_DETAIL_ENV.has(k))
-    const revealed = !!revealedEnv
+    const revealed = showReveal && !!fullEnv
     const valueFor = (key: string) =>
-      revealed ? (revealedEnv?.[key] ?? '') : maskedEnv[key]
+      revealed ? (fullEnv?.[key] ?? '') : maskedEnv[key]
 
     // The effective .mcp.json entry, with env swapped to real values when revealed.
     const entry: Record<string, unknown> = {}
@@ -971,7 +1023,7 @@ function ConnectServices({
                   </span>
                   <button
                     type="button"
-                    onClick={revealed ? () => setRevealedEnv(null) : revealDetailsEnv}
+                    onClick={toggleReveal}
                     disabled={revealingEnv}
                     className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
                   >
@@ -999,8 +1051,8 @@ function ConnectServices({
                       </span>
                       <button
                         type="button"
-                        onClick={() => copyField(`env:${key}`, valueFor(key))}
-                        aria-label={`Copy ${key}`}
+                        onClick={() => copyEnvValue(key)}
+                        aria-label={`Copy ${ENV_FIELD_LABELS[key] ?? key}`}
                         className="shrink-0 rounded p-0.5 text-muted-foreground transition-colors hover:bg-background hover:text-foreground"
                       >
                         {copiedField === `env:${key}` ? (
@@ -1021,7 +1073,7 @@ function ConnectServices({
                 <span className="text-xs font-medium text-muted-foreground">.mcp.json entry</span>
                 <button
                   type="button"
-                  onClick={() => copyField('json', entryJson)}
+                  onClick={copyJsonEntry}
                   className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
                 >
                   {copiedField === 'json' ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
