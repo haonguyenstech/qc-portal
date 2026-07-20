@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { crawlOneTicket, type CrawlResult, type TicketKind, type TicketSource } from './crawl.js'
 import { withClickupToken } from './clickup.js'
 import { withJiraCreds, type JiraCreds } from './jira.js'
+import { withAzureCreds, type AzureCreds } from './azure.js'
 
 // In-memory background jobs for ticket crawling. A job runs server-side, so it
 // keeps going even if the browser reloads or navigates away — the client polls by
@@ -40,6 +41,7 @@ interface CrawlJob {
   source: TicketSource // which tracker the tickets come from
   token: string | undefined // ClickUp token captured at start (per-project .mcp.json)
   jiraCreds: JiraCreds | undefined // Jira creds captured at start (per-project .mcp.json)
+  azureCreds: AzureCreds | undefined // Azure creds captured at start (per-project .mcp.json)
   model: string
   ticketKind: TicketKind | null
   items: CrawlJobItem[]
@@ -133,7 +135,9 @@ async function runJob(job: CrawlJob): Promise<void> {
         })
       const r = await (job.source === 'jira'
         ? withJiraCreds(job.jiraCreds, runOne)
-        : withClickupToken(job.token, runOne))
+        : job.source === 'azure'
+          ? withAzureCreds(job.azureCreds, runOne)
+          : withClickupToken(job.token, runOne))
       item.status = 'done'
       item.result = r
       const att = r.attachmentCount ? ` · ${r.attachmentCount} attachment(s)` : ''
@@ -158,6 +162,7 @@ export function startCrawlJob(opts: {
   source?: TicketSource
   token?: string | undefined
   jiraCreds?: JiraCreds | undefined
+  azureCreds?: AzureCreds | undefined
   model: string
   ticketKind?: TicketKind | null
   tickets: { id: string; displayId: string; name: string; relDir?: string }[]
@@ -170,6 +175,7 @@ export function startCrawlJob(opts: {
     source: opts.source ?? 'clickup',
     token: opts.token,
     jiraCreds: opts.jiraCreds,
+    azureCreds: opts.azureCreds,
     model: opts.model,
     ticketKind: opts.ticketKind === 'bug' || opts.ticketKind === 'feature' ? opts.ticketKind : null,
     items: opts.tickets.map((t) => ({

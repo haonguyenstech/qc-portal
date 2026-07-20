@@ -3,6 +3,22 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.9.25 — 2026-07-20
+
+**Crawl tickets from Azure DevOps Boards**
+
+### Added
+
+- **Azure DevOps is now a ticket source on the Tickets page.** Once you connect Azure DevOps on the
+  MCP page, the **Tickets** page can browse, search, and **crawl** your Boards work items — bugs, user
+  stories, and tasks — just like ClickUp and Jira. Each crawled work item's description, **repro steps**,
+  **acceptance criteria**, comments, and attachments download into \`testing/tickets/\` so the QC skill,
+  test-case generation, and Design Check can read them locally. When more than one tracker is connected,
+  a source toggle (ClickUp / Jira / Azure DevOps) appears above the ticket list.
+  - **Pick a project fast.** If you set a **default project** when connecting, the picker uses it and the
+    PAT only needs Work-Items read. Leave it empty to choose from all projects (that needs the PAT's
+    *Project and Team → Read* scope). The **Getting API tokens** doc page spells out the exact scopes.
+
 ## 0.9.24 — 2026-07-17
 
 **Connect Azure DevOps Boards, and QC screenshots now show inline on ClickUp cards**

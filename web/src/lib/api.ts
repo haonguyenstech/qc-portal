@@ -684,6 +684,45 @@ export function startJiraCrawlJob(body: {
   })
 }
 
+// ---- Azure DevOps (same shapes as ClickUp — the ticket UI is source-agnostic) ----
+// The picker + crawler treat Azure exactly like ClickUp/Jira: a "workspace" is an
+// Azure DevOps project (id = project name), a "task" is a work item, and crawl jobs
+// share the same registry (so getCrawlJob/listCrawlJobs above resolve Azure jobs too).
+
+export function azureStatus(projectId?: string): Promise<{ configured: boolean }> {
+  return request(`/api/azure/status${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ''}`)
+}
+
+export function azureWorkspaces(projectId?: string): Promise<ClickupWorkspace[]> {
+  const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : ''
+  return request(`/api/azure/workspaces${qs}`)
+}
+
+/** Search work items within an Azure DevOps project (`team` is the project name). */
+export function azureTasks(team: string, q: string, projectId?: string): Promise<ClickupTask[]> {
+  return request(
+    `/api/azure/tasks?team=${encodeURIComponent(team)}&q=${encodeURIComponent(q)}${pid(projectId)}`,
+  )
+}
+
+/** Child work items of one Azure work item, loaded on demand. */
+export function azureSubtasks(parent: string, projectId?: string): Promise<ClickupTask[]> {
+  return request(`/api/azure/subtasks?parent=${encodeURIComponent(parent)}${pid(projectId)}`)
+}
+
+/** Start a background job that crawls one or more Azure work items to disk. */
+export function startAzureCrawlJob(body: {
+  projectId: string
+  tickets: { id: string; displayId: string; name: string; relDir?: string }[]
+  model?: string
+  ticketKind?: 'feature' | 'bug' | null
+}): Promise<{ jobId: string; job: CrawlJob }> {
+  return request('/api/azure/crawl/jobs', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+}
+
 /** Poll one crawl job by id. */
 export function getCrawlJob(jobId: string, projectId: string): Promise<{ job: CrawlJob }> {
   return request(

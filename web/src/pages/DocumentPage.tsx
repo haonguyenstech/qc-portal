@@ -399,8 +399,9 @@ Azure DevOps needs **two** things (a third is optional), all entered on the card
 
 - **Organization URL** — your Azure DevOps org address, e.g. \`https://dev.azure.com/your-org\`.
 - **Personal Access Token (PAT)** — created as follows.
-- **Default project** *(optional)* — the board/project to read from by default; leave empty to
-  work across all projects in the org.
+- **Default project** *(recommended)* — the project (board) to read from. If you set it, the **Tickets**
+  page browses that project and the PAT only needs Work-Items read. Leave it empty to pick from **all**
+  projects in the org — which additionally needs the **Project and Team (Read)** scope (below).
 
 1. Click **Connect** on the Azure DevOps card (or open
    **[dev.azure.com](https://dev.azure.com)** and sign in to your org).
@@ -408,15 +409,22 @@ Azure DevOps needs **two** things (a third is optional), all entered on the card
    \`https://dev.azure.com/your-org/_usersSettings/tokens\`).
 3. Click **New Token**. Name it (e.g. \`qc-portal\`), pick the **Organization** it applies to, and set
    an expiration.
-4. Under **Scopes**, choose **Custom defined** and grant **Work Items → Read** (this is enough to pull
-   bugs, user stories, and tasks from Boards). Add **Code → Read** too only if you also want it to read
-   repos.
+4. Under **Scopes**, choose **Custom defined** and grant:
+   - **Work Items → Read** — required; this is what pulls bugs, user stories, and tasks from Boards.
+   - **Project and Team → Read** — needed only if you leave **Default project** empty, so the portal can
+     list every project for the picker. If you set a default project, you can skip this.
+   - **Code → Read** — optional, only if you also want it to read repos.
 5. Click **Create** and **copy it now** — the PAT is shown once (a long opaque string, no fixed prefix).
-6. Back on the MCP page: fill in **Organization URL** + PAT (+ optional **Default project**) on the
-   Azure DevOps card and click **Save**.
+6. Back on the MCP page: fill in **Organization URL** + PAT (+ **Default project**) on the Azure DevOps
+   card and click **Save**.
 
 The PAT acts as **you** — it sees the same organizations, projects, and work items your Azure DevOps
 account sees, limited to the scopes you granted.
+
+Once connected, the **Tickets** page gains an **Azure DevOps** source (a toggle appears when more than
+one tracker is connected): browse and search work items, pick several, and **crawl** them — each work
+item's description, repro steps, acceptance criteria, comments, and attachments download into
+\`testing/tickets/\` for the QC skill to read, exactly like ClickUp and Jira.
 
 ---
 

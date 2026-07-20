@@ -55,6 +55,11 @@ import {
   jiraSubtasks,
   jiraWorkspaces,
   startJiraCrawlJob,
+  azureStatus,
+  azureTasks,
+  azureSubtasks,
+  azureWorkspaces,
+  startAzureCrawlJob,
   getCrawlJob,
   openTicketsFolder,
   startCrawlJob,
@@ -75,17 +80,26 @@ import { useProjects } from '@/lib/project-context'
 
 const CRAWL_MODEL_KEY = 'qc.crawlModel'
 
-// Which tracker the ticket picker reads from. Both normalize to the same shape,
-// so only the data source differs — the tree, status grouping, and crawler are
-// identical. The pick is remembered per project; the workspace pick is remembered
-// per source (a ClickUp team id and a Jira project key must not collide).
-type TicketSourceId = 'clickup' | 'jira'
+// Which tracker the ticket picker reads from. Every client normalizes to the same
+// shape, so only the data source differs — the tree, status grouping, and crawler
+// are identical. The pick is remembered per project; the workspace pick is
+// remembered per source (a ClickUp team id, a Jira project key, and an Azure
+// project name must not collide).
+type TicketSourceId = 'clickup' | 'jira' | 'azure'
+
+const TICKET_SOURCES: readonly TicketSourceId[] = ['clickup', 'jira', 'azure']
+const SOURCE_LABEL: Record<TicketSourceId, string> = {
+  clickup: 'ClickUp',
+  jira: 'Jira',
+  azure: 'Azure DevOps',
+}
 
 const SOURCE_PREFIX = 'qc.ticketSource.'
 function loadTicketSource(projectId: string | null): TicketSourceId {
   if (!projectId) return 'clickup'
   try {
-    return localStorage.getItem(SOURCE_PREFIX + projectId) === 'jira' ? 'jira' : 'clickup'
+    const v = localStorage.getItem(SOURCE_PREFIX + projectId)
+    return TICKET_SOURCES.includes(v as TicketSourceId) ? (v as TicketSourceId) : 'clickup'
   } catch {
     return 'clickup'
   }
@@ -515,17 +529,25 @@ export default function TicketsPage() {
     queryKey: ['jira-status', activeProjectId],
     queryFn: () => jiraStatus(activeProjectId ?? undefined),
   })
-  const clickupOk = !!cuStatus?.configured
-  const jiraOk = !!jStatus?.configured
-  const bothConfigured = clickupOk && jiraOk
+  const { data: azStatus } = useQuery({
+    queryKey: ['azure-status', activeProjectId],
+    queryFn: () => azureStatus(activeProjectId ?? undefined),
+  })
+  const okBy: Record<TicketSourceId, boolean> = {
+    clickup: !!cuStatus?.configured,
+    jira: !!jStatus?.configured,
+    azure: !!azStatus?.configured,
+  }
+  // Trackers connected for this project, in a stable display order.
+  const configuredSources = TICKET_SOURCES.filter((s) => okBy[s])
 
-  // Remembered pick; only honored when both trackers are connected. Otherwise we
-  // snap to whichever one is configured so the page always shows a usable source.
+  // Remembered pick; only honored when its tracker is connected. Otherwise we snap
+  // to the first configured one so the page always shows a usable source.
   const [sourcePref, setSourcePref] = useState<TicketSourceId>(() =>
     loadTicketSource(activeProjectId),
   )
-  const source: TicketSourceId = bothConfigured ? sourcePref : jiraOk ? 'jira' : 'clickup'
-  const configured = source === 'jira' ? jiraOk : clickupOk
+  const source: TicketSourceId = okBy[sourcePref] ? sourcePref : (configuredSources[0] ?? 'clickup')
+  const configured = okBy[source]
 
   function chooseSource(next: TicketSourceId) {
     setSourcePref(next)
@@ -625,7 +647,9 @@ export default function TicketsPage() {
     queryFn: () =>
       source === 'jira'
         ? jiraWorkspaces(activeProjectId ?? undefined)
-        : clickupWorkspaces(activeProjectId ?? undefined),
+        : source === 'azure'
+          ? azureWorkspaces(activeProjectId ?? undefined)
+          : clickupWorkspaces(activeProjectId ?? undefined),
     enabled: configured && !cuBinding,
     staleTime: 5 * 60_000,
   })
@@ -657,7 +681,9 @@ export default function TicketsPage() {
         ? clickupListTasks(cuBinding.listId, debounced.trim(), activeProjectId ?? undefined)
         : source === 'jira'
           ? jiraTasks(activeTeam, debounced.trim(), activeProjectId ?? undefined)
-          : clickupTasks(activeTeam, debounced.trim(), activeProjectId ?? undefined),
+          : source === 'azure'
+            ? azureTasks(activeTeam, debounced.trim(), activeProjectId ?? undefined)
+            : clickupTasks(activeTeam, debounced.trim(), activeProjectId ?? undefined),
     enabled: configured && !!activeProjectId && (cuBinding ? true : !!activeTeam),
     staleTime: 15_000,
   })
@@ -668,7 +694,9 @@ export default function TicketsPage() {
   const crawl = useMutation({
     mutationFn: ({ tasks }: { tasks: ClickupTask[] }) => {
       const batch = new Map(tasks.map((t) => [t.id, t] as const))
-      return (source === 'jira' ? startJiraCrawlJob : startCrawlJob)({
+      const startJob =
+        source === 'jira' ? startJiraCrawlJob : source === 'azure' ? startAzureCrawlJob : startCrawlJob
+      return startJob({
         projectId: activeProjectId as string,
         model: crawlModel,
         tickets: tasks.map((t) => ({
@@ -827,7 +855,9 @@ export default function TicketsPage() {
     try {
       const subs = await (source === 'jira'
         ? jiraSubtasks(parentId, activeProjectId ?? undefined)
-        : clickupSubtasks(parentId, activeProjectId ?? undefined))
+        : source === 'azure'
+          ? azureSubtasks(parentId, activeProjectId ?? undefined)
+          : clickupSubtasks(parentId, activeProjectId ?? undefined))
       setSubtasks((prev) => {
         const next = new Map(prev)
         for (const s of subs) next.set(s.id, s)
@@ -1111,7 +1141,7 @@ export default function TicketsPage() {
               <ListChecks className="h-5 w-5" />
             </span>
             <p className="text-sm text-muted-foreground">
-              No ticket tracker is connected. Connect ClickUp or Jira on the{' '}
+              No ticket tracker is connected. Connect ClickUp, Jira, or Azure DevOps on the{' '}
               <a href="/mcp" className="font-medium text-primary hover:underline">
                 MCP page
               </a>{' '}
@@ -1135,10 +1165,10 @@ export default function TicketsPage() {
                   )}
                 </span>
                 <div className="flex items-center gap-1">
-                  {/* Source toggle — only when both trackers are connected. */}
-                  {bothConfigured && (
+                  {/* Source toggle — only when more than one tracker is connected. */}
+                  {configuredSources.length > 1 && (
                     <div className="mr-1 inline-flex items-center rounded-full border border-border/60 bg-muted/40 p-0.5 text-xs">
-                      {(['clickup', 'jira'] as const).map((s) => (
+                      {configuredSources.map((s) => (
                         <button
                           key={s}
                           type="button"
@@ -1150,7 +1180,7 @@ export default function TicketsPage() {
                               : 'text-muted-foreground hover:text-foreground',
                           )}
                         >
-                          {s === 'clickup' ? 'ClickUp' : 'Jira'}
+                          {SOURCE_LABEL[s]}
                         </button>
                       ))}
                     </div>
@@ -1161,7 +1191,7 @@ export default function TicketsPage() {
                         size="sm"
                         className="h-7 max-w-40 border-none bg-transparent text-xs text-muted-foreground shadow-none hover:text-foreground"
                       >
-                        <SelectValue placeholder={source === 'jira' ? 'Project' : 'Workspace'} />
+                        <SelectValue placeholder={source === 'clickup' ? 'Workspace' : 'Project'} />
                       </SelectTrigger>
                       <SelectContent>
                         {workspaces.map((w) => (
@@ -1204,7 +1234,9 @@ export default function TicketsPage() {
                       ? `Search “${cuBinding.listName}”…`
                       : source === 'jira'
                         ? 'Search Jira issues…'
-                        : 'Search ClickUp tasks…'
+                        : source === 'azure'
+                          ? 'Search Azure work items…'
+                          : 'Search ClickUp tasks…'
                   }
                   value={query}
                   autoComplete="off"

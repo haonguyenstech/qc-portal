@@ -3,6 +3,7 @@ import path from 'node:path'
 import { ticketsDirFor } from './config.js'
 import * as clickup from './clickup.js'
 import * as jira from './jira.js'
+import * as azure from './azure.js'
 import type { TaskAttachment, TaskComment, TaskDetail } from './clickup.js'
 import { CRAWL_SUMMARY_MODELS, parseClaudeJsonResult, runClaude } from './claudeExec.js'
 
@@ -13,11 +14,11 @@ import { CRAWL_SUMMARY_MODELS, parseClaudeJsonResult, runClaude } from './claude
 // client (ClickUp or Jira) — both normalize to the same TaskDetail/TaskComment
 // shapes, so everything below is tracker-agnostic.
 
-/** Which tracker a ticket is fetched from. Both clients emit identical shapes. */
-export type TicketSource = 'clickup' | 'jira'
+/** Which tracker a ticket is fetched from. Every client emits identical shapes. */
+export type TicketSource = 'clickup' | 'jira' | 'azure'
 export type TicketKind = 'feature' | 'bug'
 
-/** The read functions we need from a tracker client — clickup.ts and jira.ts both satisfy this. */
+/** The read functions we need from a tracker client — clickup/jira/azure all satisfy this. */
 interface TicketClient {
   getTaskDetail(id: string): Promise<TaskDetail>
   getTaskComments(id: string): Promise<TaskComment[]>
@@ -25,7 +26,7 @@ interface TicketClient {
 }
 
 function clientFor(source: TicketSource): TicketClient {
-  return source === 'jira' ? jira : clickup
+  return source === 'jira' ? jira : source === 'azure' ? azure : clickup
 }
 
 const MAX_SUMMARY_INPUT_CHARS = 40_000
