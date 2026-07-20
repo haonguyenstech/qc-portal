@@ -3,6 +3,19 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.9.27 — 2026-07-20
+
+**See a connected MCP server's full configuration**
+
+### Added
+
+- **"View details" on every connected MCP server.** Each connected card (ClickUp, Figma, Jira, Azure
+  DevOps, Playwright, Mobile) now has a **View details** button that opens a dialog showing the server's
+  complete configuration from `.mcp.json` — its transport, the exact command + arguments (or URL), and
+  **all** of its environment variables, not just the one masked key shown on the card. Secrets stay
+  masked by default; a **Reveal** toggle shows the real values on demand (localhost only, never logged),
+  and everything — each value and the whole `.mcp.json` entry — is one click to copy.
+
 ## 0.9.26 — 2026-07-20
 
 **"Update now" no longer gets stuck on the loading page (Windows)**

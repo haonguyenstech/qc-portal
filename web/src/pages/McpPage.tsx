@@ -11,6 +11,8 @@ import {
   Clock,
   Cloud,
   Copy,
+  Eye,
+  EyeOff,
   ExternalLink,
   Figma,
   FileJson,
@@ -49,6 +51,7 @@ import {
   mcpUvStatus,
   openMcpFolder,
   removeMcp,
+  revealMcpEnv,
   revealMcpSecret,
   runMcpTest,
   saveMcpToken,
@@ -56,6 +59,7 @@ import {
   type McpCapabilityResult,
   type McpOauthProvider,
 } from '@/lib/api'
+import type { McpServer } from '@/lib/types'
 import { useProjects } from '@/lib/project-context'
 
 const OAUTH_META: Record<
@@ -226,6 +230,39 @@ function CardStatusBadge({
       <s.Icon className="h-3 w-3" />
       {s.label}
     </span>
+  )
+}
+
+/** A label + monospace value row with a copy button, used in the details dialog. */
+function FieldRow({
+  label,
+  value,
+  copied,
+  onCopy,
+}: {
+  label: string
+  value: string
+  copied: boolean
+  onCopy: () => void
+}) {
+  return (
+    <div className="flex items-center gap-2">
+      <span className="w-20 shrink-0 text-xs font-medium text-muted-foreground">{label}</span>
+      <span
+        className="min-w-0 flex-1 truncate rounded-md bg-muted px-1.5 py-0.5 font-mono text-[11px]"
+        title={value}
+      >
+        {value}
+      </span>
+      <button
+        type="button"
+        onClick={onCopy}
+        aria-label={`Copy ${label}`}
+        className="shrink-0 rounded p-0.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+      >
+        {copied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+      </button>
+    </div>
   )
 }
 
@@ -441,12 +478,14 @@ function ConnectServices({
   existingNames,
   statusByName,
   envByName,
+  serverByName,
   checkingStatus,
 }: {
   projectId: string
   existingNames: string[]
   statusByName: Record<string, string | undefined>
   envByName: Record<string, Record<string, string> | undefined>
+  serverByName: Record<string, McpServer | undefined>
   checkingStatus: boolean
 }) {
   const queryClient = useQueryClient()
@@ -463,6 +502,12 @@ function ConnectServices({
   const [azureOrgUrl, setAzureOrgUrl] = useState('')
   const [azureProject, setAzureProject] = useState('')
   const [copiedEnv, setCopiedEnv] = useState<string | null>(null)
+  // "View details" dialog: which server, plus its revealed (unmasked) env once the
+  // user clicks Reveal (null = still masked).
+  const [detailsName, setDetailsName] = useState<string | null>(null)
+  const [revealedEnv, setRevealedEnv] = useState<Record<string, string> | null>(null)
+  const [revealingEnv, setRevealingEnv] = useState(false)
+  const [copiedField, setCopiedField] = useState<string | null>(null)
   // Default to headed (headless = false) so QC can watch the browser during runs;
   // the checkbox below still lets them opt into headless before connecting.
   const [playwrightHeadless, setPlaywrightHeadless] = useState(false)
@@ -796,6 +841,185 @@ function ConnectServices({
     )
   }
 
+  // Open the "View details" dialog for a server (starts masked).
+  function openDetails(name: string) {
+    setRevealedEnv(null)
+    setCopiedField(null)
+    setDetailsName(name)
+  }
+
+  // Fetch the real (unmasked) env for the open details dialog.
+  async function revealDetailsEnv() {
+    if (!detailsName) return
+    setRevealingEnv(true)
+    try {
+      const { env } = await revealMcpEnv(detailsName, projectId)
+      setRevealedEnv(env)
+    } catch (err) {
+      toast.error('Failed to reveal values', {
+        description: err instanceof Error ? err.message : 'Unknown error',
+      })
+    } finally {
+      setRevealingEnv(false)
+    }
+  }
+
+  async function copyField(id: string, value: string) {
+    try {
+      await navigator.clipboard.writeText(value)
+      setCopiedField(id)
+      window.setTimeout(() => setCopiedField((c) => (c === id ? null : c)), 1200)
+    } catch {
+      /* clipboard blocked — ignore */
+    }
+  }
+
+  // Full-configuration dialog for a connected server. Shows the transport, the
+  // spawn command/args (or URL), and every env var — masked, with a Reveal toggle
+  // that fetches the real values on explicit request (localhost-only, never logged).
+  function detailsDialog() {
+    const name = detailsName
+    const server = name ? serverByName[name] : undefined
+    const meta = name && name in OAUTH_META ? OAUTH_META[name as McpOauthProvider] : null
+    const Icon = meta?.icon ?? FileJson
+    const maskedEnv = (name && envByName[name]) || {}
+    const envKeys = Object.keys(maskedEnv)
+    const revealed = !!revealedEnv
+    const valueFor = (key: string) =>
+      revealed ? (revealedEnv?.[key] ?? '') : maskedEnv[key]
+
+    // The effective .mcp.json entry, with env swapped to real values when revealed.
+    const entry: Record<string, unknown> = {}
+    if (server?.type) entry.type = server.type
+    if (server?.command) entry.command = server.command
+    if (server?.args?.length) entry.args = server.args
+    if (server?.url) entry.url = server.url
+    if (envKeys.length) {
+      entry.env = Object.fromEntries(envKeys.map((k) => [k, valueFor(k)]))
+    }
+    const entryJson = JSON.stringify({ [name ?? 'server']: entry }, null, 2)
+
+    return (
+      <Dialog open={!!detailsName} onOpenChange={(o) => !o && setDetailsName(null)}>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Icon className="h-4 w-4" />
+              <span className="font-mono text-sm">{name}</span>
+              {name && <CardStatusBadge configured status={statusByName[name]} />}
+            </DialogTitle>
+            <DialogDescription>
+              The full configuration saved in this project's <code>.mcp.json</code>. Secrets are
+              masked — reveal them only on this machine.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-4 text-sm">
+            {/* Transport + command / url */}
+            <div className="space-y-2">
+              <div className="flex items-center gap-2">
+                <span className="w-20 shrink-0 text-xs font-medium text-muted-foreground">Transport</span>
+                <span className="rounded-md bg-muted px-1.5 py-0.5 font-mono text-xs">
+                  {server?.type ?? 'stdio'}
+                </span>
+              </div>
+              {server?.url && (
+                <FieldRow
+                  label="URL"
+                  value={server.url}
+                  copied={copiedField === 'url'}
+                  onCopy={() => copyField('url', server.url as string)}
+                />
+              )}
+              {server?.command && (
+                <FieldRow
+                  label="Command"
+                  value={[server.command, ...(server.args ?? [])].join(' ')}
+                  copied={copiedField === 'cmd'}
+                  onCopy={() => copyField('cmd', [server.command, ...(server.args ?? [])].join(' '))}
+                />
+              )}
+            </div>
+
+            {/* Environment variables */}
+            {envKeys.length > 0 && (
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-medium text-muted-foreground">
+                    Environment ({envKeys.length})
+                  </span>
+                  <button
+                    type="button"
+                    onClick={revealed ? () => setRevealedEnv(null) : revealDetailsEnv}
+                    disabled={revealingEnv}
+                    className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
+                  >
+                    {revealingEnv ? (
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                    ) : revealed ? (
+                      <EyeOff className="h-3 w-3" />
+                    ) : (
+                      <Eye className="h-3 w-3" />
+                    )}
+                    {revealed ? 'Hide' : 'Reveal'}
+                  </button>
+                </div>
+                <div className="divide-y divide-border/60 overflow-hidden rounded-xl border border-border/60">
+                  {envKeys.map((key) => (
+                    <div key={key} className="flex items-center gap-2 bg-muted/40 px-2.5 py-1.5">
+                      <span className="w-40 shrink-0 truncate font-mono text-[11px] text-muted-foreground" title={key}>
+                        {key}
+                      </span>
+                      <span className="min-w-0 flex-1 truncate font-mono text-[11px]" title={revealed ? valueFor(key) : undefined}>
+                        {valueFor(key)}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => copyField(`env:${key}`, valueFor(key))}
+                        aria-label={`Copy ${key}`}
+                        className="shrink-0 rounded p-0.5 text-muted-foreground transition-colors hover:bg-background hover:text-foreground"
+                      >
+                        {copiedField === `env:${key}` ? (
+                          <Check className="h-3 w-3" />
+                        ) : (
+                          <Copy className="h-3 w-3" />
+                        )}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Raw .mcp.json entry */}
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-medium text-muted-foreground">.mcp.json entry</span>
+                <button
+                  type="button"
+                  onClick={() => copyField('json', entryJson)}
+                  className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
+                >
+                  {copiedField === 'json' ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+                  Copy
+                </button>
+              </div>
+              <pre className="max-h-56 overflow-auto rounded-xl bg-zinc-950 p-3 font-mono text-[11px] leading-relaxed text-zinc-100">
+                {entryJson}
+              </pre>
+            </div>
+          </div>
+
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setDetailsName(null)}>
+              Close
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    )
+  }
+
   // Actions shown once a service is connected: live Test + Disconnect.
   function connectedActions(name: string) {
     const testing = testingName === name
@@ -837,6 +1061,16 @@ function ConnectServices({
           </p>
         )}
         {functionalTestTrigger(name)}
+        <Button
+          size="sm"
+          variant="ghost"
+          onClick={() => openDetails(name)}
+          disabled={disconnecting}
+          className="w-full rounded-full text-muted-foreground transition-all duration-200 hover:text-foreground active:scale-[0.98]"
+        >
+          <FileJson className="h-3.5 w-3.5" />
+          View details
+        </Button>
         <Button
           size="sm"
           variant="outline"
@@ -1176,6 +1410,7 @@ function ConnectServices({
       </McpGroup>
 
       {functionalTestDialog()}
+      {detailsDialog()}
       {capDialogName === 'mobile-mcp' && (
         <MobileFunctionalTest projectId={projectId} onClose={() => setCapDialogName(null)} />
       )}
@@ -1392,6 +1627,7 @@ export default function McpPage() {
         existingNames={servers.map((s) => s.name)}
         statusByName={Object.fromEntries(servers.map((s) => [s.name, s.status]))}
         envByName={Object.fromEntries(servers.map((s) => [s.name, s.env]))}
+        serverByName={Object.fromEntries(servers.map((s) => [s.name, s]))}
         checkingStatus={isLoading || healthChecking}
       />
     </div>

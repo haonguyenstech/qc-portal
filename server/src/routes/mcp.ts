@@ -483,6 +483,25 @@ mcpRouter.get('/:name/secret', (req, res) => {
 })
 
 /**
+ * Reveal the FULL (unmasked) env map for a server, for the localhost "View
+ * details" dialog's reveal toggle. Same contract as /:name/secret — localhost
+ * only, never logged; the values already live in .mcp.json on this machine.
+ */
+mcpRouter.get('/:name/env', (req, res) => {
+  const project = resolveProject(req)
+  if (!project) return res.status(400).json({ error: 'project not found' })
+
+  const servers = readMcp(mcpJsonFor(project.rootPath)).mcpServers ?? {}
+  const entry = servers[req.params.name] ?? localProjectMcpServers(project.rootPath)[req.params.name]
+  const env = entry?.env
+  const out: Record<string, string> = {}
+  if (env && typeof env === 'object') {
+    for (const [k, v] of Object.entries(env)) if (typeof v === 'string') out[k] = v
+  }
+  return res.json({ env: out })
+})
+
+/**
  * Reveal the active project's root folder (where .mcp.json lives) in the OS file
  * explorer on the machine running the server.
  */

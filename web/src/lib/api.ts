@@ -1509,6 +1509,16 @@ export function revealMcpSecret(
   )
 }
 
+/** Reveal the full (unmasked) env map for a server, for the "View details" dialog. Localhost-only. */
+export function revealMcpEnv(
+  name: string,
+  projectId: string,
+): Promise<{ env: Record<string, string> }> {
+  return request(
+    `/api/mcp/${encodeURIComponent(name)}/env?projectId=${encodeURIComponent(projectId)}`,
+  )
+}
+
 export interface McpCapabilityResult {
   ok: boolean
   /** ok, but with a caveat (e.g. the MCP works yet no devices are connected) — shown amber, not green. */
