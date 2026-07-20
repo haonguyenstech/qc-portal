@@ -246,7 +246,7 @@ function FieldRow({
   onCopy: () => void
 }) {
   return (
-    <div className="flex items-center gap-2">
+    <div className="flex min-w-0 items-center gap-2">
       <span className="w-20 shrink-0 text-xs font-medium text-muted-foreground">{label}</span>
       <span
         className="min-w-0 flex-1 truncate rounded-md bg-muted px-1.5 py-0.5 font-mono text-[11px]"
@@ -901,8 +901,8 @@ function ConnectServices({
 
     return (
       <Dialog open={!!detailsName} onOpenChange={(o) => !o && setDetailsName(null)}>
-        <DialogContent className="sm:max-w-lg">
-          <DialogHeader>
+        <DialogContent className="max-h-[85vh] overflow-y-auto overflow-x-hidden sm:max-w-lg">
+          <DialogHeader className="min-w-0">
             <DialogTitle className="flex items-center gap-2">
               <Icon className="h-4 w-4" />
               <span className="font-mono text-sm">{name}</span>
@@ -914,9 +914,9 @@ function ConnectServices({
             </DialogDescription>
           </DialogHeader>
 
-          <div className="space-y-4 text-sm">
+          <div className="min-w-0 space-y-4 text-sm">
             {/* Transport + command / url */}
-            <div className="space-y-2">
+            <div className="min-w-0 space-y-2">
               <div className="flex items-center gap-2">
                 <span className="w-20 shrink-0 text-xs font-medium text-muted-foreground">Transport</span>
                 <span className="rounded-md bg-muted px-1.5 py-0.5 font-mono text-xs">
@@ -943,7 +943,7 @@ function ConnectServices({
 
             {/* Environment variables */}
             {envKeys.length > 0 && (
-              <div className="space-y-1.5">
+              <div className="min-w-0 space-y-1.5">
                 <div className="flex items-center justify-between">
                   <span className="text-xs font-medium text-muted-foreground">
                     Environment ({envKeys.length})
@@ -966,8 +966,8 @@ function ConnectServices({
                 </div>
                 <div className="divide-y divide-border/60 overflow-hidden rounded-xl border border-border/60">
                   {envKeys.map((key) => (
-                    <div key={key} className="flex items-center gap-2 bg-muted/40 px-2.5 py-1.5">
-                      <span className="w-40 shrink-0 truncate font-mono text-[11px] text-muted-foreground" title={key}>
+                    <div key={key} className="flex min-w-0 items-center gap-2 bg-muted/40 px-2.5 py-1.5">
+                      <span className="w-36 shrink-0 truncate font-mono text-[11px] text-muted-foreground" title={key}>
                         {key}
                       </span>
                       <span className="min-w-0 flex-1 truncate font-mono text-[11px]" title={revealed ? valueFor(key) : undefined}>
@@ -992,7 +992,7 @@ function ConnectServices({
             )}
 
             {/* Raw .mcp.json entry */}
-            <div className="space-y-1.5">
+            <div className="min-w-0 space-y-1.5">
               <div className="flex items-center justify-between">
                 <span className="text-xs font-medium text-muted-foreground">.mcp.json entry</span>
                 <button
@@ -1004,7 +1004,7 @@ function ConnectServices({
                   Copy
                 </button>
               </div>
-              <pre className="max-h-56 overflow-auto rounded-xl bg-zinc-950 p-3 font-mono text-[11px] leading-relaxed text-zinc-100">
+              <pre className="max-h-56 w-full min-w-0 overflow-auto rounded-xl bg-zinc-950 p-3 font-mono text-[11px] leading-relaxed text-zinc-100">
                 {entryJson}
               </pre>
             </div>

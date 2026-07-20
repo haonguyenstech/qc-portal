@@ -3,6 +3,18 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.9.28 — 2026-07-20
+
+**Fix the MCP "View details" dialog spilling outside its box**
+
+### Fixed
+
+- **The MCP server details dialog no longer overflows.** With a long command or `.mcp.json` block (e.g.
+  ClickUp's `uvx --from git+https://…` line), the dialog's rows and JSON preview spilled past the white
+  panel onto the page behind it. The content is now constrained to the dialog — long values truncate,
+  and the `.mcp.json` preview scrolls inside its own box — with the dialog scrolling vertically if it's
+  tall.
+
 ## 0.9.27 — 2026-07-20
 
 **See a connected MCP server's full configuration**
