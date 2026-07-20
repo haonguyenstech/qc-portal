@@ -379,31 +379,79 @@ function ProjectSwitcher({ collapsed, onExpand }: { collapsed: boolean; onExpand
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
-/** True when the server answers a cheap request; false while it's mid-restart. */
-async function serverReachable(): Promise<boolean> {
+/**
+ * Probe the server's reported version with a HARD timeout. Returns the version
+ * string when reachable, `null` when reachable but the version is unknown, and
+ * `undefined` when unreachable / timed out.
+ *
+ * The timeout is what makes this safe on Windows: a fetch to a just-killed or
+ * rebinding port can hang "pending" for ~20s (the OS drops the SYN with no RST)
+ * instead of failing fast, which would stall the poll loop below and leave the
+ * page spinning. An AbortController caps every probe so each one fails fast and
+ * the loop keeps its cadence. `cache: no-store` stops a cached 200 from faking
+ * reachability while the server is actually down.
+ */
+async function probeServerVersion(timeoutMs = 4000): Promise<string | null | undefined> {
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs)
   try {
-    await getVersion()
-    return true
+    const res = await fetch('/api/version', { signal: ctrl.signal, cache: 'no-store' })
+    if (!res.ok) return undefined
+    const data = (await res.json().catch(() => null)) as { current?: string | null } | null
+    return typeof data?.current === 'string' ? data.current : null
   } catch {
-    return false
+    return undefined // unreachable, or aborted by the timeout
+  } finally {
+    clearTimeout(timer)
   }
 }
 
 /**
- * Wait out a self-update: the server is stopped, rebuilt, and restarted. We first
- * watch it go down (it stops almost immediately), then wait for it to answer again.
- * The build step (npm install + build) is why the "up" budget is generous.
+ * Wait out a self-update: the launcher stops the server, rebuilds it (git reset +
+ * npm install + build — slow, hence the generous "up" budget), then starts a fresh
+ * one on the same port.
+ *
+ * We only report "back" once the server answers as a genuinely RESTARTED process —
+ * either reporting the new version, or (a no-op rebuild) any reachable server after
+ * we've witnessed it go down first — and we require two consecutive good probes.
+ * That is what prevents the Windows "stuck loading" bug: reloading onto the OLD
+ * server that's about to be killed, or onto a half-up one mid-restart.
  */
-async function waitForRestart(): Promise<boolean> {
+async function waitForRestart(prevVersion: string | null): Promise<boolean> {
+  const changed = (v: string) => !!prevVersion && v !== prevVersion
+
+  // Phase 1 — watch it go down. If it instead comes straight back on a new version
+  // (the restart landed between two probes), we're already done.
   const downDeadline = Date.now() + 90_000
+  let sawDown = false
   while (Date.now() < downDeadline) {
-    if (!(await serverReachable())) break
+    const v = await probeServerVersion()
+    if (v === undefined) {
+      sawDown = true
+      break
+    }
+    if (typeof v === 'string' && changed(v)) return true
     await sleep(1500)
   }
+
+  // Phase 2 — wait for it to answer again as a restarted server, twice in a row.
   const upDeadline = Date.now() + 5 * 60_000
+  let good = 0
   while (Date.now() < upDeadline) {
     await sleep(2000)
-    if (await serverReachable()) return true
+    const v = await probeServerVersion()
+    if (typeof v !== 'string') {
+      good = 0
+      continue
+    }
+    // Accept a changed version, or — if the version never changes (no-op rebuild) —
+    // any reachable server, but only once we've confirmed it actually went down
+    // first, so we never reload onto the still-up old process.
+    if (changed(v) || sawDown) {
+      if (++good >= 2) return true
+    } else {
+      good = 0
+    }
   }
   return false
 }
@@ -471,7 +519,9 @@ function VersionFooter({ collapsed }: { collapsed: boolean }) {
         description: 'Pulling, rebuilding, and restarting the server.',
         duration: Infinity,
       })
-      const back = await waitForRestart()
+      // Gate the reload on the server coming back as a RESTARTED process (new
+      // version, or a witnessed down→up), so we never reload mid-restart.
+      const back = await waitForRestart(r.current ?? version)
       if (back) {
         toast.success('Update complete — reloading…', { id: 'qc-update', duration: 2000 })
         await sleep(600)

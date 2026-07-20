@@ -3,6 +3,21 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.9.26 — 2026-07-20
+
+**"Update now" no longer gets stuck on the loading page (Windows)**
+
+### Fixed
+
+- **The in-app "Update now" could hang forever on a spinning page on Windows.** After the update
+  rebuilt and restarted the server, the page sometimes reloaded at the wrong moment — onto the old
+  server as it was being shut down, or onto one still mid-restart — and got stuck loading. The portal
+  now waits until the server comes back as a genuinely **restarted** process (reporting the new
+  version, or confirmed to have gone down and returned), double-checks it twice, and only **then**
+  reloads. Every "is it back yet?" check now also has a hard timeout, so a stalled connection during
+  the restart can't freeze the wait. If the server genuinely doesn't return in time you'll get the
+  clear "Update timed out" message (pointing at `data/update.log`) instead of an endless spinner.
+
 ## 0.9.25 — 2026-07-20
 
 **Crawl tickets from Azure DevOps Boards**
