@@ -1849,8 +1849,11 @@ export default function TestCasePage() {
   const allCrawled = crawled ?? []
   const byName = new Map(allCrawled.map((c) => [c.name, c] as const))
   const matches = (c: CrawledTicket) =>
-    `${c.name} ${c.displayId ?? ''} ${c.title ?? ''}`.toLowerCase().includes(q) &&
-    (tcFilter === 'with' ? c.hasTestcases : tcFilter === 'without' ? !c.hasTestcases : true)
+    // Already-selected tickets stay visible no matter what's typed or filtered, so
+    // you never lose sight of your picks while searching for the next one.
+    selectedFolders.has(c.name) ||
+    (`${c.name} ${c.displayId ?? ''} ${c.title ?? ''}`.toLowerCase().includes(q) &&
+      (tcFilter === 'with' ? c.hasTestcases : tcFilter === 'without' ? !c.hasTestcases : true))
   // Visible = tickets matching the filter, plus every ancestor of a match, so a
   // nested subtask that matches keeps its parent chain in view (a coherent tree).
   const visible = new Set<string>()
@@ -1986,6 +1989,43 @@ export default function TestCasePage() {
                 </SelectContent>
               </Select>
             </div>
+            {selectedFolders.size > 0 && (
+              <div className="flex flex-wrap items-center gap-1.5">
+                {[...selectedFolders].map((name) => {
+                  const t = (crawled ?? []).find((c) => c.name === name)
+                  const label = t?.displayId ?? name
+                  return (
+                    <Tooltip key={name}>
+                      <TooltipTrigger asChild>
+                        <span className="inline-flex max-w-[16rem] items-center gap-1 rounded-full border border-primary/30 bg-primary/10 py-0.5 pl-2 pr-1 text-[11px] font-medium text-primary">
+                          <Ticket className="size-2.5 shrink-0" />
+                          <span className="truncate font-mono">{label}</span>
+                          <button
+                            type="button"
+                            onClick={() => toggleSelectTicket(name)}
+                            aria-label={`Remove ${label}`}
+                            className="inline-flex size-4 shrink-0 items-center justify-center rounded-full text-primary/70 transition-colors hover:bg-primary/20 hover:text-primary"
+                          >
+                            <X className="size-3" />
+                          </button>
+                        </span>
+                      </TooltipTrigger>
+                      <TooltipContent side="top" className="max-w-sm">
+                        <span className="font-mono font-medium">{label}</span>
+                        {t?.title ? ` — ${t.title}` : ''}
+                      </TooltipContent>
+                    </Tooltip>
+                  )
+                })}
+                <button
+                  type="button"
+                  onClick={() => setSelectedFolders(new Set())}
+                  className="ml-1 text-[11px] font-medium text-muted-foreground underline-offset-2 transition-colors hover:text-foreground hover:underline"
+                >
+                  Clear all
+                </button>
+              </div>
+            )}
             <div className="flex items-start gap-2 rounded-xl bg-muted/60 px-2.5 py-2 text-xs leading-relaxed text-muted-foreground">
               <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
               <p>

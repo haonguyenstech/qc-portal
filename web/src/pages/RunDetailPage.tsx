@@ -17,6 +17,9 @@ import {
   ArrowLeft,
   Ban,
   CalendarClock,
+  Check,
+  CheckCircle2,
+  ChevronDown,
   File as FileIcon,
   FileCode2,
   FileText,
@@ -24,6 +27,7 @@ import {
   Folder,
   Globe,
   Image as ImageIcon,
+  Link2,
   ListChecks,
   Loader2,
   Send,
@@ -515,6 +519,27 @@ function stripMd(value: string): string {
     .trim()
 }
 
+// Pull a severity/impact word out of an issue body so each card can carry a
+// triage badge, e.g. "**Business impact:** Low" or "Severity: High". Best-effort —
+// returns null when the skill didn't record one.
+const SEVERITY_RE =
+  /(?:business\s*impact|severity|priority|impact)\s*[-:—]+\s*\*{0,2}\s*(critical|blocker|urgent|high|medium|moderate|normal|low|minor|trivial)/i
+
+function extractSeverity(text: string): string | null {
+  const m = text.match(SEVERITY_RE)
+  return m ? m[1].toLowerCase() : null
+}
+
+/** Map a parsed severity word onto a display label + our status-color palette. */
+function severityMeta(sev: string): { label: string; className: string } {
+  if (/critical|blocker|urgent/.test(sev))
+    return { label: sev, className: 'border-red-200 bg-red-50 text-red-700' }
+  if (/high/.test(sev)) return { label: sev, className: 'border-amber-200 bg-amber-50 text-amber-700' }
+  if (/medium|moderate|normal/.test(sev))
+    return { label: sev, className: 'border-blue-200 bg-blue-50 text-blue-700' }
+  return { label: sev, className: 'border-border bg-muted text-muted-foreground' } // low / minor / trivial
+}
+
 function parseIssues(md: string | null): ParsedIssue[] {
   if (!md?.trim()) return []
   const lines = md.split('\n')
@@ -979,6 +1004,164 @@ function OutcomeBreakdown({ data, total }: { data: OutcomeDatum[]; total: number
   )
 }
 
+/** A small square check control matching the app's selection style. */
+function CheckBox({ checked }: { checked: boolean }) {
+  return (
+    <span
+      className={cn(
+        'flex size-[18px] shrink-0 items-center justify-center rounded-[6px] border transition-colors',
+        checked
+          ? 'border-primary bg-primary text-primary-foreground'
+          : 'border-muted-foreground/40 bg-background',
+      )}
+      aria-hidden
+    >
+      {checked && <Check className="size-3" strokeWidth={3} />}
+    </span>
+  )
+}
+
+/** A compact issue row: the checkbox toggles selection; the title jumps
+ *  (smooth-scrolls) down to the full issue in the report below. Any screenshots
+ *  render as thumbnails that open a lightbox. */
+function IssueCard({
+  issue,
+  index,
+  checked,
+  onToggle,
+  projectId,
+  slug,
+  onViewImage,
+}: {
+  issue: ParsedIssue
+  index: number
+  checked: boolean
+  onToggle: () => void
+  projectId: string
+  slug: string | null
+  onViewImage: (path: string) => void
+}) {
+  const severity = extractSeverity(issue.description)
+  const sev = severity ? severityMeta(severity) : null
+  // The full issue heading below (EvidenceReport) is tagged with this same anchor.
+  const anchor = issueHeadingId(issue.title)
+
+  function jumpToDetail() {
+    if (!anchor) return
+    const el = document.getElementById(anchor)
+    if (!el) return
+    el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    // Flash the whole issue block — the heading plus every element after it up to
+    // the next issue heading — so the jumped-to issue is unmistakable.
+    const targets: Element[] = [el]
+    let sib = el.nextElementSibling
+    while (sib && sib.tagName !== 'H2') {
+      targets.push(sib)
+      sib = sib.nextElementSibling
+    }
+    for (const t of targets) {
+      t.classList.remove('qc-issue-flash')
+      // Force a reflow so re-adding the class restarts the animation on repeat clicks.
+      void (t as HTMLElement).offsetWidth
+      t.classList.add('qc-issue-flash')
+      window.setTimeout(() => t.classList.remove('qc-issue-flash'), 1800)
+    }
+  }
+
+  return (
+    <div
+      className={cn(
+        'group rounded-2xl border px-3 py-2 transition-colors',
+        checked
+          ? 'border-primary/40 bg-primary/[0.05]'
+          : 'border-border/60 bg-muted/30 hover:border-border hover:bg-muted/50',
+      )}
+    >
+      <div className="flex items-center gap-2.5">
+        <button
+          type="button"
+          onClick={onToggle}
+          aria-pressed={checked}
+          aria-label={checked ? 'Deselect issue' : 'Select issue'}
+          className="shrink-0"
+        >
+          <CheckBox checked={checked} />
+        </button>
+        <button
+          type="button"
+          onClick={jumpToDetail}
+          disabled={!anchor}
+          title={anchor ? `${issue.title} — jump to details` : issue.title}
+          className={cn(
+            'flex min-w-0 flex-1 items-center gap-2 text-left',
+            anchor && 'cursor-pointer',
+          )}
+        >
+          <span className="shrink-0 font-mono text-[10px] font-medium text-muted-foreground">
+            #{index + 1}
+          </span>
+          {sev && (
+            <span
+              className={cn(
+                'shrink-0 rounded-full border px-1.5 py-0.5 text-[10px] font-semibold capitalize',
+                sev.className,
+              )}
+            >
+              {sev.label}
+            </span>
+          )}
+          <span
+            className={cn(
+              'min-w-0 flex-1 truncate text-sm font-medium text-foreground transition-colors',
+              anchor && 'group-hover:text-primary',
+            )}
+          >
+            {issue.title}
+          </span>
+          {issue.screenshots.length > 0 && (
+            <span className="inline-flex shrink-0 items-center gap-1 text-[10px] text-muted-foreground">
+              <ImageIcon className="size-3" />
+              {issue.screenshots.length}
+            </span>
+          )}
+          {anchor && (
+            <ChevronDown className="size-4 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100" />
+          )}
+        </button>
+      </div>
+
+      {/* Screenshot thumbnails — click to open the lightbox. */}
+      {issue.screenshots.length > 0 && (
+        <div className="mt-2 flex flex-wrap gap-2 pl-[30px]">
+          {issue.screenshots.map((path) => {
+            const src = screenshotUrl(projectId, slug ?? '', path)
+            const name = path.split('/').pop() ?? path
+            return (
+              <button
+                key={path}
+                type="button"
+                onClick={() => onViewImage(path)}
+                title={`${name} — click to view`}
+                className="group/thumb relative overflow-hidden rounded-lg border border-border/60 bg-background transition-all duration-200 hover:-translate-y-0.5 hover:border-primary/40 hover:shadow-sm active:scale-[0.98]"
+              >
+                <img
+                  src={src}
+                  alt={name}
+                  loading="lazy"
+                  className="h-16 w-24 object-cover"
+                />
+                <span className="pointer-events-none absolute inset-0 flex items-center justify-center bg-foreground/0 text-background opacity-0 transition-all duration-200 group-hover/thumb:bg-foreground/40 group-hover/thumb:opacity-100">
+                  <ImageIcon className="size-4" />
+                </span>
+              </button>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function IssueClickupPanel({
   issuesMd,
   projectId,
@@ -994,6 +1177,8 @@ function IssueClickupPanel({
   const [parentTask, setParentTask] = useState('')
   const [selected, setSelected] = useState<Set<string>>(() => new Set(issues.map((issue) => issue.id)))
   const [created, setCreated] = useState<ClickupTask[]>([])
+  // Screenshot path currently open in the lightbox (null = closed).
+  const [viewer, setViewer] = useState<string | null>(null)
 
   const selectedIssues = issues.filter((issue) => selected.has(issue.id))
   const mutation = useMutation({
@@ -1026,110 +1211,122 @@ function IssueClickupPanel({
   if (issues.length === 0) return null
 
   const allSelected = selected.size === issues.length
+  const someSelected = selected.size > 0
+  const totalScreens = issues.reduce((n, i) => n + i.screenshots.length, 0)
+
+  function toggleIssue(id: string) {
+    setSelected((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
 
   return (
     <div className="mb-6 overflow-hidden rounded-3xl border border-border/60 bg-card shadow-none">
-      <div className="border-b border-border/60 bg-muted/60 px-5 py-4">
-        <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+      {/* Header */}
+      <div className="flex flex-col gap-3 border-b border-border/60 bg-muted/40 px-5 py-4 sm:flex-row sm:items-start sm:justify-between">
+        <div className="flex items-start gap-3">
+          <span className="flex size-9 shrink-0 items-center justify-center rounded-2xl bg-foreground text-background">
+            <Send className="size-4" />
+          </span>
           <div>
-            <div className="flex items-center gap-2 text-sm font-semibold">
-              <Send className="size-4" />
-              Review issues and create ClickUp subtasks
-            </div>
-            <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
-              Paste the parent ClickUp ticket URL, pick issues, then create them inside that ticket's
-              subtask list.
+            <h3 className="text-sm font-semibold tracking-tight">
+              Review issues &amp; file to ClickUp
+            </h3>
+            <p className="mt-0.5 max-w-xl text-xs leading-relaxed text-muted-foreground">
+              Pick the issues worth filing, then create them as subtasks under a parent ClickUp
+              ticket — screenshots attach automatically.
             </p>
           </div>
-          <span className="w-fit rounded-full bg-muted px-2.5 py-1 text-xs font-semibold tabular-nums text-muted-foreground">
-            {selectedIssues.length} selected
-          </span>
         </div>
+        <span className="w-fit shrink-0 rounded-full border border-border/60 bg-background px-2.5 py-1 text-xs font-semibold tabular-nums text-muted-foreground">
+          {selectedIssues.length}
+          <span className="text-muted-foreground/60"> / {issues.length}</span> selected
+        </span>
       </div>
 
-      <div className="space-y-4 p-5">
-        <div className="grid gap-3 lg:grid-cols-[1fr_auto]">
-          <Input
-            value={parentTask}
-            onChange={(event) => setParentTask(event.target.value)}
-            placeholder="Paste ClickUp ticket URL, e.g. https://app.clickup.com/t/86eut664j"
-            className="h-10 rounded-full"
-          />
-          <Button
-            onClick={() => mutation.mutate()}
-            disabled={!parentTask.trim() || selectedIssues.length === 0 || mutation.isPending}
-            className="min-w-40 rounded-full transition-all duration-200 active:scale-[0.98]"
-          >
-            {mutation.isPending ? (
-              <Loader2 className="size-4 animate-spin" />
-            ) : (
-              <Send className="size-4" />
-            )}
-            Create subtasks
-          </Button>
-        </div>
-
-        <div className="flex flex-wrap items-center gap-2">
-          <Button
+      <div className="space-y-3 p-5">
+        {/* Toolbar: master select-all + screenshot tally */}
+        <div className="flex items-center justify-between gap-2">
+          <button
             type="button"
-            variant="outline"
-            size="sm"
             onClick={() =>
               setSelected(allSelected ? new Set() : new Set(issues.map((issue) => issue.id)))
             }
-            className="rounded-full transition-all duration-200 active:scale-[0.98]"
+            className="inline-flex items-center gap-2 rounded-full px-2 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
           >
-            {allSelected ? 'Clear selection' : 'Select all'}
-          </Button>
-          <span className="text-xs text-muted-foreground">
-            Review the parsed issue cards before creating ClickUp subtasks.
-          </span>
+            <CheckBox checked={allSelected} />
+            {allSelected ? 'Clear all' : someSelected ? 'Select all' : `Select all ${issues.length}`}
+          </button>
+          {totalScreens > 0 && (
+            <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground">
+              <ImageIcon className="size-3.5" />
+              {totalScreens} screenshot{totalScreens === 1 ? '' : 's'} across issues
+            </span>
+          )}
         </div>
 
-        <div className="grid gap-3">
-          {issues.map((issue, index) => {
-            const checked = selected.has(issue.id)
-            return (
-              <label
-                key={issue.id}
-                className={cn(
-                  'flex cursor-pointer gap-3 rounded-2xl border border-border/60 p-3 transition-colors',
-                  checked ? 'border-primary/30 bg-primary/5' : 'bg-muted/60 hover:bg-muted/40',
-                )}
-              >
-                <input
-                  type="checkbox"
-                  checked={checked}
-                  onChange={(event) => {
-                    setSelected((prev) => {
-                      const next = new Set(prev)
-                      if (event.target.checked) next.add(issue.id)
-                      else next.delete(issue.id)
-                      return next
-                    })
-                  }}
-                  className="mt-1 size-4 accent-primary"
-                />
-                <div className="min-w-0 flex-1">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="rounded-full bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
-                      #{index + 1}
-                    </span>
-                    <p className="font-medium leading-5">{issue.title}</p>
-                  </div>
-                  <p className="mt-1 line-clamp-3 whitespace-pre-wrap text-xs leading-5 text-muted-foreground">
-                    {issue.description}
-                  </p>
-                </div>
-              </label>
-            )
-          })}
+        {/* Issue cards */}
+        <div className="space-y-2.5">
+          {issues.map((issue, index) => (
+            <IssueCard
+              key={issue.id}
+              issue={issue}
+              index={index}
+              checked={selected.has(issue.id)}
+              onToggle={() => toggleIssue(issue.id)}
+              projectId={projectId}
+              slug={slug}
+              onViewImage={setViewer}
+            />
+          ))}
+        </div>
+
+        {/* Commit bar: parent ticket + create */}
+        <div className="space-y-2.5 rounded-2xl border border-border/60 bg-muted/40 p-3.5">
+          <label
+            htmlFor="clickup-parent"
+            className="flex items-center gap-1.5 text-xs font-semibold text-foreground"
+          >
+            <Link2 className="size-3.5 text-muted-foreground" />
+            Parent ClickUp ticket
+          </label>
+          <div className="flex flex-col gap-2 sm:flex-row">
+            <Input
+              id="clickup-parent"
+              value={parentTask}
+              onChange={(event) => setParentTask(event.target.value)}
+              placeholder="https://app.clickup.com/t/86eut664j"
+              className="h-10 flex-1 rounded-full shadow-none"
+            />
+            <Button
+              onClick={() => mutation.mutate()}
+              disabled={!parentTask.trim() || selectedIssues.length === 0 || mutation.isPending}
+              className="h-10 shrink-0 rounded-full transition-all duration-200 active:scale-[0.98] sm:min-w-44"
+            >
+              {mutation.isPending ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : (
+                <Send className="size-4" />
+              )}
+              Create{selectedIssues.length > 0 ? ` ${selectedIssues.length}` : ''} subtask
+              {selectedIssues.length === 1 ? '' : 's'}
+            </Button>
+          </div>
+          <p className="text-[11px] text-muted-foreground">
+            {selectedIssues.length === 0
+              ? 'Select at least one issue to file.'
+              : 'Each selected issue becomes a subtask inside that ticket.'}
+          </p>
         </div>
 
         {created.length > 0 && (
-          <div className="rounded-2xl border border-border/60 bg-muted/30 p-3">
-            <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-              Created subtasks
+          <div className="rounded-2xl border border-emerald-200 bg-emerald-50/60 p-3">
+            <div className="flex items-center gap-1.5 text-xs font-semibold text-emerald-700">
+              <CheckCircle2 className="size-3.5" />
+              Created {created.length} subtask{created.length === 1 ? '' : 's'}
             </div>
             <div className="mt-2 flex flex-wrap gap-2">
               {created.map((task) => (
@@ -1138,7 +1335,7 @@ function IssueClickupPanel({
                   href={task.url}
                   target="_blank"
                   rel="noreferrer"
-                  className="inline-flex items-center gap-1 rounded-full border border-border/60 bg-background px-2 py-1 text-xs font-medium hover:text-primary"
+                  className="inline-flex items-center gap-1 rounded-full border border-emerald-200 bg-background px-2 py-1 text-xs font-medium text-emerald-700 transition-colors hover:bg-emerald-100"
                 >
                   {task.displayId}
                   <ArrowUpRight className="size-3" />
@@ -1148,6 +1345,39 @@ function IssueClickupPanel({
           </div>
         )}
       </div>
+
+      {/* Screenshot lightbox */}
+      <Dialog open={!!viewer} onOpenChange={(open) => !open && setViewer(null)}>
+        <DialogContent className="flex max-h-[92vh] w-[95vw] flex-col gap-0 overflow-hidden p-0 sm:max-w-5xl">
+          <DialogHeader className="shrink-0 space-y-0 border-b border-border/60 bg-muted/30 px-5 py-3">
+            <DialogTitle className="flex min-w-0 items-center gap-2 text-sm">
+              <ImageIcon className="size-4 shrink-0 text-muted-foreground" />
+              <span className="truncate font-mono">{viewer?.split('/').pop() ?? ''}</span>
+              {viewer && (
+                <a
+                  href={screenshotUrl(projectId, slug ?? '', viewer)}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="ml-auto inline-flex shrink-0 items-center gap-1 rounded-full border border-border/60 px-2 py-0.5 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
+                >
+                  Open
+                  <ArrowUpRight className="size-3" />
+                </a>
+              )}
+            </DialogTitle>
+            <DialogDescription className="sr-only">Screenshot preview</DialogDescription>
+          </DialogHeader>
+          <div className="min-h-0 flex-1 overflow-auto bg-muted/20 p-4">
+            {viewer && (
+              <img
+                src={screenshotUrl(projectId, slug ?? '', viewer)}
+                alt={viewer.split('/').pop() ?? 'Screenshot'}
+                className="mx-auto h-auto max-w-full rounded-lg"
+              />
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

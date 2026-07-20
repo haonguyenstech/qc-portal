@@ -184,20 +184,39 @@ function safeFolderName(name: string): string {
     .trim()
 }
 
+/**
+ * True only when .mcp.json exists AND declares at least one server. A brand-new
+ * project is scaffolded with an EMPTY `{ "mcpServers": {} }` (see
+ * initializeProjectFolder), so checking mere file existence would wrongly flag the
+ * MCP capability as configured. The badge must stay un-ticked until the engineer
+ * actually adds a server on /mcp.
+ */
+function hasConfiguredMcp(rootPath: string): boolean {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(mcpJsonFor(rootPath), 'utf8'))
+    const servers = parsed?.mcpServers
+    return !!servers && typeof servers === 'object' && Object.keys(servers).length > 0
+  } catch {
+    return false // missing file or invalid JSON → not configured
+  }
+}
+
 /** Light health hints about a project root so the UI can warn the user. */
 function rootInfo(rootPath: string) {
   return {
     exists: isDir(rootPath),
     hasSkills: isDir(skillsDirFor(rootPath)),
-    hasMcp: fs.existsSync(path.join(rootPath, '.mcp.json')),
+    hasMcp: hasConfiguredMcp(rootPath),
     hasClaudeMd: fs.existsSync(path.join(rootPath, 'CLAUDE.md')),
   }
 }
 
-/** True when a folder already has the full Claude Code layout we can clone from. */
+/** True when a folder already has the full Claude Code layout we can clone from.
+ *  Clone-readiness only needs the .mcp.json FILE present (even an empty scaffold),
+ *  not a configured server — that's a stricter, badge-only distinction. */
 function isClaudeReady(rootPath: string): boolean {
   const i = rootInfo(rootPath)
-  return i.exists && i.hasSkills && i.hasMcp && i.hasClaudeMd
+  return i.exists && i.hasSkills && fs.existsSync(mcpJsonFor(rootPath)) && i.hasClaudeMd
 }
 
 /**

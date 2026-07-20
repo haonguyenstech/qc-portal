@@ -8,12 +8,14 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronRight,
+  Clock,
   DownloadCloud,
   ExternalLink,
   FileText,
   FolderDown,
   FolderGit2,
   ListChecks,
+  ListPlus,
   Loader2,
   Paperclip,
   ScrollText,
@@ -134,29 +136,73 @@ function saveTeam(source: TicketSourceId, id: string): void {
   }
 }
 
-// The active background crawl-job id, remembered per project so a browser reload
-// (or navigating away and back) reconnects to the still-running server-side job.
-// The global CrawlJobWatcher clears this key once a job finishes.
+// Started background crawl-job ids, remembered per project so a browser reload (or
+// navigating away and back) reconnects, AND so the global CrawlJobWatcher announces
+// EACH one — even when crawls run back-to-back from the queue below. Stored as a
+// JSON array; the watcher removes each id as it finishes (legacy single-id values
+// are tolerated on read).
 const ACTIVE_CRAWL_JOB_PREFIX = 'qc.crawlJob.'
-function loadActiveCrawlJobId(projectId: string | null): string | null {
-  if (!projectId) return null
+function loadActiveCrawlJobIds(projectId: string | null): string[] {
+  if (!projectId) return []
+  let raw: string | null = null
   try {
-    return localStorage.getItem(ACTIVE_CRAWL_JOB_PREFIX + projectId)
+    raw = localStorage.getItem(ACTIVE_CRAWL_JOB_PREFIX + projectId)
   } catch {
-    return null
+    return []
+  }
+  if (!raw) return []
+  try {
+    const v = JSON.parse(raw)
+    if (Array.isArray(v)) return v.filter((x): x is string => typeof x === 'string')
+    return typeof v === 'string' && v ? [v] : []
+  } catch {
+    return [raw] // legacy single-id string (pre-queue)
   }
 }
-function saveActiveCrawlJobId(projectId: string, jobId: string): void {
+function addActiveCrawlJobId(projectId: string, jobId: string): void {
   try {
-    localStorage.setItem(ACTIVE_CRAWL_JOB_PREFIX + projectId, jobId)
+    const ids = loadActiveCrawlJobIds(projectId)
+    if (!ids.includes(jobId)) ids.push(jobId)
+    localStorage.setItem(ACTIVE_CRAWL_JOB_PREFIX + projectId, JSON.stringify(ids))
   } catch {
     /* storage unavailable */
   }
 }
-function clearActiveCrawlJobId(projectId: string | null): void {
+function removeActiveCrawlJobId(projectId: string | null, jobId: string): void {
   if (!projectId) return
   try {
-    localStorage.removeItem(ACTIVE_CRAWL_JOB_PREFIX + projectId)
+    const ids = loadActiveCrawlJobIds(projectId).filter((id) => id !== jobId)
+    if (ids.length) localStorage.setItem(ACTIVE_CRAWL_JOB_PREFIX + projectId, JSON.stringify(ids))
+    else localStorage.removeItem(ACTIVE_CRAWL_JOB_PREFIX + projectId)
+  } catch {
+    /* ignore */
+  }
+}
+
+// A crawl batch waiting its turn: the tickets (already resolved to their on-disk
+// folder paths) + the model chosen when it was queued. One crawl runs at a time;
+// the rest wait here and auto-start when the current finishes. Persisted per project.
+interface CrawlBatch {
+  id: string
+  model: string
+  tickets: { id: string; displayId: string; name: string; relDir?: string }[]
+}
+const CRAWL_QUEUE_PREFIX = 'qc.crawlQueue.'
+function loadCrawlQueue(projectId: string | null): CrawlBatch[] {
+  if (!projectId) return []
+  try {
+    const raw = localStorage.getItem(CRAWL_QUEUE_PREFIX + projectId)
+    const v = raw ? JSON.parse(raw) : []
+    return Array.isArray(v) ? (v as CrawlBatch[]).filter((b) => b && Array.isArray(b.tickets)) : []
+  } catch {
+    return []
+  }
+}
+function saveCrawlQueue(projectId: string | null, queue: CrawlBatch[]): void {
+  if (!projectId) return
+  try {
+    if (queue.length) localStorage.setItem(CRAWL_QUEUE_PREFIX + projectId, JSON.stringify(queue))
+    else localStorage.removeItem(CRAWL_QUEUE_PREFIX + projectId)
   } catch {
     /* ignore */
   }
@@ -567,9 +613,13 @@ export default function TicketsPage() {
   const debounced = useDebounced(query, 300)
 
   // The crawl now runs as a server-side background job (survives reload / nav).
-  // We track its id (reconnecting from the per-project stored id) and poll it; the
-  // live log, progress and results are all derived from the job below.
-  const [jobId, setJobId] = useState<string | null>(() => loadActiveCrawlJobId(activeProjectId))
+  // We track the active job id (reconnecting from the per-project stored ids) and
+  // poll it; the live log, progress and results are all derived from the job below.
+  const [jobId, setJobId] = useState<string | null>(
+    () => loadActiveCrawlJobIds(activeProjectId).at(-1) ?? null,
+  )
+  // Batches waiting to crawl (one runs at a time; the rest auto-start in turn).
+  const [queue, setQueue] = useState<CrawlBatch[]>(() => loadCrawlQueue(activeProjectId))
   const [showLogs, setShowLogs] = useState(true)
   // Crawl results just deleted from disk — hidden from the post-crawl summary panel.
   const [hiddenResults, setHiddenResults] = useState<Set<string>>(new Set())
@@ -600,7 +650,8 @@ export default function TicketsPage() {
     setBinding(activeProjectId ? loadListBinding(activeProjectId) : null)
     setSourcePref(loadTicketSource(activeProjectId))
     setSelected(new Map())
-    setJobId(loadActiveCrawlJobId(activeProjectId))
+    setJobId(loadActiveCrawlJobIds(activeProjectId).at(-1) ?? null)
+    setQueue(loadCrawlQueue(activeProjectId))
     setHiddenResults(new Set())
   }
 
@@ -692,24 +743,20 @@ export default function TicketsPage() {
   // returns immediately; completion (toast + bell notification + cache refresh) is
   // owned by the global <CrawlJobWatcher/>, so it fires even if we leave this page.
   const crawl = useMutation({
-    mutationFn: ({ tasks }: { tasks: ClickupTask[] }) => {
-      const batch = new Map(tasks.map((t) => [t.id, t] as const))
+    mutationFn: (batch: CrawlBatch) => {
       const startJob =
         source === 'jira' ? startJiraCrawlJob : source === 'azure' ? startAzureCrawlJob : startCrawlJob
       return startJob({
         projectId: activeProjectId as string,
-        model: crawlModel,
-        tickets: tasks.map((t) => ({
-          id: t.id,
-          displayId: t.displayId,
-          name: t.name,
-          relDir: relDirFor(t, batch),
-        })),
+        model: batch.model,
+        tickets: batch.tickets,
       })
     },
     onSuccess: ({ jobId: id }) => {
       setJobId(id)
-      saveActiveCrawlJobId(activeProjectId as string, id)
+      // Track EVERY started job so the watcher announces each (queued crawls run
+      // back-to-back); the watcher removes each id when it finishes.
+      addActiveCrawlJobId(activeProjectId as string, id)
       setHiddenResults(new Set())
       setShowLogs(true)
     },
@@ -719,6 +766,36 @@ export default function TicketsPage() {
       })
     },
   })
+
+  // Build a crawl batch from the current selection, resolving each ticket's nested
+  // on-disk folder path and capturing the model chosen right now.
+  function buildBatch(tasks: ClickupTask[]): CrawlBatch {
+    const map = new Map(tasks.map((t) => [t.id, t] as const))
+    return {
+      id: crypto.randomUUID(),
+      model: crawlModel,
+      tickets: tasks.map((t) => ({
+        id: t.id,
+        displayId: t.displayId,
+        name: t.name,
+        relDir: relDirFor(t, map),
+      })),
+    }
+  }
+
+  // Start the next queued batch when nothing is actively crawling. Guarded by a ref
+  // so a burst of re-renders can't launch two at once.
+  const advancingQueueRef = useRef(false)
+  function startNextInQueue() {
+    if (advancingQueueRef.current || crawl.isPending || !activeProjectId) return
+    const q = loadCrawlQueue(activeProjectId)
+    if (!q.length) return
+    advancingQueueRef.current = true
+    const [next, ...rest] = q
+    saveCrawlQueue(activeProjectId, rest)
+    setQueue(rest)
+    crawl.mutate(next, { onSettled: () => (advancingQueueRef.current = false) })
+  }
 
   // Poll the tracked crawl job until it finishes. Stops polling once done.
   const jobQuery = useQuery({
@@ -733,6 +810,41 @@ export default function TicketsPage() {
   // True while starting the POST or while the job runs — drives the busy UI.
   const busy = crawl.isPending || isRunning
   const progress = job ? { done: job.doneCount, total: job.total } : null
+
+  // Auto-advance the queue: once the active job is finished (or there's none), start
+  // the next queued batch. `activeUnfinished` waits while a job is still loading or
+  // running so we never run two at once (jobQuery.isError = the job was pruned).
+  const activeUnfinished = !!jobId && (job ? job.status !== 'done' : !jobQuery.isError)
+  useEffect(() => {
+    if (crawl.isPending || activeUnfinished || !queue.length) return
+    startNextInQueue()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeUnfinished, crawl.isPending, queue, activeProjectId])
+
+  // Crawl the current selection now, or — if a crawl is already running or batches
+  // are queued — add it to the queue to run next. Either way the selection clears so
+  // the engineer can immediately pick the following batch.
+  function onCrawlOrQueue() {
+    const tasks = [...selected.values()]
+    if (!tasks.length) return
+    const batch = buildBatch(tasks)
+    if (busy || queue.length > 0) {
+      const next = [...queue, batch]
+      setQueue(next)
+      saveCrawlQueue(activeProjectId, next)
+      toast.success(`Queued ${tasks.length} ticket${tasks.length === 1 ? '' : 's'}`, {
+        description: 'Crawls automatically after the current one finishes.',
+      })
+    } else {
+      crawl.mutate(batch)
+    }
+    setSelected(new Map())
+  }
+
+  function clearCrawlQueue() {
+    setQueue([])
+    saveCrawlQueue(activeProjectId, [])
+  }
 
   // Live log + post-crawl results, derived from the job (so they survive reloads).
   const logs: LogLine[] = (job?.logs ?? []).map((l: CrawlLogLine, i) => ({
@@ -750,8 +862,8 @@ export default function TicketsPage() {
     .map((it) => it.result as CrawlResult)
 
   function clearCrawlJob() {
+    if (jobId) removeActiveCrawlJobId(activeProjectId, jobId)
     setJobId(null)
-    clearActiveCrawlJobId(activeProjectId)
     setHiddenResults(new Set())
   }
 
@@ -1331,6 +1443,27 @@ export default function TicketsPage() {
             </p>
           )}
 
+          {queue.length > 0 && (
+            <div className="flex items-center gap-2 rounded-2xl border border-border/60 bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+              <Clock className="size-3.5 shrink-0 text-primary/70" />
+              <span className="min-w-0 flex-1">
+                <span className="font-medium text-foreground">
+                  {queue.reduce((n, b) => n + b.tickets.length, 0)} ticket
+                  {queue.reduce((n, b) => n + b.tickets.length, 0) === 1 ? '' : 's'}
+                </span>{' '}
+                queued in {queue.length} batch{queue.length === 1 ? '' : 'es'} — crawls automatically
+                after the current one finishes.
+              </span>
+              <button
+                type="button"
+                onClick={clearCrawlQueue}
+                className="shrink-0 font-medium text-muted-foreground transition-colors hover:text-destructive"
+              >
+                Clear queue
+              </button>
+            </div>
+          )}
+
           {logs.length > 0 && (
             <CrawlLogPanel
               logs={logs}
@@ -1375,8 +1508,9 @@ export default function TicketsPage() {
                 )}
               </div>
 
-              {/* Pick how each ticket is processed: plain download or an AI brief. */}
-              <Select value={crawlModel} onValueChange={chooseCrawlModel} disabled={busy}>
+              {/* Pick how each ticket is processed: plain download or an AI brief.
+                  Stays editable while a crawl runs — it applies to the NEXT batch. */}
+              <Select value={crawlModel} onValueChange={chooseCrawlModel} disabled={crawl.isPending}>
                 <SelectTrigger
                   size="sm"
                   className="h-9 w-auto min-w-[8.5rem] shrink-0 gap-2 rounded-full"
@@ -1410,20 +1544,25 @@ export default function TicketsPage() {
                 variant="ghost"
                 size="sm"
                 onClick={() => setSelected(new Map())}
-                disabled={busy}
+                disabled={crawl.isPending}
                 className="shrink-0 rounded-full transition-all duration-200 active:scale-[0.98]"
               >
                 Clear
               </Button>
               <Button
-                onClick={() => crawl.mutate({ tasks: [...selected.values()] })}
-                disabled={busy || selected.size === 0}
+                onClick={onCrawlOrQueue}
+                disabled={crawl.isPending || selected.size === 0}
                 className="shrink-0 rounded-full transition-all duration-200 active:scale-[0.98]"
               >
-                {busy ? (
+                {crawl.isPending ? (
                   <>
                     <Loader2 className="size-4 animate-spin" />
-                    Crawling {progress ? `${progress.done}/${progress.total}` : ''}…
+                    Starting…
+                  </>
+                ) : busy || queue.length > 0 ? (
+                  <>
+                    <ListPlus className="size-4" />
+                    Queue {selected.size}
                   </>
                 ) : (
                   <>

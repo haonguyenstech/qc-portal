@@ -3,6 +3,50 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.10.0 — 2026-07-20
+
+**Crawl queue, a rebuilt issues-to-ClickUp panel, and steadier test-case generation**
+
+### Added
+
+- **Queue crawls back-to-back on the Tickets page.** Start a crawl while one is already running (or
+  more are queued) and the new selection is added to a queue that auto-runs the next batch when the
+  current finishes — the selection clears immediately so you can line up the following batch. A queue
+  banner shows how many tickets/batches are waiting, with a **Clear queue** action. Each queued crawl
+  still announces its own completion notification.
+- **Search now finds subtasks by ID.** On the Tickets page, typing a subtask's id (or name) in the
+  search box now returns that subtask — previously only parent tickets were searchable, so a subtask
+  id matched nothing.
+- **Selected test-case tickets show as removable chips.** On the Test cases page the tickets you've
+  picked appear as badges under the search box (hover for the full title, click ✕ to unpick, or
+  **Clear all**), and a selected ticket stays visible even while you filter/search for the next one.
+
+### Changed
+
+- **Rebuilt the "Review issues → ClickUp" panel on a run's Issues tab.** Issues are now compact
+  one-line rows with a severity badge; **clicking a row scrolls to that issue's full detail below and
+  highlights it**. Screenshots show as thumbnails that open in a **lightbox**, and each issue's
+  description renders as real formatted text (bold labels, lists) instead of raw `**…**`.
+- **Bug subtasks created in ClickUp inherit the parent ticket's assignees, tags, and priority**, so a
+  logged bug lands on the right person with the right context instead of empty.
+- **Deleting a test-case row now renumbers the sequence.** After removing a row, both the **No (STT)**
+  and **Test Case ID** columns are re-sequenced so there are no gaps (e.g. deleting #04 shifts #05→#04)
+  — each column keeps its own format (`01`, `TC-001`, `No-01`).
+- **Generated CSV test cases now fill the Priority column.** The generator previously treated Priority
+  as an execution column to leave blank; it's now correctly authored (High / Medium / Low).
+- **The Run page no longer re-selects a ticket that's already running.** When it restores your last
+  selection, any ticket with an in-flight run is dropped so you don't accidentally re-run it.
+
+### Fixed
+
+- **A brand-new project no longer shows MCP as "configured".** The MCP badge (and the "Fully
+  configured" count) went green just because an empty `.mcp.json` scaffold existed; it now turns green
+  only once at least one MCP server is actually configured.
+- **The occasional malformed test-case CSV is auto-repaired.** When a generated row was misaligned by
+  an unescaped comma (the intermittent "format error"), the file is now fixed in place — the same
+  cases re-emitted with correct quoting/columns — instead of saving a corrupt row. It only runs when a
+  defect is detected and is discarded unless it cleanly resolves the issue.
+
 ## 0.9.33 — 2026-07-20
 
 **Test-case generation's "Set one URL for all" starts empty**

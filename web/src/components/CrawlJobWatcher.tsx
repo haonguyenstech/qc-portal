@@ -11,8 +11,10 @@ import { useNotifications } from '@/lib/notifications'
 // Mirrors TestCaseJobWatcher.
 //
 // Active jobs are discovered from the per-project keys TicketsPage writes:
-//   qc.crawlJob.<projectId> = <jobId>
-// On completion (or if the job is gone) we clear that key so it isn't re-watched.
+//   qc.crawlJob.<projectId> = JSON array of started job ids (legacy: a bare id string)
+// Crawls can run back-to-back from the queue, so each project key holds a LIST — we
+// announce each id and remove just that one when it finishes (a bare string from an
+// older build is tolerated on read).
 
 const ACTIVE_JOB_PREFIX = 'qc.crawlJob.'
 const POLL_MS = 2000
@@ -26,14 +28,31 @@ interface WatchedJob {
   jobId: string
 }
 
+function readJobIds(projectId: string): string[] {
+  let raw: string | null = null
+  try {
+    raw = localStorage.getItem(ACTIVE_JOB_PREFIX + projectId)
+  } catch {
+    return []
+  }
+  if (!raw) return []
+  try {
+    const v = JSON.parse(raw)
+    if (Array.isArray(v)) return v.filter((x): x is string => typeof x === 'string')
+    return typeof v === 'string' && v ? [v] : []
+  } catch {
+    return [raw] // legacy single-id string
+  }
+}
+
 function listWatchedJobs(): WatchedJob[] {
   const out: WatchedJob[] = []
   try {
     for (let i = 0; i < localStorage.length; i++) {
       const key = localStorage.key(i)
       if (!key || !key.startsWith(ACTIVE_JOB_PREFIX)) continue
-      const jobId = localStorage.getItem(key)
-      if (jobId) out.push({ projectId: key.slice(ACTIVE_JOB_PREFIX.length), jobId })
+      const projectId = key.slice(ACTIVE_JOB_PREFIX.length)
+      for (const jobId of readJobIds(projectId)) out.push({ projectId, jobId })
     }
   } catch {
     /* storage unavailable */
@@ -41,9 +60,13 @@ function listWatchedJobs(): WatchedJob[] {
   return out
 }
 
-function clearWatched(projectId: string): void {
+// Remove just the finished job id, leaving any sibling (queued back-to-back) ids so
+// they're still announced. Removes the whole key once the list empties.
+function removeWatched(projectId: string, jobId: string): void {
   try {
-    localStorage.removeItem(ACTIVE_JOB_PREFIX + projectId)
+    const ids = readJobIds(projectId).filter((id) => id !== jobId)
+    if (ids.length) localStorage.setItem(ACTIVE_JOB_PREFIX + projectId, JSON.stringify(ids))
+    else localStorage.removeItem(ACTIVE_JOB_PREFIX + projectId)
   } catch {
     /* ignore */
   }
@@ -70,13 +93,13 @@ export default function CrawlJobWatcher() {
       } catch {
         // 404 / network — job pruned or server restarted. Stop watching it.
         handled.add(w.jobId)
-        clearWatched(w.projectId)
+        removeWatched(w.projectId, w.jobId)
         return
       }
       if (cancelled || job.status !== 'done' || handled.has(job.id)) return
 
       handled.add(job.id)
-      clearWatched(w.projectId)
+      removeWatched(w.projectId, job.id)
 
       // Refresh the crawled-ticket lists on both pages that show them.
       queryClient.invalidateQueries({ queryKey: ['crawled-tickets', w.projectId] })

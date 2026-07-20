@@ -166,11 +166,14 @@ function toHit(t: any): TaskHit {
  * ClickUp's REST API has no free-text task search, so we page recent tasks
  * (newest first) and filter in-process. Capped to keep it snappy.
  *
- * Top-level tickets only (subtasks=false) — subtasks are loaded on demand when a
- * parent is expanded, so the page cap is spent on distinct parent tickets.
+ * With NO query, top-level tickets only (subtasks=false) — subtasks are loaded on
+ * demand when a parent is expanded, so the page cap is spent on distinct parents.
+ * With a query, subtasks=true so a search can match a SUBTASK by its id/name too
+ * (otherwise subtasks — never in the flat list — would be unsearchable).
  */
 export async function searchTasks(teamId: string, query: string): Promise<TaskHit[]> {
   const q = query.trim().toLowerCase()
+  const includeSubtasks = q ? 'true' : 'false'
   const hits: TaskHit[] = []
   const MAX_PAGES = 6
   const MAX_HITS = 100
@@ -178,7 +181,7 @@ export async function searchTasks(teamId: string, query: string): Promise<TaskHi
   for (let page = 0; page < MAX_PAGES; page++) {
     const data = await cuFetch(
       `/team/${encodeURIComponent(teamId)}/task` +
-        `?page=${page}&order_by=updated&reverse=true&subtasks=false&include_closed=false`,
+        `?page=${page}&order_by=updated&reverse=true&subtasks=${includeSubtasks}&include_closed=false`,
     )
     const tasks: any[] = data.tasks ?? []
     for (const t of tasks) {
@@ -234,11 +237,13 @@ export async function getLists(spaceId: string): Promise<ListRef[]> {
  * Top-level tasks in a single list — complete and accurate (no recency window).
  * Paginated fully (capped), optionally filtered by an id/name substring.
  *
- * subtasks=false so the cap counts only parent tickets; a parent's subtasks are
- * fetched on demand via getSubtasks() when its row is expanded.
+ * With NO query, subtasks=false so the cap counts only parent tickets; a parent's
+ * subtasks are fetched on demand via getSubtasks() when its row is expanded. With a
+ * query, subtasks=true so the search can also match a SUBTASK by its id/name.
  */
 export async function getListTasks(listId: string, query: string): Promise<TaskHit[]> {
   const q = query.trim().toLowerCase()
+  const includeSubtasks = q ? 'true' : 'false'
   const hits: TaskHit[] = []
   const MAX_PAGES = 10 // 1000 tasks — plenty for one QC list
   const MAX_HITS = 100
@@ -246,7 +251,7 @@ export async function getListTasks(listId: string, query: string): Promise<TaskH
   for (let page = 0; page < MAX_PAGES; page++) {
     const data = await cuFetch(
       `/list/${encodeURIComponent(listId)}/task` +
-        `?page=${page}&order_by=updated&reverse=true&subtasks=false&archived=false&include_closed=false`,
+        `?page=${page}&order_by=updated&reverse=true&subtasks=${includeSubtasks}&archived=false&include_closed=false`,
     )
     const tasks: any[] = data.tasks ?? []
     for (const t of tasks) {
@@ -341,6 +346,20 @@ export async function createIssueSubtask(input: CreateSubtaskInput): Promise<Cre
     throw Object.assign(new Error('Could not resolve the parent task list in ClickUp'), { status: 502 })
   }
 
+  // Inherit the parent ticket's assignees, tags, and priority so the logged bug lands
+  // on the right person with the right context — the QC engineer would otherwise have
+  // to set these by hand. All three come straight off the parent task we just fetched:
+  //   - assignees: ClickUp create expects an array of user IDs (parent.assignees[].id)
+  //   - tags:      an array of tag NAMES that exist in the space (parent.tags[].name)
+  //   - priority:  an integer 1-4 (Urgent…Low); parent.priority.id is that value
+  const assignees: number[] = Array.isArray(parent?.assignees)
+    ? parent.assignees.map((a: any) => Number(a?.id)).filter((n: number) => Number.isFinite(n))
+    : []
+  const tags: string[] = Array.isArray(parent?.tags)
+    ? parent.tags.map((t: any) => String(t?.name ?? '')).filter(Boolean)
+    : []
+  const priority = parent?.priority?.id != null ? Number(parent.priority.id) : NaN
+
   // Send markdown_content (NOT description): ClickUp renders markdown_content as rich
   // text (bold labels, numbered/bulleted lists) but shows description as literal plain
   // text — which is why the raw `**...**` and run-on layout appeared before.
@@ -348,6 +367,9 @@ export async function createIssueSubtask(input: CreateSubtaskInput): Promise<Cre
     name,
     markdown_content: normalizeIssueMarkdown(input.description).slice(0, 6000),
     parent: parentId,
+    ...(assignees.length ? { assignees } : {}),
+    ...(tags.length ? { tags } : {}),
+    ...(Number.isFinite(priority) && priority >= 1 && priority <= 4 ? { priority } : {}),
   })
 
   return {

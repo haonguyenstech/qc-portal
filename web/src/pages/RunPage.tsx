@@ -689,6 +689,36 @@ export default function RunPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeProject?.id])
 
+  // Don't auto-select a ticket that's already running: the last-inputs restore above
+  // re-selects the previous lead (and bug) tickets, but if one of them still has an
+  // in-flight run the user came here to run a DIFFERENT ticket — so drop it from the
+  // selection. Runs once per project, after the runs list first loads (it's only the
+  // AUTO-restored selection we prune; a ticket the user picks by hand is left alone).
+  const prunedRunningRef = useRef<string | null>(null)
+  useEffect(() => {
+    if (!activeProject || !recentRuns) return
+    if (prunedRunningRef.current === activeProject.id) return
+    prunedRunningRef.current = activeProject.id
+    const active = new Set(
+      recentRuns
+        .filter(
+          (r) =>
+            r.projectId === activeProject.id &&
+            (r.status === 'running' || r.status === 'queued' || r.status === 'paused'),
+        )
+        .map((r) => r.ticketId)
+        .filter(Boolean),
+    )
+    if (!active.size) return
+    setSimpleTickets((sel) => sel.filter((id) => !active.has(id)))
+    setBugTickets((prev) =>
+      [...prev].some((id) => active.has(id))
+        ? new Set([...prev].filter((id) => !active.has(id)))
+        : prev,
+    )
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeProject?.id, recentRuns])
+
   // app-mobile drives a native app already installed on the device — there's no URL,
   // so the URL field is hidden and never required/validated in that mode.
   const isAppTarget = testTarget === 'app-mobile'

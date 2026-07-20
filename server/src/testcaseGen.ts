@@ -96,6 +96,82 @@ export function findOverflowCsvRows(csv: string): { id: string; fields: number }
   return bad
 }
 
+const CSV_REPAIR_BUDGET_USD = '0.15'
+const CSV_REPAIR_TIMEOUT_MS = 120_000
+const CSV_REPAIR_MAX_CHARS = 80_000
+
+/**
+ * Best-effort AI repair for the occasional CSV whose rows are shifted by an unescaped
+ * comma (see findOverflowCsvRows) — the ~1-in-N "format error" a generation run can hit
+ * despite the strict prompt rules. A cheap model re-emits the SAME cases with correct
+ * quoting and column alignment. It is applied ONLY when a defect is detected, so it costs
+ * nothing on the common (already-valid) path.
+ *
+ * Returns the fixed CSV ONLY when it passes strict guards — identical header, identical
+ * row count, and NO overflow rows remaining — otherwise null, so the caller keeps the
+ * original file and warns the engineer. Never throws.
+ */
+async function repairMalformedCsv(opts: {
+  rootPath: string
+  csv: string
+  model?: string
+  signal?: AbortSignal
+}): Promise<string | null> {
+  const csv = (opts.csv ?? '').trim()
+  if (!csv || csv.length > CSV_REPAIR_MAX_CHARS) return null
+  const original = parseCsvRows(csv)
+  if (original.length < 2) return null
+  const model = CRAWL_SUMMARY_MODELS.has((opts.model ?? '').trim()) ? (opts.model as string) : 'haiku'
+
+  const prompt = `You are fixing CSV FORMATTING ONLY — do not change any test-case content.
+The CSV below has one or more rows whose columns are MISALIGNED: a free-text field contained an unescaped comma and was NOT wrapped in double quotes, so the row split into too many fields and pushed later values into the wrong columns.
+
+Re-emit the SAME test cases as VALID CSV:
+- Keep the EXACT same header row — same column names, same order, same count.
+- Keep the SAME number of data rows and the SAME cases. Do NOT add, remove, reword, translate, summarize, or re-order any case. Fix ONLY quoting and column alignment.
+- Wrap EVERY free-text field in double quotes; escape an embedded double-quote by doubling it ("").
+- Every data row must have EXACTLY the same number of top-level (unquoted) commas as the header.
+- Put any value that landed in the wrong column back where it belongs, using the header names as the guide (e.g. Steps text must sit in the Steps column, not in Priority/Status).
+- Preserve real newlines inside quoted multi-line fields.
+
+Output ONLY the corrected CSV — the header row then the data rows. No preamble, no commentary, no surrounding code fence.
+
+--- CSV START ---
+${csv}
+--- CSV END ---`
+
+  const result = await runClaude(
+    [
+      '-p',
+      '--model',
+      model,
+      '--output-format',
+      'json',
+      '--no-session-persistence',
+      '--max-budget-usd',
+      CSV_REPAIR_BUDGET_USD,
+    ],
+    CSV_REPAIR_TIMEOUT_MS,
+    { cwd: opts.rootPath, usageSource: 'testcase-csv-repair', model, input: prompt, signal: opts.signal },
+  )
+  if (result.timedOut) return null
+  const { text, isError } = parseClaudeJsonResult(result.stdout || result.stderr)
+  if (result.code !== 0 || isError || !text) return null
+
+  const fixed = stripCodeFence(text).trim()
+  if (!fixed) return null
+  const rows = parseCsvRows(fixed)
+  // Guards — accept the repair only when it's structurally sound AND unchanged in shape:
+  if (rows.length !== original.length) return null // same number of rows (no cases dropped/added)
+  const sameHeader =
+    rows[0].length === original[0].length &&
+    rows[0].every((c, i) => c.trim().toLowerCase() === (original[0][i] ?? '').trim().toLowerCase())
+  if (!sameHeader) return null // header must be identical
+  if (findOverflowCsvRows(fixed).length > 0) return null // the defect must actually be gone
+  if (fixed.length < csv.length * 0.5) return null // guard against a truncated/collapsed rewrite
+  return fixed
+}
+
 export type TestcaseFormat = 'markdown' | 'csv'
 
 export interface TestcaseVersionMeta {
@@ -265,7 +341,7 @@ IMPORTANT — time-box the reading HARD, then write. You are on a wall-clock bud
   - WHY THIS MATTERS — the trap is the SHORT, SINGLE-LINE field that happens to contain a comma. The multi-line fields are easy to remember to quote; the one that breaks rows is a one-line value like a Pre-condition \`1. Services of different modalities exist (e.g. X-Ray, CT, MRI)\` or a Summary \`Verify header shows badge, title, and body\`. Each hidden comma splits the value into extra fields and shoves the REAL Steps into "Actual result", the REAL Expected result into "Priority", and so on. This is not hypothetical — it is the single most common way these files come out broken. If you follow the ABSOLUTE RULE above, it cannot happen.
   - Every data row MUST parse into EXACTLY the same number of fields (top-level commas) as the header — never more, never fewer.
   - Escape a double-quote that appears INSIDE a quoted field by doubling it ("").
-  - MANDATORY self-check before finishing — re-scan EVERY data row and confirm: (a) each free-text column value begins with \`"\` and ends with \`"\`; (b) the row has the right number of columns; (c) Pre-condition / Steps / Expected result actually sit in THEIR columns and did NOT shift right into Actual result / Priority / Status / Reference / Note (which must stay blank). If any row's Actual result or Priority is non-blank, you forgot a quote earlier in that row — fix it before you output.
+  - MANDATORY self-check before finishing — re-scan EVERY data row and confirm: (a) each free-text column value begins with \`"\` and ends with \`"\`; (b) the row has the right number of columns; (c) Pre-condition / Steps / Expected result actually sit in THEIR columns and did NOT shift right into the EXECUTION columns the template's sample rows leave blank (Actual result / Status / Reference / Note). NOTE: Priority is an AUTHORED planning column, NOT an execution column — fill it per the template's sample rows (e.g. High / Medium / Low); do NOT leave it blank. If any row's Actual result is non-blank, you forgot a quote earlier in that row — fix it before you output.
 - Multi-line fields (Pre-condition, Steps, Expected result) use REAL newlines inside the quoted field, with numbered items (1., 2., …) and lettered sub-items (a., b., …), mirroring the style of the template's sample rows.
 - Use angle-bracket placeholders for variable test data exactly like the template (e.g. <Patient Name data>, <Clinician account data>).
 - The template's rows are only a FORMAT SAMPLE — drive the number and content of the test cases from THIS ticket's scope, not from how many rows the template happens to contain.`
@@ -356,7 +432,7 @@ ${template.content}
 
 Final reminder: ${outputRule}${
     format === 'csv'
-      ? ' Wrap EVERY free-text field (Summary, Pre-condition, Steps, Expected result, Note) in double quotes on EVERY row — including short single-line values that contain a comma, which is the #1 cause of column-shift — and keep every row at exactly the header’s column count. Before you output, verify no row has a non-blank Actual result or Priority; if one does, you dropped a quote (see CSV INTEGRITY above).'
+      ? ' Wrap EVERY free-text field (Summary, Pre-condition, Steps, Expected result, Note) in double quotes on EVERY row — including short single-line values that contain a comma, which is the #1 cause of column-shift — and keep every row at exactly the header’s column count. Before you output, verify the EXECUTION columns (Actual result / Status / Reference / Note) are blank while Priority IS filled per the template; a non-blank Actual result means you dropped a quote (see CSV INTEGRITY above).'
       : ''
   }`
 }
@@ -610,16 +686,43 @@ export async function generateTestcaseVersion(opts: {
     }
   }
 
-  // Final integrity check (CSV only): flag any row whose columns are shifted by an
-  // unquoted comma so the engineer can fix/regenerate instead of trusting a corrupt row.
+  // Final integrity check (CSV only): a row whose columns are shifted by an unescaped
+  // comma is the occasional "format error" a run can hit. Try a cheap AI repair FIRST
+  // (fires only on detection, so no cost on the common valid path); if it can't be
+  // safely fixed, fall back to warning the engineer instead of trusting a corrupt row.
   if (outFormat === 'csv') {
     const overflow = findOverflowCsvRows(testcases)
-    if (overflow.length) {
+    if (overflow.length && !opts.signal?.aborted) {
       const ids = overflow.map((o) => o.id).join(', ')
       onLog({
-        level: 'error',
-        text: `⚠ ${overflow.length} row(s) have shifted columns from an unquoted comma and may show wrong values in Actual result / Priority / Status / Reference / Note: ${ids}. Regenerate, or fix these rows by wrapping their comma-containing fields in double quotes.`,
+        level: 'info',
+        text: `Detected ${overflow.length} misaligned CSV row(s) (${ids}) — attempting an automatic format repair…`,
       })
+      let repaired: string | null = null
+      try {
+        repaired = await repairMalformedCsv({
+          rootPath: opts.rootPath,
+          csv: testcases,
+          model: opts.groundingCheckModel,
+          signal: opts.signal,
+        })
+      } catch {
+        /* best-effort — a repair failure never sinks the generation */
+      }
+      if (repaired) {
+        testcases = repaired
+        try {
+          fs.writeFileSync(path.join(dir, rel), testcases + '\n', 'utf8')
+          onLog({ level: 'success', text: 'Auto-repaired CSV formatting — columns realigned.' })
+        } catch (err) {
+          onLog({ level: 'error', text: `Repaired CSV but could not save: ${(err as Error).message}` })
+        }
+      } else {
+        onLog({
+          level: 'error',
+          text: `⚠ ${overflow.length} row(s) have shifted columns from an unquoted comma and may show wrong values in Actual result / Priority / Status / Reference / Note: ${ids}. Regenerate, or fix these rows by wrapping their comma-containing fields in double quotes.`,
+        })
+      }
     }
   }
 
@@ -689,6 +792,40 @@ export function serializeCsv(rows: string[][]): string {
 function isStatusHeader(header: string): boolean {
   const h = header.trim().replace(/^"|"$/g, '').toLowerCase().replace(/[^a-z]/g, '')
   return h === 'status' || h === 'teststatus' || h === 'executionstatus'
+}
+
+/** Header-name → is this a row-numbering column that should be resequenced after a
+ *  delete/insert? Covers BOTH the STT ("No") column AND the Test Case ID column, so
+ *  deleting a row renumbers both the running number and the case IDs. */
+function isRenumberHeader(header: string): boolean {
+  const h = header.trim().replace(/^"|"$/g, '').toLowerCase().replace(/[^a-z0-9]/g, '')
+  const SEQ = new Set(['no', 'stt', 'sno', 'sott', 'seq', 'order', 'num', 'number', 'sequence'])
+  const ID = new Set(['id', 'testcaseid', 'tcid', 'caseid', 'testid', 'tcno', 'testcaseno'])
+  return SEQ.has(h) || ID.has(h)
+}
+
+/**
+ * Renumber EVERY row-numbering column (STT "No" and Test Case ID) so their values run
+ * 1..N with NO GAPS after a row delete/insert (e.g. deleting #04 renumbers #05→#04, …).
+ * Each column keeps its OWN format — a non-digit prefix and zero-pad width derived from
+ * that column's first data cell, so "01" stays "0N" and "TC-001" stays "TC-00N".
+ * Mutates `rows` in place; per-column no-op when its first cell isn't "[prefix]<number>".
+ */
+function resequenceNoColumn(rows: string[][]): void {
+  if (rows.length < 2) return
+  const header = rows[0]
+  for (let idx = 0; idx < header.length; idx++) {
+    if (!isRenumberHeader(header[idx])) continue
+    const first = (rows[1][idx] ?? '').trim().replace(/^"|"$/g, '')
+    const m = first.match(/^(\D*?)(\d+)$/)
+    if (!m) continue // not a simple "[prefix]<number>" cell — leave this column alone
+    const prefix = m[1]
+    const width = m[2].length
+    for (let i = 1; i < rows.length; i++) {
+      if (idx >= rows[i].length) continue
+      rows[i][idx] = prefix + String(i).padStart(width, '0')
+    }
+  }
 }
 
 /**
@@ -909,6 +1046,9 @@ export async function deleteTestcaseRows(opts: {
   }
 
   const kept = rows.filter((_, i) => i === 0 || !toDelete.has(i))
+  // Close the gap the deletion leaves in the STT ("No") + Test Case ID columns so
+  // both sequences stay 1..N (e.g. after removing #04, #05 becomes #04).
+  resequenceNoColumn(kept)
   const updated = serializeCsv(kept)
   try {
     fs.writeFileSync(filePath, updated + '\n', 'utf8')
@@ -975,6 +1115,9 @@ export async function insertTestcaseRow(opts: {
     newRow.push(typeof v === 'string' ? v.slice(0, MAX_CELL_VALUE_CHARS) : '')
   }
   rows.splice(at, 0, newRow)
+  // Keep the STT ("No") + Test Case ID columns contiguous after the insert (used by
+  // Undo), so a restored row doesn't reintroduce a gap/duplicate.
+  resequenceNoColumn(rows)
 
   const updated = serializeCsv(rows)
   try {

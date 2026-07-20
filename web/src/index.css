@@ -218,6 +218,22 @@
   }
 }
 
+/* Brief highlight when jumping to an issue's detail from the review list. */
+@keyframes qc-issue-flash {
+  0% {
+    background-color: color-mix(in oklch, var(--primary) 20%, transparent);
+    box-shadow: 0 0 0 4px color-mix(in oklch, var(--primary) 16%, transparent);
+  }
+  100% {
+    background-color: transparent;
+    box-shadow: 0 0 0 4px transparent;
+  }
+}
+.qc-issue-flash {
+  animation: qc-issue-flash 1.8s ease-out;
+  border-radius: 0.5rem;
+}
+
 /* Moving light sweep for loading skeletons (Prototype builder, etc.). */
 @keyframes qc-shimmer {
   100% {
