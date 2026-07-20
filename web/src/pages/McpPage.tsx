@@ -233,6 +233,25 @@ function CardStatusBadge({
   )
 }
 
+// Friendly labels for the known token-connect env vars, so the details dialog reads
+// like the connect form ("Organization URL") instead of raw shell names.
+const ENV_FIELD_LABELS: Record<string, string> = {
+  CLICKUP_API_KEY: 'API token',
+  CLICKUP_MCP_API_KEY: 'API token (legacy var)',
+  FIGMA_API_KEY: 'API token',
+  JIRA_URL: 'Site URL',
+  JIRA_USERNAME: 'Account email',
+  JIRA_API_TOKEN: 'API token',
+  AZURE_DEVOPS_ORG_URL: 'Organization URL',
+  AZURE_DEVOPS_PAT: 'Personal Access Token',
+  AZURE_DEVOPS_DEFAULT_PROJECT: 'Default project',
+  AZURE_DEVOPS_AUTH_METHOD: 'Auth method',
+}
+
+// Fixed, non-user-entered env vars hidden from the details dialog's field list (they
+// still appear in the raw .mcp.json entry) — e.g. Azure's constant AUTH_METHOD=pat.
+const HIDDEN_DETAIL_ENV = new Set(['AZURE_DEVOPS_AUTH_METHOD'])
+
 /** A label + monospace value row with a copy button, used in the details dialog. */
 function FieldRow({
   label,
@@ -884,6 +903,8 @@ function ConnectServices({
     const Icon = meta?.icon ?? FileJson
     const maskedEnv = (name && envByName[name]) || {}
     const envKeys = Object.keys(maskedEnv)
+    // Fields shown in the readable list = user-entered env, minus fixed constants.
+    const fieldKeys = envKeys.filter((k) => !HIDDEN_DETAIL_ENV.has(k))
     const revealed = !!revealedEnv
     const valueFor = (key: string) =>
       revealed ? (revealedEnv?.[key] ?? '') : maskedEnv[key]
@@ -941,12 +962,12 @@ function ConnectServices({
               )}
             </div>
 
-            {/* Environment variables */}
-            {envKeys.length > 0 && (
+            {/* Configured fields (friendly labels; constants hidden) */}
+            {fieldKeys.length > 0 && (
               <div className="min-w-0 space-y-1.5">
                 <div className="flex items-center justify-between">
                   <span className="text-xs font-medium text-muted-foreground">
-                    Environment ({envKeys.length})
+                    Settings ({fieldKeys.length})
                   </span>
                   <button
                     type="button"
@@ -965,10 +986,13 @@ function ConnectServices({
                   </button>
                 </div>
                 <div className="divide-y divide-border/60 overflow-hidden rounded-xl border border-border/60">
-                  {envKeys.map((key) => (
+                  {fieldKeys.map((key) => (
                     <div key={key} className="flex min-w-0 items-center gap-2 bg-muted/40 px-2.5 py-1.5">
-                      <span className="w-36 shrink-0 truncate font-mono text-[11px] text-muted-foreground" title={key}>
-                        {key}
+                      <span
+                        className="w-36 shrink-0 truncate text-[11px] font-medium text-muted-foreground"
+                        title={key}
+                      >
+                        {ENV_FIELD_LABELS[key] ?? key}
                       </span>
                       <span className="min-w-0 flex-1 truncate font-mono text-[11px]" title={revealed ? valueFor(key) : undefined}>
                         {valueFor(key)}

@@ -3,6 +3,18 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.9.29 — 2026-07-20
+
+**MCP "View details" now reads like the connect form**
+
+### Changed
+
+- **The MCP details dialog shows your fields with friendly names.** Instead of raw shell variable names,
+  the "View details" dialog now labels each setting the way the connect form does — e.g. Azure DevOps
+  shows **Organization URL**, **Default project**, and **Personal Access Token** (its fixed internal
+  auth-method flag is hidden from the list but still visible in the raw `.mcp.json` entry). Every value
+  has a one-click **copy** button, and the **Reveal** toggle still unmasks secrets on demand.
+
 ## 0.9.28 — 2026-07-20
 
 **Fix the MCP "View details" dialog spilling outside its box**
