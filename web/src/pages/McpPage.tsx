@@ -994,7 +994,7 @@ function ConnectServices({
                       >
                         {ENV_FIELD_LABELS[key] ?? key}
                       </span>
-                      <span className="min-w-0 flex-1 truncate font-mono text-[11px]" title={revealed ? valueFor(key) : undefined}>
+                      <span className="min-w-0 flex-1 truncate font-mono text-[11px]" title={valueFor(key)}>
                         {valueFor(key)}
                       </span>
                       <button

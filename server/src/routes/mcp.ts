@@ -305,12 +305,19 @@ function maskSecret(value: string): string {
   return `••••${trimmed.slice(-4)}`
 }
 
+// Only actual secrets are masked. URLs, usernames/emails, project names, and flags
+// (JIRA_URL, JIRA_USERNAME, AZURE_DEVOPS_ORG_URL, …_DEFAULT_PROJECT, …_AUTH_METHOD)
+// are not secrets and are far more useful shown in full.
+function isSecretKey(key: string): boolean {
+  return /TOKEN|SECRET|PASSWORD|PASSWD|PWD|API[-_]?KEY|(^|_)KEY(_|$)|(^|_)PAT(_|$)/i.test(key)
+}
+
 function publicEnv(env?: Record<string, string>): Record<string, string> | undefined {
   if (!env) return undefined
   const masked = Object.fromEntries(
     Object.entries(env)
       .filter(([, value]) => typeof value === 'string')
-      .map(([key, value]) => [key, maskSecret(value)]),
+      .map(([key, value]) => [key, isSecretKey(key) ? maskSecret(value) : value]),
   )
   return Object.keys(masked).length ? masked : undefined
 }

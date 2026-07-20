@@ -3,6 +3,18 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.9.30 — 2026-07-20
+
+**Only real secrets are masked in MCP config**
+
+### Changed
+
+- **MCP settings now mask only actual secrets.** Non-secret values — a Jira **site URL** and **account
+  email**, an Azure **organization URL** and **default project** — are shown in full instead of being
+  masked to something like `••••.net`. Only true secrets (API tokens, keys, and the Azure PAT) stay
+  masked with a **Reveal** toggle. This applies on the connected card, in the "View details" dialog, and
+  in the raw `.mcp.json` preview.
+
 ## 0.9.29 — 2026-07-20
 
 **MCP "View details" now reads like the connect form**
