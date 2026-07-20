@@ -1313,6 +1313,8 @@ function ConnectServices({
             </a>
             <Link
               to="/document/mcp-tokens"
+              target="_blank"
+              rel="noopener noreferrer"
               className="flex items-center justify-center gap-1 text-[11px] text-muted-foreground hover:text-foreground"
             >
               <BookOpen className="h-3 w-3" />

@@ -3,6 +3,17 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.9.32 — 2026-07-20
+
+**Token-guide links open in a new tab (no more losing what you typed)**
+
+### Fixed
+
+- **The "How to get a token" / "token guide" links no longer wipe the form you're filling in.** On
+  Source Code and the MCP page, those help links used to navigate away in the same tab, so anything
+  you'd already entered (repo URL, tag, other token fields) was lost and had to be re-typed. They now
+  open the guide in a **new tab**, leaving your half-filled form untouched.
+
 ## 0.9.31 — 2026-07-20
 
 **Copy now puts the real token on the clipboard, not the masked one**

@@ -500,6 +500,8 @@ function ConnectForm({
               </Label>
               <Link
                 to="/document/source-code"
+                target="_blank"
+                rel="noopener noreferrer"
                 className="inline-flex items-center gap-1 text-[11px] font-medium text-primary hover:underline"
               >
                 <BookOpen className="h-3 w-3" /> How to get a token
@@ -578,7 +580,12 @@ function ConnectForm({
               API token (<code className="font-mono">ATATT…</code>) → leave this blank. A plain
               (unscoped) API token fails with <span className="font-medium">403 — no Bitbucket scopes</span>;
               see{' '}
-              <Link to="/document/source-code" className="font-medium text-primary hover:underline">
+              <Link
+                to="/document/source-code"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="font-medium text-primary hover:underline"
+              >
                 the guide
               </Link>
               .
@@ -764,6 +771,8 @@ export default function SourceCodePage() {
               designs.{' '}
               <Link
                 to="/document/source-code"
+                target="_blank"
+                rel="noopener noreferrer"
                 className="inline-flex items-center gap-1 font-medium text-primary hover:underline"
               >
                 <BookOpen className="h-3.5 w-3.5" /> Read the setup guide
