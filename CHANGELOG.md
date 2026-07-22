@@ -3,6 +3,32 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.10.1 — 2026-07-22
+
+**Tracker tokens are now honestly reported, and Azure DevOps tickets load reliably**
+
+### Fixed
+
+- **Azure DevOps & Jira cards now catch a bad token instead of showing a false "connected".** Until now
+  only ClickUp actually test-called the provider — Azure and Jira went green off the bare connection
+  handshake, so an expired, wrong, or misplaced token (for example a ClickUp `pk_` token pasted into
+  the Azure **PAT** field) still looked healthy while the Tickets page silently loaded nothing. All
+  three tracker cards now live-verify the credential and show **needs-auth** with a clear reason when
+  it's rejected.
+- **Azure DevOps tickets load for large projects.** Browsing a project with more than 20,000 work items
+  failed with an Azure size-limit error and showed no tickets; the Tickets list now caps the query so it
+  returns the most recently changed work items instead of erroring.
+- **The Tickets page no longer shows ClickUp when it isn't configured for the project.** ClickUp tickets
+  are now driven purely by the project's MCP configuration — if a project has no ClickUp server on the
+  **MCP** page, the Tickets page won't offer ClickUp as a source. (Previously a token left in the
+  server's environment could make ClickUp appear even when it wasn't set up for that project.)
+
+### Changed
+
+- **"Getting API tokens" docs updated** with the new `needs-auth` behavior and Azure DevOps gotchas:
+  the **Default project** must exactly match a real project name, and pasting the wrong token into the
+  PAT field now surfaces as `needs-auth`.
+
 ## 0.10.0 — 2026-07-20
 
 **Crawl queue, a rebuilt issues-to-ClickUp panel, and steadier test-case generation**

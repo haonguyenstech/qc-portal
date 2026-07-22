@@ -5,11 +5,16 @@
 // reuse is the same personal token to hit ClickUp's public REST API directly.
 // The token stays on the server; the browser never sees it.
 //
-// Token source (in priority order):
-//   1. The active project's .mcp.json clickup entry (what the in-app "Connect"
-//      button writes) — resolved per request via AsyncLocalStorage, so pasting a
-//      fresh token in the UI takes effect immediately, no server restart.
-//   2. The CLICKUP_API_KEY environment variable (fallback / default project).
+// Token source:
+//   The active project's .mcp.json clickup entry (what the in-app "Connect"
+//   button writes) — resolved per request via AsyncLocalStorage, so pasting a
+//   fresh token in the UI takes effect immediately, no server restart. A project
+//   entry may itself reference `${CLICKUP_API_KEY}` to pull from the environment.
+//
+// There is deliberately NO standalone env-var fallback: if a project's .mcp.json
+// has no clickup server, ClickUp is treated as unconfigured for that project and
+// the ticket UI stays empty. This keeps /tickets in lockstep with /mcp — configure
+// ClickUp in MCP to see ClickUp tickets, remove it to hide them.
 
 import { AsyncLocalStorage } from 'node:async_hooks'
 import fs from 'node:fs'
@@ -26,9 +31,9 @@ export function withClickupToken<T>(token: string | undefined, fn: () => Promise
   return token ? tokenStore.run(token, fn) : fn()
 }
 
-/** The token in effect for this request: per-request override, else the env var. */
+/** The token in effect for this request: the active project's .mcp.json token, or none. */
 function currentToken(): string | undefined {
-  return tokenStore.getStore() ?? process.env.CLICKUP_API_KEY ?? undefined
+  return tokenStore.getStore() ?? undefined
 }
 
 /**

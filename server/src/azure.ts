@@ -334,8 +334,12 @@ export async function searchTasks(project: string, query: string): Promise<TaskH
     where = ` WHERE (${clauses.join(' OR ')})`
   }
   const wiql = `SELECT [System.Id] FROM WorkItems${where} ORDER BY [System.ChangedDate] DESC`
+  // Cap the WIQL result server-side with `$top`. Without it, an unfiltered browse
+  // of a large project (>20,000 work items) is rejected with VS402337 ("number of
+  // work items returned exceeds the size limit of 20000") and no tickets load. The
+  // `$top` URL param bounds the query to the N most-recently-changed ids up front.
   const data = await azFetch(
-    `${c.orgUrl}/${encodeURIComponent(project)}/_apis/wit/wiql?api-version=${API_VERSION}`,
+    `${c.orgUrl}/${encodeURIComponent(project)}/_apis/wit/wiql?api-version=${API_VERSION}&$top=100`,
     { method: 'POST', body: JSON.stringify({ query: wiql }) },
   )
   const ids: number[] = (data.workItems ?? [])

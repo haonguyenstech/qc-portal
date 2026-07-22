@@ -8,7 +8,17 @@ import spawn from 'cross-spawn'
 import { CLAUDE_BIN, OAUTH_APPS, OAUTH_REDIRECT_BASE, mcpJsonFor } from '../config.js'
 import { resolveProject } from '../projectScope.js'
 import { revealFolderNative } from '../folderPicker.js'
-import { resolveProjectClickupToken, verifyToken, withClickupToken } from '../clickup.js'
+import {
+  resolveProjectClickupToken,
+  verifyToken as verifyClickup,
+  withClickupToken,
+} from '../clickup.js'
+import {
+  resolveProjectAzureCreds,
+  verifyToken as verifyAzure,
+  withAzureCreds,
+} from '../azure.js'
+import { resolveProjectJiraCreds, verifyToken as verifyJira, withJiraCreds } from '../jira.js'
 import { runMcpCapabilityTest } from '../mcpCapabilityTest.js'
 import type { McpServer } from '../types.js'
 import { spawnEnv } from '../toolPath.js'
@@ -387,26 +397,43 @@ export function approveMcpJsonServer(rootPath: string, name: string): boolean {
  * Live health for every configured server in a project. Runs the (slow) Claude
  * CLI `mcp list` and the ClickUp token check **in parallel** — they're
  * independent, so the total wait is the slower of the two rather than their sum.
- * `configuredNames` is the set of servers actually in config, so the ClickUp
- * override only applies when clickup is configured. Best-effort throughout.
+ * `configuredNames` is the set of servers actually in config, so a tracker's
+ * override only applies when it's configured. Best-effort throughout.
  */
+// Tracker servers whose "connected" badge is only a stdio handshake — the token
+// is never exercised there. `verifyTrackerAuth` hits a cheap authenticated
+// endpoint so a dead/expired/wrong credential shows "needs-auth" instead of a
+// misleading "connected" (e.g. an Azure PAT field holding the wrong token).
+const TRACKER_SERVERS = ['clickup', 'azure', 'jira'] as const
+
+/** Live-validate one tracker's stored credentials. Returns null for non-trackers. */
+function verifyTrackerAuth(
+  name: string,
+  rootPath: string,
+): Promise<{ ok: boolean; status: number | null; detail: string }> | null {
+  if (name === 'clickup')
+    return withClickupToken(resolveProjectClickupToken(rootPath), verifyClickup)
+  if (name === 'azure') return withAzureCreds(resolveProjectAzureCreds(rootPath), verifyAzure)
+  if (name === 'jira') return withJiraCreds(resolveProjectJiraCreds(rootPath), verifyJira)
+  return null
+}
+
 async function computeStatuses(
   rootPath: string,
   configuredNames: Set<string>,
 ): Promise<Record<string, McpServer['status']>> {
-  const hasClickup = configuredNames.has('clickup')
-  const [statuses, clickupOk] = await Promise.all([
-    getStatuses(rootPath),
-    // `claude mcp list` reports clickup "connected" off the stdio handshake
-    // alone — the token is never exercised there. Do a real auth check so a
-    // dead/expired token shows "needs-auth" instead of a misleading "connected".
-    hasClickup
-      ? withClickupToken(resolveProjectClickupToken(rootPath), verifyToken)
-          .then((v) => v.ok)
-          .catch(() => true)
-      : Promise.resolve(true),
-  ])
-  if (hasClickup && !clickupOk) statuses.clickup = 'needs-auth'
+  const statuses = await getStatuses(rootPath)
+  // Only downgrade a server the handshake reported "connected" — a "failed"/
+  // "pending" status is already more informative than "needs-auth".
+  const toCheck = TRACKER_SERVERS.filter(
+    (n) => configuredNames.has(n) && statuses[n] === 'connected',
+  )
+  await Promise.all(
+    toCheck.map(async (n) => {
+      const ok = await verifyTrackerAuth(n, rootPath)!.then((v) => v.ok).catch(() => true)
+      if (!ok) statuses[n] = 'needs-auth'
+    }),
+  )
   return statuses
 }
 
@@ -569,10 +596,12 @@ mcpRouter.get('/test/:name', async (req, res) => {
     }
   }
 
-  // For clickup, the handshake passing isn't enough — verify the token actually
-  // authenticates, so "Test" catches an expired/invalid token the list can't see.
-  if (req.params.name === 'clickup' && result.ok) {
-    const v = await withClickupToken(resolveProjectClickupToken(project.rootPath), verifyToken)
+  // For a tracker (clickup/azure/jira), the handshake passing isn't enough —
+  // verify the credentials actually authenticate, so "Test" catches an
+  // expired/invalid/wrong token the list can't see.
+  const trackerCheck = result.ok ? verifyTrackerAuth(req.params.name, project.rootPath) : null
+  if (trackerCheck) {
+    const v = await trackerCheck
     if (!v.ok) {
       result = { ok: false, status: 'needs-auth', detail: v.detail }
     }

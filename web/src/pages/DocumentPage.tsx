@@ -399,9 +399,11 @@ Azure DevOps needs **two** things (a third is optional), all entered on the card
 
 - **Organization URL** — your Azure DevOps org address, e.g. \`https://dev.azure.com/your-org\`.
 - **Personal Access Token (PAT)** — created as follows.
-- **Default project** *(recommended)* — the project (board) to read from. If you set it, the **Tickets**
-  page browses that project and the PAT only needs Work-Items read. Leave it empty to pick from **all**
-  projects in the org — which additionally needs the **Project and Team (Read)** scope (below).
+- **Default project** *(optional)* — the exact name of the project (board) to read from, e.g.
+  \`sp-platform\`. It must **match an existing project name exactly** — a typo or leftover placeholder
+  pins the **Tickets** picker to a phantom project that loads no tickets. Set it and the PAT only needs
+  Work-Items read; leave it **empty** to pick from **all** projects in the org — which additionally needs
+  the **Project and Team (Read)** scope (below).
 
 1. Click **Connect** on the Azure DevOps card (or open
    **[dev.azure.com](https://dev.azure.com)** and sign in to your org).
@@ -448,9 +450,15 @@ item's description, repro steps, acceptance criteria, comments, and attachments 
   \`uv\`), so **Node.js** must be installed, and the first connection **downloads the server package**,
   which can briefly show \`failed\`/\`pending\` until it finishes. Wait a moment and use **Functional
   test** again.
+- **Card shows \`needs-auth\` (ClickUp / Jira / Azure DevOps)** — the connection handshake succeeded but
+  the **credential itself was rejected** when the portal test-called the provider (each tracker card
+  live-checks the token, not just the connection). Usual causes: the token is **expired**, or the
+  **wrong token is in the field** — e.g. a ClickUp \`pk_\` token pasted into the Azure **PAT** box.
+  Disconnect and reconnect with the correct, current token.
 - **Azure DevOps connects but returns nothing / 401 or 403** — the PAT is missing the **Work Items →
-  Read** scope, is scoped to the wrong **organization**, or the **Organization URL** doesn't match the
-  org the PAT was created in. Recreate the PAT with Work Items Read and confirm the org URL.
+  Read** scope, is scoped to the wrong **organization**, the **Organization URL** doesn't match the org
+  the PAT was created in, or a **Default project** was set that doesn't exactly match a real project name.
+  Recreate the PAT with Work Items Read, confirm the org URL, and clear or fix the default project.
 - **Figma test fails** — the token may be expired or missing the **File content: Read** scope;
   generate a fresh one.
 - Use each card's **Functional test** to verify the connection with a real action (fetch a ticket,
