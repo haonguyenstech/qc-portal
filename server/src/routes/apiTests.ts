@@ -6,6 +6,7 @@ import { testingDirFor } from '../config.js'
 import { resolveProject } from '../projectScope.js'
 import { revealFolderNative } from '../folderPicker.js'
 import { runClaude, parseClaudeJsonResult, CRAWL_SUMMARY_MODELS } from '../claudeExec.js'
+import { scanAvailable, startScanJob, getScanJob, stopScanJob } from '../scanJobs.js'
 
 export const apiTestsRouter = Router()
 
@@ -578,6 +579,53 @@ apiTestsRouter.post('/ai-check', async (req, res) => {
     checks,
     issues,
   })
+})
+
+// ---------------------------------------------------------------- page scan (routes)
+// "Scan a page for its APIs" — open a headed Chrome (logged-in profile) at a page
+// URL and record the XHR/fetch traffic, so the engineer can import the detected
+// endpoints. Runs as a background job (scanJobs.ts); the browser stays open until
+// Stop. Registered before `/:name` so these paths aren't read as request names.
+
+/** GET /api/api-tests/scan/available — is page scanning usable on this machine? */
+apiTestsRouter.get('/scan/available', async (_req, res) => {
+  res.json(await scanAvailable())
+})
+
+/** POST /api/api-tests/scan/jobs — open Chrome at {url} and start recording APIs. */
+apiTestsRouter.post('/scan/jobs', async (req, res) => {
+  const project = resolveProject(req)
+  if (!project) return res.status(400).json({ error: 'project not found' })
+  const raw = typeof req.body?.url === 'string' ? req.body.url.trim() : ''
+  let url: string
+  try {
+    const u = new URL(raw)
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') throw new Error('bad protocol')
+    url = u.toString()
+  } catch {
+    return res.status(400).json({ error: 'Enter a full http:// or https:// page URL.' })
+  }
+  const headless = req.body?.headless !== false // default: no visible window
+  try {
+    const job = await startScanJob({ projectId: project.id, url, headless })
+    res.json(job)
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : 'could not start scan' })
+  }
+})
+
+/** GET /api/api-tests/scan/jobs/:id — poll a scan job's detected requests + logs. */
+apiTestsRouter.get('/scan/jobs/:id', (req, res) => {
+  const job = getScanJob(req.params.id)
+  if (!job) return res.status(404).json({ error: 'scan job not found' })
+  res.json(job)
+})
+
+/** POST /api/api-tests/scan/jobs/:id/stop — stop capture, close Chrome, finalize. */
+apiTestsRouter.post('/scan/jobs/:id/stop', (req, res) => {
+  const job = stopScanJob(req.params.id)
+  if (!job) return res.status(404).json({ error: 'scan job not found' })
+  res.json(job)
 })
 
 // ---------------------------------------------------------------- environments (routes)

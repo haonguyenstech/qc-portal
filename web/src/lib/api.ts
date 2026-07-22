@@ -1975,6 +1975,64 @@ export function clearApiResults(projectId: string, name: string): Promise<{ ok: 
   )
 }
 
+// ---- Page scan: detect a page's APIs by watching a real browser ----
+
+/** One API request observed while a page ran in the scan browser. */
+export interface ScanRequest {
+  id: string
+  method: string
+  url: string
+  resourceType: string
+  status?: number
+  contentType?: string
+  requestContentType?: string
+  hasBody: boolean
+  bodyPreview?: string
+  count: number
+  at: string
+}
+
+export interface ScanJob {
+  id: string
+  projectId: string
+  url: string
+  headless: boolean
+  status: 'running' | 'done' | 'error'
+  error?: string
+  requests: ScanRequest[]
+  logs: { time: string; level: 'info' | 'success' | 'error'; text: string }[]
+  createdAt: string
+  updatedAt: string
+}
+
+/** Is page scanning usable on this machine (playwright-core + Chrome present)? */
+export function getScanAvailable(): Promise<{ ok: boolean; error?: string }> {
+  return request('/api/api-tests/scan/available')
+}
+
+/** Open Chrome (headless by default) at `url` and record the APIs the page calls. */
+export function startApiScan(projectId: string, url: string, headless = true): Promise<ScanJob> {
+  return request(`/api/api-tests/scan/jobs?projectId=${encodeURIComponent(projectId)}`, {
+    method: 'POST',
+    body: JSON.stringify({ url, headless }),
+  })
+}
+
+/** Poll a scan job's detected requests + logs. */
+export function getApiScan(projectId: string, id: string): Promise<ScanJob> {
+  return request(
+    `/api/api-tests/scan/jobs/${encodeURIComponent(id)}?projectId=${encodeURIComponent(projectId)}`,
+  )
+}
+
+/** Stop capture, close the scan browser, and finalize the job. */
+export function stopApiScan(projectId: string, id: string): Promise<ScanJob> {
+  return request(
+    `/api/api-tests/scan/jobs/${encodeURIComponent(id)}/stop?projectId=${encodeURIComponent(projectId)}`,
+    { method: 'POST' },
+  )
+}
+
 // ---- Prototype builder (Claude-style chat → self-contained HTML prototype) ----
 
 export interface PrototypeMessage {

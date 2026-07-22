@@ -15,6 +15,7 @@ import {
   ChevronDown,
   ChevronRight,
   Clock,
+  Compass,
   Cpu,
   Gauge,
   Globe,
@@ -74,6 +75,7 @@ import { CrawledStatusHeader, CrawledTicketRow } from '@/components/CrawledTicke
 import { buildCrawledTree } from '@/lib/crawled-tickets'
 import { TicketTestCasePicker, testcaseRelPath } from '@/components/TicketTestCasePicker'
 import { McpRequiredNotice } from '@/components/McpRequiredNotice'
+import { GuideTour, type TourStep } from '@/components/GuideTour'
 
 // Which Claude model drives the QC run. Each maps to --model haiku/sonnet/opus
 // on the headless claude spawn. Sonnet is the default — the best all-round
@@ -598,6 +600,7 @@ export default function RunPage() {
   const [submitting, setSubmitting] = useState(false)
   const [managingHints, setManagingHints] = useState(false)
   const [managingPresets, setManagingPresets] = useState(false)
+  const [tourOpen, setTourOpen] = useState(false)
   const instructionsRef = useRef<HTMLTextAreaElement>(null)
 
   const { hints, addHint: createHint, updateHint, removeHint, resetHints } = useHints()
@@ -616,6 +619,56 @@ export default function RunPage() {
     queryFn: () => listCrawledTickets(activeProject!.id),
     enabled: !!activeProject,
   })
+
+  const tourSteps: TourStep[] = [
+    {
+      selector: '[data-tour="header"]',
+      title: 'Launch an automated QC run',
+      body: 'Set up the ticket, target URL, and AI guidance here. When it starts, QC tests the live app and writes a structured report for the project.',
+      placement: 'bottom',
+    },
+    {
+      selector: '[data-tour="mode"]',
+      title: 'Choose how to run',
+      body: 'Single ticket mode runs one selected ticket, or queues several tickets in order. Save common configurations as templates for faster repeat runs.',
+      placement: 'bottom',
+    },
+    {
+      selector: '[data-tour="tickets"]',
+      title: 'Choose what to test',
+      body: 'Select crawled tickets with test cases, or tag a ticket as a bug to run a reproduction check. A single ticket can also choose which generated test-case version to verify.',
+      placement: 'bottom',
+    },
+    {
+      selector: '[data-tour="destination"]',
+      title: 'Point QC at the live app',
+      body: 'Web is the available target today. Enter a full staging or deployed URL, then use Check to confirm the portal server can reach it before you run.',
+      placement: 'top',
+    },
+    {
+      selector: '[data-tour="options"]',
+      title: 'Tune the AI',
+      body: 'Choose the QC skill and Claude model, then add credentials, focus areas, known issues, or other testing instructions.',
+      placement: 'top',
+      action: () => setShowOptions(true),
+    },
+    {
+      selector: '[data-tour="readiness"]',
+      title: 'Check readiness',
+      body: 'This checklist shows whether the selected ticket, app URL, skill, and test cases are ready. Recent runs remain available alongside the form.',
+      placement: 'top',
+    },
+    {
+      selector: '[data-tour="launch"]',
+      title: 'Start and follow the run',
+      body: 'Click Run QC (or press ⌘/Ctrl + Enter). The run moves to the live tracker; queued tickets run one at a time and the report is saved when testing completes.',
+      placement: 'top',
+    },
+  ]
+
+  function endTour() {
+    setTourOpen(false)
+  }
   // Configured MCP servers — a web run drives a real browser via the Playwright
   // MCP (mobile targets use Mobile MCP), so the run is blocked until the required
   // server is in the project's .mcp.json. Shares the McpRequiredNotice query cache.
@@ -1042,7 +1095,7 @@ export default function RunPage() {
   return (
     <div className="mx-auto max-w-6xl space-y-8">
       <header className="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
-        <div className="flex items-start gap-3">
+        <div className="flex items-start gap-3" data-tour="header">
           <span className="mt-0.5 flex size-11 shrink-0 items-center justify-center rounded-2xl bg-foreground text-background">
             <Play className="size-5" />
           </span>
@@ -1063,25 +1116,37 @@ export default function RunPage() {
           </div>
         </div>
 
-        <div className="grid grid-cols-3 gap-2 sm:min-w-[24rem]">
-          <div className="rounded-2xl border border-border/60 bg-muted/60 px-3 py-2 shadow-none">
-            <div className="text-lg font-semibold tabular-nums">{recent.length}</div>
-            <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
-              Runs
+        <div className="flex flex-wrap items-start gap-2">
+          <div className="grid grid-cols-3 gap-2 sm:min-w-[24rem]">
+            <div className="rounded-2xl border border-border/60 bg-muted/60 px-3 py-2 shadow-none">
+              <div className="text-lg font-semibold tabular-nums">{recent.length}</div>
+              <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                Runs
+              </div>
+            </div>
+            <div className="rounded-2xl border border-border/60 bg-muted/60 px-3 py-2 shadow-none">
+              <div className="text-lg font-semibold tabular-nums">{liveRuns}</div>
+              <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                Live
+              </div>
+            </div>
+            <div className="rounded-2xl border border-border/60 bg-muted/60 px-3 py-2 shadow-none">
+              <div className="text-lg font-semibold tabular-nums">{completedRuns}</div>
+              <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                Complete
+              </div>
             </div>
           </div>
-          <div className="rounded-2xl border border-border/60 bg-muted/60 px-3 py-2 shadow-none">
-            <div className="text-lg font-semibold tabular-nums">{liveRuns}</div>
-            <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
-              Live
-            </div>
-          </div>
-          <div className="rounded-2xl border border-border/60 bg-muted/60 px-3 py-2 shadow-none">
-            <div className="text-lg font-semibold tabular-nums">{completedRuns}</div>
-            <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
-              Complete
-            </div>
-          </div>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setTourOpen(true)}
+            className="fixed bottom-5 right-5 z-40 gap-1.5 rounded-full bg-card shadow-lg transition-all duration-200 active:scale-[0.98]"
+            title="Take a quick guided tour of this page"
+          >
+            <Compass className="size-3.5" />
+            Guide tour
+          </Button>
         </div>
       </header>
 
@@ -1104,7 +1169,7 @@ export default function RunPage() {
             className="space-y-5"
           >
             {/* mode toggle + run templates */}
-            <div className="flex flex-wrap items-center justify-between gap-3">
+            <div data-tour="mode" className="flex flex-wrap items-center justify-between gap-3">
               <div className="inline-flex w-full rounded-full border border-border/60 bg-muted/60 p-1 sm:w-auto">
                 {(
                   [
@@ -1179,7 +1244,7 @@ export default function RunPage() {
             )}
 
             {/* 1 — what to test */}
-            <section className="space-y-3">
+            <section data-tour="tickets" className="space-y-3">
               <StepHeader
                 n={1}
                 title="What to test"
@@ -1246,7 +1311,7 @@ export default function RunPage() {
             </section>
 
             {/* 2 — where to run */}
-            <section className="space-y-3">
+            <section data-tour="destination" className="space-y-3">
               <StepHeader n={2} title="Where to run" hint="device or browser" />
               {/* Test target — web (Playwright), the web app on a mobile device, or a native app on a device (Mobile MCP). */}
               <div className="space-y-2">
@@ -1472,7 +1537,7 @@ export default function RunPage() {
             </section>
 
             {/* 3 — options (collapsible: skill, model, instructions — sensible defaults, open only if needed) */}
-            <section className="space-y-3">
+            <section data-tour="options" className="space-y-3">
               <button
                 type="button"
                 onClick={() => setShowOptions((v) => !v)}
@@ -1633,7 +1698,7 @@ export default function RunPage() {
             </section>
 
             {/* action band */}
-            <div className="-mx-6 mt-2 flex flex-col gap-3 border-t border-border/60 bg-muted/60 px-6 py-4 sm:flex-row sm:items-center sm:justify-between">
+            <div data-tour="launch" className="-mx-6 mt-2 flex flex-col gap-3 border-t border-border/60 bg-muted/60 px-6 py-4 sm:flex-row sm:items-center sm:justify-between">
               {activeProject ? (
                 <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
                   <Activity className="size-3.5" />
@@ -1677,7 +1742,7 @@ export default function RunPage() {
 
         <aside className="space-y-3">
           {/* Readiness — compact checklist (no big tiles), run mode folded into the footer. */}
-          <Card className="rounded-3xl border-border/60 shadow-none">
+          <Card data-tour="readiness" className="rounded-3xl border-border/60 shadow-none">
             <CardContent className="space-y-2.5 p-4">
               <div className="flex items-center justify-between">
                 <span className="flex items-center gap-2 text-sm font-semibold tracking-tight">
@@ -1788,6 +1853,8 @@ export default function RunPage() {
         removePreset={removePreset}
         onApply={applyPreset}
       />
+
+      <GuideTour steps={tourSteps} open={tourOpen} onClose={endTour} />
     </div>
   )
 }

@@ -20,6 +20,7 @@ import {
   Check,
   CheckCircle2,
   ChevronDown,
+  Compass,
   File as FileIcon,
   FileCode2,
   FileText,
@@ -50,6 +51,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { OpenFolderButton } from '@/components/OpenFolderButton'
 import ContinueSessionPanel from '@/components/ContinueSessionPanel'
+import { GuideTour, type TourStep } from '@/components/GuideTour'
 import {
   createClickupIssueSubtasks,
   deleteRun,
@@ -1932,6 +1934,7 @@ export default function RunDetailPage() {
   const queryClient = useQueryClient()
   const [searchParams, setSearchParams] = useSearchParams()
   const [confirmDelete, setConfirmDelete] = useState(false)
+  const [tourOpen, setTourOpen] = useState(false)
   const { data: run, isLoading, isError, error } = useQuery({
     queryKey: ['run', id],
     queryFn: () => getRun(id),
@@ -2118,13 +2121,58 @@ export default function RunDetailPage() {
       f.path !== executedFile?.path,
   )
 
+  const tourSteps: TourStep[] = [
+    {
+      selector: '[data-tour="identity"]',
+      title: 'Identify this QC run',
+      body: 'The ticket ID, ticket title, status badge, and project name establish exactly what was tested. Use History to return to the grouped list of runs for this ticket.',
+      placement: 'bottom',
+    },
+    {
+      selector: '[data-tour="outcome"]',
+      title: 'Interpret the verdict',
+      body: 'The pass-rate ring and outcome breakdown summarize the acceptance checks. A green result is ready for sign-off; failed, blocked, or incomplete checks should be investigated in the evidence below.',
+      placement: 'bottom',
+    },
+    {
+      selector: '[data-tour="metadata"]',
+      title: 'Verify the run context',
+      body: 'Confirm when the run started and finished, how long it took, which app URL was tested, and where its output is stored. These details make a result reproducible.',
+      placement: 'top',
+    },
+    {
+      selector: '[data-tour="actions"]',
+      title: 'Open the tested app or output',
+      body: 'Open the tested app in a new tab or jump directly to the saved output folder. Completed runs can be deleted here; active runs are protected until they finish.',
+      placement: 'bottom',
+    },
+    {
+      selector: '[data-tour="failure"]',
+      title: 'Understand an incomplete run',
+      body: 'When QC cannot finish, this notice surfaces the likely cause. Use its shortcut to open the Log tab and inspect the exact browser, tool, or test step that failed.',
+      placement: 'bottom',
+    },
+    {
+      selector: '[data-tour="session"]',
+      title: 'Continue an available session',
+      body: 'Some runs retain an interactive QC session. Continue it here when you need to investigate or finish follow-up work without starting a completely new run.',
+      placement: 'bottom',
+    },
+    {
+      selector: '[data-tour="evidence"]',
+      title: 'Explore report evidence',
+      body: 'Report contains the written verdict and executed cases; Issues supports triage; Screenshots and Files provide artifacts; Log contains the raw event timeline. Each tab is linkable in the URL.',
+      placement: 'top',
+    },
+  ]
+
   return (
     <div className="space-y-6">
       {/* Hero — identity, actions, and the single consolidated result summary. */}
-      <section className="overflow-hidden rounded-3xl border border-border/60 bg-card shadow-none">
+      <section data-tour="summary" className="overflow-hidden rounded-3xl border border-border/60 bg-card shadow-none">
         <div className="space-y-5 px-6 pb-6 pt-5">
           <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-            <div className="min-w-0 space-y-3">
+            <div data-tour="identity" className="min-w-0 space-y-3">
               <Button asChild variant="ghost" size="sm" className="-ml-3 h-8 rounded-full transition-all duration-200 active:scale-[0.98]">
                 <Link to="/history">
                   <ArrowLeft className="mr-2 h-4 w-4" />
@@ -2153,7 +2201,17 @@ export default function RunDetailPage() {
               </p>
             </div>
 
-            <div className="flex shrink-0 flex-wrap items-center gap-2">
+            <div data-tour="actions" className="flex shrink-0 flex-wrap items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setTourOpen(true)}
+                className="fixed bottom-5 right-5 z-40 gap-1.5 rounded-full bg-card shadow-lg transition-all duration-200 active:scale-[0.98]"
+                title="Take a quick guided tour of this page"
+              >
+                <Compass className="size-3.5" />
+                Guide tour
+              </Button>
               <Button asChild variant="outline" size="sm" className="rounded-full transition-all duration-200 active:scale-[0.98]">
                 <a href={run.appUrl} target="_blank" rel="noreferrer">
                   Open app
@@ -2177,7 +2235,7 @@ export default function RunDetailPage() {
 
           {/* Result summary — donut + breakdown when results exist, else an explainer. */}
           {hasResults ? (
-            <div className="flex flex-col items-center gap-6 rounded-2xl border border-border/60 bg-muted/40 p-5 md:flex-row md:items-stretch md:gap-8">
+            <div data-tour="outcome" className="flex flex-col items-center gap-6 rounded-2xl border border-border/60 bg-muted/40 p-5 md:flex-row md:items-stretch md:gap-8">
               <div className="flex flex-col items-center justify-center gap-2 md:border-r md:border-border/60 md:pr-8">
                 <PassRateDonut rate={passRate} color={accentColor} />
                 <div className="text-center">
@@ -2191,7 +2249,7 @@ export default function RunDetailPage() {
             </div>
           ) : (
             // No pass/fail recorded — explain why instead of showing a row of zeros.
-            <div className="flex flex-col items-center justify-center gap-2 rounded-2xl border border-border/60 bg-muted/40 px-4 py-10 text-center">
+            <div data-tour="outcome" className="flex flex-col items-center justify-center gap-2 rounded-2xl border border-border/60 bg-muted/40 px-4 py-10 text-center">
               <span
                 className={cn(
                   'flex size-11 items-center justify-center rounded-full',
@@ -2231,7 +2289,7 @@ export default function RunDetailPage() {
         </div>
 
         {/* Meta strip — context that supports the result, kept low-key in the footer. */}
-        <div className="grid grid-cols-2 gap-x-6 gap-y-4 border-t border-border/60 bg-muted/30 px-6 py-4 sm:grid-cols-3 xl:grid-cols-5">
+        <div data-tour="metadata" className="grid grid-cols-2 gap-x-6 gap-y-4 border-t border-border/60 bg-muted/30 px-6 py-4 sm:grid-cols-3 xl:grid-cols-5">
           <MetaInline icon={<CalendarClock className="h-4 w-4" />} label="Started">
             <span className="font-mono" title={formatDate(run.createdAt)}>
               {formatDate(run.createdAt)}
@@ -2269,15 +2327,19 @@ export default function RunDetailPage() {
       {/* Why the run failed — surfaced up front so the reason (e.g. a hung
           Playwright/MCP browser) isn't buried in the Log tab. */}
       {diagnosis && (
-        <RunFailureNotice diagnosis={diagnosis} onViewLog={() => onTabChange('log')} />
+        <div data-tour="failure">
+          <RunFailureNotice diagnosis={diagnosis} onViewLog={() => onTabChange('log')} />
+        </div>
       )}
 
       {run.hasSession && (
-        <ContinueSessionPanel runId={run.id} runStatus={run.status} hasSession={run.hasSession} />
+        <div data-tour="session">
+          <ContinueSessionPanel runId={run.id} runStatus={run.status} hasSession={run.hasSession} />
+        </div>
       )}
 
       {/* Content tabs */}
-      <Card className="overflow-hidden rounded-3xl border-border/60 py-0 shadow-none">
+      <Card data-tour="evidence" className="overflow-hidden rounded-3xl border-border/60 py-0 shadow-none">
         <CardContent className="px-0">
           <Tabs value={activeTab} onValueChange={onTabChange}>
             <div className="sticky top-0 z-10 border-b border-border/60 bg-card/95 px-5 py-3 backdrop-blur">
@@ -2515,6 +2577,7 @@ export default function RunDetailPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      <GuideTour steps={tourSteps} open={tourOpen} onClose={() => setTourOpen(false)} />
     </div>
   )
 }

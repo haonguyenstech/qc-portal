@@ -1201,7 +1201,7 @@ export default function TicketsPage() {
   return (
     <div className="mx-auto max-w-6xl space-y-8">
       <header className="space-y-4">
-        <div className="flex items-start gap-3">
+        <div className="flex items-start gap-3" data-tour="header">
           <span className="mt-0.5 flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-foreground text-background">
             <Ticket className="h-5 w-5" />
           </span>
@@ -1215,7 +1215,10 @@ export default function TicketsPage() {
         </div>
 
         {activeProject && (
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-2xl border border-border/60 bg-card px-4 py-3 shadow-none">
+          <div
+            data-tour="dest"
+            className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-2xl border border-border/60 bg-card px-4 py-3 shadow-none"
+          >
             <span className="flex items-center gap-2">
               <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-border/60 bg-muted/60 text-muted-foreground">
                 <FolderGit2 className="h-4 w-4" />
@@ -1266,7 +1269,7 @@ export default function TicketsPage() {
           {/* Browser */}
           <Card className="rounded-3xl border-border/60 shadow-none">
             <CardContent className="space-y-3 py-5">
-              <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center justify-between gap-2" data-tour="browse">
                 <span className="flex items-center gap-1.5 text-sm font-medium">
                   <Ticket className="size-4 text-muted-foreground" />
                   Browse tickets
@@ -1338,7 +1341,7 @@ export default function TicketsPage() {
                 </div>
               </div>
 
-              <div className="group relative">
+              <div className="group relative" data-tour="search">
                 <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground transition-colors group-focus-within:text-primary" />
                 <Input
                   placeholder={
@@ -1389,7 +1392,7 @@ export default function TicketsPage() {
                 </div>
               )}
 
-              <div className="space-y-1">
+              <div className="space-y-1" data-tour="list">
                 {!tasks && isFetching && (
                   <div className="flex items-center gap-2 px-2 py-3 text-xs text-muted-foreground">
                     <Loader2 className="size-3.5 animate-spin" />
@@ -1481,7 +1484,7 @@ export default function TicketsPage() {
       {/* Sticky action bar — appears once tickets are picked, so the crawl button
           is always reachable without a second column eating the page width. */}
       {configured && selected.size > 0 && (
-        <div className="sticky bottom-4 z-20">
+        <div className="sticky bottom-4 z-20" data-tour="actionbar">
           <div className="space-y-2 rounded-3xl border border-border/60 bg-card/95 px-3 py-2.5 shadow-lg backdrop-blur supports-[backdrop-filter]:bg-card/80">
             <div className="flex flex-wrap items-center gap-2 sm:gap-3">
               <span className="flex size-8 shrink-0 items-center justify-center rounded-2xl bg-foreground text-background">

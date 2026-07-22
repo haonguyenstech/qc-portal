@@ -8,6 +8,7 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronRight,
+  Compass,
   Ban,
   ClipboardList,
   Clock,
@@ -76,6 +77,7 @@ import {
   type TestCaseLogLine,
 } from '@/lib/api'
 import { OpenFolderButton } from '@/components/OpenFolderButton'
+import { GuideTour, type TourStep } from '@/components/GuideTour'
 import { buildInstructions, useTestRules } from '@/lib/testRules'
 import { useProjects } from '@/lib/project-context'
 import {
@@ -1578,6 +1580,10 @@ export default function TestCasePage() {
   // Optional live app URL per ticket (folder → url) + the Generate confirm dialog.
   const [appUrls, setAppUrls] = useState<Record<string, string>>({})
   const [genOpen, setGenOpen] = useState(false)
+  const [tourOpen, setTourOpen] = useState(false)
+  // The last tour step reveals a useful default selection. Remember that it was
+  // created by the tour so closing the tour never clears the user's own picks.
+  const tourAutoSelectedRef = useRef(false)
   // Which Claude model drafts the test cases. Persisted across sessions.
   const [model, setModel] = useState<string>(() => {
     try {
@@ -1648,6 +1654,66 @@ export default function TestCasePage() {
     enabled: !!activeProjectId,
   })
   const hasCrawled = (crawled?.length ?? 0) > 0
+
+  const tourSteps: TourStep[] = [
+    {
+      selector: '[data-tour="header"]',
+      title: 'Generate test cases from crawled tickets',
+      body: 'Choose up to five tickets that were crawled from your tracker. Claude drafts a focused set of manual test cases for each ticket and saves them with the ticket.',
+      placement: 'bottom',
+    },
+    {
+      selector: '[data-tour="destination"]',
+      title: 'Where test cases are saved',
+      body: 'Generated files live in this project under testing/tickets/. Use Open folder to view the saved test cases on your machine.',
+      placement: 'bottom',
+    },
+    {
+      selector: '[data-tour="tickets"]',
+      title: 'Choose tickets',
+      body: 'Search and filter crawled tickets, then select up to five. Tickets stay selected while you filter, and nested subtasks can be expanded from their parent.',
+      placement: 'bottom',
+    },
+    {
+      selector: '[data-tour="template"]',
+      title: 'Use your preferred format',
+      body: 'Optionally upload a Markdown, CSV, or Excel template. Claude follows its structure; a project template from Settings is used automatically when available.',
+      placement: 'top',
+    },
+    {
+      selector: '[data-tour="rules"]',
+      title: 'Focus the coverage',
+      body: 'Pick reusable rule chips and add free-form instructions to steer the cases toward the workflows, risks, and environments that matter.',
+      placement: 'top',
+    },
+    {
+      selector: '[data-tour="model"]',
+      title: 'Choose a model',
+      body: 'Use Haiku for speed, Sonnet for balanced coverage, or Opus for deeper analysis of complex or ambiguous tickets.',
+      placement: 'top',
+    },
+    {
+      selector: '[data-tour="generate"]',
+      title: 'Generate in the background',
+      body: 'Confirm the selected tickets, optionally provide a live app URL, and start generation. Jobs continue on the server if you leave this page, with up to three running at once.',
+      placement: 'top',
+      action: () => {
+        const first = (crawled ?? [])[0]
+        if (first && selectedFolders.size === 0) {
+          setSelectedFolders(new Set([first.name]))
+          tourAutoSelectedRef.current = true
+        }
+      },
+    },
+  ]
+
+  function endTour() {
+    setTourOpen(false)
+    if (tourAutoSelectedRef.current) {
+      setSelectedFolders(new Set())
+      tourAutoSelectedRef.current = false
+    }
+  }
 
   // The project's saved test-case template (Settings page). Used as the default
   // when the user hasn't uploaded a one-off template for this run.
@@ -1899,22 +1965,34 @@ export default function TestCasePage() {
   return (
     <div className="mx-auto max-w-6xl space-y-8">
       <header className="space-y-4">
-        <div className="flex items-start gap-3">
-          <span className="mt-0.5 flex size-11 shrink-0 items-center justify-center rounded-2xl bg-foreground text-background">
-            <ClipboardList className="size-5" />
-          </span>
-          <div className="space-y-1">
-            <h1 className="text-3xl font-semibold tracking-tight">Test cases</h1>
-            <p className="max-w-2xl text-sm text-muted-foreground">
-              Pick up to {MAX_TICKETS} crawled tickets and let Claude draft manual test cases for
-              each — optionally following a template you upload. Saved per ticket under{' '}
-              <code className="font-mono">testcases/</code>.
-            </p>
+        <div className="flex items-start justify-between gap-3">
+          <div className="flex items-start gap-3" data-tour="header">
+            <span className="mt-0.5 flex size-11 shrink-0 items-center justify-center rounded-2xl bg-foreground text-background">
+              <ClipboardList className="size-5" />
+            </span>
+            <div className="space-y-1">
+              <h1 className="text-3xl font-semibold tracking-tight">Test cases</h1>
+              <p className="max-w-2xl text-sm text-muted-foreground">
+                Pick up to {MAX_TICKETS} crawled tickets and let Claude draft manual test cases for
+                each — optionally following a template you upload. Saved per ticket under{' '}
+                <code className="font-mono">testcases/</code>.
+              </p>
+            </div>
           </div>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setTourOpen(true)}
+            className="fixed bottom-5 right-5 z-40 gap-1.5 rounded-full bg-card shadow-lg transition-all duration-200 active:scale-[0.98]"
+            title="Take a quick guided tour of this page"
+          >
+            <Compass className="size-3.5" />
+            Guide tour
+          </Button>
         </div>
 
         {activeProject && (
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-2xl border border-border/60 bg-card px-4 py-3 shadow-none">
+          <div data-tour="destination" className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-2xl border border-border/60 bg-card px-4 py-3 shadow-none">
             <span className="flex items-center gap-2">
               <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-border/60 bg-muted/60 text-muted-foreground">
                 <FolderGit2 className="h-4 w-4" />
@@ -1954,7 +2032,7 @@ export default function TestCasePage() {
       </header>
 
       <div className="space-y-4">
-        <Card className="overflow-hidden rounded-3xl border-border/60 shadow-none">
+        <Card data-tour="tickets" className="overflow-hidden rounded-3xl border-border/60 shadow-none">
           <div className="flex items-center gap-2 border-b border-border/60 bg-muted/30 px-4 py-2.5 text-sm font-medium">
             <Ticket className="h-4 w-4 text-muted-foreground" />
             Crawled tickets
@@ -2104,7 +2182,7 @@ export default function TestCasePage() {
         </Card>
 
         {/* Template upload */}
-        <Card className="overflow-hidden rounded-3xl border-border/60 shadow-none">
+        <Card data-tour="template" className="overflow-hidden rounded-3xl border-border/60 shadow-none">
           <div className="flex items-center gap-2 border-b border-border/60 bg-muted/30 px-4 py-2.5 text-sm font-medium">
             <FileText className="h-4 w-4 text-muted-foreground" />
             Template
@@ -2202,7 +2280,7 @@ export default function TestCasePage() {
         </Card>
 
         {/* Instructions & quick rules */}
-        <Card className="overflow-hidden rounded-3xl border-border/60 shadow-none">
+        <Card data-tour="rules" className="overflow-hidden rounded-3xl border-border/60 shadow-none">
           <div className="flex items-center gap-2 border-b border-border/60 bg-muted/30 px-4 py-2.5 text-sm font-medium">
             <ListChecks className="h-4 w-4 text-muted-foreground" />
             Instructions &amp; rules
@@ -2268,7 +2346,7 @@ export default function TestCasePage() {
         </Card>
 
         {/* Pick which Claude model drafts the cases — same options as the crawl picker. */}
-        <div className="flex flex-wrap items-center gap-3 rounded-2xl border border-border/60 bg-card px-3 py-2.5 shadow-none">
+        <div data-tour="model" className="flex flex-wrap items-center gap-3 rounded-2xl border border-border/60 bg-card px-3 py-2.5 shadow-none">
           <div className="flex items-center gap-1.5 text-sm font-medium">
             <Sparkles className="h-4 w-4 text-primary" />
             Model
@@ -2297,7 +2375,7 @@ export default function TestCasePage() {
           </p>
         </div>
 
-        <div className="flex gap-2">
+        <div data-tour="generate" className="flex gap-2">
           <Button
             onClick={() => setGenOpen(true)}
             disabled={selectedFolders.size === 0 || start.isPending || atCap}
@@ -2375,6 +2453,8 @@ export default function TestCasePage() {
         removeRule={removeRule}
         resetRules={resetRules}
       />
+
+      <GuideTour steps={tourSteps} open={tourOpen} onClose={endTour} />
     </div>
   )
 }

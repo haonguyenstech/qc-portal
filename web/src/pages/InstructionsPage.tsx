@@ -341,7 +341,7 @@ export default function InstructionsPage() {
   return (
     <div className="mx-auto max-w-6xl space-y-8">
       <header className="space-y-4">
-        <div className="flex items-start gap-3">
+        <div className="flex items-start gap-3" data-tour="header">
           <span className="flex size-11 shrink-0 items-center justify-center rounded-2xl bg-foreground text-background">
             <FileText className="size-5" />
           </span>
@@ -360,7 +360,10 @@ export default function InstructionsPage() {
 
         {/* Per-project context: makes it unmistakable which project's context is being edited. */}
         {activeProject && (
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-2xl border border-border/60 bg-card px-4 py-3 shadow-none">
+          <div
+            data-tour="context"
+            className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-2xl border border-border/60 bg-card px-4 py-3 shadow-none"
+          >
             <span className="flex items-center gap-2">
               <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-border/60 bg-muted/60 text-muted-foreground">
                 <FolderGit2 className="h-4 w-4" />
@@ -390,7 +393,7 @@ export default function InstructionsPage() {
 
       <Tabs value={activeTab} onValueChange={onTabChange} className="space-y-5">
         <TabsList className="rounded-full">
-          <TabsTrigger value="instructions" className="gap-1.5 rounded-full">
+          <TabsTrigger value="instructions" className="gap-1.5 rounded-full" data-tour="tab-instructions">
             <FileText className="size-3.5" /> Instructions
             <TabInfo>
               The project's lean root <span className="font-mono">CLAUDE.md</span> — the standing
@@ -398,7 +401,7 @@ export default function InstructionsPage() {
               Knowledge and Memory rather than pasting everything here.
             </TabInfo>
           </TabsTrigger>
-          <TabsTrigger value="knowledge" className="gap-1.5 rounded-full">
+          <TabsTrigger value="knowledge" className="gap-1.5 rounded-full" data-tour="tab-knowledge">
             <BrainCircuit className="size-3.5" /> Knowledge
             <TabInfo>
               Reference docs you upload (Word, PDF, Markdown, CSV, Excel) — specs, requirements,
@@ -406,14 +409,14 @@ export default function InstructionsPage() {
               your real project terms and rules.
             </TabInfo>
           </TabsTrigger>
-          <TabsTrigger value="memory" className="gap-1.5 rounded-full">
+          <TabsTrigger value="memory" className="gap-1.5 rounded-full" data-tour="tab-memory">
             <BrainCog className="size-3.5" /> Memory
             <TabInfo>
               Small, durable notes you write here — one fact each (decisions, gotchas,
               conventions). Short and long-lived, unlike the larger uploaded Knowledge docs.
             </TabInfo>
           </TabsTrigger>
-          <TabsTrigger value="accounts" className="gap-1.5 rounded-full">
+          <TabsTrigger value="accounts" className="gap-1.5 rounded-full" data-tour="tab-accounts">
             <KeyRound className="size-3.5" /> Accounts
             <TabInfo>
               The app URLs and test-account logins for this project. Upload a CSV/Excel sheet (or
@@ -421,7 +424,7 @@ export default function InstructionsPage() {
               steps instead of inventing placeholders. Use non-production test accounts only.
             </TabInfo>
           </TabsTrigger>
-          <TabsTrigger value="brain" className="gap-1.5 rounded-full">
+          <TabsTrigger value="brain" className="gap-1.5 rounded-full" data-tour="tab-brain">
             <Sparkles className="size-3.5" /> AI Brain
             <TabInfo>
               A visual map of everything Claude knows about this project — how CLAUDE.md,

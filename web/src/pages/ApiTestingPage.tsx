@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import {
@@ -15,8 +15,11 @@ import {
   Info,
   KeyRound,
   Loader2,
+  CircleStop,
   Pencil,
   Plus,
+  Radar,
+  Search,
   Send,
   ShieldAlert,
   Sparkles,
@@ -24,6 +27,7 @@ import {
   Trash2,
   Variable,
   Wand2,
+  WrapText,
   X,
   XCircle,
   Zap,
@@ -60,6 +64,8 @@ import {
   deleteApiRequest,
   getApiEnvironments,
   getApiResult,
+  getApiScan,
+  getScanAvailable,
   listApiRequests,
   listApiResults,
   openApiTestsFolder,
@@ -68,6 +74,8 @@ import {
   saveApiRequest,
   saveApiResult,
   sendApiRequest,
+  startApiScan,
+  stopApiScan,
   type AiCheckResult,
   type ApiAssertion,
   type ApiAssertionType,
@@ -80,6 +88,8 @@ import {
   type ApiResultMeta,
   type ApiSendResult,
   type ApiVariable,
+  type ScanJob,
+  type ScanRequest,
 } from '@/lib/api'
 
 const METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS']
@@ -775,6 +785,29 @@ function ResponseView({ res }: { res: ApiSendResult }) {
     }
   }, [res.bodyText])
   const isJson = (res.contentType ?? '').includes('json')
+  // Controlled so the Copy button knows which tab (pretty / raw / headers) to copy.
+  const [tab, setTab] = useState('body')
+  const [wrap, setWrap] = useState(false)
+  const [copied, setCopied] = useState(false)
+
+  const headersText = useMemo(
+    () =>
+      Object.entries(res.headers ?? {})
+        .map(([k, v]) => `${k}: ${v}`)
+        .join('\n'),
+    [res.headers],
+  )
+  const copyText = tab === 'headers' ? headersText : tab === 'raw' ? (res.bodyText ?? '') : pretty
+  const copyNow = async () => {
+    try {
+      await navigator.clipboard.writeText(copyText)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1400)
+    } catch {
+      toast.error('Could not copy to clipboard')
+    }
+  }
+  const preWrap = wrap ? 'whitespace-pre-wrap break-words' : 'whitespace-pre'
 
   if (!res.ok) {
     return (
@@ -808,25 +841,69 @@ function ResponseView({ res }: { res: ApiSendResult }) {
           </span>
         )}
       </div>
-      <Tabs defaultValue="body">
-        <TabsList className="rounded-full">
-          <TabsTrigger value="body" className="rounded-full text-xs">
-            {isJson ? 'Pretty' : 'Body'}
-          </TabsTrigger>
-          <TabsTrigger value="raw" className="rounded-full text-xs">
-            Raw
-          </TabsTrigger>
-          <TabsTrigger value="headers" className="rounded-full text-xs">
-            Headers ({Object.keys(res.headers ?? {}).length})
-          </TabsTrigger>
-        </TabsList>
+      <Tabs value={tab} onValueChange={setTab}>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <TabsList className="rounded-full">
+            <TabsTrigger value="body" className="rounded-full text-xs">
+              {isJson ? 'Pretty' : 'Body'}
+            </TabsTrigger>
+            <TabsTrigger value="raw" className="rounded-full text-xs">
+              Raw
+            </TabsTrigger>
+            <TabsTrigger value="headers" className="rounded-full text-xs">
+              Headers ({Object.keys(res.headers ?? {}).length})
+            </TabsTrigger>
+          </TabsList>
+          <div className="flex items-center gap-1.5">
+            {tab !== 'headers' && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setWrap((w) => !w)}
+                className={cn(
+                  'h-8 gap-1.5 rounded-full text-xs active:scale-[0.98]',
+                  wrap ? 'text-primary' : 'text-muted-foreground',
+                )}
+                title={wrap ? 'Wrapping long lines' : 'Wrap long lines'}
+              >
+                <WrapText className="size-3.5" />
+                Wrap
+              </Button>
+            )}
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={copyNow}
+              disabled={!copyText}
+              className="h-8 gap-1.5 rounded-full text-xs text-muted-foreground hover:text-foreground active:scale-[0.98]"
+              title="Copy this view to the clipboard"
+            >
+              {copied ? (
+                <Check className="size-3.5 text-emerald-500" />
+              ) : (
+                <Clipboard className="size-3.5" />
+              )}
+              {copied ? 'Copied' : 'Copy'}
+            </Button>
+          </div>
+        </div>
         <TabsContent value="body">
-          <pre className="max-h-[420px] overflow-auto rounded-xl bg-zinc-950 p-3 font-mono text-xs leading-relaxed text-zinc-100">
+          <pre
+            className={cn(
+              'max-h-[420px] overflow-auto rounded-xl bg-zinc-950 p-3 font-mono text-xs leading-relaxed text-zinc-100',
+              preWrap,
+            )}
+          >
             {pretty || '(empty body)'}
           </pre>
         </TabsContent>
         <TabsContent value="raw">
-          <pre className="max-h-[420px] overflow-auto rounded-xl bg-zinc-950 p-3 font-mono text-xs leading-relaxed text-zinc-100">
+          <pre
+            className={cn(
+              'max-h-[420px] overflow-auto rounded-xl bg-zinc-950 p-3 font-mono text-xs leading-relaxed text-zinc-100',
+              preWrap,
+            )}
+          >
             {res.bodyText || '(empty body)'}
           </pre>
         </TabsContent>
@@ -925,6 +1002,441 @@ function CurlImportDialog({
             className="rounded-full active:scale-[0.98]"
           >
             Import
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+// ---------------------------------------------------------------- Scan page for APIs
+
+/** Turn one detected request into an editable draft (URL split into base + query). */
+function scanToDraft(r: ScanRequest): Draft {
+  let base = r.url
+  const query: ApiKV[] = []
+  try {
+    const u = new URL(r.url)
+    base = `${u.origin}${u.pathname}`
+    for (const [key, value] of u.searchParams) query.push({ key, value, enabled: true })
+  } catch {
+    /* schemeless / odd URL — keep as-is */
+  }
+  const isJson = (r.requestContentType ?? '').includes('json')
+  const bodyMode: ApiBodyMode = r.hasBody ? (isJson ? 'json' : 'text') : 'none'
+  let body = r.bodyPreview ?? ''
+  if (bodyMode === 'json' && body) {
+    try {
+      body = JSON.stringify(JSON.parse(body), null, 2)
+    } catch {
+      /* leave the raw body */
+    }
+  }
+  return {
+    method: r.method,
+    url: base,
+    query,
+    headers: [],
+    bodyMode,
+    body,
+    assertions: [{ id: 'a0', type: 'status-2xx', target: '', expected: '', enabled: true }],
+    aiExpect: '',
+    captures: [],
+  }
+}
+
+/**
+ * Scan a page for its APIs. Opens a headed Chrome (logged-in profile) at a page
+ * URL, records the XHR/fetch traffic as a background job, then previews the
+ * detected endpoints as a deletable/selectable list to import as saved requests.
+ * Mounted only while open (seeds fresh; reconnects to a running scan via the
+ * per-project stored job id).
+ */
+function ScanPageDialog({
+  projectId,
+  open,
+  onOpenChange,
+  existingNames,
+  onImported,
+}: {
+  projectId: string
+  open: boolean
+  onOpenChange: (v: boolean) => void
+  existingNames: string[]
+  onImported: () => void
+}) {
+  const queryClient = useQueryClient()
+  const jobKey = `qc.apiScanJob.${projectId}`
+  const [url, setUrl] = useState('')
+  // Off = headless (no window). On = open a visible Chrome (for pages needing login).
+  const [headed, setHeaded] = useState(false)
+  const [jobId, setJobId] = useState<string | null>(() => {
+    try {
+      return localStorage.getItem(jobKey)
+    } catch {
+      return null
+    }
+  })
+  const [removed, setRemoved] = useState<Set<string>>(new Set())
+  const [unchecked, setUnchecked] = useState<Set<string>>(new Set())
+  const [importing, setImporting] = useState(false)
+
+  const setJob = (id: string | null) => {
+    setJobId(id)
+    try {
+      if (id) localStorage.setItem(jobKey, id)
+      else localStorage.removeItem(jobKey)
+    } catch {
+      /* storage unavailable */
+    }
+  }
+
+  const { data: avail } = useQuery({
+    queryKey: ['api-scan-available'],
+    queryFn: getScanAvailable,
+    enabled: open,
+    staleTime: 60_000,
+  })
+
+  const { data: job } = useQuery({
+    queryKey: ['api-scan', projectId, jobId],
+    queryFn: () => getApiScan(projectId, jobId as string),
+    enabled: open && !!jobId,
+    refetchInterval: (q) =>
+      (q.state.data as ScanJob | undefined)?.status === 'running' ? 1200 : false,
+    retry: false,
+  })
+
+  const start = useMutation({
+    mutationFn: (u: string) => startApiScan(projectId, u, !headed),
+    onSuccess: (j) => {
+      setRemoved(new Set())
+      setUnchecked(new Set())
+      setJob(j.id)
+      queryClient.setQueryData(['api-scan', projectId, j.id], j)
+    },
+    onError: (e) =>
+      toast.error('Could not start scan', {
+        description: e instanceof Error ? e.message : 'Unknown error',
+      }),
+  })
+
+  const stop = useMutation({
+    mutationFn: () => stopApiScan(projectId, jobId as string),
+    onSuccess: (j) => queryClient.setQueryData(['api-scan', projectId, j.id], j),
+    onError: (e) =>
+      toast.error('Could not stop scan', {
+        description: e instanceof Error ? e.message : 'Unknown error',
+      }),
+  })
+
+  const running = job?.status === 'running'
+  const visible = (job?.requests ?? []).filter((r) => !removed.has(r.id))
+  const selected = visible.filter((r) => !unchecked.has(r.id))
+
+  const toggle = (id: string) =>
+    setUnchecked((s) => {
+      const next = new Set(s)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  const remove = (id: string) => setRemoved((s) => new Set(s).add(id))
+  const allSelected = visible.length > 0 && selected.length === visible.length
+  const toggleAll = () =>
+    setUnchecked(allSelected ? new Set(visible.map((r) => r.id)) : new Set())
+
+  const doImport = async () => {
+    if (!selected.length) return
+    setImporting(true)
+    const taken = new Set(existingNames)
+    let ok = 0
+    for (const r of selected) {
+      const draft = scanToDraft(r)
+      const base = deriveName(draft)
+      let name = base
+      let n = 2
+      while (taken.has(name)) name = `${base} (${n++})`.slice(0, 60)
+      taken.add(name)
+      try {
+        await saveApiRequest(projectId, name, draft)
+        ok++
+      } catch {
+        /* skip a single bad save (oversize / bad name) — keep importing the rest */
+      }
+    }
+    setImporting(false)
+    queryClient.invalidateQueries({ queryKey: ['api-requests', projectId] })
+    onImported()
+    if (ok) toast.success(`Imported ${ok} request${ok === 1 ? '' : 's'}`)
+    else toast.error('Nothing imported')
+    reset()
+    onOpenChange(false)
+  }
+
+  const reset = () => {
+    if (running) stop.mutate()
+    setJob(null)
+    setRemoved(new Set())
+    setUnchecked(new Set())
+  }
+
+  const canStart = !!url.trim() && !start.isPending && avail?.ok !== false
+
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(v) => {
+        if (!v && importing) return
+        onOpenChange(v)
+      }}
+    >
+      <DialogContent className="rounded-3xl sm:max-w-2xl">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Radar className="size-4 text-primary" />
+            Scan a page for its APIs
+          </DialogTitle>
+          <DialogDescription>
+            Loads a page URL using your logged-in profile and records the API calls it makes — by
+            default in the background with <span className="font-medium">no browser window</span>.
+            Preview the detected endpoints, delete any you don't want, and import the rest.
+          </DialogDescription>
+        </DialogHeader>
+
+        {avail?.ok === false ? (
+          <div className="flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-700">
+            <AlertTriangle className="mt-0.5 size-4 shrink-0" />
+            <div>
+              <p className="font-medium">Scanning isn't available on this machine.</p>
+              <p className="text-amber-700/80">
+                {avail.error ?? 'Google Chrome + Playwright are required.'}
+              </p>
+            </div>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {/* URL bar */}
+            <div className="flex items-center gap-2">
+              <Input
+                value={url}
+                onChange={(e) => setUrl(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && canStart) start.mutate(url.trim())
+                }}
+                placeholder="http://localhost:5173/administration/medical-billing-management"
+                className="h-10 flex-1 rounded-xl font-mono text-xs shadow-none"
+                spellCheck={false}
+                autoFocus
+                disabled={!!jobId}
+              />
+              {jobId ? (
+                <Button
+                  variant="outline"
+                  onClick={reset}
+                  className="h-10 shrink-0 gap-1.5 rounded-full active:scale-[0.98]"
+                >
+                  <X className="size-4" />
+                  New scan
+                </Button>
+              ) : (
+                <Button
+                  onClick={() => start.mutate(url.trim())}
+                  disabled={!canStart}
+                  className="h-10 shrink-0 gap-2 rounded-full px-5 active:scale-[0.98]"
+                >
+                  {start.isPending ? (
+                    <Loader2 className="size-4 animate-spin" />
+                  ) : (
+                    <Radar className="size-4" />
+                  )}
+                  Scan
+                </Button>
+              )}
+            </div>
+
+            {/* Mode: headless by default, opt into a visible window for login-walled pages. */}
+            {!jobId && (
+              <label className="flex cursor-pointer items-center gap-2 px-1 text-[11px] text-muted-foreground">
+                <input
+                  type="checkbox"
+                  checked={headed}
+                  onChange={(e) => setHeaded(e.target.checked)}
+                  className="size-3.5 rounded border-border accent-primary"
+                />
+                Open a visible browser window (only needed if the page makes you log in first)
+              </label>
+            )}
+
+            {/* Live status + stop */}
+            {jobId && job && (
+              <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-border/60 bg-muted/30 px-3 py-2">
+                <span className="inline-flex items-center gap-2 text-xs">
+                  {running ? (
+                    <>
+                      <Loader2 className="size-3.5 animate-spin text-primary" />
+                      <span className="font-medium">Recording…</span>
+                    </>
+                  ) : (
+                    <>
+                      <CheckCircle2 className="size-3.5 text-emerald-500" />
+                      <span className="font-medium">Capture ended</span>
+                    </>
+                  )}
+                  <span className="text-muted-foreground">
+                    {visible.length} API request{visible.length === 1 ? '' : 's'} found
+                  </span>
+                </span>
+                {running && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => stop.mutate()}
+                    disabled={stop.isPending}
+                    className="h-8 gap-1.5 rounded-full active:scale-[0.98]"
+                  >
+                    {stop.isPending ? (
+                      <Loader2 className="size-3.5 animate-spin" />
+                    ) : (
+                      <CircleStop className="size-3.5" />
+                    )}
+                    Stop &amp; preview
+                  </Button>
+                )}
+              </div>
+            )}
+            {job?.error && (
+              <p className="flex items-center gap-1.5 text-xs text-destructive">
+                <AlertCircle className="size-3.5" />
+                {job.error}
+              </p>
+            )}
+
+            {/* Detected requests */}
+            {jobId && (
+              <>
+                {visible.length > 0 && (
+                  <div className="flex items-center justify-between px-1">
+                    <button
+                      type="button"
+                      onClick={toggleAll}
+                      className="inline-flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground hover:text-foreground"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={allSelected}
+                        readOnly
+                        className="size-3.5 rounded border-border accent-primary"
+                      />
+                      {allSelected ? 'Deselect all' : 'Select all'}
+                    </button>
+                    <span className="text-[11px] text-muted-foreground">
+                      {selected.length} selected
+                    </span>
+                  </div>
+                )}
+                <div className="max-h-[340px] space-y-1.5 overflow-auto rounded-xl border border-border/60 p-1.5">
+                  {visible.length === 0 ? (
+                    <p className="px-2 py-8 text-center text-xs text-muted-foreground">
+                      {running
+                        ? job?.headless
+                          ? 'Loading the page and recording its API calls…'
+                          : 'Waiting for the page to call its APIs — interact with the window if needed.'
+                        : 'No API calls captured. Try a page that loads data, or run with a visible window and log in first.'}
+                    </p>
+                  ) : (
+                    visible.map((r) => {
+                      const checked = !unchecked.has(r.id)
+                      return (
+                        <div
+                          key={r.id}
+                          className={cn(
+                            'flex items-center gap-2 rounded-lg border px-2.5 py-1.5 transition-colors',
+                            checked
+                              ? 'border-border/60 bg-card'
+                              : 'border-transparent bg-muted/20 opacity-60',
+                          )}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={() => toggle(r.id)}
+                            className="size-4 shrink-0 rounded border-border accent-primary"
+                            aria-label="Import this request"
+                          />
+                          <span
+                            className={cn(
+                              'w-14 shrink-0 font-mono text-[10px] font-bold',
+                              methodColor(r.method),
+                            )}
+                          >
+                            {r.method}
+                          </span>
+                          <span
+                            className="min-w-0 flex-1 truncate font-mono text-xs text-muted-foreground"
+                            title={r.url}
+                          >
+                            {r.url}
+                          </span>
+                          {r.count > 1 && (
+                            <span className="shrink-0 rounded-full bg-muted px-1.5 py-0.5 text-[10px] tabular-nums text-muted-foreground">
+                              ×{r.count}
+                            </span>
+                          )}
+                          {r.status !== undefined && r.status > 0 && (
+                            <span
+                              className={cn(
+                                'shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-semibold tabular-nums',
+                                statusTone(r.status),
+                              )}
+                            >
+                              {r.status}
+                            </span>
+                          )}
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => remove(r.id)}
+                            className="size-7 shrink-0 rounded-md text-muted-foreground hover:text-destructive"
+                            aria-label="Remove from list"
+                          >
+                            <Trash2 className="size-3.5" />
+                          </Button>
+                        </div>
+                      )
+                    })
+                  )}
+                </div>
+                <p className="flex items-center gap-1.5 px-1 text-[11px] text-muted-foreground">
+                  <Info className="size-3 shrink-0 text-sky-500" />
+                  Login/auth isn't imported — if an endpoint needs a token, add it as a header or{' '}
+                  <span className="font-mono">{'{{variable}}'}</span> after importing.
+                </p>
+              </>
+            )}
+          </div>
+        )}
+
+        <DialogFooter>
+          <Button
+            variant="ghost"
+            onClick={() => {
+              reset()
+              onOpenChange(false)
+            }}
+            disabled={importing}
+            className="rounded-full"
+          >
+            Close
+          </Button>
+          <Button
+            onClick={doImport}
+            disabled={!selected.length || importing}
+            className="gap-1.5 rounded-full active:scale-[0.98]"
+          >
+            {importing ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />}
+            Import {selected.length > 0 ? `${selected.length} ` : ''}request
+            {selected.length === 1 ? '' : 's'}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -1492,12 +2004,15 @@ function ApiTesting({ projectId }: { projectId: string }) {
   const [res, setRes] = useState<ApiSendResult | null>(null)
   const [aiResult, setAiResult] = useState<AiCheckResult | null>(null)
   const [curlOpen, setCurlOpen] = useState(false)
+  const [scanOpen, setScanOpen] = useState(false)
   const [manageEnvOpen, setManageEnvOpen] = useState(false)
   // Inline rename of a saved request: the name being renamed + the edited value.
   const [renaming, setRenaming] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
   // The saved request pending delete-confirmation (null = no dialog open).
   const [deleting, setDeleting] = useState<string | null>(null)
+  // Filter text for the saved-requests sidebar (shown once the collection grows).
+  const [filter, setFilter] = useState('')
 
   // Persist the working draft + which request is open (writing to localStorage is
   // an external-system sync, not a setState, so this effect is fine).
@@ -1753,6 +2268,23 @@ function ApiTesting({ projectId }: { projectId: string }) {
     send.mutate({ name: savedName, req: { ...draft } })
   }
 
+  // Send from anywhere with ⌘/Ctrl+Enter — the guard inside handleSend covers an
+  // empty URL. A ref keeps the listener stable while always calling the latest closure.
+  const handleSendRef = useRef(handleSend)
+  useEffect(() => {
+    handleSendRef.current = handleSend
+  })
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+        e.preventDefault()
+        handleSendRef.current()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
+
   const loadItem = (item: ApiRequestDef) => {
     setDraft({
       method: item.method,
@@ -1840,6 +2372,28 @@ function ApiTesting({ projectId }: { projectId: string }) {
 
   const bodyDisabled = draft.method === 'GET' || draft.method === 'HEAD'
 
+  // Request state, surfaced as a one-line status under the URL bar so the auto-save
+  // model is never a mystery: a brand-new request, edited-but-saving, or clean.
+  const savedItem = (saved ?? []).find((s) => s.name === selected)
+  const isDirty = !!selected && !sameAsSaved(savedItem, draft)
+  const isNewUnsaved = !selected && !!draft.url
+  const isMac =
+    typeof navigator !== 'undefined' && /Mac|iPhone|iPad|iPod/.test(navigator.platform)
+  const sendHint = isMac ? '⌘↵' : 'Ctrl+↵'
+
+  // Saved-requests sidebar filter — matches name, method or URL.
+  const filteredSaved = useMemo(() => {
+    const all = saved ?? []
+    const q = filter.trim().toLowerCase()
+    if (!q) return all
+    return all.filter(
+      (s) =>
+        s.name.toLowerCase().includes(q) ||
+        s.method.toLowerCase().includes(q) ||
+        s.url.toLowerCase().includes(q),
+    )
+  }, [saved, filter])
+
   // Toggle a preset criterion line in/out of the AI expectation text.
   const hasCriterion = (text: string) =>
     draft.aiExpect.split('\n').some((l) => l.trim() === `- ${text}`)
@@ -1876,6 +2430,15 @@ function ApiTesting({ projectId }: { projectId: string }) {
           </div>
         </div>
         <div className="flex shrink-0 flex-wrap items-center gap-2">
+          <Button
+            size="sm"
+            onClick={() => setScanOpen(true)}
+            className="gap-1.5 rounded-full active:scale-[0.98]"
+            title="Open a page in Chrome and auto-detect the APIs it calls"
+          >
+            <Radar className="size-3.5" />
+            Scan page for APIs
+          </Button>
           <Button
             variant="outline"
             size="sm"
@@ -1922,13 +2485,29 @@ function ApiTesting({ projectId }: { projectId: string }) {
               <Plus className="size-4" />
             </Button>
           </div>
+          {(saved ?? []).length > 4 && (
+            <div className="relative">
+              <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                value={filter}
+                onChange={(e) => setFilter(e.target.value)}
+                placeholder="Filter requests…"
+                className="h-8 rounded-lg pl-8 text-xs shadow-none"
+              />
+            </div>
+          )}
           <div className="space-y-1">
             {(saved ?? []).length === 0 && (
               <p className="rounded-xl border border-dashed border-border/60 px-3 py-4 text-center text-xs text-muted-foreground">
                 No saved requests yet.
               </p>
             )}
-            {(saved ?? []).map((item) => {
+            {(saved ?? []).length > 0 && filteredSaved.length === 0 && (
+              <p className="rounded-xl border border-dashed border-border/60 px-3 py-4 text-center text-xs text-muted-foreground">
+                No requests match “{filter.trim()}”.
+              </p>
+            )}
+            {filteredSaved.map((item) => {
               const isRenaming = renaming === item.name
               return (
                 <div
@@ -2117,21 +2696,41 @@ function ApiTesting({ projectId }: { projectId: string }) {
             <Button
               onClick={handleSend}
               disabled={!draft.url || send.isPending}
+              title={`Send (${sendHint})`}
               className="h-11 shrink-0 gap-2 rounded-full px-6 active:scale-[0.98] sm:h-12"
             >
               {send.isPending ? <Loader2 className="size-4 animate-spin" /> : <Send className="size-4" />}
               Send
+              <kbd className="hidden rounded bg-primary-foreground/15 px-1.5 py-0.5 font-mono text-[10px] font-medium text-primary-foreground/80 sm:inline">
+                {sendHint}
+              </kbd>
             </Button>
           </div>
 
-          {/* Auto-save hint — edits to a saved request persist automatically. */}
-          {selected && (
+          {/* Request state — makes the auto-save model obvious at a glance. */}
+          {isNewUnsaved ? (
             <p className="flex items-center gap-1.5 px-1 text-[11px] text-muted-foreground">
-              <Check className="size-3 text-emerald-500" />
-              Changes to <span className="font-medium text-foreground">{selected}</span> save
-              automatically.
+              <Info className="size-3 text-sky-500" />
+              New request — <span className="font-medium text-foreground">Send</span> to save it to
+              your collection.
             </p>
-          )}
+          ) : selected ? (
+            <p className="flex items-center gap-1.5 px-1 text-[11px] text-muted-foreground">
+              {isDirty ? (
+                <>
+                  <Loader2 className="size-3 animate-spin text-amber-500" />
+                  Saving changes to{' '}
+                  <span className="font-medium text-foreground">{selected}</span>…
+                </>
+              ) : (
+                <>
+                  <Check className="size-3 text-emerald-500" />
+                  <span className="font-medium text-foreground">{selected}</span> is saved — edits
+                  persist automatically.
+                </>
+              )}
+            </p>
+          ) : null}
 
           {/* Request config tabs */}
           <div className="rounded-2xl border border-border/60 bg-card p-4 shadow-none">
@@ -2394,6 +2993,14 @@ function ApiTesting({ projectId }: { projectId: string }) {
           setRes(null)
           setAiResult(null)
         }}
+      />
+
+      <ScanPageDialog
+        projectId={projectId}
+        open={scanOpen}
+        onOpenChange={setScanOpen}
+        existingNames={(saved ?? []).map((s) => s.name)}
+        onImported={() => queryClient.invalidateQueries({ queryKey: ['api-requests', projectId] })}
       />
 
       {manageEnvOpen && (

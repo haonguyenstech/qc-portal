@@ -34,6 +34,7 @@ import {
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
+import { RouteGuideTour } from '@/components/RouteGuideTour'
 import {
   Select,
   SelectContent,
@@ -949,6 +950,7 @@ function App() {
             <Route path="/projects" element={<Navigate to="/settings" replace />} />
           </Routes>
           )}
+          <RouteGuideTour />
         </div>
       </main>
     </div>

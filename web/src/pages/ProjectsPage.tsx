@@ -1799,7 +1799,7 @@ function RestartAppCard() {
 
   return (
     <>
-      <Card className="overflow-hidden rounded-3xl border-border/60 py-0 shadow-none">
+      <Card data-tour="restart-app" className="overflow-hidden rounded-3xl border-border/60 py-0 shadow-none">
         <CardContent className="flex flex-col gap-4 p-4 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex min-w-0 items-start gap-3">
             <span className="flex size-11 shrink-0 items-center justify-center rounded-2xl bg-foreground text-background shadow-none">
@@ -1943,7 +1943,7 @@ export default function ProjectsPage() {
       </header>
 
       <Tabs value={activeTab} onValueChange={onTabChange} className="space-y-6">
-        <TabsList className="grid h-auto w-full grid-cols-1 gap-3 rounded-none bg-transparent p-0 sm:grid-cols-2">
+        <TabsList data-tour="settings-tabs" className="grid h-auto w-full grid-cols-1 gap-3 rounded-none bg-transparent p-0 sm:grid-cols-2">
           <TabsTrigger
             value="projects"
             className="group h-auto justify-start gap-3 rounded-2xl border border-border/60 bg-card px-4 py-3 text-left shadow-none transition-all duration-200 hover:-translate-y-0.5 hover:border-border hover:bg-muted/60 hover:shadow-sm data-[state=active]:border-foreground data-[state=active]:bg-muted/60 data-[state=active]:text-foreground data-[state=active]:shadow-none"
@@ -1981,7 +1981,7 @@ export default function ProjectsPage() {
         </TabsList>
 
         <TabsContent value="projects" className="space-y-6">
-          <section className="overflow-hidden rounded-3xl border border-border/60 bg-card shadow-none">
+          <section data-tour="project-controls" className="overflow-hidden rounded-3xl border border-border/60 bg-card shadow-none">
             <div className="flex flex-col gap-4 bg-muted/40 p-5 sm:flex-row sm:items-center sm:justify-between">
               <div className="space-y-1">
                 <h2 className="text-lg font-semibold tracking-tight">Projects</h2>
@@ -1989,14 +1989,14 @@ export default function ProjectsPage() {
                   Add repo folders, choose the active workspace, and track setup readiness.
                 </p>
               </div>
-              <div className="flex shrink-0 items-center gap-2">
+              <div data-tour="project-actions" className="flex shrink-0 items-center gap-2">
                 <ImportProjectDialog />
                 <AddProjectDialog watchAddParam />
               </div>
             </div>
 
             {hasProjects && (
-              <div className="grid gap-3 p-4 sm:grid-cols-3">
+              <div data-tour="project-readiness" className="grid gap-3 p-4 sm:grid-cols-3">
                 <StatTile icon={FolderGit2} label="Registered" value={stats.total} />
                 <StatTile
                   icon={CheckCircle2}
@@ -2014,7 +2014,7 @@ export default function ProjectsPage() {
             )}
 
             {hasProjects && data.length > 3 && (
-              <div className="flex flex-col gap-3 border-t border-border/60 bg-muted/40 p-4 sm:flex-row sm:items-center sm:justify-between">
+              <div data-tour="project-search" className="flex flex-col gap-3 border-t border-border/60 bg-muted/40 p-4 sm:flex-row sm:items-center sm:justify-between">
                 <div className="relative w-full max-w-md">
                   <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
                   <Input
@@ -2032,7 +2032,7 @@ export default function ProjectsPage() {
           </section>
 
           {isLoading && (
-            <div className="grid gap-3 sm:grid-cols-2 2xl:grid-cols-3">
+            <div data-tour="project-cards" className="grid gap-3 sm:grid-cols-2 2xl:grid-cols-3">
               {Array.from({ length: 6 }).map((_, i) => (
                 <ProjectCardSkeleton key={i} />
               ))}

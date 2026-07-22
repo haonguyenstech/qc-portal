@@ -58,6 +58,16 @@ export function useXtermSession(
     setStatus('idle')
   }, [teardown])
 
+  // Inject text into the live shell as if typed (no trailing Enter, so the user can
+  // review/edit before submitting). Used by the Terminal page's slash-command picker.
+  const sendText = useCallback((text: string) => {
+    const ws = wsRef.current
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'input', data: text }))
+      termRef.current?.focus()
+    }
+  }, [])
+
   const connect = useCallback(() => {
     if (!hostRef.current || wsRef.current) return
     setStatus('connecting')
@@ -170,5 +180,5 @@ export function useXtermSession(
   // Always tear down on unmount.
   useEffect(() => () => teardown(), [teardown])
 
-  return { hostRef, status, connect, disconnect }
+  return { hostRef, status, connect, disconnect, sendText }
 }

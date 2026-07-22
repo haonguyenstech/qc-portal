@@ -1,7 +1,9 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
   AlertCircle,
+  Command,
+  CornerDownLeft,
   FolderGit2,
   Loader2,
   Plug,
@@ -11,9 +13,131 @@ import {
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 import { terminalAvailable } from '@/lib/api'
 import { useProjects } from '@/lib/project-context'
 import { useXtermSession } from '@/lib/useXtermSession'
+
+// Curated Claude Code slash commands — the ones QC engineers reach for most —
+// surfaced in a picker so they don't have to remember them. Clicking one types it
+// into the live Claude session (no Enter, so it can be reviewed before submitting).
+interface SlashCommand {
+  cmd: string
+  desc: string
+}
+const SLASH_GROUPS: { label: string; items: SlashCommand[] }[] = [
+  {
+    label: 'Session & context',
+    items: [
+      { cmd: '/clear', desc: 'Clear the conversation and free up the context window' },
+      { cmd: '/compact', desc: 'Summarize the conversation so far to reclaim context' },
+      { cmd: '/context', desc: 'Show how much of the context window is currently used' },
+      { cmd: '/rewind', desc: 'Roll back to an earlier checkpoint of the conversation' },
+      { cmd: '/resume', desc: 'Pick a previous session to continue' },
+    ],
+  },
+  {
+    label: 'Get work done',
+    items: [
+      { cmd: '/review', desc: 'Review a pull request or the current code changes' },
+      { cmd: '/init', desc: 'Scan the repo and generate a CLAUDE.md for it' },
+      { cmd: '/memory', desc: 'Open the memory / CLAUDE.md files to edit' },
+      { cmd: '/agents', desc: 'Create and manage specialized subagents' },
+    ],
+  },
+  {
+    label: 'Setup & configuration',
+    items: [
+      { cmd: '/model', desc: 'Switch the active model (Opus, Sonnet, Haiku…)' },
+      { cmd: '/mcp', desc: 'Manage MCP server connections' },
+      { cmd: '/config', desc: 'Open Claude Code settings' },
+      { cmd: '/permissions', desc: 'View and edit tool permission rules' },
+      { cmd: '/hooks', desc: 'Configure hooks that run around tool calls' },
+    ],
+  },
+  {
+    label: 'Info & help',
+    items: [
+      { cmd: '/help', desc: 'List every available slash command' },
+      { cmd: '/cost', desc: 'Show token usage and cost for this session' },
+      { cmd: '/status', desc: 'Show account, model, and connection status' },
+      { cmd: '/doctor', desc: 'Diagnose the Claude Code installation' },
+      { cmd: '/bug', desc: 'Report a bug to Anthropic' },
+    ],
+  },
+]
+
+function SlashCommandsDialog({
+  open,
+  onOpenChange,
+  connected,
+  onPick,
+}: {
+  open: boolean
+  onOpenChange: (v: boolean) => void
+  connected: boolean
+  onPick: (cmd: string) => void
+}) {
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-h-[85vh] gap-0 overflow-hidden rounded-3xl p-0 sm:max-w-2xl lg:max-w-3xl">
+        <DialogHeader className="border-b border-border/60 px-6 pb-4 pt-6">
+          <DialogTitle className="flex items-center gap-2 tracking-tight">
+            <Command className="size-4" />
+            Claude Code slash commands
+          </DialogTitle>
+          <DialogDescription>
+            {connected
+              ? 'Click a command to type it into the session — press Enter there to run it.'
+              : 'Connect a shell first, then a command will be typed into the Claude session.'}
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="max-h-[60vh] space-y-5 overflow-y-auto px-6 py-5">
+          {SLASH_GROUPS.map((group) => (
+            <div key={group.label} className="space-y-1.5">
+              <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                {group.label}
+              </div>
+              <div className="space-y-1">
+                {group.items.map((item) => (
+                  <button
+                    key={item.cmd}
+                    type="button"
+                    disabled={!connected}
+                    onClick={() => onPick(item.cmd)}
+                    className={cn(
+                      'group flex w-full items-center gap-3 rounded-2xl border border-border/60 bg-card px-3 py-2.5 text-left transition-all duration-200',
+                      connected
+                        ? 'hover:-translate-y-0.5 hover:border-border hover:shadow-sm active:scale-[0.99]'
+                        : 'cursor-not-allowed opacity-50',
+                    )}
+                  >
+                    <code className="shrink-0 rounded-xl border border-border/60 bg-muted/60 px-2 py-1 font-mono text-xs font-semibold text-foreground">
+                      {item.cmd}
+                    </code>
+                    <span className="min-w-0 flex-1 truncate text-sm text-muted-foreground">
+                      {item.desc}
+                    </span>
+                    {connected && (
+                      <CornerDownLeft className="size-3.5 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100" />
+                    )}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      </DialogContent>
+    </Dialog>
+  )
+}
 
 // A real device pseudo-terminal: Connect spawns the user's login shell on the
 // machine running the server (cwd = active project root) and streams it here over
@@ -25,7 +149,8 @@ export default function TerminalPage() {
     queryFn: terminalAvailable,
   })
 
-  const { hostRef, status, connect, disconnect } = useXtermSession(
+  const [cmdOpen, setCmdOpen] = useState(false)
+  const { hostRef, status, connect, disconnect, sendText } = useXtermSession(
     () => (activeProjectId ? { projectId: activeProjectId } : ({} as Record<string, string>)),
     // Auto-launch Claude (skipping the per-action permission prompts) once the
     // shell is connected, so Connect drops the user straight into a Claude session.
@@ -65,6 +190,15 @@ export default function TerminalPage() {
             </div>
           </div>
           <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              onClick={() => setCmdOpen(true)}
+              className="rounded-full active:scale-[0.98]"
+              title="Browse common Claude Code slash commands"
+            >
+              <Command className="h-4 w-4" />
+              Slash commands
+            </Button>
             <span
               className={cn(
                 'inline-flex items-center gap-1.5 rounded-xl px-2.5 py-1 text-xs font-medium',
@@ -185,6 +319,16 @@ export default function TerminalPage() {
           </div>
         </div>
       )}
+
+      <SlashCommandsDialog
+        open={cmdOpen}
+        onOpenChange={setCmdOpen}
+        connected={status === 'connected'}
+        onPick={(cmd) => {
+          sendText(cmd)
+          setCmdOpen(false)
+        }}
+      />
     </div>
   )
 }

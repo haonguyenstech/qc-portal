@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import ReactMarkdown from 'react-markdown'
@@ -13,6 +13,7 @@ import {
   PenLine,
   Plus,
   Save,
+  Search,
   Sparkles,
   Trash2,
   X,
@@ -338,12 +339,23 @@ export function MemoryNotes({
   })
   const [preview, setPreview] = useState<MemoryNote | null>(null)
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
+  const [query, setQuery] = useState('')
 
   const { data: notes } = useQuery({
     queryKey: ['memory', projectId],
     queryFn: () => listMemory(projectId),
     enabled: !!projectId,
   })
+
+  // Filter by name + description (case-insensitive); an "ai" query also matches
+  // AI-captured notes via their source tag.
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    if (!q || !notes) return notes ?? []
+    return notes.filter((n) =>
+      `${n.name} ${n.description ?? ''} ${n.source ?? ''}`.toLowerCase().includes(q),
+    )
+  }, [notes, query])
 
   const del = useMutation({
     mutationFn: (name: string) => deleteMemoryNote(name, projectId),
@@ -399,11 +411,35 @@ export function MemoryNotes({
         </div>
       </div>
 
+      {notes && notes.length > 0 && (
+        <div className="relative">
+          <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search notes by name or description…"
+            className="rounded-full pl-9 pr-9"
+          />
+          {query && (
+            <button
+              type="button"
+              onClick={() => setQuery('')}
+              aria-label="Clear search"
+              className="absolute right-3 top-1/2 -translate-y-1/2 rounded-full p-0.5 text-muted-foreground transition-colors hover:text-foreground"
+            >
+              <X className="size-4" />
+            </button>
+          )}
+        </div>
+      )}
+
       {notes && notes.length > 0 ? (
         <Card className="overflow-hidden rounded-3xl border-border/60 shadow-none">
           <div className="flex items-center justify-between gap-2 border-b border-border/60 bg-muted/40 px-4 py-2.5">
             <span className="text-xs font-semibold tracking-tight">
-              {notes.length} note{notes.length === 1 ? '' : 's'}
+              {query.trim()
+                ? `${filtered.length} of ${notes.length} note${notes.length === 1 ? '' : 's'}`
+                : `${notes.length} note${notes.length === 1 ? '' : 's'}`}
             </span>
             <span
               className="inline-flex items-center gap-1.5 font-mono text-[11px] text-muted-foreground"
@@ -413,8 +449,16 @@ export function MemoryNotes({
             </span>
           </div>
           <CardContent className="p-0">
+            {filtered.length === 0 ? (
+              <div className="flex flex-col items-center justify-center gap-1 px-4 py-10 text-center">
+                <p className="text-sm font-medium">No matching notes</p>
+                <p className="text-xs text-muted-foreground">
+                  Nothing matches “{query.trim()}”. Try a different term.
+                </p>
+              </div>
+            ) : (
             <ul className="divide-y divide-border/60">
-              {notes.map((n) => (
+              {filtered.map((n) => (
                 <li
                   key={n.name}
                   className="flex items-center gap-3 px-4 py-3 transition-colors hover:bg-muted/40"
@@ -489,6 +533,7 @@ export function MemoryNotes({
                 </li>
               ))}
             </ul>
+            )}
           </CardContent>
         </Card>
       ) : (

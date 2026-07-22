@@ -12,6 +12,7 @@ import {
   ChevronsUpDown,
   CircleDashed,
   CircleSlash,
+  Compass,
   Clock3,
   ExternalLink,
   History as HistoryIcon,
@@ -26,6 +27,7 @@ import {
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { GuideTour, type TourStep } from '@/components/GuideTour'
 import { listCrawledTickets, listRuns } from '@/lib/api'
 import { StatusBadge } from '@/lib/status'
 import { useProjects } from '@/lib/project-context'
@@ -450,6 +452,7 @@ export default function HistoryPage() {
   const [filter, setFilter] = useState<Filter>('all')
   const [query, setQuery] = useState('')
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
+  const [tourOpen, setTourOpen] = useState(false)
 
   const runs = data ?? []
   const hasRuns = runs.length > 0
@@ -558,10 +561,17 @@ export default function HistoryPage() {
     setCollapsed(allCollapsed ? new Set() : new Set(groups.map((g) => g.ticketId)))
   }
 
+  const tourSteps: TourStep[] = [
+    { selector: '[data-tour="header"]', title: 'Review QC run history', body: 'QC executions are grouped by ticket so you can compare repeated runs and open the evidence report for a specific result.', placement: 'bottom' },
+    { selector: '[data-tour="overview"]', title: 'Read the outcome at a glance', body: 'The overview shows the decision pass rate, run distribution, ticket count, average duration, and recent activity. Select a status to filter the history.', placement: 'bottom' },
+    { selector: '[data-tour="search"]', title: 'Find and organize runs', body: 'Search by ticket, project, or app URL. Expand or collapse ticket groups to focus on the runs you want to compare.', placement: 'bottom' },
+    { selector: '[data-tour="results"]', title: 'Open the evidence report', body: 'Each ticket group lists its runs newest first. Open a run to review its report, issues, screenshots, files, and event log.', placement: 'top' },
+  ]
+
   return (
     <div className="mx-auto max-w-6xl space-y-8">
       <header className="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
-        <div className="flex items-start gap-3">
+        <div data-tour="header" className="flex items-start gap-3">
           <span className="mt-0.5 flex size-11 shrink-0 items-center justify-center rounded-2xl bg-foreground text-background">
             <HistoryIcon className="size-5" />
           </span>
@@ -585,18 +595,24 @@ export default function HistoryPage() {
           </div>
         </div>
 
-        <Button asChild size="sm" className="w-fit rounded-full transition-all duration-200 active:scale-[0.98]">
-          <Link to="/qc-run">
-            <Sparkles className="size-4" />
-            New run
-          </Link>
-        </Button>
+        <div className="flex flex-wrap gap-2">
+          <Button variant="outline" size="sm" onClick={() => setTourOpen(true)} className="fixed bottom-5 right-5 z-40 w-fit gap-1.5 rounded-full bg-card shadow-lg transition-all duration-200 active:scale-[0.98]" title="Take a quick guided tour of this page">
+            <Compass className="size-3.5" />
+            Guide tour
+          </Button>
+          <Button asChild size="sm" className="w-fit rounded-full transition-all duration-200 active:scale-[0.98]">
+            <Link to="/qc-run">
+              <Sparkles className="size-4" />
+              New run
+            </Link>
+          </Button>
+        </div>
       </header>
 
       {!isLoading && !isError && hasRuns && (
         <>
           {/* Results overview — pass rate + distribution + filters, all in one band. */}
-          <section className="space-y-4 rounded-3xl border border-border/60 bg-card p-5 shadow-none">
+          <section data-tour="overview" className="space-y-4 rounded-3xl border border-border/60 bg-card p-5 shadow-none">
             <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-3">
               <div className="flex items-baseline gap-2.5">
                 <span className="text-4xl font-semibold tabular-nums tracking-tight">
@@ -649,7 +665,7 @@ export default function HistoryPage() {
           </section>
 
           {/* Toolbar — search + expand/collapse + result count. */}
-          <div className="rounded-3xl border border-border/60 bg-card p-3 shadow-none">
+          <div data-tour="search" className="rounded-3xl border border-border/60 bg-card p-3 shadow-none">
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <div className="group relative w-full sm:max-w-md">
                 <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground transition-colors group-focus-within:text-primary" />
@@ -770,7 +786,7 @@ export default function HistoryPage() {
       )}
 
       {!isLoading && !isError && hasRuns && groups.length > 0 && (
-        <div className="space-y-3">
+        <div data-tour="results" className="space-y-3">
           {groups.map((group) => (
             <TicketGroupCard
               key={group.ticketId}
@@ -781,6 +797,7 @@ export default function HistoryPage() {
           ))}
         </div>
       )}
+      <GuideTour steps={tourSteps} open={tourOpen} onClose={() => setTourOpen(false)} />
     </div>
   )
 }

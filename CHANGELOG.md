@@ -3,6 +3,32 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.10.2 — 2026-07-23
+
+**Guided tours, an API page scanner, a terminal slash-command picker, and searchable Memory**
+
+### Added
+
+- **Per-page guided tours.** A single **Guide tour** button now sits at the bottom-right of every
+  major page. Click it for a step-by-step walkthrough that spotlights each part of the page in turn —
+  Tickets, API Testing, Instructions, Skills, MCP, Templates, Prototype, Terminal, and Settings all
+  have one. The Instructions tour now actually walks through each tab (Instructions → Knowledge →
+  Memory → Accounts → AI Brain) so the panel changes as you read, instead of parking on the tab strip.
+- **Scan a page for its APIs.** On the **API Testing** page, paste a page URL and the portal drives a
+  browser to capture the XHR/fetch calls that page makes, then shows a deletable preview list you can
+  import as saved requests. It runs **headless by default** (no visible browser window); tick a box if
+  you'd rather watch it in your own Chrome profile.
+- **Slash-command picker in the Terminal.** A **Slash commands** button opens a dialog of the most
+  useful Claude Code commands (`/clear`, `/compact`, `/context`, `/review`, `/model`, `/mcp`, and more),
+  grouped by purpose. Click one to type it straight into the live session — you press Enter to run it.
+- **Search your Memory notes.** The **Memory** tab now has a search box that filters notes by name or
+  description as you type (and matches AI-captured notes too).
+
+### Changed
+
+- **Only one Guide tour button.** Consolidated the earlier duplicate per-page tour buttons into the
+  single bottom-right button so no page shows two.
+
 ## 0.10.1 — 2026-07-22
 
 **Tracker tokens are now honestly reported, and Azure DevOps tickets load reliably**
