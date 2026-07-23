@@ -6,6 +6,7 @@ import {
   CornerDownLeft,
   FolderGit2,
   Loader2,
+  Play,
   Plug,
   PlugZap,
   TerminalSquare,
@@ -20,6 +21,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { terminalAvailable } from '@/lib/api'
 import { useProjects } from '@/lib/project-context'
 import { useXtermSession } from '@/lib/useXtermSession'
@@ -65,6 +67,7 @@ const SLASH_GROUPS: { label: string; items: SlashCommand[] }[] = [
     label: 'Info & help',
     items: [
       { cmd: '/help', desc: 'List every available slash command' },
+      { cmd: '/usage', desc: 'Show plan usage and rate-limit status' },
       { cmd: '/cost', desc: 'Show token usage and cost for this session' },
       { cmd: '/status', desc: 'Show account, model, and connection status' },
       { cmd: '/doctor', desc: 'Diagnose the Claude Code installation' },
@@ -82,7 +85,7 @@ function SlashCommandsDialog({
   open: boolean
   onOpenChange: (v: boolean) => void
   connected: boolean
-  onPick: (cmd: string) => void
+  onPick: (cmd: string, run: boolean) => void
 }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -94,7 +97,7 @@ function SlashCommandsDialog({
           </DialogTitle>
           <DialogDescription>
             {connected
-              ? 'Click a command to type it into the session — press Enter there to run it.'
+              ? 'Click a command to type it into the session (review, then Enter), or hit Run to type it and send it right away.'
               : 'Connect a shell first, then a command will be typed into the Claude session.'}
           </DialogDescription>
         </DialogHeader>
@@ -107,28 +110,69 @@ function SlashCommandsDialog({
               </div>
               <div className="space-y-1">
                 {group.items.map((item) => (
-                  <button
+                  <div
                     key={item.cmd}
-                    type="button"
-                    disabled={!connected}
-                    onClick={() => onPick(item.cmd)}
                     className={cn(
-                      'group flex w-full items-center gap-3 rounded-2xl border border-border/60 bg-card px-3 py-2.5 text-left transition-all duration-200',
+                      'group flex w-full items-center gap-3 rounded-2xl border border-border/60 bg-card px-3 py-2.5 transition-all duration-200',
                       connected
-                        ? 'hover:-translate-y-0.5 hover:border-border hover:shadow-sm active:scale-[0.99]'
-                        : 'cursor-not-allowed opacity-50',
+                        ? 'hover:border-border hover:shadow-sm'
+                        : 'opacity-50',
                     )}
                   >
-                    <code className="shrink-0 rounded-xl border border-border/60 bg-muted/60 px-2 py-1 font-mono text-xs font-semibold text-foreground">
-                      {item.cmd}
-                    </code>
-                    <span className="min-w-0 flex-1 truncate text-sm text-muted-foreground">
-                      {item.desc}
-                    </span>
-                    {connected && (
-                      <CornerDownLeft className="size-3.5 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100" />
-                    )}
-                  </button>
+                    {/* Click the row body: type the command in for review (no Enter). */}
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <button
+                          type="button"
+                          disabled={!connected}
+                          onClick={() => onPick(item.cmd, false)}
+                          className={cn(
+                            'flex min-w-0 flex-1 items-center gap-3 text-left',
+                            connected ? 'active:scale-[0.99]' : 'cursor-not-allowed',
+                          )}
+                        >
+                          <code className="shrink-0 rounded-xl border border-border/60 bg-muted/60 px-2 py-1 font-mono text-xs font-semibold text-foreground">
+                            {item.cmd}
+                          </code>
+                          <span className="min-w-0 flex-1 truncate text-sm text-muted-foreground">
+                            {item.desc}
+                          </span>
+                          {connected && (
+                            <CornerDownLeft className="size-3.5 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100" />
+                          )}
+                        </button>
+                      </TooltipTrigger>
+                      <TooltipContent>
+                        {connected
+                          ? 'Insert — type it in, then press Enter yourself'
+                          : 'Connect a shell first'}
+                      </TooltipContent>
+                    </Tooltip>
+                    {/* Run icon: type the command AND send Enter immediately. */}
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <button
+                          type="button"
+                          disabled={!connected}
+                          onClick={() => onPick(item.cmd, true)}
+                          aria-label={`Run ${item.cmd} now`}
+                          className={cn(
+                            'flex size-8 shrink-0 items-center justify-center rounded-full border border-border/60 bg-muted/60 text-muted-foreground transition-all duration-200',
+                            connected
+                              ? 'hover:bg-foreground hover:text-background active:scale-[0.95]'
+                              : 'cursor-not-allowed',
+                          )}
+                        >
+                          <Play className="size-3.5" />
+                        </button>
+                      </TooltipTrigger>
+                      <TooltipContent>
+                        {connected
+                          ? `Run now — type ${item.cmd} and send Enter`
+                          : 'Connect a shell first'}
+                      </TooltipContent>
+                    </Tooltip>
+                  </div>
                 ))}
               </div>
             </div>
@@ -324,8 +368,9 @@ export default function TerminalPage() {
         open={cmdOpen}
         onOpenChange={setCmdOpen}
         connected={status === 'connected'}
-        onPick={(cmd) => {
-          sendText(cmd)
+        onPick={(cmd, run) => {
+          // Run: type the command and press Enter (\r). Otherwise just type it in.
+          sendText(run ? `${cmd}\r` : cmd)
           setCmdOpen(false)
         }}
       />

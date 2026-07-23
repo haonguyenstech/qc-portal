@@ -3,6 +3,25 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.10.3 — 2026-07-23
+
+**Terminal slash commands: run with one click, clearer tooltips, and a new /usage entry**
+
+### Added
+
+- **Run a slash command with one click.** Each command in the Terminal's **Slash commands** dialog now
+  has a **Run** (▶) button that types the command into the live session *and* presses Enter for you.
+  Clicking the command text still just inserts it (so you can review and press Enter yourself) — now you
+  can pick whichever you want per command.
+- **`/usage` added to the list.** Shows your plan usage and rate-limit status, alongside the existing
+  `/help`, `/cost`, and `/status` commands.
+
+### Changed
+
+- **Clearer tooltips on the two actions.** Hovering the command text explains it inserts without Enter;
+  hovering the Run button explains it types the command and sends Enter right away — so the two ways to
+  use a command are no longer ambiguous.
+
 ## 0.10.2 — 2026-07-23
 
 **Guided tours, an API page scanner, a terminal slash-command picker, and searchable Memory**
