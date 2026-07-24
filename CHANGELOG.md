@@ -3,6 +3,20 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.11.1 — 2026-07-24
+
+**Import now tells you why a .zip won't load, instead of a vague error**
+
+### Fixed
+
+- **Clearer "import project" errors.** Importing a project from a `.zip` used to fail with a single
+  unhelpful message — *"could not read that .zip file"* — no matter what was actually wrong. Import now
+  names the real cause and how to fix it: an **incomplete or interrupted download** ("re-download or
+  re-export and import the fresh file"), a **file that isn't really a zip** (e.g. a renamed or partly
+  downloaded file — it now checks the zip signature up front), and a **password-protected zip** (not
+  supported — re-export from QC Portal, whose exports are never encrypted). Valid exports import exactly
+  as before.
+
 ## 0.11.0 — 2026-07-24
 
 **Database page, native app testing on a device, and Appium support for mobile runs**

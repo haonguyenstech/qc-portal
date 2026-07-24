@@ -482,11 +482,36 @@ projectsRouter.post(
       return res.status(409).json({ error: `a folder named "${safe}" already exists here` })
     }
 
+    // Diagnose an unreadable upload precisely instead of the old opaque
+    // "could not read that .zip file", which hid the real cause (a partial
+    // download, a non-zip file renamed .zip, or a password-protected archive).
+    // Every real .zip starts with the "PK" signature (0x50 0x4B) — a local file
+    // header (PK\x03\x04) or an empty-archive end record (PK\x05\x06).
+    const hasZipSignature =
+      zipBuffer.length >= 2 && zipBuffer[0] === 0x50 && zipBuffer[1] === 0x4b
+    if (!hasZipSignature) {
+      return res.status(400).json({
+        error:
+          'That file is not a .zip archive — its header is missing the "PK" zip signature. ' +
+          'Pick the .zip you exported from QC Portal (with the Export button on a project card), ' +
+          'not a renamed or only partially-downloaded file.',
+      })
+    }
+
     let zip: JSZip
     try {
       zip = await JSZip.loadAsync(zipBuffer)
-    } catch {
-      return res.status(400).json({ error: 'could not read that .zip file' })
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : ''
+      const friendly = /encrypted/i.test(reason)
+        ? 'This .zip is password-protected, which is not supported — re-export the project ' +
+          'from QC Portal (its exports are never encrypted) and import that file.'
+        : /end of central directory|end of data|corrupt/i.test(reason)
+          ? 'This .zip looks incomplete or corrupted — its central directory could not be read. ' +
+            'A partial or interrupted download is the usual cause; re-download or re-export the ' +
+            'project and import the fresh file.'
+          : `Could not read that .zip file${reason ? `: ${reason}` : ''}.`
+      return res.status(400).json({ error: friendly })
     }
     const files = Object.values(zip.files).filter((f) => !f.dir)
     if (files.length === 0) return res.status(400).json({ error: 'the .zip is empty' })
@@ -508,9 +533,14 @@ projectsRouter.post(
       }
     } catch (err) {
       fs.rmSync(dest, { recursive: true, force: true }) // roll back a partial extract
-      return res
-        .status(500)
-        .json({ error: err instanceof Error ? err.message : 'failed to extract the zip' })
+      const reason = err instanceof Error ? err.message : ''
+      // An encrypted zip loads its directory fine and only fails here, when a
+      // member is actually read — surface that as an actionable message.
+      const friendly = /encrypted/i.test(reason)
+        ? 'This .zip is password-protected, which is not supported — re-export the project from ' +
+          'QC Portal (its exports are never encrypted) and import that file.'
+        : reason || 'failed to extract the zip'
+      return res.status(400).json({ error: friendly })
     }
 
     const project = createProject(name.trim(), dest, false)
