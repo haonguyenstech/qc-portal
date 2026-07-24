@@ -10,6 +10,7 @@ import {
   CheckCircle2,
   ClipboardList,
   Code2,
+  Database,
   FileCog,
   FileText,
   FolderGit2,
@@ -51,6 +52,7 @@ import TestCaseJobWatcher from '@/components/TestCaseJobWatcher'
 import CrawlJobWatcher from '@/components/CrawlJobWatcher'
 import VerifyJobWatcher from '@/components/VerifyJobWatcher'
 import SourceJobWatcher from '@/components/SourceJobWatcher'
+import DatabaseJobWatcher from '@/components/DatabaseJobWatcher'
 import RunPage from '@/pages/RunPage'
 import RunningPage from '@/pages/RunningPage'
 import HistoryPage from '@/pages/HistoryPage'
@@ -66,6 +68,7 @@ import ProjectSettingsPage from '@/pages/ProjectSettingsPage'
 import InstructionsPage from '@/pages/InstructionsPage'
 import OverviewPage from '@/pages/OverviewPage'
 import SourceCodePage from '@/pages/SourceCodePage'
+import DatabasePage from '@/pages/DatabasePage'
 import DiagramsPage from '@/pages/DiagramsPage'
 import VerifyDesignPage from '@/pages/VerifyDesignPage'
 import TerminalPage from '@/pages/TerminalPage'
@@ -118,6 +121,7 @@ const navGroups: { label: string; items: NavItemDef[] }[] = [
     items: [
       { to: '/overview', label: 'Overview', icon: BookOpen, end: false },
       { to: '/source', label: 'Source Code', icon: Code2, end: false },
+      { to: '/database', label: 'Database', icon: Database, end: false },
       // Diagrams hidden temporarily — restore this entry to bring it back.
       // { to: '/diagrams', label: 'Diagrams', icon: Workflow, end: false },
     ],
@@ -833,6 +837,7 @@ function App() {
       <CrawlJobWatcher />
       <VerifyJobWatcher />
       <SourceJobWatcher />
+      <DatabaseJobWatcher />
       <NotificationBell />
       <aside
         className={cn(
@@ -928,6 +933,7 @@ function App() {
             <Route path="/qc-run" element={<RunPage />} />
             <Route path="/overview" element={<OverviewPage />} />
             <Route path="/source" element={<SourceCodePage />} />
+            <Route path="/database" element={<DatabasePage />} />
             <Route path="/diagrams" element={<DiagramsPage />} />
             <Route path="/running" element={<RunningPage />} />
             <Route path="/history" element={<HistoryPage />} />

@@ -858,6 +858,183 @@ export function openSourceFolder(
   })
 }
 
+// ---- Databases (connect one or more MySQL/Postgres/SQL Server/SQLite databases, each with a tag) ----
+
+export type DbKind = 'mysql' | 'postgres' | 'sqlserver'
+
+export interface DbKindInfo {
+  value: DbKind
+  label: string
+  defaultPort: number
+}
+
+export interface DatabaseConn {
+  id: string
+  tag: string // "Backend DB", "Analytics DB", …
+  kind: DbKind
+  host: string
+  port: number
+  database: string // db name
+  username: string
+  ssl: boolean
+  lastSync: string // ISO
+  serverVersion: string
+  tableCount: number
+  hasPassword: boolean // a password is stored (never returned raw)
+  credential: { label: string; passwordPreview: string } | null
+}
+
+export interface DatabaseInfo {
+  connected: boolean
+  rootPath: string
+  kinds: DbKindInfo[]
+  databases: DatabaseConn[]
+}
+
+export type DbJobKind = 'connect' | 'sync'
+
+export interface DbLogLine {
+  time: string
+  level: 'info' | 'success' | 'error'
+  text: string
+}
+
+export interface DbJob {
+  id: string
+  kind: DbJobKind
+  projectId: string
+  databaseId: string
+  tag: string
+  status: 'running' | 'done' | 'error'
+  error?: string
+  logs: DbLogLine[]
+  result?: { serverVersion: string; tableCount: number; mapDoc: string | null }
+  createdAt: string
+  updatedAt: string
+}
+
+/** Read all of the project's connected databases + the supported database kinds. */
+export function getDatabases(projectId: string): Promise<DatabaseInfo> {
+  return request(`/api/database?projectId=${encodeURIComponent(projectId)}`)
+}
+
+/** Read one database's stored password (for the edit-&-reconnect prefill). */
+export function getDatabaseCredential(
+  projectId: string,
+  databaseId: string,
+): Promise<{ password: string }> {
+  return request(
+    `/api/database/credential?projectId=${encodeURIComponent(projectId)}&databaseId=${encodeURIComponent(databaseId)}`,
+  )
+}
+
+/**
+ * Connect + introspect a database under a tag. Runs as a background job — poll
+ * getDatabaseJob. Pass databaseId to re-point an existing one ("Edit & reconnect").
+ */
+export function connectDatabase(body: {
+  projectId: string
+  kind: DbKind
+  host?: string
+  port?: number
+  database: string
+  username?: string
+  password?: string
+  ssl?: boolean
+  tag?: string
+  databaseId?: string
+}): Promise<{ jobId: string; job: DbJob }> {
+  return request(`/api/database/connect?projectId=${encodeURIComponent(body.projectId)}`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+}
+
+/**
+ * Quick connection check — connects & reads the schema but persists nothing.
+ * Resolves with { ok, ... } even on failure (never throws for a bad connection).
+ */
+export function testDatabaseConnection(body: {
+  projectId: string
+  kind: DbKind
+  host?: string
+  port?: number
+  database: string
+  username?: string
+  password?: string
+  ssl?: boolean
+  databaseId?: string
+}): Promise<{ ok: boolean; serverVersion?: string; tableCount?: number; error?: string }> {
+  return request(`/api/database/test?projectId=${encodeURIComponent(body.projectId)}`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+}
+
+/** Refresh one connected database (re-introspect the schema). Runs as a background job. */
+export function syncDatabase(
+  projectId: string,
+  databaseId: string,
+): Promise<{ jobId: string; job: DbJob }> {
+  return request(`/api/database/sync?projectId=${encodeURIComponent(projectId)}`, {
+    method: 'POST',
+    body: JSON.stringify({ databaseId }),
+  })
+}
+
+/** Forget one connected database (the database server itself is untouched). */
+export function disconnectDatabase(projectId: string, databaseId: string): Promise<{ ok: true }> {
+  return request(`/api/database/disconnect?projectId=${encodeURIComponent(projectId)}`, {
+    method: 'POST',
+    body: JSON.stringify({ databaseId }),
+  })
+}
+
+export function getDatabaseJob(jobId: string, projectId: string): Promise<{ job: DbJob }> {
+  return request(
+    `/api/database/jobs/${encodeURIComponent(jobId)}?projectId=${encodeURIComponent(projectId)}`,
+  )
+}
+
+export function listDatabaseJobs(projectId: string): Promise<{ jobs: DbJob[] }> {
+  return request(`/api/database/jobs?projectId=${encodeURIComponent(projectId)}`)
+}
+
+export interface DbQueryResult {
+  columns: string[]
+  rows: unknown[][]
+  rowCount: number
+  truncated: boolean
+}
+
+/** Run a READ-ONLY SQL query against a connected database. Resolves even on failure. */
+export function runDatabaseQuery(
+  projectId: string,
+  databaseId: string,
+  sql: string,
+): Promise<{ ok: boolean; result?: DbQueryResult; error?: string }> {
+  return request(`/api/database/query?projectId=${encodeURIComponent(projectId)}`, {
+    method: 'POST',
+    body: JSON.stringify({ databaseId, sql }),
+  })
+}
+
+/**
+ * Ask a natural-language question — AI writes a read-only SELECT, runs it, and
+ * returns the SQL + results. Resolves even on failure (sql echoed when possible).
+ */
+export function askDatabase(
+  projectId: string,
+  databaseId: string,
+  question: string,
+  model?: string,
+): Promise<{ ok: boolean; sql?: string; result?: DbQueryResult; error?: string }> {
+  return request(`/api/database/ask?projectId=${encodeURIComponent(projectId)}`, {
+    method: 'POST',
+    body: JSON.stringify({ databaseId, question, model }),
+  })
+}
+
 export interface CrawledTicket {
   name: string // folder path under testing/tickets/ — nested (PARENT/CHILD) for subtasks, else the sanitized displayId
   parent?: string | null // `name` of the enclosing ticket folder when nested, else null/undefined

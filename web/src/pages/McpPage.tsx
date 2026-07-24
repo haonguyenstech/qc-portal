@@ -107,6 +107,8 @@ const SERVER_PURPOSE: Record<string, string> = {
     'Drives a real browser — navigating, clicking, typing, screenshotting — so QC runs can exercise and verify the web app.',
   'mobile-mcp':
     'Drives a connected iOS/Android device or simulator so QC runs can test the mobile app.',
+  'appium-mcp':
+    'Drives a connected iOS/Android device or simulator through Appium (UiAutomator2/XCUITest) so QC runs can test the mobile app.',
 }
 
 /** Small info glyph with a hover/focus tooltip explaining a server's purpose. */
@@ -162,6 +164,12 @@ const CAPABILITY: Record<
     action: 'Open Google & close',
   },
   'mobile-mcp': {
+    needsInput: false,
+    inputLabel: '',
+    placeholder: '',
+    action: 'List devices',
+  },
+  'appium-mcp': {
     needsInput: false,
     inputLabel: '',
     placeholder: '',
@@ -312,15 +320,19 @@ function ResultLine({ result }: { result: { ok: boolean; warn?: boolean; detail:
  * No devices → amber notice, test stays disabled.
  */
 function MobileFunctionalTest({
+  name,
+  label,
   projectId,
   onClose,
 }: {
+  name: string
+  label: string
   projectId: string
   onClose: () => void
 }) {
   const [device, setDevice] = useState('')
-  const detect = useMutation({ mutationFn: () => runMcpTest('mobile-mcp', projectId, '') })
-  const runTest = useMutation({ mutationFn: (dev: string) => runMcpTest('mobile-mcp', projectId, dev) })
+  const detect = useMutation({ mutationFn: () => runMcpTest(name, projectId, '') })
+  const runTest = useMutation({ mutationFn: (dev: string) => runMcpTest(name, projectId, dev) })
 
   // The component is freshly mounted each time the dialog opens (parent gates it),
   // so a bare mount-time detect is enough — no state to reset.
@@ -352,7 +364,7 @@ function MobileFunctionalTest({
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Smartphone className="h-4 w-4" />
-            Functional test — Mobile
+            Functional test — {label}
           </DialogTitle>
           <DialogDescription>
             Detects connected devices/simulators, then drives the one you pick to confirm the server
@@ -659,6 +671,7 @@ function ConnectServices({
   function serverLabel(name: string): string {
     if (name === 'playwright') return 'Playwright'
     if (name === 'mobile-mcp') return 'Mobile'
+    if (name === 'appium-mcp') return 'Appium'
     return OAUTH_META[name as McpOauthProvider]?.label ?? name
   }
 
@@ -683,8 +696,8 @@ function ConnectServices({
     const name = capDialogName
     const spec = name ? CAPABILITY[name] : null
     if (!name || !spec) return null
-    // Mobile has its own auto-detect → pick device → run dialog (rendered separately).
-    if (name === 'mobile-mcp') return null
+    // Mobile & Appium have their own auto-detect → pick device → run dialog (separate).
+    if (name === 'mobile-mcp' || name === 'appium-mcp') return null
     const running = capTestingName === name
     const result = capResults[name]
     const input = capInputs[name] ?? ''
@@ -818,6 +831,30 @@ function ConnectServices({
     },
     onError: (err) =>
       toast.error('Failed to add Mobile', {
+        description: err instanceof Error ? err.message : 'Unknown error',
+      }),
+  })
+
+  const appiumAdded = existingNames.includes('appium-mcp')
+  const addAppium = useMutation({
+    mutationFn: () =>
+      addMcp(
+        {
+          name: 'appium-mcp',
+          command: 'npx',
+          args: ['-y', 'appium-mcp@latest'],
+          type: 'stdio',
+        },
+        projectId,
+      ),
+    onSuccess: () => {
+      toast.success('Appium added', {
+        description: 'Needs Node 22 or 24 (not 23), JDK, Android SDK / Xcode. Connect a device, then test.',
+      })
+      return refresh()
+    },
+    onError: (err) =>
+      toast.error('Failed to add Appium', {
         description: err instanceof Error ? err.message : 'Unknown error',
       }),
   })
@@ -1446,6 +1483,68 @@ function ConnectServices({
     )
   }
 
+  // Appium (appium/appium-mcp) needs no token — one-click project setup. Unlike
+  // mobile-mcp it rides the full Appium stack (UiAutomator2 / XCUITest), so it needs
+  // Node 22+, a JDK, and the Android SDK / Xcode on the machine running the server.
+  function appiumCard() {
+    return (
+      <Card
+        key="appium-mcp"
+        className="flex h-full flex-col gap-3 rounded-3xl border-border/60 p-5 shadow-none transition-all duration-200 hover:-translate-y-0.5 hover:border-border hover:shadow-sm"
+      >
+        <div className="flex items-center gap-3">
+          <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl border border-border/60 bg-muted/60 text-muted-foreground">
+            <Smartphone className="h-4 w-4" />
+          </span>
+          <div className="min-w-0 leading-tight">
+            <div className="flex items-center gap-1.5 text-sm font-semibold tracking-tight">
+              <span className="truncate">Appium</span>
+              <PurposeTip name="appium-mcp" label="Appium" />
+            </div>
+            <div className="truncate text-xs text-muted-foreground">iOS / Android driver</div>
+          </div>
+          <CardStatusBadge
+            configured={appiumAdded}
+            status={statusByName['appium-mcp']}
+            checking={checkingStatus}
+          />
+        </div>
+        {checkingStatus ? (
+          <Button size="sm" disabled className="mt-auto w-full rounded-full">
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            Checking status…
+          </Button>
+        ) : appiumAdded ? (
+          connectedActions('appium-mcp')
+        ) : (
+          <div className="mt-auto space-y-2">
+            <p className="flex items-start gap-1.5 rounded-xl bg-amber-50 px-2.5 py-2 text-[11px] leading-snug text-amber-700">
+              <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              <span>
+                Runs on the full Appium stack — needs <span className="font-medium">Node 22 or 24</span>{' '}
+                (not 23), a JDK, and Android SDK / Xcode on this machine. On Node 23 it fails to
+                connect.
+              </span>
+            </p>
+            <Button
+              size="sm"
+              onClick={() => addAppium.mutate()}
+              disabled={addAppium.isPending}
+              className="w-full rounded-full transition-all duration-200 active:scale-[0.98]"
+            >
+              {addAppium.isPending ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Plug className="h-3.5 w-3.5" />
+              )}
+              Connect
+            </Button>
+          </div>
+        )}
+      </Card>
+    )
+  }
+
   return (
     <div className="space-y-6">
       <div className="flex items-center gap-2">
@@ -1485,12 +1584,18 @@ function ConnectServices({
       >
         {playwrightCard()}
         {mobileCard()}
+        {appiumCard()}
       </McpGroup>
 
       {functionalTestDialog()}
       {detailsDialog()}
-      {capDialogName === 'mobile-mcp' && (
-        <MobileFunctionalTest projectId={projectId} onClose={() => setCapDialogName(null)} />
+      {(capDialogName === 'mobile-mcp' || capDialogName === 'appium-mcp') && (
+        <MobileFunctionalTest
+          name={capDialogName}
+          label={serverLabel(capDialogName)}
+          projectId={projectId}
+          onClose={() => setCapDialogName(null)}
+        />
       )}
     </div>
   )

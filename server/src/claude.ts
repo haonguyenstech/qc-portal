@@ -111,13 +111,22 @@ export function runQc(
       lines.push(`ClickUp ticket: ${opts.ticketId}`)
     }
     if (opts.testTarget === 'app-mobile') {
+      // opts.appUrl carries the app's NAME / package / bundle id for this target
+      // (never a URL). "Mobile app" is the placeholder stored when none was given.
+      const appName = opts.appUrl && opts.appUrl !== 'Mobile app' ? opts.appUrl.trim() : ''
       lines.push(
         ``,
         `TEST TARGET: a NATIVE APP already installed on a MOBILE device — there is no URL. ` +
-          `Do NOT use the desktop/Playwright browser. Use the Mobile MCP tools: list the available ` +
+          (appName
+            ? `The app under test is "${appName}" (a display name or package / bundle id) — find it ` +
+              `on the device by this name and launch it. `
+            : '') +
+          `Do NOT use the desktop/Playwright browser. Use the connected mobile-automation MCP tools ` +
+          `(Mobile MCP or Appium — whichever this project has): list the available ` +
           `devices and drive a booted simulator/device (if none is booted, stop and report that as a ` +
           `blocker). The app under test must already be INSTALLED on the device — launch it; if it is ` +
-          `not installed, stop and report that as a blocker rather than trying to install it. Perform ` +
+          `not installed${appName ? ` (or no app matching "${appName}" is present)` : ''}, stop and ` +
+          `report that as a blocker rather than trying to install it. Perform ` +
           `ALL interaction and verification on the device, capturing mobile screenshots as evidence.`,
       )
     } else {
@@ -126,7 +135,8 @@ export function runQc(
         lines.push(
           ``,
           `TEST TARGET: the web app above, opened on a MOBILE device — do NOT use the desktop/Playwright ` +
-            `browser. Use the Mobile MCP tools: list the available devices and drive a booted ` +
+            `browser. Use the connected mobile-automation MCP tools (Mobile MCP or Appium — whichever ` +
+            `this project has): list the available devices and drive a booted ` +
             `simulator/device (if none is booted, stop and report that as a blocker). Open the App URL ` +
             `in the device's mobile browser and perform ALL interaction and verification on that device, ` +
             `capturing mobile screenshots as evidence. Test the responsive/mobile experience.`,

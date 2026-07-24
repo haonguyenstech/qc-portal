@@ -154,8 +154,9 @@ type TestTarget = 'web' | 'web-mobile' | 'app-mobile'
 const TEST_TARGET_KEY = 'qc.runTestTarget'
 const TEST_TARGETS: TestTarget[] = ['web', 'web-mobile', 'app-mobile']
 
-// Mobile targets are not ready yet — shown as "Coming soon" and unselectable.
-const COMING_SOON_TARGETS: TestTarget[] = ['web-mobile', 'app-mobile']
+// "Web on mobile" and "App on device" are both live (they drive a booted device
+// via Mobile MCP / Appium). Nothing is coming-soon right now.
+const COMING_SOON_TARGETS: TestTarget[] = []
 
 function loadTestTarget(): TestTarget {
   try {
@@ -182,6 +183,26 @@ function saveBugTickets(projectId: string, ids: string[]): void {
   try {
     if (ids.length) localStorage.setItem(BUG_TICKETS_KEY + projectId, JSON.stringify(ids))
     else localStorage.removeItem(BUG_TICKETS_KEY + projectId)
+  } catch {
+    /* ignore quota / disabled storage */
+  }
+}
+
+// For the "App on device" target the run has no URL — instead the QC engineer
+// names the app that's already installed on the device (a display name or a
+// package / bundle id). Persisted per project so it survives a reload.
+const APP_NAME_KEY = 'qc.appName.'
+function loadAppName(projectId: string): string {
+  try {
+    return localStorage.getItem(APP_NAME_KEY + projectId) ?? ''
+  } catch {
+    return ''
+  }
+}
+function saveAppName(projectId: string, name: string): void {
+  try {
+    if (name.trim()) localStorage.setItem(APP_NAME_KEY + projectId, name.trim())
+    else localStorage.removeItem(APP_NAME_KEY + projectId)
   } catch {
     /* ignore quota / disabled storage */
   }
@@ -577,6 +598,9 @@ export default function RunPage() {
   // need test cases. A ticket is a bug ONLY when tagged here (never by default).
   const [bugTickets, setBugTickets] = useState<Set<string>>(new Set())
   const [appUrl, setAppUrl] = useState('')
+  // Name (or package / bundle id) of the app installed on the device — used only
+  // by the "App on device" target, which has no URL.
+  const [appName, setAppName] = useState('')
   // Per-ticket App URL overrides for multi-ticket queues (ticket id → url).
   // Blank = the ticket uses the shared App URL field as its default.
   const [ticketUrls, setTicketUrls] = useState<Record<string, string>>({})
@@ -642,7 +666,7 @@ export default function RunPage() {
     {
       selector: '[data-tour="destination"]',
       title: 'Point QC at the live app',
-      body: 'Web is the available target today. Enter a full staging or deployed URL, then use Check to confirm the portal server can reach it before you run.',
+      body: 'Pick a target: Web (desktop browser), Web on mobile (opens the URL on a booted device), or App on device (drives a native app already installed on the device). For web targets, enter a full staging URL and use Check to confirm it is reachable; for App on device, name the installed app instead.',
       placement: 'top',
     },
     {
@@ -735,6 +759,7 @@ export default function RunPage() {
     const lead = saved?.ticketId ? [saved.ticketId] : []
     setSimpleTickets([...new Set([...lead, ...savedBugs])].slice(0, MAX_QUEUE_TICKETS))
     setAppUrl(saved?.appUrl ?? '')
+    setAppName(loadAppName(activeProject.id))
     setInstructions(saved?.instructions ?? '')
     // The project's default skill (set on the Skills page) wins on load; otherwise
     // restore the last-used skill. Reconciled against the skills list below.
@@ -775,14 +800,20 @@ export default function RunPage() {
   // app-mobile drives a native app already installed on the device — there's no URL,
   // so the URL field is hidden and never required/validated in that mode.
   const isAppTarget = testTarget === 'app-mobile'
-  // The MCP server this target drives the browser/device with. Web → Playwright;
-  // mobile targets → Mobile MCP. The run can't proceed until it's configured.
-  const requiredMcpServer = testTarget === 'web' ? 'playwright' : 'mobile-mcp'
-  const requiredMcpLabel = testTarget === 'web' ? 'Playwright' : 'Mobile'
+  // The MCP server(s) this target drives the browser/device with. Web → Playwright.
+  // Mobile targets → EITHER Mobile MCP or Appium; having just one connected is enough
+  // to drive a device, so the run isn't blocked when only one of the two is set up.
+  const requiredMcpServers = testTarget === 'web' ? ['playwright'] : ['mobile-mcp', 'appium-mcp']
+  // Web needs ALL of its servers; mobile needs ANY ONE of the two drivers.
+  const mcpAnyOf = testTarget !== 'web'
+  const requiredMcpLabel = testTarget === 'web' ? 'Playwright' : 'Mobile or Appium'
   // Only block once we've actually loaded the config (mcpServers !== undefined);
   // don't gate the button on a still-loading query.
   const mcpMissing =
-    mcpServers !== undefined && !mcpServers.some((s) => s.name === requiredMcpServer)
+    mcpServers !== undefined &&
+    (mcpAnyOf
+      ? !requiredMcpServers.some((n) => mcpServers.some((s) => s.name === n))
+      : requiredMcpServers.some((n) => !mcpServers.some((s) => s.name === n)))
   const appUrlInvalid =
     !isAppTarget && appUrl.trim().length > 0 && !isValidHttpUrl(appUrl)
   const appUrlHelp =
@@ -916,7 +947,13 @@ export default function RunPage() {
       })
     : []
   const missingTicketUrls = multiUrl ? runTickets.filter((id) => !urlFor(id)) : []
-  const appUrlReady = isAppTarget || (multiUrl ? missingTicketUrls.length === 0 : !!appUrl.trim())
+  // App-on-device has no URL, but the engineer must name the installed app so the
+  // run knows which app to launch. Web targets need a reachable URL instead.
+  const appUrlReady = isAppTarget
+    ? !!appName.trim()
+    : multiUrl
+      ? missingTicketUrls.length === 0
+      : !!appUrl.trim()
   // The shared App URL field is hidden in multi mode, so its validity is irrelevant there.
   const sharedUrlInvalid = !multiUrl && appUrlInvalid
   const canSubmit =
@@ -956,7 +993,7 @@ export default function RunPage() {
       label: isAppTarget ? 'App' : multiUrl ? 'App URLs' : 'App URL',
       ok: appUrlReady && !sharedUrlInvalid && invalidTicketUrls.length === 0,
       value: isAppTarget
-        ? 'On device'
+        ? appName.trim() || 'Name the app'
         : sharedUrlInvalid || invalidTicketUrls.length > 0
           ? 'Invalid URL'
           : multiUrl
@@ -1037,9 +1074,10 @@ export default function RunPage() {
           await createRun({
             projectId: activeProject.id,
             ticketId: ticket,
-            // Single ticket uses the shared App URL field; only multi-ticket
-            // runs collect a per-ticket URL in `ticketUrls`.
-            appUrl: isAppTarget ? '' : multiUrl ? urlFor(ticket) : appUrl.trim(),
+            // App-on-device has no URL — pass the installed app's name/bundle id
+            // (the server stores it as the app identifier). Single ticket uses the
+            // shared App URL field; only multi-ticket runs collect a per-ticket URL.
+            appUrl: isAppTarget ? appName.trim() : multiUrl ? urlFor(ticket) : appUrl.trim(),
             skill: skill || undefined,
             instructions: finalInstructions || undefined,
             model,
@@ -1051,7 +1089,7 @@ export default function RunPage() {
         await createRun({
           projectId: activeProject.id,
           ticketId: leadTicket,
-          appUrl: isAppTarget ? '' : appUrl.trim(),
+          appUrl: isAppTarget ? appName.trim() : appUrl.trim(),
           skill: skill || undefined,
           instructions: finalInstructions || undefined,
           model,
@@ -1066,6 +1104,7 @@ export default function RunPage() {
         skill,
         instructions: instructions.trim(),
       })
+      saveAppName(activeProject.id, appName)
       queryClient.invalidateQueries({ queryKey: ['runs'] })
       toast.success(
         mode === 'advanced' && runTickets.length > 1
@@ -1151,7 +1190,8 @@ export default function RunPage() {
       </header>
 
       <McpRequiredNotice
-        required={testTarget === 'web' ? ['playwright'] : ['mobile-mcp']}
+        required={requiredMcpServers}
+        anyOf={mcpAnyOf}
         feature="run QC tests"
       />
 
@@ -1361,29 +1401,58 @@ export default function RunPage() {
                 </div>
                 {testTarget === 'web-mobile' && (
                   <p className="text-[11px] text-muted-foreground">
-                    Opens the App URL on a booted device via the{' '}
+                    Opens the App URL on a booted device via{' '}
                     <Link to="/mcp" className="font-medium text-primary hover:underline">
-                      Mobile MCP
+                      Mobile MCP or Appium
                     </Link>{' '}
-                    — connect the Mobile server and boot a device first.
+                    — connect either server and boot a device first.
                   </p>
                 )}
               </div>
 
               {isAppTarget ? (
-                // Native app: no URL — the app must already be installed on the device.
-                <div className="flex items-start gap-2.5 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-800">
-                  <TriangleAlert className="mt-0.5 size-4 shrink-0" />
-                  <div className="space-y-0.5 leading-snug">
-                    <p className="font-medium">No App URL needed — Claude drives the installed app.</p>
-                    <p>
-                      Install the app on the booted device first and connect the{' '}
-                      <Link to="/mcp" className="font-medium underline">
-                        Mobile MCP
-                      </Link>{' '}
-                      server. Claude launches the already-installed app on the device — it won't
-                      install it for you.
+                // Native app: no URL — instead the engineer names the app that is
+                // ALREADY installed on the device, and Claude launches it there.
+                <div className="space-y-2">
+                  <div className="space-y-2">
+                    <Label htmlFor="appName" className="flex items-center gap-1.5">
+                      <TabletSmartphone className="size-3.5 text-muted-foreground" />
+                      App name on device
+                    </Label>
+                    <div className="group relative">
+                      <TabletSmartphone className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground transition-colors group-focus-within:text-primary" />
+                      <Input
+                        id="appName"
+                        placeholder="e.g. MyApp  ·  or com.example.myapp"
+                        value={appName}
+                        onChange={(e) => setAppName(e.target.value)}
+                        disabled={!activeProject}
+                        className="h-11 pl-9 text-sm shadow-xs transition-shadow focus-visible:shadow-sm"
+                      />
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      The name (or package / bundle id) of the app Claude should open on the device.
                     </p>
+                  </div>
+
+                  {/* Install-first reminder — Claude won't install the app for you. */}
+                  <div className="flex items-start gap-2.5 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-800">
+                    <TriangleAlert className="mt-0.5 size-4 shrink-0" />
+                    <div className="space-y-0.5 leading-snug">
+                      <p className="font-medium">Install the app on the device before you run.</p>
+                      <p>
+                        Boot the device and install{' '}
+                        <span className="font-semibold">
+                          {appName.trim() ? `“${appName.trim()}”` : 'the app'}
+                        </span>{' '}
+                        first, then connect the{' '}
+                        <Link to="/mcp" className="font-medium underline">
+                          Mobile MCP or Appium
+                        </Link>{' '}
+                        server. Claude only <span className="font-medium">launches the
+                        already-installed app</span> by this name — it won't install it for you.
+                      </p>
+                    </div>
                   </div>
                 </div>
               ) : (

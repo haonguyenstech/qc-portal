@@ -157,6 +157,28 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_sources_projectId ON sources(projectId);
 `)
 
+// Connected databases: each project can connect SEVERAL databases, each with a tag
+// ("Backend DB", "Analytics DB", …). The password is NOT stored here — it lives in
+// data/database-credentials.json, keyed by the database id. Mirrors `sources`.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS databases (
+    id TEXT PRIMARY KEY,
+    projectId TEXT NOT NULL,
+    tag TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    host TEXT NOT NULL DEFAULT '',
+    port INTEGER NOT NULL DEFAULT 0,
+    dbName TEXT NOT NULL DEFAULT '',
+    username TEXT NOT NULL DEFAULT '',
+    ssl INTEGER NOT NULL DEFAULT 0,
+    lastSync TEXT NOT NULL DEFAULT '',
+    serverVersion TEXT NOT NULL DEFAULT '',
+    tableCount INTEGER NOT NULL DEFAULT 0,
+    createdAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_databases_projectId ON databases(projectId);
+`)
+
 // Migration: fold the legacy single-repo projects.source* columns into one tagged
 // `sources` row (tag "Source"), re-keying the on-disk credential from projectId to
 // the new source id, then blank the legacy columns so this never re-runs.
@@ -498,6 +520,89 @@ export function saveSource(source: SourceRow): void {
 /** Forget one connected source repo (the files on disk are left alone). */
 export function deleteSourceRow(id: string): void {
   db.prepare(`DELETE FROM sources WHERE id = ?`).run(id)
+}
+
+/** One connected database of a project (no password — that lives on disk, keyed by id). */
+export interface DatabaseRow {
+  id: string
+  projectId: string
+  tag: string
+  kind: string
+  host: string
+  port: number
+  dbName: string
+  username: string
+  ssl: boolean
+  lastSync: string
+  serverVersion: string
+  tableCount: number
+  createdAt: string
+}
+
+function databaseFromRow(row: Record<string, unknown>): DatabaseRow {
+  return {
+    id: row.id as string,
+    projectId: row.projectId as string,
+    tag: (row.tag as string | null) ?? '',
+    kind: (row.kind as string | null) ?? '',
+    host: (row.host as string | null) ?? '',
+    port: Number(row.port ?? 0),
+    dbName: (row.dbName as string | null) ?? '',
+    username: (row.username as string | null) ?? '',
+    ssl: Number(row.ssl ?? 0) === 1,
+    lastSync: (row.lastSync as string | null) ?? '',
+    serverVersion: (row.serverVersion as string | null) ?? '',
+    tableCount: Number(row.tableCount ?? 0),
+    createdAt: (row.createdAt as string | null) ?? '',
+  }
+}
+
+/** All databases connected to a project, oldest first (stable card order). */
+export function listDatabases(projectId: string): DatabaseRow[] {
+  const rows = db
+    .prepare(`SELECT * FROM databases WHERE projectId = ? ORDER BY createdAt ASC`)
+    .all(projectId) as Record<string, unknown>[]
+  return rows.map(databaseFromRow)
+}
+
+export function getDatabaseRow(id: string): DatabaseRow | undefined {
+  const row = db.prepare(`SELECT * FROM databases WHERE id = ?`).get(id) as
+    | Record<string, unknown>
+    | undefined
+  return row ? databaseFromRow(row) : undefined
+}
+
+/** Insert or fully update a database row (after a connect/sync finishes). */
+export function saveDatabase(dbRow: DatabaseRow): void {
+  db.prepare(
+    `INSERT INTO databases (id, projectId, tag, kind, host, port, dbName, username, ssl,
+                            lastSync, serverVersion, tableCount, createdAt)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET
+       tag = excluded.tag, kind = excluded.kind, host = excluded.host, port = excluded.port,
+       dbName = excluded.dbName, username = excluded.username, ssl = excluded.ssl,
+       lastSync = excluded.lastSync, serverVersion = excluded.serverVersion,
+       tableCount = excluded.tableCount`,
+  ).run(
+    dbRow.id,
+    dbRow.projectId,
+    dbRow.tag,
+    dbRow.kind,
+    dbRow.host,
+    dbRow.port,
+    dbRow.dbName,
+    dbRow.username,
+    dbRow.ssl ? 1 : 0,
+    dbRow.lastSync,
+    dbRow.serverVersion,
+    dbRow.tableCount,
+    dbRow.createdAt,
+  )
+}
+
+/** Forget one connected database (the database server itself is untouched). */
+export function deleteDatabaseRow(id: string): void {
+  db.prepare(`DELETE FROM databases WHERE id = ?`).run(id)
 }
 
 /**

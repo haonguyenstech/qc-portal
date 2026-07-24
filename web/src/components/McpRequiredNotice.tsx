@@ -10,16 +10,17 @@ const SERVER_LABELS: Record<string, string> = {
   figma: 'Figma',
   playwright: 'Playwright',
   'mobile-mcp': 'Mobile',
+  'appium-mcp': 'Appium',
 }
 
 function labelFor(name: string): string {
   return SERVER_LABELS[name] ?? name
 }
 
-function joinNames(names: string[]): string {
+function joinNames(names: string[], conj: 'and' | 'or' = 'and'): string {
   if (names.length <= 1) return names.join('')
-  if (names.length === 2) return `${names[0]} and ${names[1]}`
-  return `${names.slice(0, -1).join(', ')}, and ${names[names.length - 1]}`
+  if (names.length === 2) return `${names[0]} ${conj} ${names[1]}`
+  return `${names.slice(0, -1).join(', ')}, ${conj} ${names[names.length - 1]}`
 }
 
 /**
@@ -33,11 +34,18 @@ function joinNames(names: string[]): string {
 export function McpRequiredNotice({
   required,
   feature,
+  anyOf = false,
 }: {
   /** Canonical server names the feature needs (e.g. ['clickup']). */
   required: string[]
   /** Short feature name, e.g. "crawl tickets" or "Design Check". */
   feature: string
+  /**
+   * When true, ANY ONE of `required` satisfies the feature (e.g. a mobile run
+   * needs Mobile MCP *or* Appium). The notice then shows only if NONE are
+   * present, and lists the options with "or". Default false = all are required.
+   */
+  anyOf?: boolean
 }) {
   const { activeProjectId } = useProjects()
   const { data: servers } = useQuery({
@@ -50,7 +58,12 @@ export function McpRequiredNotice({
   if (!activeProjectId || !servers) return null
 
   const configured = new Set(servers.map((s) => s.name))
-  const missing = required.filter((name) => !configured.has(name))
+  // any-of: satisfied if at least one is configured → nothing "missing" then.
+  // all-of: every server that isn't configured is missing.
+  const missing =
+    anyOf && required.some((name) => configured.has(name))
+      ? []
+      : required.filter((name) => !configured.has(name))
   if (missing.length === 0) return null
 
   const labels = missing.map(labelFor)
@@ -66,10 +79,20 @@ export function McpRequiredNotice({
             Configure MCP to {feature}
           </p>
           <p className="text-xs leading-relaxed text-amber-800/90 dark:text-amber-300/80">
-            This project hasn't set up the{' '}
-            <span className="font-medium">{joinNames(labels)}</span>{' '}
-            {missing.length === 1 ? 'server' : 'servers'} yet — add{' '}
-            {missing.length === 1 ? 'it' : 'them'} on the MCP page, then come back.
+            {anyOf ? (
+              <>
+                This project hasn't set up a{' '}
+                <span className="font-medium">{joinNames(labels, 'or')}</span> server yet — add
+                either one on the MCP page, then come back.
+              </>
+            ) : (
+              <>
+                This project hasn't set up the{' '}
+                <span className="font-medium">{joinNames(labels)}</span>{' '}
+                {missing.length === 1 ? 'server' : 'servers'} yet — add{' '}
+                {missing.length === 1 ? 'it' : 'them'} on the MCP page, then come back.
+              </>
+            )}
           </p>
         </div>
       </div>

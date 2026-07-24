@@ -3,6 +3,30 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.11.0 — 2026-07-24
+
+**Database page, native app testing on a device, and Appium support for mobile runs**
+
+### Added
+
+- **New Database page.** Connect a project to its database (MySQL, PostgreSQL, or SQL Server) and let
+  Claude use it during testing. The portal reads the schema and saves a **schema map into Knowledge** so
+  runs and test-case generation know your real tables and columns. A **query & ask console** lets you ask
+  a question in plain English — Claude writes a query, runs it, and shows both the SQL and the results —
+  or run your own SQL by hand. **Everything is read-only** (point it at staging or a read replica), and
+  the password is only used to read the schema, never logged or stored in run history.
+- **Test a native app on a device.** The Launch QC Run page's **App on device** target is now available
+  (it was previously "Coming soon"). Pick it, **name the app installed on the device** (a display name
+  like `MyApp`, or a package / bundle id like `com.example.myapp`), and Claude launches *that* app on a
+  booted device and tests it there — no URL needed. A clear reminder tells you to **install the app on
+  the device first**: the portal launches an already-installed app by name, it won't install it for you.
+
+### Changed
+
+- **Mobile runs now work with Appium too.** Both **Web on mobile** and **App on device** can be driven by
+  **either Mobile MCP or Appium** — whichever your project has connected. You only need one of the two set
+  up to run, and the MCP page verifies the connected driver can actually see and control a booted device.
+
 ## 0.10.3 — 2026-07-23
 
 **Terminal slash commands: run with one click, clearer tooltips, and a new /usage entry**

@@ -44,6 +44,12 @@ export const CAPABILITY_TESTS: Record<
     inputPlaceholder: '',
     action: 'List devices',
   },
+  'appium-mcp': {
+    needsInput: false,
+    inputLabel: '',
+    inputPlaceholder: '',
+    action: 'List devices',
+  },
 }
 
 function statusError(message: string, status: number): Error {
@@ -100,6 +106,27 @@ Reply with ONLY a JSON object and nothing else:
 No prose, no markdown, no code fence.`
       }
       return `Using the Mobile MCP tools available to you, select the device named "${input}", then read its screen ONCE (screen size or a screenshot) to confirm you can actually drive it. Do NOT install apps or tap anything.
+Reply with ONLY a JSON object and nothing else:
+- on success: {"ok": true, "device": "${input}", "info": "<short note, e.g. the screen size or 'screenshot captured'>"}
+- on failure: {"ok": false, "error": "<short reason>"}
+No prose, no markdown, no code fence.`
+    case 'appium-mcp':
+      // Same two-step shape as mobile-mcp. Appium exposes its own device-listing +
+      // session/device-selection tools; empty input = DETECT (an empty list still
+      // means the MCP works), non-empty = DRIVE the named device to prove control.
+      if (!input) {
+        // Appium's device-listing tool returns EVERY installed simulator/emulator
+        // (including shut-down ones), so filter to what's actually usable: physical
+        // devices that are connected and simulators/emulators that are BOOTED/running.
+        return `Using the Appium MCP tools available to you, list mobile devices and simulators/emulators (use the device-listing tool ONCE).
+Include ONLY devices that are currently RUNNING and drivable — physical devices that are connected, and simulators/emulators whose state is "Booted"/running. EXCLUDE anything that is shut down, offline, or merely installed but not booted.
+An empty list is a valid, successful result — it just means nothing is currently booted or connected.
+Reply with ONLY a JSON object and nothing else:
+- if the tool ran (even with zero running devices): {"ok": true, "devices": ["<name of a running/connected device>", ...]}
+- only if the tool itself errored: {"ok": false, "error": "<short reason>"}
+No prose, no markdown, no code fence.`
+      }
+      return `Using the Appium MCP tools available to you, select/prepare the device named "${input}", then read its screen ONCE (screen size or a screenshot) to confirm you can actually drive it. Do NOT install apps or tap anything.
 Reply with ONLY a JSON object and nothing else:
 - on success: {"ok": true, "device": "${input}", "info": "<short note, e.g. the screen size or 'screenshot captured'>"}
 - on failure: {"ok": false, "error": "<short reason>"}
@@ -191,7 +218,7 @@ export async function runMcpCapabilityTest(opts: {
     detail = `Read issue: ${String(data.summary ?? '(no summary)')} · status ${String(data.status ?? '?')}`
   } else if (opts.name === 'playwright') {
     detail = `Opened & closed browser · page title: ${String(data.title ?? '(none)')}`
-  } else if (opts.name === 'mobile-mcp') {
+  } else if (opts.name === 'mobile-mcp' || opts.name === 'appium-mcp') {
     if (Array.isArray(data.devices)) {
       // DETECT step (empty input) — report the device list.
       const devices = data.devices.map(String)
