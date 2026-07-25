@@ -19,6 +19,7 @@ import {
   Loader2,
   Pencil,
   Plus,
+  RefreshCw,
   Save,
   Search,
   Star,
@@ -51,6 +52,7 @@ import {
   listSkills,
   openSkillsFolder,
   saveSkillFile,
+  syncSkillFromPortal,
   updateProject,
   updateSkill,
   uploadSkill,
@@ -89,7 +91,7 @@ function SkillEditor({ skillName, projectId }: { skillName: string; projectId: s
 
   return (
     <Tabs defaultValue={files[0].name} className="flex h-full min-h-0 w-full flex-col gap-0">
-      <TabsList className="flex h-auto w-full shrink-0 justify-start gap-0 overflow-x-auto rounded-none border-b bg-muted/30 p-0">
+      <TabsList data-tour="files" className="flex h-auto w-full shrink-0 justify-start gap-0 overflow-x-auto rounded-none border-b bg-muted/30 p-0">
         {files.map((f) => (
           <TabsTrigger
             key={f.name}
@@ -527,7 +529,7 @@ function NewSkillDialog({
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
-        <Button className="group rounded-full shadow-none transition-all duration-200 hover:shadow-sm active:scale-[0.98]">
+        <Button data-tour="new-skill" className="group rounded-full shadow-none transition-all duration-200 hover:shadow-sm active:scale-[0.98]">
           <Plus className="size-4" />
           New skill
         </Button>
@@ -754,6 +756,92 @@ function EditSkillDialog({
 }
 
 /** Type-to-confirm dialog that permanently deletes a skill folder from disk. */
+/**
+ * The portal ships a master copy of the `qc-testing` skill; each project runs its OWN
+ * copy under .claude/skills. When the portal is updated, copies nobody edited are
+ * refreshed automatically at startup — this button covers the copies that were
+ * hand-edited, which are never overwritten without asking.
+ *
+ * Shown only when the project's copy differs from the portal's version.
+ */
+function SkillSyncButton({ skill, projectId }: { skill: SkillSummary; projectId: string }) {
+  const queryClient = useQueryClient()
+  const [open, setOpen] = useState(false)
+  const state = skill.sync
+
+  const mutation = useMutation({
+    mutationFn: () => syncSkillFromPortal(skill.name, projectId),
+    onSuccess: (r) => {
+      toast.success('Skill updated from the portal', {
+        description: `${skill.name} — ${r.files} file${r.files === 1 ? '' : 's'} replaced with the version shipped with this portal build.`,
+      })
+      setOpen(false)
+      queryClient.removeQueries({ queryKey: ['skill', projectId, skill.name] })
+      queryClient.invalidateQueries({ queryKey: ['skills', projectId] })
+    },
+    onError: (err) =>
+      toast.error('Could not update the skill', {
+        description: err instanceof Error ? err.message : 'Unknown error',
+      }),
+  })
+
+  if (state !== 'customized' && state !== 'update-available') return null
+
+  return (
+    <>
+      <Button
+        variant="ghost"
+        size="sm"
+        onClick={() => setOpen(true)}
+        title="The portal ships a different version of this skill"
+        className="h-7 shrink-0 gap-1 px-2 text-[11px] text-amber-700 hover:bg-amber-50 hover:text-amber-800 active:scale-[0.98] dark:text-amber-400"
+      >
+        <RefreshCw className="size-3" />
+        Update available
+      </Button>
+
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent className="rounded-3xl sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Update {skill.name} from the portal?</DialogTitle>
+            <DialogDescription>
+              This project runs its own copy of the skill. The portal ships a different
+              version — replacing the copy makes this project use it.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2 rounded-2xl border border-amber-200/70 bg-amber-50/60 px-4 py-3 text-xs leading-relaxed text-amber-900 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-200">
+            <p>
+              <strong>Your edits to this skill's own files will be replaced.</strong> Any extra
+              file you added to the folder is kept.
+            </p>
+            <p>
+              This copy was flagged as edited (or predates version tracking), which is why the
+              portal did not refresh it automatically.
+            </p>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setOpen(false)} className="rounded-full">
+              Cancel
+            </Button>
+            <Button
+              onClick={() => mutation.mutate()}
+              disabled={mutation.isPending}
+              className="gap-1.5 rounded-full active:scale-[0.98]"
+            >
+              {mutation.isPending ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : (
+                <RefreshCw className="size-3.5" />
+              )}
+              Replace with the portal's version
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
+  )
+}
+
 function DeleteSkillDialog({
   skill,
   projectId,
@@ -987,7 +1075,7 @@ export default function SkillsPage() {
     <div className="mx-auto max-w-6xl space-y-8">
       <header className="space-y-4">
         <div className="flex flex-wrap items-end justify-between gap-3">
-          <div className="flex items-start gap-3">
+          <div data-tour="header" className="flex items-start gap-3">
             <span className="mt-0.5 flex size-11 shrink-0 items-center justify-center rounded-2xl bg-foreground text-background">
               <Wrench className="size-5" />
             </span>
@@ -1051,7 +1139,7 @@ export default function SkillsPage() {
       {/* IDE-style workspace: one panel, list rail + editor pane */}
       <div className="flex min-h-[34rem] flex-col overflow-hidden rounded-3xl border border-border/60 bg-card shadow-none lg:h-[calc(100svh-13rem)] lg:flex-row">
         {/* ── skills rail ── */}
-        <aside className="flex w-full shrink-0 flex-col border-b border-border/60 lg:w-72 lg:border-b-0 lg:border-r">
+        <aside data-tour="rail" className="flex w-full shrink-0 flex-col border-b border-border/60 lg:w-72 lg:border-b-0 lg:border-r">
           <div className="flex items-center justify-between border-b border-border/60 px-4 py-3">
             <span className="text-sm font-semibold tracking-tight">Available skills</span>
             {skills && (
@@ -1152,9 +1240,21 @@ export default function SkillsPage() {
                           <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">
                             {s.description}
                           </p>
-                          <div className="mt-1.5 flex items-center gap-1 text-[11px] text-muted-foreground/80">
-                            <FileCode className="h-3 w-3" />
-                            {fileCount} {fileCount === 1 ? 'file' : 'files'}
+                          <div className="mt-1.5 flex items-center gap-2 text-[11px] text-muted-foreground/80">
+                            <span className="flex items-center gap-1">
+                              <FileCode className="h-3 w-3" />
+                              {fileCount} {fileCount === 1 ? 'file' : 'files'}
+                            </span>
+                            {/* This copy differs from the version the portal ships. */}
+                            {(s.sync === 'customized' || s.sync === 'update-available') && (
+                              <span
+                                title="The portal ships a different version of this skill — open it to update"
+                                className="flex shrink-0 items-center gap-1 rounded-full bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-500/10 dark:text-amber-400"
+                              >
+                                <RefreshCw className="size-2.5" />
+                                Update
+                              </span>
+                            )}
                           </div>
                         </button>
                       </li>
@@ -1167,7 +1267,7 @@ export default function SkillsPage() {
         </aside>
 
         {/* ── editor pane ── */}
-        <section className="flex min-h-[24rem] min-w-0 flex-1 flex-col bg-muted/20 lg:min-h-0">
+        <section data-tour="editor" className="flex min-h-[24rem] min-w-0 flex-1 flex-col bg-muted/20 lg:min-h-0">
           {active ? (
             <>
               <div className="flex flex-wrap items-center gap-3 border-b border-border/60 bg-card px-4 py-3">
@@ -1206,7 +1306,8 @@ export default function SkillsPage() {
                   )}
                 </div>
                 {activeSkill && (
-                  <div className="ml-auto flex items-center gap-1">
+                  <div data-tour="skill-actions" className="ml-auto flex items-center gap-1">
+                    <SkillSyncButton skill={activeSkill} projectId={activeProjectId} />
                     <DefaultSkillButton
                       skillName={activeSkill.name}
                       projectId={activeProjectId}

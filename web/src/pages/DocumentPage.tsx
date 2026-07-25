@@ -17,6 +17,7 @@ import {
   History,
   KeyRound,
   Layers,
+  Layout,
   LifeBuoy,
   NotebookPen,
   PlayCircle,
@@ -40,7 +41,7 @@ import { cn } from '@/lib/utils'
 
 // Bump this whenever the manual's content changes — shown in the hero so readers know
 // how current the docs are. Use a human-friendly date.
-const LAST_UPDATED = 'July 16, 2026'
+const LAST_UPDATED = 'July 25, 2026'
 
 interface DocSection {
   id: string
@@ -248,6 +249,11 @@ The sidebar is grouped by purpose. Here's what each page does.
 - **History** — past runs grouped by ticket with the full outcome breakdown (Passed · Failed · Blocked ·
   Untested · Cancelled) and pass-rate %; filter/search; open one for the report, issues, evidence, the
   executed test-case sheet, ClickUp issue push, and the **Continue session** terminal.
+- **Prototype** — describe a screen (or build it straight **from a crawled ticket**) and the AI writes a
+  working HTML prototype you can click through on desktop / tablet / phone. Refine it by chatting, or by
+  **clicking an element and commenting on it**; every refine is kept as a revision you can compare and
+  restore. It answers back with **open questions** for the BA, and turns the agreed screen into **test
+  cases**.
 - **Design Check** — pick a crawled ticket + paste its Figma link (plus optional instructions and a
   checklist); the AI compares the **Figma design against the ticket** (reading the project's source via
   MCP when connected) and reports findings in five buckets (match / mismatch / concern / not sure /
@@ -748,6 +754,87 @@ project knowledge, and silently rewrites the saved version to drop anything inve
 or acceptance criteria that neither the ticket nor your knowledge supports) — keeping legitimate edge
 and negative coverage. It's best-effort and never blocks generation. Toggle it per project on
 **Settings → AI models**.
+`,
+  },
+  {
+    id: 'prototype',
+    title: 'Prototype',
+    icon: Layout,
+    blurb: 'Turn a requirement into a clickable screen — then into test cases.',
+    body: `
+**Prototype** turns a requirement into a **working screen** you can click through, agree on, and then
+test — before a line of the real feature is built. It's a single self-contained HTML page, so it opens
+anywhere, and it's saved with the project.
+
+### The short version
+
+1. Pick **Build from a ticket** and choose an already-crawled ticket. Now the ticket is the *scope*.
+2. Type what you want (or just "build this screen") and send.
+3. Refine it — by chatting, or by clicking straight on the part you don't like.
+4. Answer the **open questions** it asks you.
+5. Hit **Test cases** to turn the agreed screen into a test-case version under that ticket.
+
+### Make it look like YOUR app
+
+By default a prototype is polished but generic. Two things fix that:
+
+- **Design system** (the pill above the chat) — extract your app's real visual language **once**:
+  its colours, fonts, spacing, button and input shapes, and the way it words labels, statuses and
+  error messages. It takes a minute or two, needs a connected repo, and after that **every**
+  prototype matches your product. It's saved as the \`design-system\` doc on
+  **Instructions → Knowledge**, so you can read it and **correct anything the AI got wrong** —
+  editing it makes it yours.
+- **Match our app** — lets a single build read the source code directly. Slower per build. With a
+  design system already in place, it spends its reading on real *field names and rules* instead of
+  re-deriving the styling.
+
+Your project's **Knowledge and Memory** are injected into every build either way, so prototypes use
+your product's real terminology.
+
+### Comment on the screen instead of describing it
+
+Click the **speech-bubble** button in the preview toolbar to turn on comment mode, then click any
+element in the screen — a button, a label, a column. Say what should change ("this should be a
+secondary button", "this label should read Member ID") and it's **pinned** as a numbered comment.
+Pin as many as you like, then **Apply** them: they go up as one instruction that names each element
+precisely and leaves the rest of the screen alone.
+
+No more "the third button in the top-right area, not that one, the other one".
+
+### Open questions — the BA loop
+
+Every build tells you what it had to **guess**. Those appear as **open questions** under the chat:
+real requirement gaps ("Can a closed note still be edited?"), never questions about colours or
+taste. Type an answer and the screen is rebuilt to match.
+
+Your answer is then kept as a **confirmed decision**: it grounds every later build and you'll never
+be asked again. That list *is* your record of what the team decided while reviewing the screen —
+which is usually the most valuable thing to come out of a prototype review.
+
+### Revisions — a refine can't lose your work
+
+Every build and refine **appends a revision**. The bar above the preview lets you switch between
+them, **Compare** two side by side, and **Restore** an earlier one. Restoring is itself undoable.
+
+This matters: a cheap model asked to "tidy this up" can come back with a much smaller screen. The
+original is always one click away.
+
+### Sharing it
+
+- **Download** (the arrow in the toolbar) saves it as a standalone \`.html\` file — email it, or attach
+  it to the ticket. It opens in any browser with no server.
+- The **camera** copies a PNG of the whole screen to your clipboard.
+- The **external-link** button opens it full-size in a new tab.
+
+### Test cases from the prototype
+
+**Test cases** (top right) drafts manual cases from the prototype's **real** labels, fields, states
+and validation messages — far better material than the ticket alone — while the **ticket still owns
+the scope**. It uses your saved test-case template and saves a version under the linked ticket, so it
+shows up on the TestCase page like any other. It needs a linked ticket for exactly that reason.
+
+> A prototype is a **static** page with placeholder data. It never touches a real backend, and a
+> build never modifies your source code — it can only read it.
 `,
   },
   {

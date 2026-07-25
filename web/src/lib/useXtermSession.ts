@@ -15,9 +15,16 @@ export type TerminalStatus = 'idle' | 'connecting' | 'connected'
  * Protocol: server→client frames are raw terminal bytes; client→server frames are
  * JSON control messages ({type:'input'} / {type:'resize'}).
  */
+/** The server closes a socket with this code when another window attaches to its session. */
+export const WS_CLOSE_TAKEN_OVER = 4001
+
 export function useXtermSession(
   getParams: () => Record<string, string>,
-  options?: { initialCommand?: string },
+  options?: {
+    initialCommand?: string
+    /** Called when the socket closes, with the WebSocket close code. */
+    onClosed?: (code: number) => void
+  },
 ) {
   const [status, setStatus] = useState<TerminalStatus>('idle')
   const hostRef = useRef<HTMLDivElement | null>(null)
@@ -53,7 +60,20 @@ export function useXtermSession(
     fitRef.current = null
   }, [])
 
+  /**
+   * End the session for good. The server keeps a shell running when its socket
+   * merely closes (so leaving the page doesn't kill it), so an explicit Disconnect
+   * has to say so — `{type:'kill'}` — before we tear the socket down.
+   */
   const disconnect = useCallback(() => {
+    const ws = wsRef.current
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      try {
+        ws.send(JSON.stringify({ type: 'kill' }))
+      } catch {
+        /* socket already going away */
+      }
+    }
     teardown()
     setStatus('idle')
   }, [teardown])
@@ -68,7 +88,18 @@ export function useXtermSession(
     }
   }, [])
 
-  const connect = useCallback(() => {
+  /**
+   * Open (or re-open) the terminal. Pass `reattach` when the server already has a
+   * live session for these params: the shell is picked up where it was left, so the
+   * `initialCommand` must NOT be replayed — it would be typed into whatever is
+   * already running in there.
+   */
+  /** Put the caret in this terminal — used when switching between terminal tabs. */
+  const focus = useCallback(() => {
+    termRef.current?.focus()
+  }, [])
+
+  const connect = useCallback((opts?: { reattach?: boolean }) => {
     if (!hostRef.current || wsRef.current) return
     setStatus('connecting')
 
@@ -128,7 +159,7 @@ export function useXtermSession(
       // Optionally auto-run a command once the shell is up (e.g. launch Claude).
       // A short delay lets the freshly-spawned login shell print its prompt first,
       // so the command lands on a clean line. `\r` is what Enter sends in a TTY.
-      const cmd = optionsRef.current?.initialCommand
+      const cmd = opts?.reattach ? undefined : optionsRef.current?.initialCommand
       if (cmd) {
         setTimeout(() => {
           if (wsRef.current === ws && ws.readyState === WebSocket.OPEN) {
@@ -140,9 +171,10 @@ export function useXtermSession(
     ws.onmessage = (e) => {
       term.write(typeof e.data === 'string' ? e.data : new Uint8Array(e.data as ArrayBuffer))
     }
-    ws.onclose = () => {
+    ws.onclose = (e) => {
       teardown()
       setStatus('idle')
+      optionsRef.current?.onClosed?.(e.code)
     }
     ws.onerror = () => {
       teardown()
@@ -177,8 +209,18 @@ export function useXtermSession(
     return () => ro.disconnect()
   }, [status])
 
-  // Always tear down on unmount.
-  useEffect(() => () => teardown(), [teardown])
+  // Unmount (navigating away) closes the socket WITHOUT killing the shell — the
+  // server detaches and keeps it running, and the next connect() re-attaches.
+  // `setStatus('idle')` is a no-op on a real unmount, but it matters when React
+  // re-mounts the same instance (StrictMode in dev): status must reflect that the
+  // socket is gone, or a status-driven re-connect would never fire.
+  useEffect(
+    () => () => {
+      teardown()
+      setStatus('idle')
+    },
+    [teardown],
+  )
 
-  return { hostRef, status, connect, disconnect, sendText }
+  return { hostRef, status, connect, disconnect, sendText, focus }
 }

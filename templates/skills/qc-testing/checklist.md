@@ -114,10 +114,32 @@ If the ticket has a design/Figma link, do a side-by-side:
 
 ## F. Status rubric (use in report.md)
 
-- **✅ Pass** — behaves exactly as the AC states, content correct, no UI defect that violates
-  the ticket.
-- **❌ Fail** — violates the AC (wrong/missing behavior, wrong content the ticket specified, or
-  a UI defect the ticket calls out).
-- **⚠️ Partial** — mostly works but has a defect, OR a mutating final step was intentionally not
-  run on shared data. Always say which.
-- **⛔ Blocked** — could not test (page won't load, data/prerequisite missing).
+These are the **only** status labels, and the Execution Summary table in `templates.md` has one
+row per label. Spell them exactly like this — the Portal reads that table for the counts it shows
+in History.
+
+- **✅ Passed** — behaves exactly as the AC/case states, content correct, no UI defect that
+  violates the ticket.
+- **⚠️ Passed-with-issue** — the AC/case works, but with a **minor** (Low / cosmetic, or
+  non-blocking Medium) defect, **or** its final mutating step was intentionally not run on shared
+  data. Always say which of the two it is.
+- **❌ Failed** — violates the AC/case: wrong or missing behavior, wrong content the ticket
+  specified, or a UI defect the ticket calls out. A High-severity finding is always a Failed.
+- **⛔ Blocked** — could not test because something stopped you: the page won't load, a
+  prerequisite/data state doesn't exist and can't be created non-destructively, or an
+  out-of-scope screen wasn't provided.
+- **◻️ Not Tested** — in scope and testable, but not exercised this run (ran out of budget, or
+  deliberately deferred). Never use it to hide a failure, and never use it for something you
+  *couldn't* test — that is Blocked.
+- **🚫 Cancelled** — the case was withdrawn by the QC/BA. Include this row only if it applies;
+  a run never invents it.
+
+**Reconcile before you finish.** Passed + Passed-with-issue + Failed + Blocked + Not Tested
+(+ Cancelled) = Total, the percentages sum to 100%, and those numbers match the per-AC and
+per-case tables one for one. A summary that disagrees with its own detail tables is treated as a
+wrong report.
+
+Mapping the layers onto a status: take the **worst** layer. A Content or UI defect that the
+ticket explicitly specifies (wrong label the AC quotes, a state the AC requires) makes the AC
+**Failed**; a cosmetic drift the ticket never mentions makes it **Passed-with-issue** with the
+finding recorded.

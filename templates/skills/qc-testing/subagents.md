@@ -28,45 +28,68 @@ To save budget without losing rigor:
 - A reasonable default for a 6-AC ticket: 3–4 subagents (group the screen-sharing ones), launched
   in parallel. Scale up to one-per-AC when the user wants maximum thoroughness.
 
+### Read the text first, the pictures only when needed (cost + accuracy)
+The content inventory already holds every label, placeholder, button, option and message as
+**text** — that is both cheaper and more exact than looking at a PNG. So instruct each subagent:
+read the `evidence/*.md` files first and settle every Content and Functional row from them; open
+a screenshot only for a **UI/Visual** row, or to confirm a finding it is about to report. Reading
+every PNG "just in case" is the single most expensive mistake in this phase.
+
 ### Missing evidence → recapture (don't just report it)
 If a subagent returns "Missing evidence", that is an instruction to the **main agent**: go back
 to Phase 4, capture exactly what it asked for, and **re-run that subagent** with the new files.
-Only leave a Partial-for-missing-evidence in the final report when the gap is a deliberately
-skipped mutation on shared data or an out-of-scope screen the QC hasn't provided.
+Do **one** such re-capture round (Phase 6 caps it) — after that, an unresolved gap is reported
+honestly as ⛔ Blocked with the reason. Only leave a missing-evidence gap in the final report when
+it is a deliberately skipped mutation on shared data, an out-of-scope screen the QC hasn't
+provided, or data that cannot be created non-destructively.
 
 ## What each subagent receives
-Give it everything it needs to judge **without** the browser or the code:
+Give it everything it needs to judge **without** the browser:
 1. The **AC text verbatim**, including every exact expected string from the ticket.
-2. The **scenario matrix** for that AC (the Phase-2 table: happy / negative / boundary / state /
+2. The **test-case ids** this AC covers (`TC-01`, …) exactly as spelled in the ticket's test-case
+   file, when the run has one — the verdict must be reportable per case id.
+3. The **scenario matrix** for that AC (the Phase-2 table: happy / negative / boundary / state /
    implied rows). The subagent must return a verdict for **every row**.
-3. The **file paths** to the relevant `screenshots/*.png` and `evidence/*.md` for that AC.
-4. The **design/Figma link** if any (for UI comparison; tell it to compare only if it can open
+4. The **file paths** to the relevant `evidence/*.md` (list these first) and `screenshots/*.png`
+   for that AC.
+5. The **expected behavior you derived from the implementation**, if you read the source in
+   Phase 1 — stated as plain behavior ("the field accepts 1–50 characters and shows *X* above
+   that"), never as file/function references. The subagent does **not** read code itself.
+6. The **design/Figma link** if any (for UI comparison; tell it to compare only if it can open
    it, else verify content + internal consistency).
-5. The **full text of `checklist.md`** (paste it in, or tell it to read the file at its path).
+7. The **path** to `checklist.md` so it reads the file itself — do not paste the whole checklist
+   into every subagent prompt; that duplicates the same 100+ lines N times.
 
 ## Prompt template (fill the «slots»)
 
 ```
 You are a QC analyst. Judge ONE acceptance criterion as a black-box tester. You may ONLY use
-the evidence files listed below — do NOT open a browser and do NOT read source code. Never
-mention code, files-of-the-app, functions, or line numbers in your output.
+the evidence files listed below — do NOT open a browser and do NOT go read the application's
+source code. Never mention code, app files, functions, or line numbers in your output.
 
 TICKET: «ticket name / id»
 ACCEPTANCE CRITERION (verbatim):
 «paste AC text + every exact expected string: labels, placeholders, button text, options,
  messages, formats, counts, ordering»
 
+TEST CASES COVERED (report a verdict per id): «TC-01, TC-02» or «none — bug ticket»
+EXPECTED BEHAVIOR CONFIRMED BY THE MAIN AGENT (treat as authoritative, phrased as behavior):
+«e.g. "the note field accepts 1–50 chars; over that it shows 'Maximum 50 characters'"» or «none»
+
 SCENARIO MATRIX (judge EVERY row):
 «paste the Phase-2 matrix table for this AC: # | class | concrete case | expected | evidence»
 
 DESIGN REFERENCE (optional): «figma link or "none">
-EVIDENCE FILES (read these with the Read tool — PNGs show visually, .md is text):
-- screenshots: «testing/<ticket>/screenshots/ac4-...png», «...»
-- content inventory: «testing/<ticket>/evidence/<screen>.md»
-QC CHECKLIST (apply all relevant items): read «testing/.../checklist.md» (or pasted below).
+EVIDENCE FILES:
+- content inventory (READ THESE FIRST — they are the text of the screen):
+  «testing/test-result/<ticket-slug>/evidence/<screen>.md», «...»
+- screenshots (open ONLY for a UI/Visual row, or to confirm a finding):
+  «testing/test-result/<ticket-slug>/screenshots/ac4-...png», «...»
+QC CHECKLIST (apply all relevant items): read the file at «.claude/skills/qc-testing/checklist.md».
 
 DO:
-1. Read every evidence file.
+1. Read the content-inventory files. Settle every Content and Functional row from that text;
+   open a screenshot only for a UI/Visual row or to confirm a finding you are about to report.
 2. Judge **every scenario row** in the matrix — happy, negative, boundary, state, and implied.
    The happy path passing is NOT enough; a failing negative/boundary/state row means the AC
    does not pass.
@@ -79,12 +102,13 @@ DO:
 5. If the evidence is insufficient to judge a scenario row, say exactly what extra screenshot or
    state is needed (status Blocked for that row) — do NOT guess.
 
-RETURN STRICTLY THIS MARKDOWN (no preamble):
+RETURN STRICTLY THIS MARKDOWN (no preamble, no closing commentary, under 400 words):
 
-### «ACx» — «short title» — STATUS: Pass | Fail | Partial | Blocked
+### «ACx» — «short title» — STATUS: Passed | Passed-with-issue | Failed | Blocked | Not Tested
 Reason: «one line»
+Case verdicts: «TC-01 → Passed; TC-02 → Failed» (omit this line if there are no test-case ids)
 Scenario results:
-- «#» «class» «concrete case» → Pass | Fail | Partial | Blocked | N/A(«why») — «evidence file»
+- «#» «class» «concrete case» → Passed | Passed-with-issue | Failed | Blocked | N/A(«why») — «evidence file»
 - (one line per matrix row)
 Findings:
 - [«Functional|Content|UI»] [«High|Medium|Low»] Expected: "«…»" | Observed: "«…»" | Evidence: «file.png»
@@ -95,12 +119,13 @@ Missing evidence (if any): «what else to capture»
 
 ## After the subagents return
 1. Collect each subagent's block.
-2. **Validate**: every Fail/Partial finding must name a screenshot. If one doesn't, either you
-   already have a fitting screenshot (fill it in) or go back to Phase 4, capture it, and re-run
-   just that subagent. Drop any finding that cannot be evidenced.
+2. **Validate**: every Failed / Passed-with-issue finding must name a screenshot that exists. If
+   one doesn't, either you already have a fitting screenshot (fill it in) or go back to Phase 4,
+   capture it, and re-run just that subagent. Drop any finding that cannot be evidenced.
 3. Carry the verdicts into Phase 6 (aggregate) → Phase 7 (write `report.md` + `issues.md`).
 4. Renumber findings globally as ISSUE-1, ISSUE-2, … in `issues.md`; reference them from the
-   report's Actual column.
+   report's Actual column, and carry each `Case verdicts:` line into the report's per-case table
+   using the same ids.
 
 ## Optional: cross-screen consistency subagent
 One extra subagent, given ALL `evidence/*.md` files, asked to check things no single-AC agent

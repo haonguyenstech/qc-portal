@@ -5,6 +5,8 @@ import path from 'node:path'
 import { skillsDirFor } from '../config.js'
 import { resolveProject } from '../projectScope.js'
 import { pickFolderNative, revealFolderNative } from '../folderPicker.js'
+import { clearSkillInstallHash } from '../db.js'
+import { applyBundledSkill, bundledSkillNames, skillSyncStatus } from '../skillSync.js'
 import type { SkillFile, SkillSummary } from '../types.js'
 
 export const skillsRouter = Router()
@@ -103,6 +105,7 @@ skillsRouter.get('/', (req, res) => {
     return res.json([])
   }
 
+  const project = resolveProject(req)
   const summaries: SkillSummary[] = entries
     .filter((e) => e.isDirectory())
     .map((e) => {
@@ -113,10 +116,42 @@ skillsRouter.get('/', (req, res) => {
       } catch {
         /* no SKILL.md */
       }
-      return { name: e.name, description: parseDescription(md), files: listSkillFiles(dir) }
+      // For a skill the portal ships, say whether this copy is current — a portal
+      // update refreshes the bundled master, not the copies inside projects.
+      const sync = project ? (skillSyncStatus(project, e.name)?.state ?? undefined) : undefined
+      return {
+        name: e.name,
+        description: parseDescription(md),
+        files: listSkillFiles(dir),
+        sync,
+      }
     })
 
   return res.json(summaries)
+})
+
+/**
+ * Overwrite this project's copy of a bundled skill with the portal's current version.
+ * Used for a copy we won't touch automatically (hand-edited, or installed before the
+ * portal started fingerprinting) — the UI confirms first, since local edits to the
+ * skill's own files are replaced. Files the engineer ADDED to the folder are kept.
+ */
+skillsRouter.post('/:name/sync', (req, res) => {
+  const project = resolveProject(req)
+  if (!project) return res.status(400).json({ error: 'project not found' })
+  const name = req.params.name
+  if (!name || name.includes('..') || name.includes('/') || name.includes('\\')) {
+    return res.status(400).json({ error: 'invalid skill name' })
+  }
+  if (!bundledSkillNames().includes(name)) {
+    return res.status(400).json({ error: `"${name}" is not a skill bundled with the portal` })
+  }
+  try {
+    const { written } = applyBundledSkill(project, name)
+    return res.json({ ok: true, files: written.length })
+  } catch (err) {
+    return res.status(500).json({ error: (err as Error).message })
+  }
 })
 
 skillsRouter.get('/:name', (req, res) => {
@@ -256,6 +291,10 @@ skillsRouter.delete('/:name', (req, res) => {
       .status(500)
       .json({ error: err instanceof Error ? err.message : 'failed to delete skill' })
   }
+  // Drop the bundled-skill fingerprint too, so a fresh copy (re-imported, or
+  // re-scaffolded) is judged on its own rather than against the deleted one.
+  const project = resolveProject(req)
+  if (project) clearSkillInstallHash(project.id, req.params.name)
   return res.json({ ok: true })
 })
 

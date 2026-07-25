@@ -8,9 +8,15 @@ import { WebSocketServer } from 'ws'
 import type { WebSocket } from 'ws'
 import { PORT } from './config.js'
 import { getEvents, reconcileInterruptedRuns, seedDefaultProject } from './db.js'
+import { reconcileBundledSkills } from './skillSync.js'
 import * as hub from './hub.js'
 import { shutdownActiveRuns } from './runManager.js'
-import { handleTerminalConnection, terminalAvailable } from './terminal.js'
+import {
+  handleTerminalConnection,
+  killAllTerminalSessions,
+  listTerminalSessions,
+  terminalAvailable,
+} from './terminal.js'
 import { qcRouter } from './routes/qc.js'
 import { filesRouter } from './routes/files.js'
 import { skillsRouter } from './routes/skills.js'
@@ -40,6 +46,22 @@ if (interrupted) {
   console.log(`Reconciled ${interrupted} interrupted run(s) → error`)
 }
 
+// Keep each project's copy of a portal-bundled skill (qc-testing) in step with the
+// portal: refresh the copies nobody has edited, leave customized ones alone (the
+// Skills page offers those an update instead). See skillSync.ts.
+{
+  const { updated, customized } = reconcileBundledSkills()
+  for (const u of updated) {
+    console.log(`Updated skill "${u.skill}" in ${u.project} from the portal's bundled version`)
+  }
+  if (customized.length) {
+    const list = customized.map((c) => `${c.project}/${c.skill}`).join(', ')
+    console.log(
+      `Skill update available but not applied (locally edited): ${list} — update it on the Skills page`,
+    )
+  }
+}
+
 const app = express()
 app.use(cors())
 // Larger limit so drag-and-drop skill folders (base64-encoded files) fit.
@@ -54,6 +76,12 @@ app.get('/api/health', (_req, res) => {
 // Whether the device-terminal feature can run (node-pty native binding loaded).
 app.get('/api/terminal/available', (_req, res) => {
   res.json(terminalAvailable())
+})
+
+// Terminal sessions that are still running (a shell survives leaving the page), so
+// the UI can re-attach instead of starting a second one.
+app.get('/api/terminal/sessions', (_req, res) => {
+  res.json({ sessions: listTerminalSessions() })
 })
 
 app.use('/api/projects', projectsRouter)
@@ -183,6 +211,10 @@ function gracefulExit(signal: NodeJS.Signals) {
   shuttingDown = true
   const n = shutdownActiveRuns()
   if (n) console.log(`Stopped ${n} in-flight run(s) on ${signal}`)
+  // Terminal shells outlive their WebSocket by design, so they must be killed here
+  // or a restart would orphan them (they're setsid session leaders).
+  const t = killAllTerminalSessions()
+  if (t) console.log(`Closed ${t} terminal session(s) on ${signal}`)
   // Re-raise the default behaviour so the process actually exits.
   process.exit(0)
 }

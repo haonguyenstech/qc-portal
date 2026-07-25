@@ -478,6 +478,8 @@ export function startRun(body: CreateRunBody): RunSummary {
     projectName: project.name,
     ticketId: body.ticketId,
     appUrl: body.appUrl,
+    // Recorded so History can tag the run's surface long after it finished.
+    testTarget: body.testTarget ?? 'web',
     slug: null,
     status: mustQueue ? 'queued' : 'running',
     passCount: 0,

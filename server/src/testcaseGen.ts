@@ -22,6 +22,7 @@ function normalizeModel(raw: string | undefined): string {
 const MAX_TICKET_CHARS = 40_000 // ticket.md + comments.md fed into the test-case prompt
 const MAX_TEMPLATE_CHARS = 30_000 // uploaded test-case template
 const MAX_INSTRUCTIONS_CHARS = 4_000 // extra QC instructions + selected rules
+const MAX_PROTOTYPE_CHARS = 60_000 // UI prototype HTML fed in as observed UI
 
 /** An Error carrying an HTTP status the route can surface. */
 function statusError(message: string, status: number): Error {
@@ -312,6 +313,7 @@ function testCasesPrompt(
   appUrl: string | null,
   knowledgeBlock: string,
   sourceWhere: string,
+  prototypeUi: { name: string; html: string } | null,
 ): string {
   // The run executes inside the project repo, so the model should READ the feature's
   // real implementation before drafting — this is what makes cases match the app
@@ -371,6 +373,18 @@ Use your browser/Playwright tool to OPEN this URL and explore the actual running
 - If the URL cannot be opened, fall back to writing cases from the ticket alone and note that the live app could not be reached.\n`
     : ''
 
+  // A prototype of the screen under test is the closest thing to the real UI available
+  // before the feature is built: it names the actual fields, buttons, states and messages.
+  // Treat it as observed UI (like a live app), NOT as scope — the ticket still owns scope.
+  const prototypeBlock = prototypeUi
+    ? `\nAn approved UI PROTOTYPE of this feature ("${prototypeUi.name}") is provided below as a complete HTML document. It is the screen the team agreed to build, so use it as OBSERVED UI:
+- Take the EXACT visible labels, field names, button text, column headers, placeholder/help text, validation and error messages, empty/loading/success states, and navigation from the prototype's markup, and use those exact strings in your steps and expected results instead of inventing wording.
+- Derive concrete UI-level cases from what is actually present: every input (and its constraints — required, type, maxlength, pattern, options in a <select>), every button/link and what it should do, every table/list and its columns, every tab/modal/toggle, and every state the prototype renders or hints at.
+- Look for elements marked as an assumption or open question in the prototype and write a case (or an inline note) flagging it for confirmation.
+- The prototype is a STATIC mock: ignore its dummy data values, dead links, and the fact that nothing persists. Never write a case that merely verifies the mock-up itself.
+- SCOPE STILL COMES FROM THE TICKET. Where the prototype and the ticket disagree, follow the ticket and write a case (or note) for the discrepancy. Do not add coverage for prototype elements the ticket does not require.\n`
+    : ''
+
   // Keep the generated steps/expected-results terse and action-focused, matching the
   // template's sample rows — the model tends to pad them with justifications ("because…",
   // "per AC…") and restated ticket prose, which makes the cases hard to execute.
@@ -403,7 +417,7 @@ ${sourceBlock}
 ${formatBlock}
 
 ${styleBlock}
-${appBlock}${instructionBlock}${knowledge}
+${appBlock}${prototypeBlock}${instructionBlock}${knowledge}
 Coverage — be EXHAUSTIVE, not representative:
 - Silently (do NOT write this out) take stock of every distinct area this ticket spans: each feature/module it touches, each trigger or event it describes, each screen/view, and each user role/permission. A ticket that touches N modules or N triggers needs cases for ALL of them.
 - Then write cases covering EVERY one of those areas — do not stop after the first few modules and do not sample. If you are wrapping up with whole areas of the ticket still uncovered, keep writing until they are all covered.
@@ -427,6 +441,14 @@ ${ticketContent}
 --- TEST CASE TEMPLATE ("${template.name}") START ---
 ${template.content}
 --- TEST CASE TEMPLATE END ---`
+      : ''
+  }${
+    prototypeUi
+      ? `
+
+--- UI PROTOTYPE ("${prototypeUi.name}") START ---
+${prototypeUi.html}
+--- UI PROTOTYPE END ---`
       : ''
   }
 
@@ -483,6 +505,12 @@ export async function generateTestcaseVersion(opts: {
   groundingCheck?: boolean
   /** Model alias for the grounding check (haiku/sonnet/opus). */
   groundingCheckModel?: string
+  /**
+   * An approved UI prototype of this feature (from the Prototype page). Treated as
+   * OBSERVED UI — real labels, fields, states and messages — while the ticket still
+   * owns scope. Capped before it reaches the prompt.
+   */
+  prototypeUi?: { name: string; html: string } | null
   /** Called with each streamed log line so callers can surface progress live. */
   onLog?: (log: StreamLog) => void
   /** Fires to cancel an in-flight generation (pause/cancel of a job). */
@@ -546,9 +574,25 @@ export async function generateTestcaseVersion(opts: {
       .join(', ')
     return `in ${rels.length > 1 ? 'these repositories' : 'this repository'} inside the current working directory: ${list}. Pick the repo(s) relevant to the ticket`
   })()
+  // The prototype's markup is what names the real fields/labels, so it goes in whole —
+  // capped so a heavyweight document can't crowd out the ticket and project context.
+  const prototypeUi = (() => {
+    const raw = opts.prototypeUi
+    const html = typeof raw?.html === 'string' ? raw.html.trim() : ''
+    if (!html) return null
+    return {
+      name: raw?.name?.trim() || 'prototype',
+      html:
+        html.length > MAX_PROTOTYPE_CHARS
+          ? `${html.slice(0, MAX_PROTOTYPE_CHARS)}\n<!-- …(prototype truncated) -->`
+          : html,
+    }
+  })()
   onLog({
     level: 'info',
-    text: `Reading ticket (${ticketContent.length.toLocaleString()} chars)… output: ${format.toUpperCase()} · reading source code${
+    text: `Reading ticket (${ticketContent.length.toLocaleString()} chars)…${
+      prototypeUi ? ` · grounding in UI prototype "${prototypeUi.name}"` : ''
+    } output: ${format.toUpperCase()} · reading source code${
       ctx.hasContent
         ? ` · using project context (${ctx.noteCount} memory, ${ctx.docCount} knowledge${
             ctx.truncated ? ', some clipped to fit' : ''
@@ -589,6 +633,7 @@ export async function generateTestcaseVersion(opts: {
     appUrl,
     ctx.block,
     sourceWhere,
+    prototypeUi,
   )
   const result = await runClaudeStream(
     [...baseArgs, ...toolArgs, '--max-budget-usd', budget],

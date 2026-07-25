@@ -119,7 +119,7 @@ export default function ContinueSessionPanel({
           </span>
           {status === 'idle' ? (
             <Button
-              onClick={connect}
+              onClick={() => connect()}
               disabled={!canConnect}
               title={
                 unavailable

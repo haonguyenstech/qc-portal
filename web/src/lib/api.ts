@@ -297,6 +297,22 @@ export function deleteSkill(name: string, projectId: string): Promise<{ ok: true
   )
 }
 
+/**
+ * Replace this project's copy of a portal-bundled skill with the portal's current
+ * version. Only needed for a copy the portal won't refresh on its own (hand-edited,
+ * or installed before fingerprinting existed) — untouched copies are updated
+ * automatically when the server starts.
+ */
+export function syncSkillFromPortal(
+  name: string,
+  projectId: string,
+): Promise<{ ok: true; files: number }> {
+  return request(
+    `/api/skills/${encodeURIComponent(name)}/sync?projectId=${encodeURIComponent(projectId)}`,
+    { method: 'POST' },
+  )
+}
+
 /** Reveal the project's .claude/skills folder in the OS file explorer (Finder/Explorer). */
 export function openSkillsFolder(projectId: string): Promise<{ ok: true; path: string }> {
   return request(`/api/skills/open?projectId=${encodeURIComponent(projectId)}`, {
@@ -1222,6 +1238,22 @@ export function saveTemplate(
   return request(
     `/api/templates/${encodeURIComponent(key)}?projectId=${encodeURIComponent(projectId)}`,
     { method: 'PUT', body: JSON.stringify({ content }) },
+  )
+}
+
+/** Template kinds the portal ships a default for (so "Reset to default" can be offered). */
+export function listTemplateDefaults(): Promise<{ keys: string[] }> {
+  return request('/api/templates/defaults')
+}
+
+/** Overwrite a template with the default bundled with the portal. */
+export function resetTemplateToDefault(
+  key: string,
+  projectId: string,
+): Promise<ProjectTemplate> {
+  return request(
+    `/api/templates/${encodeURIComponent(key)}/reset?projectId=${encodeURIComponent(projectId)}`,
+    { method: 'POST' },
   )
 }
 
@@ -2223,7 +2255,28 @@ export interface PrototypeMeta {
   createdAt: string
   updatedAt: string
   messageCount: number
+  /** Display id of the crawled ticket this prototype realizes, when linked. */
+  ticketId?: string | null
+  ticketFolder?: string | null
+  /** How many revisions are stored (see PrototypeVersionMeta). */
+  versionCount?: number
 }
+
+/**
+ * One stored revision of a prototype, WITHOUT its HTML — a refine appends a revision
+ * rather than overwriting, so earlier documents can be previewed, compared and restored.
+ * Fetch a revision's HTML on demand with getPrototypeVersion.
+ */
+export interface PrototypeVersionMeta {
+  n: number
+  /** The request that produced this revision ('' for a pre-versioning document). */
+  prompt: string
+  summary: string
+  at: string
+  model: string
+  bytes: number
+}
+
 export interface Prototype {
   slug: string
   name: string
@@ -2231,9 +2284,63 @@ export interface Prototype {
   updatedAt: string
   model: string
   messages: PrototypeMessage[]
+  /** The CURRENT document (always the newest or most recently restored revision). */
   html: string
   /** Short follow-up improvement ideas the model proposed for the latest version. */
   suggestions?: string[]
+  /** Revision history, oldest first. */
+  versions?: PrototypeVersionMeta[]
+  /** Crawled-ticket folder this prototype realizes (test cases save under it). */
+  ticketFolder?: string | null
+  ticketId?: string | null
+  ticketTitle?: string | null
+  /** Whether builds are allowed to read the project's real source to match the app. */
+  matchApp?: boolean
+  /** Requirement ambiguities the latest build had to guess about — for the BA to settle. */
+  questions?: string[]
+  /** Ambiguities the BA has answered. Each answer grounds every later build. */
+  decisions?: PrototypeDecision[]
+}
+
+/** One answered requirement ambiguity (see Prototype.questions / decisions). */
+export interface PrototypeDecision {
+  q: string
+  a: string
+  at: string
+}
+
+/** The project's extracted design system — the real app's visual language, as text. */
+export interface DesignSystemInfo {
+  exists: boolean
+  /** Provenance ('' once the engineer has edited it by hand — then it's theirs). */
+  source: string
+  size: number
+  savedAt: string | null
+  content: string
+  /** False when no repo is connected, so there's nothing to extract from. */
+  hasSource?: boolean
+}
+
+/** Read the project's design system (stored as the `design-system` knowledge doc). */
+export function getDesignSystem(projectId: string): Promise<DesignSystemInfo> {
+  return request(`/api/prototype/design-system?projectId=${encodeURIComponent(projectId)}`)
+}
+
+/**
+ * Extract the real app's design language from its source into the `design-system`
+ * knowledge doc. Slow (a read-only AI pass over the repo) but done once — every later
+ * prototype then matches the product without re-reading the code.
+ */
+export function generateDesignSystem(
+  projectId: string,
+  model?: string,
+  signal?: AbortSignal,
+): Promise<DesignSystemInfo> {
+  return request('/api/prototype/design-system', {
+    method: 'POST',
+    body: JSON.stringify({ projectId, model }),
+    signal,
+  })
 }
 
 /** List the project's saved prototypes (metadata only, newest first). */
@@ -2301,6 +2408,18 @@ export async function streamPrototype(
     name?: string
     images?: PrototypeImage[]
     style?: PrototypeStyleSettings
+    /**
+     * Crawled-ticket folder to build FROM (its description + comments become the scope).
+     * Omit to keep the prototype's existing link; pass '' to unlink.
+     */
+    ticketFolder?: string
+    /** Let the build read the project's real source so the prototype matches the app. */
+    matchApp?: boolean
+    /**
+     * Answers to open questions, recorded before this build runs. Each becomes a durable
+     * decision that grounds this and every later build, and is never asked again.
+     */
+    decisions?: { q: string; a: string }[]
   },
   handlers: {
     onDelta: (text: string) => void
@@ -2362,6 +2481,63 @@ export async function streamPrototype(
   if (!settled) handlers.onError('The build ended before finishing. Please try again.')
 }
 
+/** Fetch one stored revision's full HTML (for preview / side-by-side compare). */
+export function getPrototypeVersion(
+  projectId: string,
+  slug: string,
+  n: number,
+): Promise<{ n: number; html: string; prompt: string; summary: string; at: string; model: string }> {
+  return request(
+    `/api/prototype/${encodeURIComponent(slug)}/versions/${n}?projectId=${encodeURIComponent(projectId)}`,
+  )
+}
+
+/**
+ * Make an earlier revision current again. This APPENDS a revision rather than rewinding,
+ * so the restore is itself undoable.
+ */
+export function restorePrototypeVersion(
+  projectId: string,
+  slug: string,
+  version: number,
+): Promise<Prototype> {
+  return request(`/api/prototype/${encodeURIComponent(slug)}/restore`, {
+    method: 'POST',
+    body: JSON.stringify({ projectId, version }),
+  })
+}
+
+/**
+ * Drop one open question without answering it. Open questions accumulate across builds,
+ * so this is how a question that doesn't need settling gets cleared.
+ */
+export function dismissPrototypeQuestion(
+  projectId: string,
+  slug: string,
+  question: string,
+): Promise<Prototype> {
+  return request(`/api/prototype/${encodeURIComponent(slug)}/questions/dismiss`, {
+    method: 'POST',
+    body: JSON.stringify({ projectId, question }),
+  })
+}
+
+/**
+ * Draft manual test cases from a prototype — its markup supplies the real labels,
+ * fields, states and messages, while the linked ticket still owns the scope. Saves a new
+ * version under testing/tickets/<ticketFolder>/testcases/. Requires a linked ticket.
+ */
+export function generateTestcasesFromPrototype(
+  projectId: string,
+  slug: string,
+  body: { model?: string; instructions?: string } = {},
+): Promise<TestCaseResult> {
+  return request(`/api/prototype/${encodeURIComponent(slug)}/testcases`, {
+    method: 'POST',
+    body: JSON.stringify({ projectId, ...body }),
+  })
+}
+
 /** Duplicate a prototype into a new "(copy)" entry (same HTML + conversation). */
 export function duplicatePrototype(projectId: string, slug: string): Promise<Prototype> {
   return request(
@@ -2403,4 +2579,22 @@ export function openPrototypesFolder(projectId: string): Promise<{ ok: true; pat
 /** Whether the device-terminal feature is usable (node-pty native binding loaded). */
 export function terminalAvailable(): Promise<{ ok: boolean; error?: string }> {
   return request('/api/terminal/available')
+}
+
+/** A shell still running on the server (it outlives the page that opened it). */
+export interface TerminalSessionInfo {
+  key: string
+  kind: 'shell' | 'resume'
+  projectId?: string
+  tab?: string // terminal tab id on the Terminal page (shell sessions only)
+  runId?: string
+  cwd: string
+  attached: boolean // a browser window is currently viewing it
+  startedAt: string
+  lastActivityAt: string
+}
+
+/** Live terminal sessions — used to re-attach instead of starting a second shell. */
+export function listTerminalSessions(): Promise<{ sessions: TerminalSessionInfo[] }> {
+  return request('/api/terminal/sessions')
 }

@@ -63,10 +63,11 @@ function logLineClass(kind: LogEvent['kind']): string {
 }
 
 /**
- * Compact segmented progress bar. One thin segment per phase: filled for phases
- * already reached, the active one shimmering, the rest empty. `activeIdx` is the
- * furthest phase reached (monotonic) so it never snaps backward when the phase
- * guess from the log text wobbles. Reads far cleaner than 7 cramped numbered dots.
+ * Labeled 7-step phase stepper. Each phase is a thin segment with its name below:
+ * reached phases fill solid, the active one shimmers, upcoming ones stay muted.
+ * `activeIdx` is the furthest phase reached (monotonic) so it never snaps backward
+ * when the phase signal wobbles. The labels tell the QC engineer exactly which of
+ * the 7 phases the run is in (the plain bar left that ambiguous).
  */
 function PhaseProgress({
   activeIdx,
@@ -79,31 +80,52 @@ function PhaseProgress({
   starting?: boolean
 }) {
   return (
-    <div className="flex items-center gap-1" aria-hidden>
+    <div className="flex items-stretch gap-1" role="list" aria-label="QC phases">
       {PHASES.map((p, i) => {
         const done = i < activeIdx
         const active = i === activeIdx
         const preparing = starting && i === 0
         return (
-          <span
+          <div
             key={p.key}
-            className={cn(
-              'h-1.5 flex-1 overflow-hidden rounded-full transition-colors duration-300',
-              done
-                ? 'bg-foreground'
-                : active
-                  ? paused
-                    ? 'bg-amber-500'
-                    : 'bg-sky-500'
-                  : preparing
-                    ? 'bg-sky-500/25'
-                    : 'bg-border',
-            )}
+            role="listitem"
+            aria-current={active ? 'step' : undefined}
+            title={`Step ${i + 1} of ${PHASES.length}: ${p.label}`}
+            className="flex min-w-0 flex-1 flex-col gap-1"
           >
-            {((active && !paused) || preparing) && (
-              <span className="block h-full w-full animate-pulse bg-sky-400/60" />
-            )}
-          </span>
+            <span
+              className={cn(
+                'h-1.5 w-full overflow-hidden rounded-full transition-colors duration-300',
+                done
+                  ? 'bg-foreground'
+                  : active
+                    ? paused
+                      ? 'bg-amber-500'
+                      : 'bg-sky-500'
+                    : preparing
+                      ? 'bg-sky-500/25'
+                      : 'bg-border',
+              )}
+            >
+              {((active && !paused) || preparing) && (
+                <span className="block h-full w-full animate-pulse bg-sky-400/60" />
+              )}
+            </span>
+            <span
+              className={cn(
+                'truncate text-center text-[9px] leading-none tracking-tight transition-colors',
+                active
+                  ? paused
+                    ? 'font-semibold text-amber-600 dark:text-amber-400'
+                    : 'font-semibold text-sky-600 dark:text-sky-400'
+                  : done
+                    ? 'text-muted-foreground'
+                    : 'text-muted-foreground/50',
+              )}
+            >
+              {p.label}
+            </span>
+          </div>
         )
       })}
     </div>

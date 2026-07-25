@@ -5,6 +5,8 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {
   BrainCog,
+  ChevronLeft,
+  ChevronRight,
   Eye,
   FileText,
   Info,
@@ -41,6 +43,13 @@ import {
   type MemoryNote,
 } from '@/lib/api'
 import { OpenFolderButton } from '@/components/OpenFolderButton'
+
+/**
+ * How many notes one page of the list shows. A project accumulates memory notes
+ * steadily (auto-capture adds a few per run), so the list is paged to stay scannable
+ * instead of growing into an endless scroll.
+ */
+const NOTES_PER_PAGE = 10
 
 /**
  * Provenance label for a note: AI-captured (source starts with "ai") vs.
@@ -340,6 +349,7 @@ export function MemoryNotes({
   const [preview, setPreview] = useState<MemoryNote | null>(null)
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
   const [query, setQuery] = useState('')
+  const [page, setPage] = useState(1)
 
   const { data: notes } = useQuery({
     queryKey: ['memory', projectId],
@@ -356,6 +366,20 @@ export function MemoryNotes({
       `${n.name} ${n.description ?? ''} ${n.source ?? ''}`.toLowerCase().includes(q),
     )
   }, [notes, query])
+
+  // Paginate the filtered list. The page is CLAMPED on render rather than reset in an
+  // effect, so deleting the last note on the last page (or narrowing the search) just
+  // lands you on the new last page instead of on a blank list.
+  const totalPages = Math.max(1, Math.ceil(filtered.length / NOTES_PER_PAGE))
+  const safePage = Math.min(Math.max(1, page), totalPages)
+  const pageStart = (safePage - 1) * NOTES_PER_PAGE
+  const visible = filtered.slice(pageStart, pageStart + NOTES_PER_PAGE)
+
+  /** Any change to what's being filtered starts reading from the top again. */
+  function search(next: string) {
+    setQuery(next)
+    setPage(1)
+  }
 
   const del = useMutation({
     mutationFn: (name: string) => deleteMemoryNote(name, projectId),
@@ -416,14 +440,14 @@ export function MemoryNotes({
           <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
           <Input
             value={query}
-            onChange={(e) => setQuery(e.target.value)}
+            onChange={(e) => search(e.target.value)}
             placeholder="Search notes by name or description…"
             className="rounded-full pl-9 pr-9"
           />
           {query && (
             <button
               type="button"
-              onClick={() => setQuery('')}
+              onClick={() => search('')}
               aria-label="Clear search"
               className="absolute right-3 top-1/2 -translate-y-1/2 rounded-full p-0.5 text-muted-foreground transition-colors hover:text-foreground"
             >
@@ -458,7 +482,7 @@ export function MemoryNotes({
               </div>
             ) : (
             <ul className="divide-y divide-border/60">
-              {filtered.map((n) => (
+              {visible.map((n) => (
                 <li
                   key={n.name}
                   className="flex items-center gap-3 px-4 py-3 transition-colors hover:bg-muted/40"
@@ -535,6 +559,37 @@ export function MemoryNotes({
             </ul>
             )}
           </CardContent>
+          {/* Pager — only once there's more than one page to move between. */}
+          {filtered.length > NOTES_PER_PAGE && (
+            <div className="flex items-center justify-between gap-2 border-t border-border/60 bg-muted/40 px-4 py-2.5">
+              <span className="text-[11px] tabular-nums text-muted-foreground">
+                Showing {pageStart + 1}–{pageStart + visible.length} of {filtered.length}
+              </span>
+              <div className="flex items-center gap-1.5">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => setPage(safePage - 1)}
+                  disabled={safePage <= 1}
+                  className="h-8 gap-1 rounded-full active:scale-[0.98]"
+                >
+                  <ChevronLeft className="size-3.5" /> Prev
+                </Button>
+                <span className="px-1 text-[11px] tabular-nums text-muted-foreground">
+                  Page {safePage} of {totalPages}
+                </span>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => setPage(safePage + 1)}
+                  disabled={safePage >= totalPages}
+                  className="h-8 gap-1 rounded-full active:scale-[0.98]"
+                >
+                  Next <ChevronRight className="size-3.5" />
+                </Button>
+              </div>
+            </div>
+          )}
         </Card>
       ) : (
         <Card className="rounded-3xl border-dashed border-border/60 shadow-none">

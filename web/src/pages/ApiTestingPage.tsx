@@ -2416,7 +2416,7 @@ function ApiTesting({ projectId }: { projectId: string }) {
   return (
     <div className="space-y-6">
       <header className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-        <div className="flex items-start gap-3">
+        <div data-tour="header" className="flex items-start gap-3">
           <span className="mt-0.5 flex size-11 shrink-0 items-center justify-center rounded-2xl bg-foreground text-background">
             <Zap className="size-5" />
           </span>
@@ -2429,7 +2429,7 @@ function ApiTesting({ projectId }: { projectId: string }) {
             </p>
           </div>
         </div>
-        <div className="flex shrink-0 flex-wrap items-center gap-2">
+        <div data-tour="import" className="flex shrink-0 flex-wrap items-center gap-2">
           <Button
             size="sm"
             onClick={() => setScanOpen(true)}
@@ -2664,7 +2664,7 @@ function ApiTesting({ projectId }: { projectId: string }) {
           </div>
 
           {/* URL bar */}
-          <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+          <div data-tour="request" className="flex flex-col gap-2 sm:flex-row sm:items-center">
             <div className="flex flex-1 items-center gap-2 rounded-xl border border-border/60 bg-card p-1.5 shadow-none">
               <Select value={draft.method} onValueChange={(v) => patch({ method: v })}>
                 <SelectTrigger
@@ -2733,7 +2733,7 @@ function ApiTesting({ projectId }: { projectId: string }) {
           ) : null}
 
           {/* Request config tabs */}
-          <div className="rounded-2xl border border-border/60 bg-card p-4 shadow-none">
+          <div data-tour="config" className="rounded-2xl border border-border/60 bg-card p-4 shadow-none">
             <Tabs defaultValue="params">
               <TabsList className="rounded-full">
                 <TabsTrigger value="params" className="rounded-full text-xs">
@@ -2749,12 +2749,12 @@ function ApiTesting({ projectId }: { projectId: string }) {
                 <TabsTrigger value="body" className="rounded-full text-xs" disabled={bodyDisabled}>
                   Body
                 </TabsTrigger>
-                <TabsTrigger value="assert" className="rounded-full text-xs">
+                <TabsTrigger value="assert" data-tour="tab-assert" className="rounded-full text-xs">
                   Assertions
                   {draft.assertions.filter((a) => a.enabled).length > 0 &&
                     ` (${draft.assertions.filter((a) => a.enabled).length})`}
                 </TabsTrigger>
-                <TabsTrigger value="capture" className="gap-1 rounded-full text-xs">
+                <TabsTrigger value="capture" data-tour="tab-capture" className="gap-1 rounded-full text-xs">
                   <Variable className="size-3" />
                   Capture
                   {draft.captures.length > 0 && ` (${draft.captures.length})`}
@@ -2891,7 +2891,7 @@ function ApiTesting({ projectId }: { projectId: string }) {
           </div>
 
           {/* Response */}
-          <div className="rounded-2xl border border-border/60 bg-card p-4 shadow-none">
+          <div data-tour="response" className="rounded-2xl border border-border/60 bg-card p-4 shadow-none">
             <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
               <h2 className="flex items-center gap-2 text-sm font-semibold">
                 <ChevronRight className="size-4 text-muted-foreground" />

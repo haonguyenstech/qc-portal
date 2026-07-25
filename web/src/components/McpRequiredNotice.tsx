@@ -41,9 +41,9 @@ export function McpRequiredNotice({
   /** Short feature name, e.g. "crawl tickets" or "Design Check". */
   feature: string
   /**
-   * When true, ANY ONE of `required` satisfies the feature (e.g. a mobile run
-   * needs Mobile MCP *or* Appium). The notice then shows only if NONE are
-   * present, and lists the options with "or". Default false = all are required.
+   * When true, ANY ONE of `required` satisfies the feature. The notice then
+   * shows only if NONE are present, and lists the options with "or". Default
+   * false = all are required.
    */
   anyOf?: boolean
 }) {

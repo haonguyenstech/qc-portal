@@ -29,7 +29,6 @@ import {
   Plus,
   Search,
   Settings2,
-  Smartphone,
   Sparkles,
   TabletSmartphone,
   Ticket,
@@ -63,6 +62,8 @@ import {
   type TestCaseFormat,
 } from '@/lib/api'
 import { cn } from '@/lib/utils'
+import { TEST_TARGET_META } from '@/lib/testTarget'
+import type { TestTarget } from '@/lib/types'
 import { useProjects } from '@/lib/project-context'
 import { useHints } from '@/lib/hints'
 import { loadLastInputs, saveLastInputs, isValidHttpUrl } from '@/lib/runForm'
@@ -150,12 +151,13 @@ function loadRunMode(): RunMode {
 //  web        — desktop browser (Playwright), the App URL
 //  web-mobile — the App URL opened in a mobile device's browser via Mobile MCP
 //  app-mobile — a native app driven on a mobile device via Mobile MCP (App URL optional)
-type TestTarget = 'web' | 'web-mobile' | 'app-mobile'
+// The type itself lives in lib/types.ts — a run now stores its target, so History and
+// the run detail page label it with the same vocabulary.
 const TEST_TARGET_KEY = 'qc.runTestTarget'
 const TEST_TARGETS: TestTarget[] = ['web', 'web-mobile', 'app-mobile']
 
 // "Web on mobile" and "App on device" are both live (they drive a booted device
-// via Mobile MCP / Appium). Nothing is coming-soon right now.
+// via Mobile MCP). Nothing is coming-soon right now.
 const COMING_SOON_TARGETS: TestTarget[] = []
 
 function loadTestTarget(): TestTarget {
@@ -208,11 +210,9 @@ function saveAppName(projectId: string, name: string): void {
   }
 }
 
-const TARGET_META: Record<TestTarget, { label: string; hint: string; Icon: typeof Globe }> = {
-  web: { label: 'Web', hint: 'Desktop browser', Icon: Globe },
-  'web-mobile': { label: 'Web on mobile', hint: 'Mobile browser', Icon: Smartphone },
-  'app-mobile': { label: 'App on device', hint: 'Native app', Icon: TabletSmartphone },
-}
+// Shared with History + a run's detail header, so a run is described the same way
+// when it's started and when it's read back later (see lib/testTarget.ts).
+const TARGET_META = TEST_TARGET_META
 
 /** Numbered step header that splits the run form into clear, scannable sections. */
 function StepHeader({ n, title, hint }: { n: number; title: string; hint?: string }) {
@@ -801,12 +801,11 @@ export default function RunPage() {
   // so the URL field is hidden and never required/validated in that mode.
   const isAppTarget = testTarget === 'app-mobile'
   // The MCP server(s) this target drives the browser/device with. Web → Playwright.
-  // Mobile targets → EITHER Mobile MCP or Appium; having just one connected is enough
-  // to drive a device, so the run isn't blocked when only one of the two is set up.
-  const requiredMcpServers = testTarget === 'web' ? ['playwright'] : ['mobile-mcp', 'appium-mcp']
-  // Web needs ALL of its servers; mobile needs ANY ONE of the two drivers.
-  const mcpAnyOf = testTarget !== 'web'
-  const requiredMcpLabel = testTarget === 'web' ? 'Playwright' : 'Mobile or Appium'
+  // Mobile targets → Mobile MCP (Appium is disabled — see APPIUM_ENABLED in McpPage).
+  const requiredMcpServers = testTarget === 'web' ? ['playwright'] : ['mobile-mcp']
+  // Single required server per target, so "any of" vs "all of" is moot — keep false.
+  const mcpAnyOf = false
+  const requiredMcpLabel = testTarget === 'web' ? 'Playwright' : 'Mobile'
   // Only block once we've actually loaded the config (mcpServers !== undefined);
   // don't gate the button on a still-loading query.
   const mcpMissing =
@@ -1403,9 +1402,9 @@ export default function RunPage() {
                   <p className="text-[11px] text-muted-foreground">
                     Opens the App URL on a booted device via{' '}
                     <Link to="/mcp" className="font-medium text-primary hover:underline">
-                      Mobile MCP or Appium
+                      Mobile MCP
                     </Link>{' '}
-                    — connect either server and boot a device first.
+                    — connect it and boot a device first.
                   </p>
                 )}
               </div>
@@ -1447,7 +1446,7 @@ export default function RunPage() {
                         </span>{' '}
                         first, then connect the{' '}
                         <Link to="/mcp" className="font-medium underline">
-                          Mobile MCP or Appium
+                          Mobile MCP
                         </Link>{' '}
                         server. Claude only <span className="font-medium">launches the
                         already-installed app</span> by this name — it won't install it for you.

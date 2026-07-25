@@ -6,27 +6,38 @@ import {
   Camera,
   Check,
   ChevronDown,
+  ClipboardCheck,
   Clock,
+  Code2,
+  Columns2,
   Copy,
+  Download,
   ExternalLink,
+  HelpCircle,
+  History,
   ImagePlus,
   Laptop,
   Layout,
   Loader2,
   MessageCircle,
+  MessageSquarePlus,
   Minus,
   Monitor,
+  Palette,
   PanelRight,
   Plus,
   RefreshCw,
   RotateCw,
+  Search,
   Settings2,
   Smartphone,
   Sparkles,
   Square,
   Tablet,
   TerminalSquare,
+  Ticket as TicketIcon,
   Trash2,
+  Undo2,
   X,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
@@ -47,17 +58,30 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { OpenFolderButton } from '@/components/OpenFolderButton'
+import { CrawledStatusHeader, CrawledTicketRow } from '@/components/CrawledTicketRow'
+import { buildCrawledTree } from '@/lib/crawled-tickets'
 import { useProjects } from '@/lib/project-context'
 import { cn } from '@/lib/utils'
 import {
   deletePrototype,
+  dismissPrototypeQuestion,
   duplicatePrototype,
+  generateDesignSystem,
+  generateTestcasesFromPrototype,
+  getDesignSystem,
   getPrototype,
+  getPrototypeVersion,
+  listCrawledTickets,
   listPrototypes,
   openPrototypesFolder,
   renamePrototype,
+  restorePrototypeVersion,
   streamPrototype,
+  type CrawledTicket,
+  type DesignSystemInfo,
+  type PrototypeDecision,
   type PrototypeMessage,
+  type PrototypeVersionMeta,
 } from '@/lib/api'
 
 const MODELS = ['haiku', 'sonnet', 'opus'] as const
@@ -287,6 +311,114 @@ function openInNewTab(html: string) {
 }
 
 /**
+ * Save the prototype as a standalone .html file. It's a single self-contained document,
+ * so the download opens in any browser with no server — which is how a BA hands a screen
+ * to a stakeholder, or attaches it to a ticket for sign-off.
+ */
+function downloadHtml(html: string, filename: string) {
+  const url = URL.createObjectURL(new Blob([html], { type: 'text/html' }))
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  window.setTimeout(() => URL.revokeObjectURL(url), 30_000)
+}
+
+// ------------------------------------------------------- comment mode (element picker)
+
+/** An element the user clicked in comment mode, plus what they want changed there. */
+interface PinComment {
+  id: string
+  /** Human-readable target, e.g. `<button> "Save changes"`. */
+  label: string
+  /** Shallow CSS-ish path, so the model can locate the element in the markup. */
+  path: string
+  text: string
+}
+
+/**
+ * Injected into the preview iframe while comment mode is on: highlights whatever the
+ * cursor is over and posts the clicked element's description back to the parent, instead
+ * of letting the click do whatever the prototype would normally do.
+ *
+ * This is only ever added to the RENDERED srcDoc (see withPicker) — never to the stored
+ * document. The iframe is sandboxed without allow-same-origin, so postMessage is the only
+ * channel out, and the parent validates the payload shape before trusting it.
+ */
+const PICKER_SCRIPT = `
+<script>(function(){
+  var box = document.createElement('div');
+  box.setAttribute('data-qc-pick','1');
+  box.style.cssText = 'position:fixed;pointer-events:none;z-index:2147483647;border:2px solid #3279F9;background:rgba(50,121,249,.14);border-radius:4px;box-shadow:0 0 0 1px rgba(255,255,255,.6);display:none';
+  var tag = document.createElement('div');
+  tag.setAttribute('data-qc-pick','1');
+  tag.style.cssText = 'position:fixed;pointer-events:none;z-index:2147483647;background:#3279F9;color:#fff;font:600 11px/1.4 ui-sans-serif,system-ui,sans-serif;padding:2px 6px;border-radius:6px;display:none;max-width:60vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
+  function mount(){ if(document.body){ document.body.appendChild(box); document.body.appendChild(tag); } }
+  mount();
+  document.documentElement.style.cursor = 'crosshair';
+  function describe(el){
+    // innerText first (it respects layout), then textContent as a fallback — an element
+    // with no readable text at all still gets identified by its tag + path.
+    var t = (el.innerText || el.textContent || el.value || el.getAttribute('aria-label') || el.getAttribute('placeholder') || '').trim().replace(/\\s+/g,' ');
+    return '<' + el.tagName.toLowerCase() + '>' + (t ? ' "' + t.slice(0,70) + '"' : '');
+  }
+  function pathOf(el){
+    var out = [], n = el, d = 0;
+    while (n && n.nodeType === 1 && n.tagName !== 'HTML' && d < 6) {
+      var s = n.tagName.toLowerCase();
+      if (n.id) { out.unshift(s + '#' + n.id); break; }
+      var c = n.getAttribute && n.getAttribute('class');
+      if (c && typeof c === 'string' && c.trim()) s += '.' + c.trim().split(/\\s+/).slice(0,3).join('.');
+      out.unshift(s); n = n.parentElement; d++;
+    }
+    return out.join(' > ');
+  }
+  document.addEventListener('mouseover', function(e){
+    var el = e.target;
+    if (!el || el.nodeType !== 1 || el.getAttribute('data-qc-pick')) return;
+    var r = el.getBoundingClientRect();
+    box.style.display = 'block';
+    box.style.left = r.left + 'px'; box.style.top = r.top + 'px';
+    box.style.width = r.width + 'px'; box.style.height = r.height + 'px';
+    tag.textContent = describe(el);
+    tag.style.display = 'block';
+    tag.style.left = r.left + 'px';
+    tag.style.top = (r.top > 20 ? r.top - 19 : r.bottom + 3) + 'px';
+  }, true);
+  // Swallow anything the prototype would normally do — this click is a comment, not a use.
+  function eat(e){ e.preventDefault(); e.stopPropagation(); }
+  document.addEventListener('submit', eat, true);
+  document.addEventListener('click', function(e){
+    eat(e);
+    var el = e.target;
+    if (!el || el.nodeType !== 1) return;
+    parent.postMessage({ source:'qc-prototype', type:'pick', label: describe(el), path: pathOf(el) }, '*');
+  }, true);
+})();</script>
+`
+
+/** Add the picker to a document for RENDERING only (never to what we store). */
+function withPicker(html: string): string {
+  if (!html) return html
+  return /<\/body>/i.test(html)
+    ? html.replace(/<\/body>/i, `${PICKER_SCRIPT}</body>`)
+    : html + PICKER_SCRIPT
+}
+
+/** Turn pinned comments into one precise refine instruction. */
+function commentsToPrompt(comments: PinComment[]): string {
+  const lines = comments.map(
+    (c, i) => `${i + 1}. On the element ${c.label}${c.path ? ` (in ${c.path})` : ''} — ${c.text}`,
+  )
+  return [
+    `Apply these ${comments.length} targeted change${comments.length === 1 ? '' : 's'}. Each one names a SPECIFIC element in the current prototype — find that element and change only what is asked, leaving the rest of the screen exactly as it is:`,
+    ...lines,
+  ].join('\n')
+}
+
+/**
  * Rasterize the prototype HTML and write it to the clipboard as a PNG image.
  *
  * The live preview iframe is sandboxed WITHOUT allow-same-origin (null origin),
@@ -376,22 +508,26 @@ function DeviceStage({
   orientation,
   html,
   nonce,
+  commentMode,
 }: {
   device: Device
   orientation: Orientation
   html: string
   nonce: number
+  /** Comment mode injects the element picker into the RENDERED doc (see withPicker). */
+  commentMode: boolean
 }) {
   const spec = DEVICES.find((d) => d.id === device)
   const iframe = (
     <iframe
-      // Remount on rotate too so the page relayouts at the new viewport size.
-      key={`${nonce}-${device}-${orientation}`}
+      // Remount on rotate too so the page relayouts at the new viewport size, and on a
+      // comment-mode change so the picker script is added/removed.
+      key={`${nonce}-${device}-${orientation}-${commentMode ? 'pick' : 'view'}`}
       title="Prototype preview"
       // Sandbox WITHOUT allow-same-origin: scripts (Tailwind CDN, small inline JS) run,
       // but the page is a null origin and can't touch the portal.
       sandbox="allow-scripts allow-forms allow-popups"
-      srcDoc={html}
+      srcDoc={commentMode ? withPicker(html) : html}
       className="h-full w-full border-0 bg-white"
     />
   )
@@ -618,6 +754,20 @@ function PreviewPane({
   onView,
   pending,
   className,
+  versions,
+  viewVersion,
+  onViewVersion,
+  onRestore,
+  restoring,
+  onCompare,
+  loadingVersion,
+  commentMode,
+  onCommentMode,
+  comments,
+  onPick,
+  onRemoveComment,
+  onApplyComments,
+  onDownload,
 }: {
   html: string | undefined
   code: string
@@ -625,6 +775,23 @@ function PreviewPane({
   onView: (v: 'preview' | 'code') => void
   pending: boolean
   className?: string
+  /** Click-to-comment on the rendered screen (Claude-Design-style annotation). */
+  commentMode: boolean
+  onCommentMode: (on: boolean) => void
+  comments: PinComment[]
+  onPick: (target: { label: string; path: string }) => void
+  onRemoveComment: (id: string) => void
+  onApplyComments: () => void
+  onDownload: () => void
+  /** Revision history of the selected prototype (oldest first). */
+  versions: PrototypeVersionMeta[]
+  /** Which revision is on screen — null means the current document. */
+  viewVersion: number | null
+  onViewVersion: (n: number | null) => void
+  onRestore: (n: number) => void
+  restoring: boolean
+  onCompare: () => void
+  loadingVersion: boolean
 }) {
   const [device, setDevice] = useState<Device>('desktop')
   const [orientation, setOrientation] = useState<Orientation>('portrait')
@@ -634,6 +801,11 @@ function PreviewPane({
   const [capturing, setCapturing] = useState(false)
   const [copied, setCopied] = useState(false)
   const codeRef = useRef<HTMLPreElement>(null)
+  // The newest revision IS the current document, so `viewVersion === null` and
+  // `viewVersion === latestVersion` mean the same thing on screen.
+  const latestVersion = versions.at(-1)?.n ?? 1
+  const shownVersion = viewVersion ?? latestVersion
+  const viewingOlder = viewVersion != null && viewVersion !== latestVersion
 
   async function captureImage() {
     if (!html || capturing) return
@@ -664,8 +836,33 @@ function PreviewPane({
     if (view === 'code' && codeRef.current) codeRef.current.scrollTop = codeRef.current.scrollHeight
   }, [code, view])
 
+  // Receive picked elements from the preview iframe. The frame is a null origin, so we
+  // can't check e.origin usefully — validate the payload SHAPE instead, and only listen
+  // while comment mode is actually on.
+  useEffect(() => {
+    if (!commentMode) return
+    const onMessage = (e: MessageEvent) => {
+      const d = e.data as { source?: string; type?: string; label?: unknown; path?: unknown } | null
+      if (!d || typeof d !== 'object' || d.source !== 'qc-prototype' || d.type !== 'pick') return
+      onPick({
+        label: typeof d.label === 'string' ? d.label.slice(0, 140) : 'element',
+        path: typeof d.path === 'string' ? d.path.slice(0, 300) : '',
+      })
+    }
+    window.addEventListener('message', onMessage)
+    return () => window.removeEventListener('message', onMessage)
+  }, [commentMode, onPick])
+
+  // Comment mode is about the live screen — it means nothing in the code view.
+  useEffect(() => {
+    if (view !== 'preview' && commentMode) onCommentMode(false)
+  }, [view, commentMode, onCommentMode])
+
   return (
-    <div className={cn('flex min-h-0 flex-col rounded-2xl border border-border/60 bg-card shadow-none', className)}>
+    <div
+      data-tour="preview"
+      className={cn('flex min-h-0 flex-col rounded-2xl border border-border/60 bg-card shadow-none', className)}
+    >
       <div className="flex items-center justify-between gap-2 border-b border-border/60 px-3 py-2">
         <div className="flex items-center gap-1 rounded-full bg-muted/60 p-0.5">
           {(['preview', 'code'] as const).map((v) => (
@@ -725,6 +922,37 @@ function PreviewPane({
               </Button>
             </Tip>
           )}
+          {/* Point at the thing instead of describing it — the fastest way to say
+              "this button is wrong" without writing a paragraph about which button. */}
+          {view === 'preview' && (
+            <Tip
+              label={
+                commentMode
+                  ? 'Comment mode is ON — click any element in the screen to comment on it. Click here to exit.'
+                  : 'Comment on the screen — click an element and say what should change, instead of describing where it is'
+              }
+            >
+              <Button
+                variant={commentMode ? 'default' : 'ghost'}
+                size="icon"
+                onClick={() => onCommentMode(!commentMode)}
+                disabled={!html}
+                className={cn(
+                  'relative size-8 rounded-lg transition-all active:scale-[0.98]',
+                  !commentMode && 'text-muted-foreground hover:text-foreground',
+                )}
+                aria-pressed={commentMode}
+                aria-label="Comment mode"
+              >
+                <MessageSquarePlus className="size-3.5" />
+                {comments.length > 0 && (
+                  <span className="absolute -right-0.5 -top-0.5 flex size-4 items-center justify-center rounded-full bg-primary text-[9px] font-semibold tabular-nums text-primary-foreground ring-2 ring-card">
+                    {comments.length}
+                  </span>
+                )}
+              </Button>
+            </Tip>
+          )}
           {view === 'preview' && (
             <Tip label="Capture a PNG snapshot of the preview to your clipboard">
               <Button
@@ -738,6 +966,18 @@ function PreviewPane({
               </Button>
             </Tip>
           )}
+          <Tip label="Download as a standalone .html file — opens in any browser, no server needed">
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={onDownload}
+              disabled={!html}
+              className="size-8 rounded-lg text-muted-foreground hover:text-foreground"
+              aria-label="Download HTML"
+            >
+              <Download className="size-3.5" />
+            </Button>
+          </Tip>
           {view === 'code' && (
             <Tip label="Copy the generated HTML to your clipboard">
               <Button
@@ -776,6 +1016,140 @@ function PreviewPane({
         </div>
       </div>
 
+      {/* Revision bar — a refine APPENDS a version, so nothing is lost. Only shown once
+          there's history to move through (or while an older revision is on screen). */}
+      {!pending && (versions.length > 1 || viewVersion != null) && (
+        <div
+          className={cn(
+            'flex flex-wrap items-center gap-2 border-b border-border/60 px-3 py-1.5',
+            viewingOlder && 'bg-amber-50 dark:bg-amber-950/40',
+          )}
+        >
+          <History className="size-3.5 shrink-0 text-muted-foreground" />
+          <Select
+            value={String(shownVersion)}
+            onValueChange={(v) => onViewVersion(Number(v) === latestVersion ? null : Number(v))}
+          >
+            <SelectTrigger className="h-7 w-[132px] rounded-lg text-xs shadow-none">
+              <span className="truncate">
+                v{shownVersion}
+                {shownVersion === latestVersion ? ' · latest' : ''}
+              </span>
+            </SelectTrigger>
+            <SelectContent className="max-w-[380px]">
+              {[...versions].reverse().map((v) => (
+                <SelectItem key={v.n} value={String(v.n)} textValue={`v${v.n}`} className="text-xs">
+                  <VersionLabel v={v} latest={v.n === latestVersion} />
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          {loadingVersion && <Loader2 className="size-3.5 animate-spin text-muted-foreground" />}
+          {viewingOlder ? (
+            <>
+              <span className="text-[11px] font-medium text-amber-700 dark:text-amber-400">
+                Viewing an older revision — not the current one.
+              </span>
+              <div className="ml-auto flex items-center gap-1.5">
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => onViewVersion(null)}
+                  className="h-7 rounded-full px-2.5 text-[11px]"
+                >
+                  Back to latest
+                </Button>
+                <Tip label="Make this revision the current document (appended as a new revision, so this is undoable)">
+                  <Button
+                    size="sm"
+                    onClick={() => onRestore(shownVersion)}
+                    disabled={restoring}
+                    className="h-7 gap-1 rounded-full px-2.5 text-[11px] active:scale-[0.98]"
+                  >
+                    {restoring ? (
+                      <Loader2 className="size-3 animate-spin" />
+                    ) : (
+                      <Undo2 className="size-3" />
+                    )}
+                    Restore v{shownVersion}
+                  </Button>
+                </Tip>
+              </div>
+            </>
+          ) : (
+            <>
+              <span className="truncate text-[11px] text-muted-foreground">
+                {versions.length} revision{versions.length === 1 ? '' : 's'} · every refine is kept
+              </span>
+              <Tip label="Compare two revisions side by side">
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={onCompare}
+                  disabled={versions.length < 2}
+                  className="ml-auto h-7 gap-1 rounded-full px-2.5 text-[11px]"
+                >
+                  <Columns2 className="size-3" />
+                  Compare
+                </Button>
+              </Tip>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* Comment mode: the instruction + every pin so far, applied as ONE refine. */}
+      {view === 'preview' && (commentMode || comments.length > 0) && !pending && (
+        <div className="space-y-1.5 border-b border-border/60 bg-primary/5 px-3 py-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <MessageSquarePlus className="size-3.5 shrink-0 text-primary" />
+            <span className="text-[11px] font-medium text-primary">
+              {commentMode
+                ? 'Click any element in the screen to comment on it'
+                : `${comments.length} comment${comments.length === 1 ? '' : 's'} pinned`}
+            </span>
+            {comments.length > 0 && (
+              <Button
+                size="sm"
+                onClick={onApplyComments}
+                className="ml-auto h-7 gap-1 rounded-full px-2.5 text-[11px] active:scale-[0.98]"
+              >
+                <ArrowUp className="size-3" />
+                Apply {comments.length} comment{comments.length === 1 ? '' : 's'}
+              </Button>
+            )}
+          </div>
+          {comments.length > 0 && (
+            <ol className="space-y-1">
+              {comments.map((c, i) => (
+                <li
+                  key={c.id}
+                  className="flex items-start gap-2 rounded-xl border border-border/60 bg-card px-2 py-1.5"
+                >
+                  <span className="mt-0.5 flex size-4 shrink-0 items-center justify-center rounded-full bg-primary text-[9px] font-semibold text-primary-foreground">
+                    {i + 1}
+                  </span>
+                  <span className="min-w-0 flex-1 text-[11px] leading-snug">
+                    <span className="block truncate font-mono text-[10px] text-muted-foreground" title={c.path}>
+                      {c.label}
+                    </span>
+                    <span className="text-foreground">{c.text}</span>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => onRemoveComment(c.id)}
+                    className="mt-0.5 shrink-0 text-muted-foreground transition-colors hover:text-destructive"
+                    aria-label="Remove comment"
+                  >
+                    <X className="size-3" />
+                  </button>
+                </li>
+              ))}
+            </ol>
+          )}
+        </div>
+      )}
+
       {view === 'code' ? (
         <div className="relative min-h-0 flex-1">
           <pre
@@ -802,7 +1176,13 @@ function PreviewPane({
               <BuildingOverlay updating={!!html} />
             </>
           ) : html ? (
-            <DeviceStage device={device} orientation={orientation} html={html} nonce={nonce} />
+            <DeviceStage
+              device={device}
+              orientation={orientation}
+              html={html}
+              nonce={nonce}
+              commentMode={commentMode}
+            />
           ) : (
             <div className="flex h-full min-h-[84vh] items-center justify-center text-center text-sm text-muted-foreground">
               Your prototype will render here.
@@ -912,7 +1292,818 @@ function LogPanel({
   )
 }
 
+// ---------------------------------------------------------------- ticket linking
+
+/**
+ * Pick an already-crawled ticket to build the prototype FROM. Keyed on the ticket's
+ * on-disk FOLDER (`c.name`, possibly nested PARENT/CHILD) rather than its display id,
+ * because that folder is what the server reads the ticket from and where test-case
+ * versions are written. Reuses the shared crawled-ticket tree so it nests and groups
+ * exactly like every other crawled-ticket selector in the portal.
+ */
+function TicketLinkDialog({
+  open,
+  onOpenChange,
+  projectId,
+  value,
+  onPick,
+}: {
+  open: boolean
+  onOpenChange: (v: boolean) => void
+  projectId: string
+  value: string | null
+  onPick: (t: CrawledTicket | null) => void
+}) {
+  const [query, setQuery] = useState('')
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
+
+  const { data: crawled, isLoading } = useQuery({
+    queryKey: ['crawled-tickets', projectId],
+    queryFn: () => listCrawledTickets(projectId),
+    enabled: !!projectId && open,
+  })
+
+  const q = query.trim().toLowerCase()
+  const tree = useMemo(() => {
+    const sorted = [...(crawled ?? [])].sort((a, b) =>
+      (b.crawledAt ?? '').localeCompare(a.crawledAt ?? ''),
+    )
+    return buildCrawledTree(sorted, {
+      collapsed,
+      match: q
+        ? (t) =>
+            (t.displayId ?? t.name).toLowerCase().includes(q) ||
+            (t.title ?? '').toLowerCase().includes(q)
+        : undefined,
+    })
+  }, [crawled, q, collapsed])
+
+  const toggleCollapse = (name: string) =>
+    setCollapsed((prev) => {
+      const next = new Set(prev)
+      if (next.has(name)) next.delete(name)
+      else next.add(name)
+      return next
+    })
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="rounded-3xl sm:max-w-2xl">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <TicketIcon className="size-4" />
+            Build from a ticket
+          </DialogTitle>
+          <DialogDescription>
+            The ticket’s description, comments and acceptance criteria become the prototype’s scope —
+            so the screen uses the requirement’s real names and covers the states it asks for.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="relative">
+          <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+          <input
+            autoFocus
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Filter by id or title…"
+            className="h-10 w-full rounded-full border border-input bg-transparent px-4 pl-9 text-sm outline-none transition-[color,box-shadow] placeholder:text-muted-foreground focus:border-ring focus:ring-3 focus:ring-ring/50"
+          />
+        </div>
+
+        <div className="max-h-[45vh] overflow-y-auto rounded-2xl border border-border/60">
+          {isLoading ? (
+            <div className="flex items-center gap-2 px-3 py-6 text-xs text-muted-foreground">
+              <Loader2 className="size-3.5 animate-spin" />
+              Loading crawled tickets…
+            </div>
+          ) : (crawled?.length ?? 0) === 0 ? (
+            <div className="px-3 py-8 text-center text-sm text-muted-foreground">
+              No crawled tickets yet — crawl one on the <span className="font-medium">Tickets</span>{' '}
+              page and it’ll show up here.
+            </div>
+          ) : tree.count === 0 ? (
+            <div className="px-3 py-6 text-center text-xs text-muted-foreground">
+              No crawled ticket matches “{query}”.
+            </div>
+          ) : (
+            tree.groups.map((group) => (
+              <div key={group.status || '∅'}>
+                <CrawledStatusHeader status={group.status} count={group.roots.length} />
+                <ul className="divide-y">
+                  {tree.rows(group.roots).map(({ ticket: t, depth, hasChildren }) => (
+                    <li key={t.name}>
+                      <CrawledTicketRow
+                        ticket={t}
+                        depth={depth}
+                        hasChildren={hasChildren}
+                        isOpen={!collapsed.has(t.name)}
+                        onToggleExpand={() => toggleCollapse(t.name)}
+                        selected={t.name === value}
+                        onSelect={() => {
+                          onPick(t)
+                          onOpenChange(false)
+                          setQuery('')
+                        }}
+                      />
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))
+          )}
+        </div>
+
+        <DialogFooter>
+          {value && (
+            <Button
+              variant="ghost"
+              onClick={() => {
+                onPick(null)
+                onOpenChange(false)
+              }}
+              className="rounded-full text-muted-foreground"
+            >
+              <X className="size-4" />
+              Unlink ticket
+            </Button>
+          )}
+          <Button variant="outline" onClick={() => onOpenChange(false)} className="rounded-full">
+            Cancel
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+/**
+ * The grounding strip above the chat: what this prototype is built FROM. A linked ticket
+ * supplies the requirement (scope + real names); "Match our app" additionally lets the
+ * build read the project's own source so the mock-up looks like the real product. Both
+ * apply to the NEXT build, and both persist on the prototype for later refines.
+ */
+function GroundingBar({
+  ticketId,
+  ticketTitle,
+  ticketFolder,
+  matchApp,
+  onPickTicket,
+  onToggleMatchApp,
+  disabled,
+  designSystem,
+  onOpenDesignSystem,
+}: {
+  ticketId: string | null
+  ticketTitle: string | null
+  ticketFolder: string | null
+  matchApp: boolean
+  onPickTicket: () => void
+  onToggleMatchApp: () => void
+  disabled: boolean
+  designSystem: DesignSystemInfo | undefined
+  onOpenDesignSystem: () => void
+}) {
+  const hasDs = !!designSystem?.exists
+  return (
+    <div className="flex flex-wrap items-center gap-1.5 border-b border-border/60 px-3 py-1.5">
+      <Tip
+        label={
+          ticketFolder
+            ? 'Built from this ticket — click to change or unlink'
+            : 'Build from a crawled ticket so the screen matches the requirement'
+        }
+      >
+        <button
+          type="button"
+          onClick={onPickTicket}
+          disabled={disabled}
+          className={cn(
+            'inline-flex min-w-0 items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-medium transition-colors disabled:opacity-50',
+            ticketFolder
+              ? 'border-primary/40 bg-primary/10 text-primary'
+              : 'border-dashed border-border/60 bg-muted/40 text-muted-foreground hover:border-border hover:text-foreground',
+          )}
+        >
+          <TicketIcon className="size-3 shrink-0" />
+          {ticketFolder ? (
+            <>
+              <span className="font-mono">{ticketId ?? ticketFolder}</span>
+              {ticketTitle && (
+                <span className="max-w-[9rem] truncate font-normal opacity-70">{ticketTitle}</span>
+              )}
+            </>
+          ) : (
+            'Build from a ticket'
+          )}
+        </button>
+      </Tip>
+      {/* The design system, extracted once, is what makes every prototype look like the
+          same product. Surfaced here so it's obvious whether builds are using it. */}
+      <Tip
+        label={
+          hasDs
+            ? "Using this project's design system — the real app's palette, type, components and wording. Click to view or re-extract."
+            : "No design system yet. Extract the real app's visual language once, and every prototype will match the product."
+        }
+      >
+        <button
+          type="button"
+          onClick={onOpenDesignSystem}
+          className={cn(
+            'ml-auto inline-flex shrink-0 items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-medium transition-colors',
+            hasDs
+              ? 'border-violet-200 bg-violet-50 text-violet-700 dark:border-violet-900 dark:bg-violet-950 dark:text-violet-300'
+              : 'border-dashed border-border/60 bg-muted/40 text-muted-foreground hover:border-border hover:text-foreground',
+          )}
+        >
+          <Palette className="size-3 shrink-0" />
+          Design system
+          {hasDs && <Check className="size-3" />}
+        </button>
+      </Tip>
+      <Tip label="Read this project's real source code so the prototype matches the app's design language, field names and terminology (slower)">
+        <button
+          type="button"
+          onClick={onToggleMatchApp}
+          disabled={disabled}
+          className={cn(
+            'inline-flex shrink-0 items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-medium transition-colors disabled:opacity-50',
+            matchApp
+              ? 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-300'
+              : 'border-border/60 bg-muted/40 text-muted-foreground hover:border-border hover:text-foreground',
+          )}
+        >
+          {matchApp ? <Check className="size-3" /> : <Code2 className="size-3" />}
+          Match our app
+        </button>
+      </Tip>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------- revisions
+
+/** Compact absolute time for a revision row ("Jul 16, 02:30 PM" → same as formatCreated). */
+function VersionLabel({ v, latest }: { v: PrototypeVersionMeta; latest: boolean }) {
+  return (
+    <span className="flex items-center gap-1.5">
+      <span className="font-medium tabular-nums">v{v.n}</span>
+      {latest && <span className="text-[10px] uppercase tracking-wide opacity-60">latest</span>}
+      <span className="truncate text-[11px] opacity-60">{v.prompt || v.summary}</span>
+    </span>
+  )
+}
+
+/**
+ * Side-by-side comparison of two revisions, each rendered in its own sandboxed iframe.
+ * This is what makes a refine safe to try: you can see exactly what changed, and restore
+ * the older document from the revision bar if the new one went the wrong way.
+ */
+function CompareDialog({
+  open,
+  onOpenChange,
+  projectId,
+  slug,
+  versions,
+}: {
+  open: boolean
+  onOpenChange: (v: boolean) => void
+  projectId: string
+  slug: string
+  versions: PrototypeVersionMeta[]
+}) {
+  const latest = versions.at(-1)?.n ?? 1
+  const previous = versions.length > 1 ? versions.at(-2)!.n : latest
+  const [left, setLeft] = useState(previous)
+  const [right, setRight] = useState(latest)
+
+  const leftQ = useQuery({
+    queryKey: ['prototype-version', projectId, slug, left],
+    queryFn: () => getPrototypeVersion(projectId, slug, left),
+    enabled: open,
+  })
+  const rightQ = useQuery({
+    queryKey: ['prototype-version', projectId, slug, right],
+    queryFn: () => getPrototypeVersion(projectId, slug, right),
+    enabled: open,
+  })
+
+  const picker = (value: number, onChange: (n: number) => void) => (
+    <Select value={String(value)} onValueChange={(v) => onChange(Number(v))}>
+      <SelectTrigger className="h-8 w-full rounded-lg text-xs shadow-none">
+        <span className="truncate">
+          v{value}
+          {value === latest ? ' · latest' : ''}
+        </span>
+      </SelectTrigger>
+      <SelectContent className="max-w-[360px]">
+        {[...versions].reverse().map((v) => (
+          <SelectItem key={v.n} value={String(v.n)} textValue={`v${v.n}`} className="text-xs">
+            <VersionLabel v={v} latest={v.n === latest} />
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
+  )
+
+  const pane = (q: typeof leftQ) => (
+    <div className="min-h-0 flex-1 overflow-hidden rounded-xl border border-border/60 bg-white">
+      {q.isLoading ? (
+        <div className="flex h-full items-center justify-center">
+          <Loader2 className="size-5 animate-spin text-muted-foreground" />
+        </div>
+      ) : q.data?.html ? (
+        <iframe
+          title={`Revision v${q.data.n}`}
+          sandbox="allow-scripts allow-forms allow-popups"
+          srcDoc={q.data.html}
+          className="h-full w-full border-0 bg-white"
+        />
+      ) : (
+        <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
+          Could not load this revision.
+        </div>
+      )}
+    </div>
+  )
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="flex h-[88vh] max-w-[96vw] flex-col rounded-3xl sm:max-w-[96vw]">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Columns2 className="size-4" />
+            Compare revisions
+          </DialogTitle>
+          <DialogDescription>
+            Both revisions render live — scroll each independently to see what the refine changed.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="grid min-h-0 flex-1 grid-cols-1 gap-3 md:grid-cols-2">
+          <div className="flex min-h-0 flex-col gap-2">
+            {picker(left, setLeft)}
+            {pane(leftQ)}
+          </div>
+          <div className="flex min-h-0 flex-col gap-2">
+            {picker(right, setRight)}
+            {pane(rightQ)}
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+// ---------------------------------------------------------------- test cases
+
+/**
+ * Draft manual test cases from the prototype. The prototype's markup carries the real
+ * labels, fields, constraints and states, so the cases come out executable instead of
+ * paraphrasing the ticket — and they save as a new version under the LINKED ticket, which
+ * is why a ticket link is required here.
+ */
+function TestcasesDialog({
+  open,
+  onOpenChange,
+  projectId,
+  slug,
+  ticketId,
+  ticketFolder,
+  model,
+}: {
+  open: boolean
+  onOpenChange: (v: boolean) => void
+  projectId: string
+  slug: string
+  ticketId: string | null
+  ticketFolder: string | null
+  model: string
+}) {
+  const queryClient = useQueryClient()
+  const [instructions, setInstructions] = useState('')
+  const [result, setResult] = useState<{ savedTo: string; version: number; count: number } | null>(
+    null,
+  )
+
+  const mut = useMutation({
+    mutationFn: () => generateTestcasesFromPrototype(projectId, slug, { model, instructions }),
+    onSuccess: (r) => {
+      setResult({
+        savedTo: r.savedTo,
+        version: r.version,
+        // Rough case count for the confirmation line — rows/headings in the output.
+        count: r.testcases.split('\n').filter((l) => /^\s*\|?\s*(TC|No)[-\s]?\d/i.test(l)).length,
+      })
+      queryClient.invalidateQueries({ queryKey: ['crawled-tickets', projectId] })
+      queryClient.invalidateQueries({ queryKey: ['crawled', projectId] })
+      queryClient.invalidateQueries({ queryKey: ['testcase-versions', projectId] })
+      toast.success(`Test cases saved as v${r.version}`)
+    },
+    onError: (e) =>
+      toast.error('Could not generate test cases', {
+        description: e instanceof Error ? e.message : 'Unknown error',
+      }),
+  })
+
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(v) => {
+        if (!v && mut.isPending) return // a generation is in flight — don't drop it silently
+        if (!v) {
+          setResult(null)
+          setInstructions('')
+        }
+        onOpenChange(v)
+      }}
+    >
+      <DialogContent className="rounded-3xl sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <ClipboardCheck className="size-4" />
+            Test cases from this prototype
+          </DialogTitle>
+          <DialogDescription>
+            {ticketFolder ? (
+              <>
+                Claude reads the prototype’s markup for the real field names, labels, constraints and
+                states, keeps the scope from{' '}
+                <span className="font-mono font-medium text-foreground">
+                  {ticketId ?? ticketFolder}
+                </span>
+                , and saves a new test-case version under that ticket.
+              </>
+            ) : (
+              'Link this prototype to a crawled ticket first — test-case versions are stored under the ticket, and the ticket defines the acceptance scope.'
+            )}
+          </DialogDescription>
+        </DialogHeader>
+
+        {ticketFolder && !result && (
+          <div className="space-y-1.5">
+            <label className="text-xs font-medium text-muted-foreground">
+              Extra instructions (optional)
+            </label>
+            <Textarea
+              value={instructions}
+              onChange={(e) => setInstructions(e.target.value)}
+              disabled={mut.isPending}
+              rows={3}
+              placeholder="e.g. focus on validation and permissions; skip visual styling cases"
+              className="resize-y rounded-xl text-sm"
+            />
+          </div>
+        )}
+
+        {result && (
+          <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-3 text-sm dark:border-emerald-900 dark:bg-emerald-950">
+            <p className="flex items-center gap-1.5 font-medium text-emerald-800 dark:text-emerald-300">
+              <Check className="size-4" />
+              Saved as v{result.version}
+              {result.count > 0 && ` · ~${result.count} cases`}
+            </p>
+            <p className="mt-1 break-all font-mono text-[11px] text-emerald-700/80 dark:text-emerald-400/80">
+              {result.savedTo}
+            </p>
+          </div>
+        )}
+
+        <DialogFooter>
+          <Button
+            variant="ghost"
+            onClick={() => onOpenChange(false)}
+            disabled={mut.isPending}
+            className="rounded-full"
+          >
+            {result ? 'Done' : 'Cancel'}
+          </Button>
+          {ticketFolder && !result && (
+            <Button
+              onClick={() => mut.mutate()}
+              disabled={mut.isPending}
+              className="gap-1.5 rounded-full active:scale-[0.98]"
+            >
+              {mut.isPending ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : (
+                <ClipboardCheck className="size-4" />
+              )}
+              {mut.isPending ? 'Writing cases…' : 'Generate test cases'}
+            </Button>
+          )}
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 // ---------------------------------------------------------------- page
+
+// ---------------------------------------------------------------- comment capture
+
+/**
+ * Asked as soon as an element is clicked in comment mode: what should change HERE.
+ * The target is already known, so the engineer never has to describe where it is.
+ */
+function CommentDialog({
+  target,
+  onCancel,
+  onSave,
+}: {
+  target: { label: string; path: string } | null
+  onCancel: () => void
+  onSave: (text: string) => void
+}) {
+  const [text, setText] = useState('')
+  // Remount per target (key below) seeds an empty box without a setState-in-effect.
+  return (
+    <Dialog open={!!target} onOpenChange={(v) => !v && onCancel()}>
+      <DialogContent className="rounded-3xl sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <MessageSquarePlus className="size-4" />
+            Comment on this element
+          </DialogTitle>
+          <DialogDescription className="space-y-1">
+            <span className="block font-mono text-xs text-foreground">{target?.label}</span>
+            {target?.path && (
+              <span className="block truncate font-mono text-[10px] opacity-70">{target.path}</span>
+            )}
+          </DialogDescription>
+        </DialogHeader>
+        <Textarea
+          autoFocus
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && !e.shiftKey && text.trim()) {
+              e.preventDefault()
+              onSave(text.trim())
+            }
+          }}
+          placeholder="What should change here? e.g. “make this a secondary button”, “this label should read Member ID”"
+          rows={3}
+          className="min-h-[84px] resize-y rounded-xl"
+        />
+        <DialogFooter>
+          <Button variant="ghost" onClick={onCancel} className="rounded-full">
+            Cancel
+          </Button>
+          <Button
+            onClick={() => onSave(text.trim())}
+            disabled={!text.trim()}
+            className="gap-1.5 rounded-full active:scale-[0.98]"
+          >
+            <Check className="size-4" />
+            Pin comment
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+// ---------------------------------------------------------------- design system
+
+/**
+ * The project's design system: extract the real app's visual language ONCE, then every
+ * prototype inherits it. Stored as the `design-system` knowledge doc, so it's also
+ * editable on Instructions → Knowledge and reaches test-case generation and QC runs.
+ */
+function DesignSystemDialog({
+  open,
+  onOpenChange,
+  projectId,
+  model,
+}: {
+  open: boolean
+  onOpenChange: (v: boolean) => void
+  projectId: string
+  model: string
+}) {
+  const queryClient = useQueryClient()
+  const { data, isLoading } = useQuery({
+    queryKey: ['design-system', projectId],
+    queryFn: () => getDesignSystem(projectId),
+    enabled: open,
+  })
+  const gen = useMutation({
+    mutationFn: () => generateDesignSystem(projectId, model),
+    onSuccess: (info) => {
+      queryClient.setQueryData(['design-system', projectId], info)
+      // It's a knowledge doc — the Instructions page must see it too.
+      queryClient.invalidateQueries({ queryKey: ['knowledge', projectId] })
+      toast.success('Design system extracted', {
+        description: 'Every prototype from now on will match your app.',
+      })
+    },
+    onError: (e) =>
+      toast.error('Could not extract the design system', {
+        description: e instanceof Error ? e.message : 'Unknown error',
+      }),
+  })
+  const exists = !!data?.exists
+
+  return (
+    <Dialog open={open} onOpenChange={(v) => !gen.isPending && onOpenChange(v)}>
+      <DialogContent className="flex max-h-[85vh] flex-col rounded-3xl sm:max-w-3xl">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Palette className="size-4" />
+            Project design system
+          </DialogTitle>
+          <DialogDescription>
+            Read the real app's visual language once — palette, typography, spacing, component
+            shapes and wording conventions — and every prototype is built to match it. Much faster
+            and far more consistent than re-reading the source on every build. Saved as the{' '}
+            <span className="font-mono text-xs">design-system</span> knowledge doc, so you can edit
+            it on the Instructions page.
+          </DialogDescription>
+        </DialogHeader>
+
+        {isLoading ? (
+          <div className="flex items-center gap-2 py-8 text-sm text-muted-foreground">
+            <Loader2 className="size-4 animate-spin" />
+            Loading…
+          </div>
+        ) : (
+          <div className="min-h-0 flex-1 space-y-3 overflow-auto">
+            <div className="flex flex-wrap items-center gap-2 rounded-2xl border border-border/60 bg-muted/40 px-3 py-2">
+              <span
+                className={cn(
+                  'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium',
+                  exists
+                    ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300'
+                    : 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300',
+                )}
+              >
+                {exists ? <Check className="size-3" /> : <Sparkles className="size-3" />}
+                {exists ? 'In use by every build' : 'Not extracted yet'}
+              </span>
+              {exists && data?.savedAt && (
+                <span className="text-[11px] text-muted-foreground">
+                  {(data.size / 1024).toFixed(1)} KB · {formatCreated(data.savedAt)}
+                  {data.source ? ' · AI-extracted' : ' · edited by you'}
+                </span>
+              )}
+              <Tip
+                label={
+                  data?.hasSource === false
+                    ? 'No source code is connected to this project — connect a repo on the Source Code page first'
+                    : "Read the app's source and write the design system (a cheap, read-only AI pass — it never modifies your repo)"
+                }
+              >
+                <Button
+                  onClick={() => gen.mutate()}
+                  disabled={gen.isPending || data?.hasSource === false}
+                  className="ml-auto gap-1.5 rounded-full active:scale-[0.98]"
+                >
+                  {gen.isPending ? (
+                    <Loader2 className="size-4 animate-spin" />
+                  ) : (
+                    <Palette className="size-4" />
+                  )}
+                  {exists ? 'Re-extract' : 'Extract from source'}
+                </Button>
+              </Tip>
+            </div>
+            {gen.isPending && (
+              <p className="flex items-center gap-2 rounded-2xl border border-border/60 bg-card px-3 py-2 text-xs text-muted-foreground">
+                <Loader2 className="size-3.5 animate-spin" />
+                Reading the app's styling, components and strings… this takes a minute or two, and
+                only has to happen once.
+              </p>
+            )}
+            {exists ? (
+              <pre className="whitespace-pre-wrap rounded-2xl border border-border/60 bg-muted/30 p-3 font-mono text-[11px] leading-relaxed">
+                {data?.content}
+              </pre>
+            ) : (
+              !gen.isPending && (
+                <p className="rounded-2xl border border-dashed border-border/60 px-3 py-6 text-center text-xs text-muted-foreground">
+                  Without a design system, prototypes look polished but generic. Extract one and
+                  they'll use your product's real colours, fonts, components and terminology.
+                </p>
+              )
+            )}
+          </div>
+        )}
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+// ---------------------------------------------------------------- open questions
+
+/**
+ * Open questions the build had to guess about, and the BA's answers.
+ *
+ * This is what turns a prototype into a requirements instrument: instead of an assumption
+ * being silently baked into the markup, it's asked out loud, and the answer is stored as a
+ * decision that grounds every later build. Answering re-runs the build with the answers.
+ */
+function QuestionsPanel({
+  questions,
+  decisions,
+  answers,
+  onAnswerChange,
+  onSend,
+  onDismiss,
+  disabled,
+}: {
+  questions: string[]
+  decisions: PrototypeDecision[]
+  answers: Record<string, string>
+  onAnswerChange: (q: string, a: string) => void
+  onSend: () => void
+  onDismiss: (q: string) => void
+  disabled: boolean
+}) {
+  const [showDecisions, setShowDecisions] = useState(false)
+  const answeredCount = questions.filter((q) => (answers[q] ?? '').trim()).length
+  if (!questions.length && !decisions.length) return null
+
+  return (
+    <div className="mb-2.5 space-y-2">
+      {questions.length > 0 && (
+        <div className="space-y-2 rounded-2xl border border-amber-200 bg-amber-50 p-2.5 dark:border-amber-900 dark:bg-amber-950/40">
+          <p className="flex items-center gap-1.5 text-[11px] font-semibold text-amber-800 dark:text-amber-300">
+            <HelpCircle className="size-3.5 shrink-0" />
+            {questions.length} open question{questions.length === 1 ? '' : 's'} for the BA
+          </p>
+          <p className="text-[10px] leading-snug text-amber-700/80 dark:text-amber-400/80">
+            The build had to assume these. Answer any of them and the screen is rebuilt to
+            match — the answer is remembered and never asked again. They stay here until you
+            answer or dismiss them.
+          </p>
+          {questions.map((q) => (
+            <div key={q} className="space-y-1">
+              <div className="flex items-start gap-1.5">
+                <p className="flex-1 text-[11px] font-medium leading-snug text-foreground">{q}</p>
+                <Tip label="Dismiss — this one doesn't need an answer">
+                  <button
+                    type="button"
+                    onClick={() => onDismiss(q)}
+                    disabled={disabled}
+                    className="mt-0.5 shrink-0 text-amber-700/60 transition-colors hover:text-destructive disabled:opacity-50 dark:text-amber-400/60"
+                    aria-label="Dismiss question"
+                  >
+                    <X className="size-3" />
+                  </button>
+                </Tip>
+              </div>
+              <Textarea
+                value={answers[q] ?? ''}
+                onChange={(e) => onAnswerChange(q, e.target.value)}
+                disabled={disabled}
+                placeholder="Your answer…"
+                rows={1}
+                className="max-h-24 min-h-[32px] resize-y rounded-lg bg-background py-1.5 text-[11px]"
+              />
+            </div>
+          ))}
+          {answeredCount > 0 && (
+            <Button
+              size="sm"
+              onClick={onSend}
+              disabled={disabled}
+              className="h-7 w-full gap-1 rounded-full text-[11px] active:scale-[0.98]"
+            >
+              <ArrowUp className="size-3" />
+              Answer {answeredCount} & rebuild
+            </Button>
+          )}
+        </div>
+      )}
+      {decisions.length > 0 && (
+        <div className="rounded-2xl border border-border/60 bg-muted/30 px-2.5 py-1.5">
+          <button
+            type="button"
+            onClick={() => setShowDecisions((s) => !s)}
+            className="flex w-full items-center gap-1.5 text-[11px] font-medium text-muted-foreground transition-colors hover:text-foreground"
+          >
+            <ClipboardCheck className="size-3.5 shrink-0" />
+            {decisions.length} confirmed decision{decisions.length === 1 ? '' : 's'}
+            <ChevronDown
+              className={cn('ml-auto size-3.5 transition-transform', showDecisions && 'rotate-180')}
+            />
+          </button>
+          {showDecisions && (
+            <ul className="mt-1.5 space-y-1.5 border-t border-border/60 pt-1.5">
+              {decisions.map((d, i) => (
+                <li key={i} className="text-[11px] leading-snug">
+                  <span className="block text-muted-foreground">{d.q}</span>
+                  <span className="block font-medium text-foreground">→ {d.a}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
 
 export default function PrototypePageWrapper() {
   const { activeProjectId } = useProjects()
@@ -959,6 +2150,25 @@ function PrototypePage({ projectId }: { projectId: string }) {
   const fileInputRef = useRef<HTMLInputElement>(null)
   // Follow-up suggestions the user has ticked to apply together.
   const [selectedSuggestions, setSelectedSuggestions] = useState<string[]>([])
+  // Grounding for the NEXT build. `undefined` = inherit whatever the selected prototype
+  // already stores; an explicit pick (including `null` = unlink) overrides it. Keeping
+  // "not chosen" distinct from "chosen as none" is what lets a follow-up refine stay
+  // bound to the prototype's ticket without re-picking it every turn.
+  const [pendingTicket, setPendingTicket] = useState<CrawledTicket | null | undefined>(undefined)
+  const [pendingMatchApp, setPendingMatchApp] = useState<boolean | undefined>(undefined)
+  const [ticketPickerOpen, setTicketPickerOpen] = useState(false)
+  const [compareOpen, setCompareOpen] = useState(false)
+  const [testcasesOpen, setTestcasesOpen] = useState(false)
+  const [designSystemOpen, setDesignSystemOpen] = useState(false)
+  // Comment mode: click an element in the preview, say what should change there. Pins are
+  // client-side until applied — sending them is what turns them into one refine.
+  const [commentMode, setCommentMode] = useState(false)
+  const [comments, setComments] = useState<PinComment[]>([])
+  const [pendingPick, setPendingPick] = useState<{ label: string; path: string } | null>(null)
+  // Draft answers to the build's open questions, keyed by the question text.
+  const [answers, setAnswers] = useState<Record<string, string>>({})
+  // Which revision is on screen — null = the current document.
+  const [viewVersion, setViewVersion] = useState<number | null>(null)
   // Start settings (design direction) for the first build of a new prototype.
   const [styleSettings, setStyleSettings] = useState<StyleSettings>(() => loadStyle())
   useEffect(() => {
@@ -997,11 +2207,64 @@ function PrototypePage({ projectId }: { projectId: string }) {
     enabled: !!projectId && !!selected,
   })
 
+  // Whether builds have the app's design system to work from (shown in the grounding bar).
+  const { data: designSystem } = useQuery({
+    queryKey: ['design-system', projectId],
+    queryFn: () => getDesignSystem(projectId),
+    enabled: !!projectId,
+  })
+
   // Keep the chat scrolled to the newest message.
   useEffect(() => {
     const el = scrollRef.current
     if (el) el.scrollTop = el.scrollHeight
   }, [current?.messages.length, selected])
+
+  const versions = current?.versions ?? []
+
+  // Grounding actually in effect for the next build (see pendingTicket above).
+  const ticketFolder =
+    pendingTicket !== undefined ? (pendingTicket?.name ?? null) : (current?.ticketFolder ?? null)
+  const ticketId =
+    pendingTicket !== undefined
+      ? (pendingTicket?.displayId ?? pendingTicket?.name ?? null)
+      : (current?.ticketId ?? null)
+  const ticketTitle =
+    pendingTicket !== undefined ? (pendingTicket?.title ?? null) : (current?.ticketTitle ?? null)
+  const matchApp = pendingMatchApp !== undefined ? pendingMatchApp : (current?.matchApp ?? false)
+
+  // An older revision's HTML, fetched on demand (revision metadata alone is in `current`).
+  const versionQ = useQuery({
+    queryKey: ['prototype-version', projectId, selected, viewVersion],
+    queryFn: () => getPrototypeVersion(projectId, selected as string, viewVersion as number),
+    enabled: !!selected && viewVersion != null,
+  })
+  const shownHtml = viewVersion != null ? versionQ.data?.html : current?.html
+
+  const dismissQuestionMut = useMutation({
+    mutationFn: (question: string) =>
+      dismissPrototypeQuestion(projectId, selected as string, question),
+    onSuccess: (p) => queryClient.setQueryData(['prototype', projectId, p.slug], p),
+    onError: (e) =>
+      toast.error('Could not dismiss that question', {
+        description: e instanceof Error ? e.message : 'Unknown error',
+      }),
+  })
+
+  const restoreMut = useMutation({
+    mutationFn: (version: number) =>
+      restorePrototypeVersion(projectId, selected as string, version),
+    onSuccess: (p) => {
+      queryClient.setQueryData(['prototype', projectId, p.slug], p)
+      queryClient.invalidateQueries({ queryKey: ['prototypes', projectId] })
+      setViewVersion(null) // the restored document IS the current one now
+      toast.success(`Restored — now v${p.versions?.at(-1)?.n ?? ''}`)
+    },
+    onError: (e) =>
+      toast.error('Could not restore that revision', {
+        description: e instanceof Error ? e.message : 'Unknown error',
+      }),
+  })
 
   // Push the live-streamed HTML into the preview, throttled to ~every 180ms so a fast
   // stream doesn't reload the iframe on every token.
@@ -1058,7 +2321,7 @@ function PrototypePage({ projectId }: { projectId: string }) {
     submit(combined)
   }
 
-  const submit = (override?: string) => {
+  const submit = (override?: string, opts?: { decisions?: { q: string; a: string }[] }) => {
     const text = (override ?? input).trim()
     const imgs = attachedImages.map((a) => ({ mediaType: a.mediaType, dataBase64: a.dataBase64 }))
     if ((!text && imgs.length === 0) || busy) return
@@ -1079,8 +2342,18 @@ function PrototypePage({ projectId }: { projectId: string }) {
 
     streamPrototype(
       projectId,
-      // Style settings only shape the FIRST build (no existing prototype).
-      { slug: targetSlug, prompt, model, images: imgs, style: targetSlug ? undefined : styleSettings },
+      {
+        slug: targetSlug,
+        prompt,
+        model,
+        images: imgs,
+        // Style settings only shape the FIRST build (no existing prototype).
+        style: targetSlug ? undefined : styleSettings,
+        // '' unlinks; the server persists both so a later refine inherits them.
+        ticketFolder: ticketFolder ?? '',
+        matchApp,
+        decisions: opts?.decisions,
+      },
       {
         onDelta: (t) => renderStream(accRef.current + t),
         onLog: (level, text) =>
@@ -1097,6 +2370,15 @@ function PrototypePage({ projectId }: { projectId: string }) {
           setPendingPrompt(null)
           setStreamText('')
           setAttachedImages([]) // consumed
+          // The grounding is now persisted on the prototype, so drop the local override
+          // and always show the new revision rather than whatever was being previewed.
+          setPendingTicket(undefined)
+          setPendingMatchApp(undefined)
+          setViewVersion(null)
+          // Comments and answers were consumed by this build.
+          setComments([])
+          setCommentMode(false)
+          setAnswers({})
         },
         onError: (msg) => {
           clearFlush()
@@ -1128,6 +2410,38 @@ function PrototypePage({ projectId }: { projectId: string }) {
 
   const stop = () => abortRef.current?.abort()
 
+  /** Send every pinned comment as ONE refine, so the model sees them together. */
+  const applyComments = () => {
+    if (busy || comments.length === 0) return
+    const extra = input.trim()
+    submit([commentsToPrompt(comments), extra].filter(Boolean).join('\n\n'))
+  }
+
+  /**
+   * Record the BA's answers and rebuild. The answers go up as `decisions` (persisted, and
+   * injected into every later build) AND as the prompt, so this turn acts on them too.
+   */
+  const sendAnswers = () => {
+    if (busy) return
+    const picked = (current?.questions ?? [])
+      .map((q) => ({ q, a: (answers[q] ?? '').trim() }))
+      .filter((d) => d.a)
+    if (!picked.length) return
+    const prompt = [
+      'The business analyst answered these open questions. Update the prototype so it matches these answers exactly:',
+      ...picked.map((d, i) => `${i + 1}. Q: ${d.q}\n   A: ${d.a}`),
+    ].join('\n')
+    submit(prompt, { decisions: picked })
+  }
+
+  /** Save the document on screen as a standalone .html file. */
+  const download = () => {
+    if (!shownHtml) return
+    const base = (current?.name ?? 'prototype').replace(/[^\w.-]+/g, '-').replace(/^-+|-+$/g, '')
+    const v = viewVersion ?? versions.at(-1)?.n
+    downloadHtml(shownHtml, `${base || 'prototype'}${v ? `-v${v}` : ''}.html`)
+  }
+
   // Clean up a pending throttle timer if the page unmounts mid-build.
   useEffect(
     () => () => {
@@ -1140,7 +2454,7 @@ function PrototypePage({ projectId }: { projectId: string }) {
     mutationFn: (slug: string) => deletePrototype(projectId, slug),
     onSuccess: (_r, slug) => {
       queryClient.invalidateQueries({ queryKey: ['prototypes', projectId] })
-      if (selected === slug) setSelected(null)
+      if (selected === slug) selectPrototype(null)
       setDeleting(null)
       toast.success('Prototype deleted')
     },
@@ -1170,7 +2484,7 @@ function PrototypePage({ projectId }: { projectId: string }) {
     onSuccess: (p) => {
       queryClient.setQueryData(['prototype', projectId, p.slug], p)
       queryClient.invalidateQueries({ queryKey: ['prototypes', projectId] })
-      setSelected(p.slug)
+      selectPrototype(p.slug)
       setSettingsFor(null)
       toast.success(`Duplicated as “${p.name}”`)
     },
@@ -1186,8 +2500,20 @@ function PrototypePage({ projectId }: { projectId: string }) {
     renameMut.mutate({ slug, name })
   }
 
+  /** Switch to another saved prototype — its own grounding + latest revision apply. */
+  const selectPrototype = (slug: string | null) => {
+    setSelected(slug)
+    setPendingTicket(undefined)
+    setPendingMatchApp(undefined)
+    setViewVersion(null)
+    // Pins and draft answers belong to the prototype you were looking at.
+    setComments([])
+    setCommentMode(false)
+    setAnswers({})
+  }
+
   const newPrototype = () => {
-    setSelected(null)
+    selectPrototype(null)
     setInput('')
   }
 
@@ -1221,7 +2547,7 @@ function PrototypePage({ projectId }: { projectId: string }) {
   return (
     <div className="space-y-6">
       <header className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-        <div className="flex items-start gap-3">
+        <div data-tour="header" className="flex items-start gap-3">
           <span className="mt-0.5 flex size-11 shrink-0 items-center justify-center rounded-2xl bg-foreground text-background">
             <Layout className="size-5" />
           </span>
@@ -1233,7 +2559,27 @@ function PrototypePage({ projectId }: { projectId: string }) {
             </p>
           </div>
         </div>
-        <div className="flex shrink-0 items-center gap-2">
+        <div data-tour="model" className="flex shrink-0 items-center gap-2">
+          {/* The QC payoff: turn the agreed screen into executable coverage. */}
+          <Tip
+            label={
+              !selected
+                ? 'Build a prototype first'
+                : ticketFolder
+                  ? 'Draft manual test cases from this prototype — its real labels, fields and states, scoped by the linked ticket'
+                  : 'Link a ticket first — test-case versions are stored under the ticket'
+            }
+          >
+            <Button
+              variant="outline"
+              onClick={() => setTestcasesOpen(true)}
+              disabled={!selected || busy}
+              className="h-8 gap-1.5 rounded-full text-xs active:scale-[0.98]"
+            >
+              <ClipboardCheck className="size-3.5" />
+              Test cases
+            </Button>
+          </Tip>
           {modelPicker}
           <OpenFolderButton open={() => openPrototypesFolder(projectId)} label="Prototypes" />
         </div>
@@ -1244,6 +2590,7 @@ function PrototypePage({ projectId }: { projectId: string }) {
             screens). Ball mode: floats just to the LEFT of the chat box (lg+ only,
             where there's room); hidden while the chat is minimized to a bubble. */}
         <aside
+          data-tour="saved"
           className={cn(
             chatFloating
               ? floatOpen
@@ -1277,11 +2624,11 @@ function PrototypePage({ projectId }: { projectId: string }) {
                 key={item.slug}
                 role="button"
                 tabIndex={0}
-                onClick={() => setSelected(item.slug)}
+                onClick={() => selectPrototype(item.slug)}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' || e.key === ' ') {
                     e.preventDefault()
-                    setSelected(item.slug)
+                    selectPrototype(item.slug)
                   }
                 }}
                 className={cn(
@@ -1298,7 +2645,19 @@ function PrototypePage({ projectId }: { projectId: string }) {
                   <span className="flex items-center gap-1 text-[10px] leading-tight text-muted-foreground">
                     <Clock className="size-2.5 shrink-0" />
                     {formatCreated(item.createdAt)}
+                    {(item.versionCount ?? 0) > 1 && (
+                      <span className="tabular-nums opacity-70">· v{item.versionCount}</span>
+                    )}
                   </span>
+                  {item.ticketId && (
+                    <span
+                      className="mt-0.5 flex items-center gap-1 truncate font-mono text-[10px] leading-tight text-primary"
+                      title={`Built from ${item.ticketId}`}
+                    >
+                      <TicketIcon className="size-2.5 shrink-0" />
+                      {item.ticketId}
+                    </span>
+                  )}
                 </div>
                 <Button
                   variant="ghost"
@@ -1374,6 +2733,19 @@ function PrototypePage({ projectId }: { projectId: string }) {
                 </Tip>
               </div>
             </div>
+            {/* What this prototype is built FROM — the ticket (scope + real names) and
+                whether the build may read the project's real source. */}
+            <GroundingBar
+              ticketId={ticketId}
+              ticketTitle={ticketTitle}
+              ticketFolder={ticketFolder}
+              matchApp={matchApp}
+              onPickTicket={() => setTicketPickerOpen(true)}
+              onToggleMatchApp={() => setPendingMatchApp(!matchApp)}
+              disabled={busy}
+              designSystem={designSystem}
+              onOpenDesignSystem={() => setDesignSystemOpen(true)}
+            />
             <div ref={scrollRef} className="min-h-0 flex-1 space-y-3 overflow-auto p-4">
               {messages.length === 0 ? (
                 <div className="flex min-h-full flex-col items-center justify-center gap-4 py-2 text-center">
@@ -1500,6 +2872,18 @@ function PrototypePage({ projectId }: { projectId: string }) {
               )}
             </div>
             <div className="border-t border-border/60 p-3">
+              {/* Requirement ambiguities the build had to guess, and what's been settled. */}
+              {!busy && selected && (
+                <QuestionsPanel
+                  questions={current?.questions ?? []}
+                  decisions={current?.decisions ?? []}
+                  answers={answers}
+                  onAnswerChange={(q, a) => setAnswers((cur) => ({ ...cur, [q]: a }))}
+                  onSend={sendAnswers}
+                  onDismiss={(q) => dismissQuestionMut.mutate(q)}
+                  disabled={busy || dismissQuestionMut.isPending}
+                />
+              )}
               {/* Follow-up suggestions — tick any (multi-select), then send them together. */}
               {!busy && (current?.suggestions?.length ?? 0) > 0 && (
                 <div className="mb-2.5">
@@ -1594,7 +2978,7 @@ function PrototypePage({ projectId }: { projectId: string }) {
                     ))}
                   </div>
                 )}
-                <div className="flex items-end gap-2">
+                <div data-tour="prompt" className="flex items-end gap-2">
                   <Button
                     variant="ghost"
                     size="icon"
@@ -1669,12 +3053,26 @@ function PrototypePage({ projectId }: { projectId: string }) {
           {/* Preview renders the finished HTML once; Code streams live while building.
               order-2 on a narrow screen puts it BELOW the chat with full width. */}
           <PreviewPane
-            html={current?.html}
-            code={busy ? streamText : (current?.html ?? '')}
+            html={shownHtml}
+            code={busy ? streamText : (shownHtml ?? '')}
             view={view}
             onView={setView}
             pending={busy}
             className="order-2 2xl:order-2"
+            versions={versions}
+            viewVersion={viewVersion}
+            onViewVersion={setViewVersion}
+            onRestore={(n) => restoreMut.mutate(n)}
+            restoring={restoreMut.isPending}
+            onCompare={() => setCompareOpen(true)}
+            loadingVersion={versionQ.isLoading}
+            commentMode={commentMode}
+            onCommentMode={setCommentMode}
+            comments={comments}
+            onPick={setPendingPick}
+            onRemoveComment={(id) => setComments((cur) => cur.filter((c) => c.id !== id))}
+            onApplyComments={applyComments}
+            onDownload={download}
           />
         </div>
       </div>
@@ -1700,6 +3098,59 @@ function PrototypePage({ projectId }: { projectId: string }) {
             </span>
           )}
         </button>
+      )}
+
+      {/* Keyed by target so each pick starts with an empty comment box. */}
+      <CommentDialog
+        key={pendingPick ? `${pendingPick.path}|${comments.length}` : 'none'}
+        target={pendingPick}
+        onCancel={() => setPendingPick(null)}
+        onSave={(text) => {
+          if (pendingPick) {
+            setComments((cur) => [
+              ...cur,
+              { id: `${Date.now()}-${cur.length}`, label: pendingPick.label, path: pendingPick.path, text },
+            ])
+          }
+          setPendingPick(null)
+        }}
+      />
+
+      <DesignSystemDialog
+        open={designSystemOpen}
+        onOpenChange={setDesignSystemOpen}
+        projectId={projectId}
+        model={model}
+      />
+
+      <TicketLinkDialog
+        open={ticketPickerOpen}
+        onOpenChange={setTicketPickerOpen}
+        projectId={projectId}
+        value={ticketFolder}
+        onPick={(t) => setPendingTicket(t)}
+      />
+
+      {selected && versions.length > 1 && (
+        <CompareDialog
+          open={compareOpen}
+          onOpenChange={setCompareOpen}
+          projectId={projectId}
+          slug={selected}
+          versions={versions}
+        />
+      )}
+
+      {selected && (
+        <TestcasesDialog
+          open={testcasesOpen}
+          onOpenChange={setTestcasesOpen}
+          projectId={projectId}
+          slug={selected}
+          ticketId={ticketId}
+          ticketFolder={ticketFolder}
+          model={model}
+        />
       )}
 
       <Dialog

@@ -19,6 +19,7 @@ import {
   testingDirFor,
 } from '../config.js'
 import { pickFolderNative } from '../folderPicker.js'
+import { recordSkillInstall } from '../skillSync.js'
 import { listTestcaseJobs } from '../testcaseJobs.js'
 import { listCrawlJobs } from '../crawlJobs.js'
 import type { Project } from '../types.js'
@@ -315,6 +316,13 @@ function initializeProjectFolder(project: Project): { created: string[]; templat
       fs.mkdirSync(targetSkills, { recursive: true })
       fs.cpSync(sourceQcSkill, targetQcSkill, { recursive: true, filter: skipDsStore })
       created.push('.claude/skills/qc-testing')
+      // Fingerprint the copy ONLY when it came from the portal's bundled version, so
+      // a later portal update may refresh it silently (skillSync.ts). A copy cloned
+      // from a template project may carry that project's own edits — leaving it
+      // unfingerprinted means we treat it as customized and never overwrite it.
+      if (sourceQcSkill === bundledSkillDir(QC_SKILL)) {
+        recordSkillInstall(project, QC_SKILL)
+      }
     }
   }
 

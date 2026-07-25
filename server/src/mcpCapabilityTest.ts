@@ -1,4 +1,7 @@
+import { readFileSync } from 'node:fs'
+import path from 'node:path'
 import { parseClaudeJsonResult, runClaude } from './claudeExec.js'
+import { detectMobileDevicesNative } from './mobileDevices.js'
 
 export interface McpCapabilityResult {
   ok: boolean
@@ -105,7 +108,15 @@ Reply with ONLY a JSON object and nothing else:
 - only if the tool itself errored: {"ok": false, "error": "<short reason>"}
 No prose, no markdown, no code fence.`
       }
-      return `Using the Mobile MCP tools available to you, select the device named "${input}", then read its screen ONCE (screen size or a screenshot) to confirm you can actually drive it. Do NOT install apps or tap anything.
+      // IMPORTANT: mobile-mcp selects a device by its OWN id (a UDID/serial), NOT the
+      // human name — driving by "iPhone 15 Pro" returns "Device not found", while the
+      // id "240CB27F-…" works. So resolve name→id via the list tool first. Also forbid
+      // Bash so the model actually invokes the (lazily-loaded) MCP tool instead of
+      // flailing in the shell.
+      return `Using ONLY the Mobile MCP tools (never Bash or any other tool), do this:
+1. Call mobile_list_available_devices ONCE to get the device list — each entry has an "id" (a UDID/serial) and a "name".
+2. Find the entry whose id OR name matches "${input}". Use its "id" value for the next step (selecting by name will fail).
+3. Call mobile_get_screen_size (or take ONE screenshot) for that id to prove you can drive it. Do NOT install apps or tap anything.
 Reply with ONLY a JSON object and nothing else:
 - on success: {"ok": true, "device": "${input}", "info": "<short note, e.g. the screen size or 'screenshot captured'>"}
 - on failure: {"ok": false, "error": "<short reason>"}
@@ -126,7 +137,11 @@ Reply with ONLY a JSON object and nothing else:
 - only if the tool itself errored: {"ok": false, "error": "<short reason>"}
 No prose, no markdown, no code fence.`
       }
-      return `Using the Appium MCP tools available to you, select/prepare the device named "${input}", then read its screen ONCE (screen size or a screenshot) to confirm you can actually drive it. Do NOT install apps or tap anything.
+      // As with mobile-mcp, prefer the id the device-listing tool reports over the raw
+      // name, and forbid Bash so the (lazily-loaded) Appium tool is actually invoked.
+      return `Using ONLY the Appium MCP tools (never Bash or any other tool), do this:
+1. Call the device-listing tool ONCE and find the running device whose id/udid OR name matches "${input}".
+2. Using the id/udid it reports, select/prepare that device and read its screen ONCE (screen size or a screenshot) to prove you can drive it. Do NOT install apps or tap anything.
 Reply with ONLY a JSON object and nothing else:
 - on success: {"ok": true, "device": "${input}", "info": "<short note, e.g. the screen size or 'screenshot captured'>"}
 - on failure: {"ok": false, "error": "<short reason>"}
@@ -155,6 +170,21 @@ function extractJson(text: string): Record<string, unknown> | null {
 }
 
 /**
+ * appium-mcp rides the full Appium stack, whose deps declare an engine range that
+ * EXCLUDES the odd/in-between Node versions (`^20.19.0 || ^22.12.0 || >=24.0.0` — so
+ * 21.x, 23.x, and 22.0–22.11 are out). On an excluded Node it crashes at startup
+ * ("Cannot find module './promise'" from bluebird) and never connects, producing a
+ * slow, confusing failure. Return null when the running Node is compatible, else a
+ * clear message so the test can short-circuit instantly.
+ */
+function appiumNodeIncompatible(): string | null {
+  const [maj, min] = process.versions.node.split('.').map(Number)
+  const ok = (maj === 20 && min >= 19) || (maj === 22 && min >= 12) || maj >= 24
+  if (ok) return null
+  return `Appium requires Node ^20.19 || ^22.12 || >=24, but this server runs Node v${process.versions.node} — appium-mcp crashes on startup here and never connects. Run the portal on a compatible Node (e.g. 22.12+ or 24+).`
+}
+
+/**
  * Functionally test one MCP server by having Claude actually use it (in the
  * project folder so the project's .mcp.json servers load). Returns a friendly
  * detail line plus the parsed data. Playwright/Figma can be slow, hence 180s.
@@ -172,24 +202,94 @@ export async function runMcpCapabilityTest(opts: {
   if (spec.needsInput && !input) {
     throw statusError(`${spec.inputLabel} is required.`, 400)
   }
+
+  // Fast path: Mobile DETECT (no device selected) needs no LLM — enumerate devices
+  // natively (adb on macOS+Windows, xcrun simctl on macOS). Instant, and the common
+  // "nothing booted" case returns immediately instead of a ~16s Claude+MCP run. The
+  // DRIVE step (a device IS selected) still goes through the MCP below for a real
+  // end-to-end check.
+  if (opts.name === 'mobile-mcp' && !input) {
+    const { devices, warnings } = await detectMobileDevicesNative()
+    if (devices.length) {
+      return {
+        ok: true,
+        detail: `Found ${devices.length} device(s): ${devices.slice(0, 5).join(', ')}`,
+        data: { devices },
+        raw: '',
+      }
+    }
+    const hint = warnings.length ? ` (${warnings.join(' ')})` : ''
+    return {
+      ok: true,
+      warn: true,
+      detail: `No devices/simulators detected — boot one to run tests${hint}`,
+      data: { devices: [] },
+      raw: '',
+    }
+  }
+
+  // appium-mcp on an incompatible Node crashes on startup — fail fast with a clear
+  // message instead of waiting ~30s for a server that will never connect.
+  if (opts.name === 'appium-mcp') {
+    const incompat = appiumNodeIncompatible()
+    if (incompat) return { ok: false, detail: incompat, data: null, raw: '' }
+  }
+
   const prompt = capabilityPrompt(opts.name, input)
   if (!prompt) throw statusError(`No functional test for "${opts.name}".`, 400)
+
+  // Speed: load ONLY the server under test. Running in the project cwd would boot the
+  // WHOLE .mcp.json — every other uvx/npx server (clickup, jira, azure, playwright,
+  // mobile, appium) whose cold start dominates the wait — even though the test needs
+  // just one. Pass a scoped one-server config + --strict-mcp-config so nothing else
+  // spawns. Falls back to the plain cwd load if the entry can't be read.
+  let scopedConfig: string | null = null
+  try {
+    const raw = readFileSync(path.join(opts.rootPath, '.mcp.json'), 'utf8')
+    const entry = (JSON.parse(raw) as { mcpServers?: Record<string, unknown> })?.mcpServers?.[
+      opts.name
+    ]
+    if (entry && typeof entry === 'object') {
+      // Drop a trailing "@latest" from npx/uvx package args: with it, npx re-checks
+      // the registry (and may re-download) on EVERY spawn; without it, the cached
+      // install is reused — the big win for a repeatedly-run functional test.
+      const e = entry as { args?: unknown }
+      if (Array.isArray(e.args)) {
+        e.args = e.args.map((a) => (typeof a === 'string' ? a.replace(/@latest$/, '') : a))
+      }
+      scopedConfig = JSON.stringify({ mcpServers: { [opts.name]: entry } })
+    }
+  } catch {
+    /* missing/invalid .mcp.json — fall back to the cwd-loaded config */
+  }
+
+  // mobile-mcp/appium-mcp load their tools LAZILY (this CLI defers MCP tools behind
+  // ToolSearch; the server shows "pending" at init). A small model (haiku) often never
+  // promotes the tool reference into a real call and just flails in Bash — an empirically
+  // confirmed false failure. Sonnet reliably invokes the MCP tool, so drive those two
+  // with sonnet and give the device handshake a bit more room. Everything else
+  // (clickup/jira/figma/playwright) stays on the cheaper haiku.
+  const mobileish = opts.name === 'mobile-mcp' || opts.name === 'appium-mcp'
+  const model = mobileish ? 'sonnet' : 'haiku'
+  const budgetUsd = mobileish ? '0.50' : '0.40'
+  const timeoutMs = mobileish ? 120_000 : 180_000
 
   const result = await runClaude(
     [
       '-p',
       '--model',
-      'haiku',
+      model,
       '--output-format',
       'json',
       '--no-session-persistence',
       '--permission-mode',
       'bypassPermissions',
+      ...(scopedConfig ? ['--mcp-config', scopedConfig, '--strict-mcp-config'] : []),
       '--max-budget-usd',
-      '0.40',
+      budgetUsd,
     ],
-    180_000,
-    { cwd: opts.rootPath, usageSource: 'mcp-test', model: 'haiku', input: prompt },
+    timeoutMs,
+    { cwd: opts.rootPath, usageSource: 'mcp-test', model, input: prompt },
   )
 
   if (result.timedOut) {

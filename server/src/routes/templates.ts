@@ -1,7 +1,7 @@
 import { Router } from 'express'
 import fs from 'node:fs'
 import path from 'node:path'
-import { testingDirFor } from '../config.js'
+import { BUNDLED_TEMPLATES_DIR, bundledTemplateFile, testingDirFor } from '../config.js'
 import { resolveProject } from '../projectScope.js'
 import { revealFolderNative } from '../folderPicker.js'
 
@@ -54,6 +54,25 @@ templatesRouter.get('/', (req, res) => {
 })
 
 /**
+ * GET /api/templates/defaults — which template kinds the portal ships a default for
+ * (templates/project-templates/<key>.md), so the UI knows when it can offer "Reset to
+ * default". Portal-wide, not project-scoped.
+ */
+templatesRouter.get('/defaults', (_req, res) => {
+  try {
+    const keys = fs
+      .readdirSync(BUNDLED_TEMPLATES_DIR, { withFileTypes: true })
+      .filter((d) => d.isFile() && d.name.endsWith('.md'))
+      .map((d) => d.name.replace(/\.md$/, ''))
+      .filter((key) => KEY_RE.test(key))
+      .sort()
+    res.json({ keys })
+  } catch {
+    res.json({ keys: [] }) // no bundled defaults shipped
+  }
+})
+
+/**
  * POST /api/templates/open — reveal the project's testing/templates folder in the
  * OS file explorer on the machine running the server. Creates it first if missing.
  */
@@ -82,6 +101,36 @@ templatesRouter.put('/:key', (req, res) => {
   const content = typeof req.body?.content === 'string' ? req.body.content : ''
   if (Buffer.byteLength(content, 'utf8') > MAX_BYTES) {
     return res.status(413).json({ error: 'template too large (200 KB max)' })
+  }
+  fs.mkdirSync(templatesDir(project.rootPath), { recursive: true })
+  fs.writeFileSync(target, content, 'utf8')
+  const stat = fs.statSync(target)
+  res.json({
+    key: req.params.key,
+    content,
+    size: stat.size,
+    savedAt: stat.mtime.toISOString(),
+  })
+})
+
+/**
+ * POST /api/templates/:key/reset — overwrite the project's template with the default
+ * bundled with the portal (templates/project-templates/<key>.md), the same file a new
+ * project is seeded with. 404 when this kind has no bundled default.
+ */
+templatesRouter.post('/:key/reset', (req, res) => {
+  const project = resolveProject(req)
+  if (!project) return res.status(400).json({ error: 'project not found' })
+  const target = templateFile(project.rootPath, req.params.key)
+  if (!target) return res.status(400).json({ error: 'invalid template key' })
+  const source = bundledTemplateFile(req.params.key)
+  let content: string
+  try {
+    content = fs.readFileSync(source, 'utf8')
+  } catch {
+    return res
+      .status(404)
+      .json({ error: `the portal ships no default "${req.params.key}" template` })
   }
   fs.mkdirSync(templatesDir(project.rootPath), { recursive: true })
   fs.writeFileSync(target, content, 'utf8')

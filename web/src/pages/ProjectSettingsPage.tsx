@@ -14,6 +14,7 @@ import {
   FolderTree,
   ListChecks,
   Loader2,
+  RotateCcw,
   Save,
   Settings,
   Trash2,
@@ -24,15 +25,19 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import {
   Dialog,
+  DialogClose,
   DialogContent,
   DialogDescription,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
 import {
   deleteTemplate,
+  listTemplateDefaults,
   listTemplates,
   openTemplatesFolder,
+  resetTemplateToDefault,
   saveTemplate,
   type ProjectTemplate,
 } from '@/lib/api'
@@ -147,10 +152,13 @@ function TemplateCard({
   kind,
   projectId,
   saved,
+  hasDefault,
 }: {
   kind: TemplateKind
   projectId: string
   saved: ProjectTemplate | undefined
+  // Whether the portal ships a default for this kind (templates/project-templates/).
+  hasDefault: boolean
 }) {
   const queryClient = useQueryClient()
   const Icon = kind.icon
@@ -159,6 +167,8 @@ function TemplateCard({
   const [pending, setPending] = useState<{ name: string; content: string } | null>(null)
   const [reading, setReading] = useState(false)
   const [showPreview, setShowPreview] = useState(false)
+  const [confirmReset, setConfirmReset] = useState(false)
+  const [confirmRemove, setConfirmRemove] = useState(false)
 
   const save = useMutation({
     mutationFn: (content: string) => saveTemplate(kind.key, content, projectId),
@@ -175,11 +185,30 @@ function TemplateCard({
       }),
   })
 
+  // Put back the template the portal ships (the same file a new project is seeded
+  // with). Overwrites whatever is saved, so it goes through a confirm step.
+  const reset = useMutation({
+    mutationFn: () => resetTemplateToDefault(kind.key, projectId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['templates', projectId] })
+      setPending(null)
+      setConfirmReset(false)
+      toast.success('Default template restored', {
+        description: `${kind.label} · testing/templates/${kind.key}.md`,
+      })
+    },
+    onError: (err) =>
+      toast.error('Could not restore the default template', {
+        description: err instanceof Error ? err.message : undefined,
+      }),
+  })
+
   const remove = useMutation({
     mutationFn: () => deleteTemplate(kind.key, projectId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['templates', projectId] })
       setPending(null)
+      setConfirmRemove(false)
       toast.success('Template removed', { description: kind.label })
     },
     onError: (err) =>
@@ -213,7 +242,7 @@ function TemplateCard({
     }
   }
 
-  const busy = save.isPending || remove.isPending || reading
+  const busy = save.isPending || remove.isPending || reset.isPending || reading
   // What to preview: the pending upload if any, else the saved content.
   const previewName = pending ? pending.name : saved ? `${kind.key}.md` : null
   const previewContent = pending ? pending.content : (saved?.content ?? '')
@@ -334,10 +363,27 @@ function TemplateCard({
               {pending ? 'Pick another' : 'Replace'}
             </Button>
           )}
+          {hasDefault && !pending && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => (saved ? setConfirmReset(true) : reset.mutate())}
+              disabled={busy}
+              className="rounded-full transition-all duration-200 active:scale-[0.98]"
+              title="Put back the template the portal ships with"
+            >
+              {reset.isPending ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : (
+                <RotateCcw className="size-3.5" />
+              )}
+              {saved ? 'Reset to default' : 'Use default'}
+            </Button>
+          )}
           {saved && !pending && (
             <Button
               variant="ghost"
-              onClick={() => remove.mutate()}
+              onClick={() => setConfirmRemove(true)}
               disabled={busy}
               className="ml-auto rounded-full text-muted-foreground transition-all duration-200 hover:text-destructive active:scale-[0.98]"
             >
@@ -351,6 +397,93 @@ function TemplateCard({
           )}
         </div>
       </CardContent>
+
+      <Dialog open={confirmRemove} onOpenChange={(o) => !remove.isPending && setConfirmRemove(o)}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-base">
+              <Trash2 className="size-4 text-destructive" />
+              Remove this template?
+            </DialogTitle>
+            <DialogDescription className="space-y-2 text-left">
+              <span className="block">
+                <span className="font-mono text-foreground">testing/templates/{kind.key}.md</span>{' '}
+                is deleted from disk.
+              </span>
+              <span className="block">
+                {kind.key === 'testcase'
+                  ? 'Test-case generation then falls back to no template — cases are drafted in the model’s own structure until you upload one again.'
+                  : 'Design Check then runs without the project checklist until you upload one again.'}
+                {hasDefault
+                  ? ' You can put the portal’s default back at any time with “Use default”.'
+                  : ''}
+              </span>
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <DialogClose asChild>
+              <Button type="button" variant="outline" disabled={remove.isPending}>
+                Cancel
+              </Button>
+            </DialogClose>
+            <Button
+              type="button"
+              variant="destructive"
+              onClick={() => remove.mutate()}
+              disabled={remove.isPending}
+              className="active:scale-[0.98]"
+            >
+              {remove.isPending ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : (
+                <Trash2 className="size-4" />
+              )}
+              Remove template
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={confirmReset} onOpenChange={(o) => !reset.isPending && setConfirmReset(o)}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-base">
+              <RotateCcw className="size-4 text-muted-foreground" />
+              Reset to the default template?
+            </DialogTitle>
+            <DialogDescription className="space-y-2 text-left">
+              <span className="block">
+                <span className="font-mono text-foreground">testing/templates/{kind.key}.md</span>{' '}
+                will be overwritten with the default the portal ships — the same file a new
+                project starts with.
+              </span>
+              <span className="block">
+                Your current {kind.label.toLowerCase()} is replaced and cannot be recovered.
+              </span>
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <DialogClose asChild>
+              <Button type="button" variant="outline" disabled={reset.isPending}>
+                Cancel
+              </Button>
+            </DialogClose>
+            <Button
+              type="button"
+              onClick={() => reset.mutate()}
+              disabled={reset.isPending}
+              className="active:scale-[0.98]"
+            >
+              {reset.isPending ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : (
+                <RotateCcw className="size-4" />
+              )}
+              Reset to default
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={showPreview} onOpenChange={setShowPreview}>
         <DialogContent className="flex max-h-[92vh] w-[97vw] flex-col gap-0 overflow-hidden p-0 sm:max-w-[90rem]">
@@ -423,6 +556,13 @@ export default function ProjectSettingsPage() {
     enabled: !!activeProjectId,
   })
 
+  // Which kinds the portal ships a default for — decides where "Reset to default" shows.
+  const { data: defaults } = useQuery({
+    queryKey: ['template-defaults'],
+    queryFn: listTemplateDefaults,
+    staleTime: Infinity,
+  })
+
   if (!activeProjectId) {
     return (
       <div className="mx-auto max-w-6xl space-y-6">
@@ -448,12 +588,13 @@ export default function ProjectSettingsPage() {
   }
 
   const byKey = new Map((templates ?? []).map((t) => [t.key, t]))
+  const defaultKeys = new Set(defaults?.keys ?? [])
   const hasTemplates = (templates?.length ?? 0) > 0
 
   return (
     <div className="mx-auto max-w-6xl space-y-8">
       <header className="space-y-4">
-        <div className="flex items-start gap-3">
+        <div data-tour="header" className="flex items-start gap-3">
           <span className="flex size-11 shrink-0 items-center justify-center rounded-2xl bg-foreground text-background">
             <Settings className="size-5" />
           </span>
@@ -506,7 +647,7 @@ export default function ProjectSettingsPage() {
         )}
       </header>
 
-      <section className="space-y-3">
+      <section data-tour="templates" className="space-y-3">
         <div className="flex items-center gap-2">
           <FileText className="size-4 text-muted-foreground" />
           <h2 className="text-sm font-semibold tracking-tight">File templates</h2>
@@ -519,12 +660,16 @@ export default function ProjectSettingsPage() {
         ) : (
           <div className="space-y-4">
             {TEMPLATE_KINDS.map((kind) => (
-              <TemplateCard
-                key={kind.key}
-                kind={kind}
-                projectId={activeProjectId}
-                saved={byKey.get(kind.key)}
-              />
+              // Wrapper carries the tour anchor so a guide step can point at one
+              // specific template kind (`[data-tour="template-testcase"]`).
+              <div key={kind.key} data-tour={`template-${kind.key}`}>
+                <TemplateCard
+                  kind={kind}
+                  projectId={activeProjectId}
+                  saved={byKey.get(kind.key)}
+                  hasDefault={defaultKeys.has(kind.key)}
+                />
+              </div>
             ))}
           </div>
         )}

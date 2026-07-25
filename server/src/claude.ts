@@ -49,6 +49,59 @@ function detectPhase(text: string): Phase | undefined {
   return undefined
 }
 
+/**
+ * Infer the QC phase from a tool call — the RELIABLE progress signal. The model
+ * reads the skill then mostly *works* via tools without re-narrating "Phase N",
+ * so text detection alone leaves the bar stuck at Intake. What the run actually
+ * *does* is unambiguous: driving the app is Collect, fanning out subagents is
+ * Analyze, writing report.md is Report, etc. Each match means "reached AT LEAST
+ * this phase"; the UI only ever moves the bar forward, so an occasional
+ * earlier-phase tool (e.g. re-reading the ticket mid-run) never rewinds it.
+ */
+function detectPhaseFromTool(name: string, input: unknown): Phase | undefined {
+  const n = name.toLowerCase()
+  const inp = (input ?? {}) as { file_path?: unknown; command?: unknown }
+  const path = String(inp.file_path ?? '').toLowerCase()
+  const cmd = String(inp.command ?? '').toLowerCase()
+
+  // Report — writing the final artifacts (report.md / issues.md).
+  if ((n === 'write' || n === 'edit') && /(^|\/)(report|issues)\.md$/.test(path)) return 'report'
+
+  // Analyze — Phase 5 fans out one subagent per AC via the Task/Agent tool.
+  if (n === 'task' || n === 'agent') return 'analyze'
+
+  // Collect — DRIVING the live app: browser/device screen reads, taps, typing, or
+  // saving evidence. Matches the actual driving verbs (screenshot, find_element,
+  // gesture, set_value, keyboard/mobile_*, page_source, navigate, snapshot) — NOT
+  // the device-prep tools (select_device / prepare_* / session_management), which
+  // fire early during probing and would otherwise jump the bar ahead prematurely.
+  if (
+    n.includes('browser_') ||
+    n.includes('mobile-mcp') ||
+    /appium_(screenshot|find_element|get_page_source|get_text|gesture|set_value|mobile_|press_key|perform_actions|scroll|swipe|tap|drag)/.test(
+      n,
+    ) ||
+    /screenshot|navigate|snapshot/.test(n)
+  ) {
+    return 'collect'
+  }
+  if ((n === 'write' || n === 'edit') && (path.includes('/evidence/') || path.includes('/screenshots/'))) {
+    return 'collect'
+  }
+
+  // Setup — scaffolding the testing/<ticket>/ output folder (the skill's Phase 3).
+  if (n === 'bash' && /\bmkdir\b/.test(cmd) && /testing\//.test(cmd)) return 'setup'
+
+  // Plan — building the test checklist / scenario task list (Phase 2 uses the task tools).
+  if (n === 'taskcreate' || n === 'taskupdate' || n === 'tasklist') return 'plan'
+
+  // Intake — starting the skill / pulling the ticket / reading its ACs.
+  if (n === 'skill' || n.includes('clickup') || n.includes('jira') || n.includes('azure')) return 'intake'
+  if (n === 'read' && /(ticket\.json|summary\.md|\/tickets\/)/.test(path)) return 'intake'
+
+  return undefined
+}
+
 function now() {
   return new Date().toISOString()
 }
@@ -121,8 +174,7 @@ export function runQc(
             ? `The app under test is "${appName}" (a display name or package / bundle id) — find it ` +
               `on the device by this name and launch it. `
             : '') +
-          `Do NOT use the desktop/Playwright browser. Use the connected mobile-automation MCP tools ` +
-          `(Mobile MCP or Appium — whichever this project has): list the available ` +
+          `Do NOT use the desktop/Playwright browser. Use the connected Mobile MCP tools: list the available ` +
           `devices and drive a booted simulator/device (if none is booted, stop and report that as a ` +
           `blocker). The app under test must already be INSTALLED on the device — launch it; if it is ` +
           `not installed${appName ? ` (or no app matching "${appName}" is present)` : ''}, stop and ` +
@@ -135,8 +187,7 @@ export function runQc(
         lines.push(
           ``,
           `TEST TARGET: the web app above, opened on a MOBILE device — do NOT use the desktop/Playwright ` +
-            `browser. Use the connected mobile-automation MCP tools (Mobile MCP or Appium — whichever ` +
-            `this project has): list the available devices and drive a booted ` +
+            `browser. Use the connected Mobile MCP tools: list the available devices and drive a booted ` +
             `simulator/device (if none is booted, stop and report that as a blocker). Open the App URL ` +
             `in the device's mobile browser and perform ALL interaction and verification on that device, ` +
             `capturing mobile screenshots as evidence. Test the responsive/mobile experience.`,
@@ -322,9 +373,22 @@ export function runQc(
     cb.onDone({ success, resultText: lastResult })
   })
 
+  // Emit a violet "Phase" marker only when the run ADVANCES to a new phase
+  // (monotonic) so the log isn't spammed with repeats and the progress bar never
+  // snaps backward. Returns the phase so callers can also tag the triggering event.
+  let maxPhaseIdx = -1
+  function notePhase(phase: Phase | undefined): Phase | undefined {
+    if (!phase) return undefined
+    const i = PHASE_ORDER.indexOf(phase)
+    if (i > maxPhaseIdx) {
+      maxPhaseIdx = i
+      cb.onEvent({ ts: now(), kind: 'phase', phase, text: `Phase ${i + 1} — ${phase}` })
+    }
+    return phase
+  }
+
   function emitText(text: string) {
-    const phase = detectPhase(text)
-    if (phase) cb.onEvent({ ts: now(), kind: 'phase', phase, text: `Phase: ${phase}` })
+    const phase = notePhase(detectPhase(text))
     cb.onEvent({ ts: now(), kind: 'text', phase, text })
   }
 
@@ -357,7 +421,8 @@ export function runQc(
             emitText(block.text.trim())
           } else if (block.type === 'tool_use') {
             const summary = summarizeTool(block.name, block.input)
-            cb.onEvent({ ts: now(), kind: 'tool', tool: block.name, text: summary })
+            const phase = notePhase(detectPhaseFromTool(block.name, block.input))
+            cb.onEvent({ ts: now(), kind: 'tool', tool: block.name, phase, text: summary })
           }
         }
         return

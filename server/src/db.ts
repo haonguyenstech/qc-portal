@@ -85,6 +85,16 @@ db.exec(`
   }
 }
 
+// Migration: remember which surface a run tested (web / web-mobile / app-mobile)
+// so History can tag each run. Older rows are NULL and get a best-effort guess in
+// rowToSummary rather than a wrong hard value.
+{
+  const cols = db.prepare(`PRAGMA table_info(runs)`).all() as { name: string }[]
+  if (!cols.some((c) => c.name === 'testTarget')) {
+    db.exec(`ALTER TABLE runs ADD COLUMN testTarget TEXT`)
+  }
+}
+
 // Migration: add the per-outcome breakdown to runs (blocked / not-tested /
 // cancelled) so the History list shows the SAME buckets as a run's detail page.
 // Existing rows default to 0 and self-heal on next detail view (routes/qc.ts).
@@ -264,6 +274,32 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_diagrams_projectId ON diagrams(projectId);
 `)
+
+// Fingerprint of a portal-bundled skill as the portal last wrote it into a project.
+// `installedHash` is the hash of that skill folder at write time, so a later boot can
+// tell "the engineer never touched this copy" (hash still matches → safe to refresh
+// from the newer bundled version) from "they customized it" (hash moved → leave it
+// alone and only offer the update). See skillSync.ts.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS skill_installs (
+    projectId TEXT NOT NULL,
+    skill TEXT NOT NULL,
+    installedHash TEXT NOT NULL,
+    installedFiles TEXT NOT NULL DEFAULT '[]',
+    syncedAt TEXT NOT NULL,
+    PRIMARY KEY (projectId, skill)
+  );
+`)
+
+// Migration: record WHICH files the portal wrote, not just their combined hash. The
+// hash alone can't tell a file the engineer added to the folder from a leftover of an
+// older bundled version, so pruning risked deleting their own file.
+{
+  const cols = db.prepare(`PRAGMA table_info(skill_installs)`).all() as { name: string }[]
+  if (!cols.some((c) => c.name === 'installedFiles')) {
+    db.exec(`ALTER TABLE skill_installs ADD COLUMN installedFiles TEXT NOT NULL DEFAULT '[]'`)
+  }
+}
 
 // One row per Design Check run (/verify). The full findings are stored as JSON and
 // also written to a markdown file under <root>/design-check/ (filePath, relative to
@@ -835,8 +871,8 @@ export function listDesignChecks(projectId: string, limit = 50): DesignCheckReco
 // ---------------- runs ----------------
 
 const insertRunStmt = db.prepare(`
-  INSERT INTO runs (id, projectId, ticketId, appUrl, slug, status, passCount, failCount, blockedCount, untestedCount, cancelledCount, totalAcs, createdAt, finishedAt)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  INSERT INTO runs (id, projectId, ticketId, appUrl, testTarget, slug, status, passCount, failCount, blockedCount, untestedCount, cancelledCount, totalAcs, createdAt, finishedAt)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `)
 
 const RUN_SELECT = `
@@ -847,6 +883,20 @@ const getRunStmt = db.prepare(`${RUN_SELECT} WHERE r.id = ?`)
 const listRunsStmt = db.prepare(`${RUN_SELECT} ORDER BY r.createdAt DESC`)
 const listRunsByProjectStmt = db.prepare(`${RUN_SELECT} WHERE r.projectId = ? ORDER BY r.createdAt DESC`)
 
+/**
+ * Resolve a run's test target. Rows written before the column existed are NULL —
+ * infer instead of guessing 'web' blindly: an app-on-device run stores the app's
+ * name/bundle id in appUrl (never a URL), so a non-http appUrl means 'app-mobile'.
+ * A legacy web-mobile run is indistinguishable from a desktop one (both store the
+ * same URL), so it reads as 'web' — only for those old rows.
+ */
+function runTestTarget(row: Record<string, unknown>): RunSummary['testTarget'] {
+  const stored = row.testTarget as string | null | undefined
+  if (stored === 'web' || stored === 'web-mobile' || stored === 'app-mobile') return stored
+  const appUrl = String(row.appUrl ?? '')
+  return /^https?:\/\//i.test(appUrl) ? 'web' : 'app-mobile'
+}
+
 function rowToSummary(row: Record<string, unknown>): RunSummary {
   return {
     id: row.id as string,
@@ -854,6 +904,7 @@ function rowToSummary(row: Record<string, unknown>): RunSummary {
     projectName: (row.projectName as string | null) ?? null,
     ticketId: row.ticketId as string,
     appUrl: row.appUrl as string,
+    testTarget: runTestTarget(row),
     slug: (row.slug as string | null) ?? null,
     status: row.status as RunSummary['status'],
     passCount: Number(row.passCount),
@@ -873,6 +924,7 @@ export function insertRun(summary: RunSummary): void {
     summary.projectId,
     summary.ticketId,
     summary.appUrl,
+    summary.testTarget,
     summary.slug,
     summary.status,
     summary.passCount,
@@ -1064,4 +1116,62 @@ export function reconcileInterruptedRuns(): number {
     })
   }
   return stuck.length
+}
+
+// ---- bundled-skill install fingerprints (see skillSync.ts) ----
+
+const getSkillInstallStmt = db.prepare(
+  `SELECT installedHash, installedFiles FROM skill_installs WHERE projectId = ? AND skill = ?`,
+)
+const setSkillInstallStmt = db.prepare(`
+  INSERT INTO skill_installs (projectId, skill, installedHash, installedFiles, syncedAt)
+  VALUES (?, ?, ?, ?, ?)
+  ON CONFLICT(projectId, skill) DO UPDATE SET
+    installedHash = excluded.installedHash,
+    installedFiles = excluded.installedFiles,
+    syncedAt = excluded.syncedAt
+`)
+const deleteSkillInstallStmt = db.prepare(
+  `DELETE FROM skill_installs WHERE projectId = ? AND skill = ?`,
+)
+
+/** What the portal last wrote into this project for a bundled skill, if known. */
+export interface SkillInstall {
+  hash: string // hash of those files' contents at write time
+  files: string[] // relative paths the portal wrote
+}
+
+export function getSkillInstall(projectId: string, skill: string): SkillInstall | null {
+  const row = getSkillInstallStmt.get(projectId, skill) as
+    | { installedHash?: string; installedFiles?: string }
+    | undefined
+  if (!row?.installedHash) return null
+  let files: string[] = []
+  try {
+    const parsed = JSON.parse(row.installedFiles ?? '[]')
+    if (Array.isArray(parsed)) files = parsed.filter((f): f is string => typeof f === 'string')
+  } catch {
+    /* corrupt row — treat as no file list */
+  }
+  return { hash: row.installedHash, files }
+}
+
+/** Remember what we just wrote, so a later boot can tell untouched from customized. */
+export function setSkillInstall(
+  projectId: string,
+  skill: string,
+  install: SkillInstall,
+): void {
+  setSkillInstallStmt.run(
+    projectId,
+    skill,
+    install.hash,
+    JSON.stringify(install.files),
+    new Date().toISOString(),
+  )
+}
+
+/** Forget the fingerprint (the skill was deleted from the project). */
+export function clearSkillInstallHash(projectId: string, skill: string): void {
+  deleteSkillInstallStmt.run(projectId, skill)
 }

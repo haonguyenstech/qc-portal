@@ -113,8 +113,15 @@ server/src/
                     test-case gen + QC runs jump straight to the files it names instead of
                     re-exploring the repo each time; skipped when a sync brings no new commits;
                     deleted on disconnect/tag-rename (regenerates on reconnect)
+  designSystem.ts   design system: one cheap (haiku) read-only AI pass over the project's source →
+                    testing/knowledge/design-system.md (AI-badged, via knowledgeStore) capturing the
+                    REAL product's palette, type scale, spacing/radii, component shapes and wording
+                    conventions, so prototype builds match the app WITHOUT re-reading the repo every
+                    time (mirrors sourceMap.ts); driven from the Prototype page
   runManager.ts     in-flight run lifecycle (spawn, stream, shutdown)
-  terminal.ts       device pseudo-terminal: node-pty shell bridged over /ws/terminal (one shell per socket)
+  terminal.ts       device pseudo-terminal: node-pty shell bridged over /ws/terminal; sessions
+                    persist across page navigation (registry keyed by project/run, detach on socket
+                    close, re-attach with replay, killed only on {type:'kill'} / exit / idle / shutdown)
   hub.ts            WebSocket pub/sub by runId (replays persisted events to late subscribers)
   projectScope.ts   resolves the active project's root path; path-guards file writes
   toolPath.ts       spawnEnv(): process.env with PATH augmented by well-known per-user tool
@@ -139,7 +146,7 @@ server/src/
                     ticket) + groundReport (report verdicts vs documented evidence); auto-revises
                     in place. Cheap (haiku), best-effort, never throws — see section below
   routes/           projects, qc, files, skills, mcp, clickup, source, ai, templates,
-                    knowledge, memory, diagrams, version
+                    knowledge, memory, diagrams, prototype, version
 
 web/src/
   App.tsx           sidebar nav + React Router routes + ProjectSwitcher + always-mounted
@@ -149,6 +156,7 @@ web/src/
   pages/            OverviewPage, DiagramsPage (at /diagrams), SourceCodePage (at /source),
                     TicketsPage, TestCasePage, RunPage, RunningPage, HistoryPage,
                     RunDetailPage, SkillsPage, McpPage, NotificationsPage, TerminalPage (at /terminal),
+                    PrototypePage (at /prototype — see "Prototype page" below),
                     InstructionsPage (at /instructions — CLAUDE.md + Knowledge + Memory hub),
                     ReleaseNotesPage
                     (at /releases — renders CHANGELOG.md + check-for-updates),
@@ -464,19 +472,151 @@ to expose a new upload slot. Current kinds:
   Checklist upload (md/csv/xlsx, Excel→CSV in-browser, preview dialog) shows "Using project checklist"
   with Preview/Override when one is saved, exactly like the TestCase template upload.
 
+## Prototype page (requirement → working screen → test cases)
+
+**`/prototype` (`PrototypePage.tsx`, `routes/prototype.ts`)** — a Claude-style chat that turns a
+request into a **self-contained HTML/CSS prototype** (Tailwind Play CDN), streamed live and rendered
+in a sandboxed iframe with device frames (desktop/laptop/tablet/mobile + rotate), a Code view, PNG
+capture, and reference-image attachments. Each prototype is a conversation stored per project at
+`testing/prototypes/<slug>.json`; follow-ups refine the SAME document. It is a **QC/BA instrument**,
+not just a mock-up generator — these things make it that:
+
+1. **Build from a ticket.** A prototype can be linked to an already-crawled ticket **folder**
+   (`ticketFolder`, possibly nested `PARENT/CHILD` — the same key `/testcases` uses, NOT the display
+   id). `readLinkedTicket` reads that folder's `ticket.md` + `comments.md` (capped at
+   `MAX_TICKET_CHARS`) plus `ticket.json` for the display id/title, and the prompt makes the ticket
+   the **scope**: real names verbatim, the states it implies, and an inline amber "Assumption" note
+   where it's ambiguous. The picker (`TicketLinkDialog`) reuses the shared `buildCrawledTree` +
+   `CrawledTicketRow`, so it nests and groups like every other crawled-ticket selector.
+2. **Project- and source-grounded.** `readProjectContext(root)` (Knowledge + Memory) is injected into
+   **every** build — same block `testcaseGen.ts` uses, so prototypes speak the product's terminology.
+   **"Match our app"** (`matchApp`, opt-in per build) additionally runs the build with
+   `cwd = project.rootPath` and READ-ONLY file tools so the model takes the real design language,
+   field labels and messages from the codebase (steered by the `source-map-*` knowledge doc first).
+   Tool-enabled builds get `GEN_TIMEOUT_SOURCE` instead of `GEN_TIMEOUT` and the prompt time-boxes
+   reading hard. `toolArgsFor()` names the mutating tools in **`--disallowedTools`** as well as
+   omitting them from `--allowedTools` — verified: allow-list-only still makes the model *attempt*
+   `Write`/`Bash` (the CLI denies them, but the attempts spam `⚙ Write` into the build log). Both
+   flags are variadic, so each MUST be followed by another flag before the trailing prompt positional.
+   A build **must never modify the repo**; don't weaken this.
+3. **Revision history (non-destructive refines).** Every build/refine **appends** a `PrototypeVersion`
+   (`{n, html, prompt, summary, at, model}`) via `pushVersion` — `prototype.html` always mirrors the
+   newest/restored entry. Capped at `MAX_VERSIONS` (numbers stay monotonic after trimming, so a number
+   is never reused). `migrate()` backfills a pre-versioning document as v1 on read, so old prototypes
+   gain history for free. **`toPublic()` strips every revision's HTML** from list/detail responses
+   (they'd otherwise be ~12× larger); a revision's HTML is fetched on demand from
+   `GET /:slug/versions/:n`. The UI shows a revision bar (select + Compare, and an amber "viewing an
+   older revision" state with Restore) and a side-by-side `CompareDialog` of two live iframes.
+   `POST /:slug/restore` **appends** the restored document as a new revision rather than rewinding,
+   so a restore is itself undoable. This is the guard against a refine wrecking an agreed screen.
+4. **Prototype → test cases.** `POST /:slug/testcases` calls `generateTestcaseVersion` with the new
+   `prototypeUi: { name, html }` option (capped at `MAX_PROTOTYPE_CHARS`), which adds a prompt block
+   treating the markup as **OBSERVED UI** — exact labels, fields and constraints, states, validation
+   messages — while **the ticket still owns scope** (a disagreement becomes a case/note, not extra
+   coverage). Requires a linked ticket, because versions are written under
+   `testing/tickets/<folder>/testcases/`. It auto-reads the saved `testing/templates/testcase.md`
+   (`readTestcaseTemplate`, mirroring verifyDesign's `readChecklist`) so output matches the team format.
+
+5. **The project design system (`designSystem.ts`).** The product's visual language is extracted
+   ONCE — palette, type scale, spacing/radii, component shapes, layout shell, and the wording
+   conventions for labels/statuses/messages — into `testing/knowledge/design-system.md`, and every
+   later build inherits it. This is the fix for `matchApp` being slow, expensive, and inconsistent
+   (re-derived per build, so two prototypes of the same product didn't look like siblings). Because
+   it's a knowledge doc it needs **no prompt plumbing for the content** — `readProjectContext`
+   already injects it; `buildPrompt` only adds a directive saying the doc is **authoritative and
+   overrides the generic design guidance and any style preset**. When both the design system and
+   `matchApp` are on, the source-reading block flips to "the look is already described — spend your
+   reads on field names, validation and business logic instead". `projectContext.ts` `PRIORITY_DOCS`
+   packs it (with `source-map-*`) before all other knowledge so it can't be crowded out of the
+   budget. Routes `GET`/`POST /api/prototype/design-system` — both MUST stay **above `GET /:slug`**,
+   which would otherwise swallow the path. Driven from the `Design system` pill in `GroundingBar`
+   → `DesignSystemDialog`; extraction takes ~60-90s on haiku and is a one-off.
+6. **Comment mode — click the element, don't describe it.** `PICKER_SCRIPT` is injected into the
+   **rendered** `srcDoc` only (`withPicker`, never into the stored document) and highlights whatever
+   the cursor is over; a click is swallowed (`preventDefault` on `click` *and* `submit`, so the
+   prototype can't act on it) and `postMessage`s the element's `label` (`<button> "Save changes"`)
+   plus a shallow CSS-ish `path` to the parent. The iframe is a **null origin**, so `e.origin` is
+   useless — `PreviewPane` validates the payload **shape** (`source: 'qc-prototype'`) instead, and
+   only listens while comment mode is on. Pins are client-side state; `commentsToPrompt` sends them
+   as ONE refine that names each target and says to leave everything else alone. The iframe `key`
+   includes comment mode so toggling remounts with/without the picker.
+7. **Open questions → decision ledger (the BA half).** Every build emits a third meta comment
+   `<!-- QUESTIONS: … -->`: up to `MAX_QUESTIONS` **genuine requirement ambiguities** it had to guess
+   about — explicitly NOT visual taste, and never something already settled. `QuestionsPanel` shows
+   them as an amber card; answering one sends `decisions: [{q, a}]` with the refine, and
+   `applyDecisions` folds it into `prototype.decisions` (a re-answer **replaces** the old one, and the
+   matching open question is dropped so it isn't re-asked mid-build). `buildPrompt` injects the
+   ledger as **CONFIRMED DECISIONS — treat as requirement, don't ask again**. Restore clears
+   `questions` but deliberately **keeps `decisions`**: an answered requirement question stays
+   answered regardless of which revision is on screen.
+   The open list **accumulates** via `mergeQuestions` (capped at `MAX_OPEN_QUESTIONS`) rather than
+   being replaced by each build's fresh list — verified: answering one question, or any refine that
+   raises nothing new, would otherwise silently wipe every question the BA hadn't got to yet.
+   Anything already in the ledger is filtered out, so the only ways a question leaves the list are
+   being answered or `POST /:slug/questions/dismiss` (the × in `QuestionsPanel`) — a list that
+   accumulates needs an explicit way to clear one, or it nags forever.
+8. **Export.** `downloadHtml` saves the document on screen as a standalone `.html` (named
+   `<prototype>-v<n>.html`) — client-side only, no route. A single self-contained file is how a BA
+   hands a screen to a stakeholder or attaches it to a ticket.
+
+Both grounding choices persist on the prototype, so a follow-up refine inherits them. In the client,
+`pendingTicket`/`pendingMatchApp` use `undefined` = "inherit what's stored" vs `null` = "explicitly
+unlinked" — that distinction is what lets a refine stay requirement-bound without re-picking the
+ticket every turn. `POST /stream` is the live path (SSE: `delta` / `log` / `done` / `error`);
+`POST /` and `POST /:slug/message` are the buffered equivalents and must stay in step with it —
+including the `questions` / `decisions` handling.
+
+`buildContextFor(project, {ticket, matchApp, decisions})` is the single place that assembles a
+build's grounding (ticket + knowledge block + source-reading + design-system flag + ledger), so all
+three entry points ground identically. Prefer extending it over re-deriving context at a call site.
+
 ## Terminal page (device shell)
 
 **`/terminal` (`TerminalPage.tsx`, "Terminal" under the sidebar's Tools group)** — a real
 pseudo-terminal on the machine running the server, rendered in-browser with **xterm.js**
 (`@xterm/xterm` + `@xterm/addon-fit`). **Connect** spawns the user's login shell
 (`$SHELL -l`, or `%ComSpec%`/PowerShell on Windows) with `cwd` = the **active project's root** via
-**`node-pty`**, bridged over a dedicated **`/ws/terminal`** WebSocket; **Disconnect** (or `ws` close)
-kills the shell — one shell per socket, nothing persists across reconnects. It behaves like a native
-terminal (interactive TUIs work — e.g. type `claude` to start a session).
+**`node-pty`**, bridged over a dedicated **`/ws/terminal`** WebSocket. It behaves like a native
+terminal (interactive TUIs work — the page auto-runs `claude --dangerously-skip-permissions` on
+connect).
 
+- **Several terminals at once** — the page is a **tab strip** (`TerminalTabs`) over one `TerminalPane`
+  per tab, each pane its own `useXtermSession` connected with `?tab=<id>` → its own shell + Claude
+  session. Inactive panes stay **mounted but `invisible`** (not `hidden`: xterm's fit addon needs a real
+  size), so switching tabs is instant and nothing is replayed. Tabs are persisted per project in
+  `localStorage` (`qc.terminalTabs.<projectId>`, capped at `MAX_TABS` = 6) and the whole workspace is
+  mounted with `key={projectId}`, so each project has its own set. A shell the server still has whose id
+  isn't in localStorage is **derived back into the tab list on render** (no setState-in-effect). Header
+  controls (status pill, Connect/Re-attach, Disconnect, Slash commands) act on the **active** tab via an
+  imperative `PaneApi` registry (`apis` ref); the **×** on a tab is what ends its shell.
+- **One viewer per session, and never a tug-of-war** — attaching kicks whatever socket was attached,
+  closing it with code **`WS_CLOSE_TAKEN_OVER` (4001)** so the loser can tell "someone took this over"
+  from "my connection dropped". That distinction is load-bearing: the client re-attaches on its own, so
+  with a generic close two windows on `/terminal` steal every session back and forth forever
+  (`lastActivityAt` churning every ~2 s, the UI flapping Connected → Disconnected → Connecting…). The
+  client therefore **never auto-attaches a session another window holds** (`attached` from
+  `/api/terminal/sessions`, polled every 3 s — offering "Take over" instead) and stops auto-retrying
+  after `AUTO_CONNECT_ATTEMPTS` (3). On the server, `pruneDeadViewer()` drops a viewer whose socket is
+  no longer OPEN before reporting or attaching — a missed `close` event would otherwise leave a session
+  permanently "open in another window" with nobody watching it.
+- **Sessions persist across navigation** — the pty **outlives its socket**. `terminal.ts` keeps a
+  registry keyed by `sessionKey(req)` (`shell:<projectId>#<tab>` for the page, `run:<runId>` for Continue
+  session): leaving the page / reloading / a dropped socket only **detaches**, and the next connection
+  **re-attaches** to the same shell, replaying the last 256 KB of output. A session ends only on an
+  explicit `{type:'kill'}` (the **Disconnect** button), the shell exiting, 6 h detached (`IDLE_MS`),
+  eviction past `MAX_SESSIONS` (16, oldest detached first), or shutdown — `gracefulExit` calls
+  `killAllTerminalSessions()`, without which restarts orphan setsid'd shells. `GET /api/terminal/sessions` lists what's alive, and
+  `TerminalPage` uses it to auto-re-attach each tab on mount and to label the button **Re-attach** vs
+  Connect. On re-attach `useXtermSession.connect({reattach:true})` **skips `initialCommand`** — replaying
+  it would type the launch line into the Claude session already running in there. Auto-connect is
+  **status-driven, not latch-based** (fires only while a pane is `idle`, and only after
+  `isFetchedAfterMount` so a cached "still alive" from before a server restart can't spawn a launch-less
+  shell); a pane the user disconnected is never resurrected (`userEnded` ref), and "just created by the
+  user" is dropped from `freshIds` on first connect so an exited shell isn't respawned in a loop.
 - **WebSocket protocol** — server→client frames are **raw terminal bytes** (`term.write`); client→server
-  frames are **JSON control** messages: `{type:'input',data}` for keystrokes and `{type:'resize',cols,rows}`
-  on fit. Connection query params: `projectId`, `cols`, `rows`.
+  frames are **JSON control** messages: `{type:'input',data}` for keystrokes, `{type:'resize',cols,rows}`
+  on fit, and `{type:'kill'}` to end the session (plain socket close keeps it running). Connection query
+  params: `projectId` (or `runId`), `cols`, `rows`.
 - **Upgrade routing** — `index.ts` uses two `noServer` `WebSocketServer`s and a single `server.on('upgrade')`
   that dispatches by pathname (`/ws` → run hub, `/ws/terminal` → `handleTerminalConnection`); unknown paths
   are `socket.destroy()`ed. Don't go back to `new WebSocketServer({ server, path })` — multiple path-bound
@@ -508,9 +648,11 @@ stream-json `init` event's `session_id` into `runs.sessionId`.
   `running`/`queued` (the session is in use). On disconnect it invalidates `['run', id]` /
   `['run-files', id]` so a report/evidence the interactive session changed refreshes.
 - **Process cleanup** — `killPtyTree` signals the pty's whole **process group** (`process.kill(-pid)`;
-  node-pty's child is a setsid session leader) so `claude` *and the MCP servers it spawns* die on
-  disconnect, escalating SIGTERM→SIGKILL. Don't downgrade this to a bare `pty.kill()` — that leaves
-  MCP children orphaned.
+  node-pty's child is a setsid session leader) so `claude` *and the MCP servers it spawns* die when the
+  session is destroyed, escalating SIGTERM→SIGKILL. Don't downgrade this to a bare `pty.kill()` — that
+  leaves MCP children orphaned. Note this now fires on **session destroy**, not on socket close:
+  navigating off `RunDetailPage` leaves the resumed session running (keyed `run:<id>`) and coming back
+  re-attaches; **Disconnect** is what ends it. See the Terminal page's session-registry bullet.
 
 ## Conventions
 

@@ -3,6 +3,82 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.11.2 — 2026-07-26
+
+**Design-system-aware prototypes, several terminals at once, and skill updates that keep your edits**
+
+### Added
+
+- **Prototypes that look like your product, not a stranger.** The Prototype page can now read your
+  app's real visual language **once** — its palette, fonts, spacing, button and input shapes, and the
+  way it words labels, statuses and error messages — and every prototype after that is built to match
+  it. Use the **Design system** pill above the chat; it needs a connected repo and takes a minute or
+  two. It's saved as the `design-system` doc on **Instructions → Knowledge**, so you can read it and
+  **correct anything the AI got wrong** (editing it makes it yours). This replaces re-reading your
+  source on every single build, which was slow and gave a slightly different answer each time.
+- **Comment on the screen instead of describing it.** Turn on comment mode in the preview toolbar,
+  click any element — a button, a label, a column — and say what should change. Pin as many as you
+  like, then **Apply**: they go up as one instruction that names each element precisely and leaves
+  the rest of the screen alone. No more "the third button in the top-right, no, the other one".
+- **The prototype now asks you the questions it had to guess.** Every build reports the real
+  **requirement gaps** it hit — *"Can a closed note still be edited?"*, never questions about colours
+  or taste. Answer one and the screen is rebuilt to match; your answer is kept as a **confirmed
+  decision** that grounds every later build and is never asked again. That list is your record of
+  what the team settled while reviewing the screen. Questions stay until you answer or dismiss them.
+- **Download a prototype as a standalone `.html` file** — one self-contained file that opens in any
+  browser with no server, so you can email it or attach it to the ticket.
+- **Several terminals at once.** The Terminal page is now a tab strip: each tab is its own shell on
+  your machine, so you can leave Claude working in one and run git or tests in another. Tabs are
+  remembered per project, and a shell keeps running when you navigate away — coming back re-attaches
+  to it (closing a tab is what ends it).
+- **A run now records which surface it tested** — Web, Web on mobile, or App on device — and the tag
+  is shown on every History row and in the run's detail header. Where a ticket was tested on more
+  than one surface, History shows which ones while the group is still collapsed. Older runs get a
+  best-effort guess rather than a wrong label.
+- **Connected devices are detected instantly.** Picking a device for a mobile run used to wait on a
+  full AI + MCP round trip (~16s, and flaky). It now asks the platform directly — `adb` for Android
+  on both macOS and Windows, `xcrun simctl` for iOS simulators — so the picker fills immediately and
+  "nothing is booted" comes back at once.
+- **Reset a template to the one the portal ships.** Templates that have a bundled default now offer
+  **Reset to default** (with a confirm, since it overwrites what's saved).
+- **Memory notes are paged** — auto-capture adds notes steadily, so the list stays scannable instead
+  of growing into an endless scroll.
+
+### Changed
+
+- **The run progress bar now tells you which phase you're in.** It's a labelled 7-step stepper, and
+  the phase is inferred from what the run is actually *doing* (driving the app, fanning out
+  subagents, writing the report) rather than from the model narrating "Phase N" — which it mostly
+  doesn't, so the bar used to sit at **Intake** for most of a run. It only ever moves forward.
+- **The `qc-testing` skill has been substantially reworked.** It now reads the ticket's **generated
+  manual test cases** as an input, can **verify a reported bug**, announces each phase so the Portal
+  can follow along, and carries explicit severity and status rubrics so verdicts are consistent.
+  On "black-box": it may now read your source code to learn what the correct behaviour *is* (real
+  field names, validation limits, states, roles) when a ticket is vague — but the report is still
+  written as a user's report, and "the code says so" is never evidence that the app behaves so.
+  Its Playwright recipes were corrected to the tools' **real** parameter names.
+  **Note:** run output now lands in `testing/test-result/<ticket-id>-<slug>/` rather than
+  `testing/<ticket>/`. Existing folders are left alone.
+- **MCP page:** a server you haven't connected yet now explains in one line what it's for and why it
+  matters, and a connected one is tinted so the page is scannable at a glance.
+- Guided tours are anchored to specific elements on the API Testing, Settings and Templates pages,
+  so a step can no longer highlight the wrong box (or silently vanish).
+
+### Fixed
+
+- **Two browser windows no longer fight over a terminal.** Opening the Terminal page in a second
+  window used to make both windows steal every session back and forth forever, flapping between
+  Connected and Connecting. A window is now told explicitly when someone else has taken a session
+  over, never re-attaches to a shell another window holds (it offers **Take over** instead), and
+  gives up after a few unattended attempts. A session whose window vanished is also no longer
+  reported as "open somewhere else" with nobody watching it.
+- **Restarting the portal no longer leaves orphaned shells behind.** Terminal shells outlive their
+  browser connection by design, so shutdown now kills them explicitly.
+- **Your project's copy of `qc-testing` no longer drifts behind the portal.** Updating QC Portal only
+  refreshed the master copy, so projects kept running last month's skill. Copies **you never edited**
+  are now refreshed automatically at startup; a copy you **hand-edited is never overwritten** — the
+  Skills page offers you the update instead, and files you *added* to the folder are always kept.
+
 ## 0.11.1 — 2026-07-24
 
 **Import now tells you why a .zip won't load, instead of a vague error**

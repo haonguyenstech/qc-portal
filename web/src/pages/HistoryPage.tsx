@@ -28,11 +28,13 @@ import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { GuideTour, type TourStep } from '@/components/GuideTour'
+import { TargetTag } from '@/components/TargetTag'
 import { listCrawledTickets, listRuns } from '@/lib/api'
 import { StatusBadge } from '@/lib/status'
 import { useProjects } from '@/lib/project-context'
+import { asTestTarget } from '@/lib/testTarget'
 import { cn } from '@/lib/utils'
-import type { RunStatus, RunSummary } from '@/lib/types'
+import type { RunStatus, RunSummary, TestTarget } from '@/lib/types'
 
 type Filter = 'all' | 'passed' | 'failed' | 'active'
 
@@ -258,6 +260,7 @@ function RunItem({ run }: { run: RunSummary }) {
           <Clock3 className="size-3 shrink-0 opacity-60" />
           {duration ?? '—'}
         </span>
+        <TargetTag target={asTestTarget(run.testTarget)} />
         <span className="hidden min-w-0 flex-1 items-center gap-1.5 truncate font-mono text-[11px] text-muted-foreground/70 lg:flex" title={run.appUrl}>
           <Link2 className="size-3 shrink-0 opacity-60" />
           <span className="truncate">{hostOf(run.appUrl)}</span>
@@ -297,6 +300,10 @@ function TicketGroupCard({
   onToggle: () => void
 }) {
   const { ticketId, title, clickupUrl, projectName, runs, latest, passed, failed, active } = group
+  // Distinct surfaces across this ticket's runs, in the picker's own order.
+  const targets = (['web', 'web-mobile', 'app-mobile'] as TestTarget[]).filter((t) =>
+    runs.some((r) => asTestTarget(r.testTarget) === t),
+  )
   const total = runs.length || 1
   const segments = [
     { key: 'passed', pct: (passed / total) * 100, cls: 'bg-emerald-500' },
@@ -356,6 +363,11 @@ function TicketGroupCard({
             <span className="whitespace-nowrap" title={formatDate(latest.createdAt)}>
               last {relativeTime(latest.createdAt)}
             </span>
+            {/* Which surfaces this ticket was tested on — visible while collapsed, so
+                you can see at a glance that e.g. it was run on web but never on device. */}
+            {targets.map((t) => (
+              <TargetTag key={t} target={t} />
+            ))}
           </div>
         </div>
 

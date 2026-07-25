@@ -111,6 +111,18 @@ const SERVER_PURPOSE: Record<string, string> = {
     'Drives a connected iOS/Android device or simulator through Appium (UiAutomator2/XCUITest) so QC runs can test the mobile app.',
 }
 
+/**
+ * Inline one-liner describing what a server is for, shown in the BODY of a
+ * not-yet-connected card. It fills the empty space that "Connect" (pinned to the
+ * bottom via mt-auto) would otherwise leave, and tells the QC why the integration
+ * matters. Connected cards omit it (their body already holds the token + actions).
+ */
+function PurposeBlurb({ name }: { name: string }) {
+  const text = SERVER_PURPOSE[name]
+  if (!text) return null
+  return <p className="text-xs leading-relaxed text-muted-foreground">{text}</p>
+}
+
 /** Small info glyph with a hover/focus tooltip explaining a server's purpose. */
 function PurposeTip({ name, label }: { name: string; label: string }) {
   const text = SERVER_PURPOSE[name]
@@ -186,9 +198,29 @@ const CARD_STATUS: Record<string, { label: string; cls: string; Icon: typeof Fig
   failed: { label: 'Failed', cls: 'bg-red-50 text-red-700', Icon: AlertCircle },
 }
 
+// Whole-card treatment. A connected server gets a subtle emerald tint + border so
+// the active integrations pop out of the grid at a glance; everything else keeps the
+// neutral hairline card. Opacity-based emerald reads correctly in light AND dark.
+function mcpCardClass(status?: string): string {
+  return cn(
+    'flex h-full flex-col gap-2.5 rounded-3xl border p-4 shadow-none transition-all duration-200 hover:-translate-y-0.5 hover:shadow-sm',
+    status === 'connected'
+      ? 'border-emerald-500/40 bg-emerald-500/[0.04] hover:border-emerald-500/60'
+      : 'border-border/60 hover:border-border',
+  )
+}
+
+// Temporarily hide the Appium card and use mobile-mcp for device automation.
+// Appium is heavier/slower (large cold start, needs a WebDriverAgent build) and its
+// stack refuses the odd Node versions (crashes on Node 23, which the portal often runs
+// on). mobile-mcp covers the same web-on-mobile + native-app flows with a much lighter,
+// faster server. Flip this back to true to bring Appium back once it's on a supported Node.
+const APPIUM_ENABLED = false
+
 function playwrightArgs(headless: boolean): string[] {
   return [
-    '@playwright/mcp@latest',
+    // No @latest: npx reuses the cached install instead of a per-spawn registry check.
+    '@playwright/mcp',
     ...(headless ? ['--headless'] : []),
     '--no-sandbox',
     '--image-responses',
@@ -223,11 +255,11 @@ function CardStatusBadge({
     )
   }
   if (!configured) return null
-  const s = (status && CARD_STATUS[status]) || {
-    label: 'Configured',
-    cls: 'bg-muted text-muted-foreground',
-    Icon: Check,
-  }
+  // Only badge a server when the live probe returned a recognized status
+  // (connected / pending / needs-auth / failed). An unconfirmed 'unknown' health
+  // shows no badge at all — we don't surface a grey "Configured" fallback.
+  const s = status ? CARD_STATUS[status] : undefined
+  if (!s) return null
   return (
     <span
       className={cn(
@@ -289,6 +321,16 @@ function FieldRow({
       >
         {copied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
       </button>
+    </div>
+  )
+}
+
+/** A labeled form field (small caption above the control) for the connect forms. */
+function Field({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className="space-y-1">
+      <label className="text-[11px] font-medium text-muted-foreground">{label}</label>
+      {children}
     </div>
   )
 }
@@ -526,6 +568,8 @@ function ConnectServices({
   })
   const [openProvider, setOpenProvider] = useState<McpOauthProvider | null>(null)
   const [token, setToken] = useState('')
+  // Reveal toggle for the token paste field (eye icon).
+  const [showToken, setShowToken] = useState(false)
   // Jira needs a site URL + account email alongside the API token (mcp-atlassian).
   const [jiraUrl, setJiraUrl] = useState('')
   const [jiraEmail, setJiraEmail] = useState('')
@@ -566,6 +610,7 @@ function ConnectServices({
     const url = tokenUrlFor(provider)
     if (url) window.open(url, '_blank', 'noopener,noreferrer')
     setToken('')
+    setShowToken(false)
     setJiraUrl('')
     setJiraEmail('')
     setAzureOrgUrl('')
@@ -600,10 +645,13 @@ function ConnectServices({
       })
       setOpenProvider(null)
       setToken('')
+      setShowToken(false)
       setJiraUrl('')
       setJiraEmail('')
       setAzureOrgUrl('')
       setAzureProject('')
+      // Auto-run the live connection test so the user doesn't have to click it.
+      test.mutate(provider)
       return refresh()
     },
     onError: (err) =>
@@ -613,8 +661,13 @@ function ConnectServices({
   })
 
   // Disconnect = remove the server entry from this project's .mcp.json.
+  // Per-name pending sets — a single useMutation only tracks its LATEST call, so
+  // testing/disconnecting two servers at once would drop the first card's spinner.
+  // Tracking by name lets each card reflect its own in-flight state independently.
+  const [disconnectingNames, setDisconnectingNames] = useState<Set<string>>(() => new Set())
   const disconnect = useMutation({
     mutationFn: (name: string) => removeMcp(name, projectId),
+    onMutate: (name) => setDisconnectingNames((s) => new Set(s).add(name)),
     onSuccess: (_, name) => {
       toast.success(`${name} disconnected`, {
         description: "Removed from this project's .mcp.json.",
@@ -625,15 +678,22 @@ function ConnectServices({
       toast.error('Failed to disconnect', {
         description: err instanceof Error ? err.message : 'Unknown error',
       }),
+    onSettled: (_res, _err, name) =>
+      setDisconnectingNames((s) => {
+        const next = new Set(s)
+        next.delete(name)
+        return next
+      }),
   })
-  const disconnectingName = disconnect.isPending ? (disconnect.variables as string) : null
 
   // Live connection test — spawns the server via the Claude CLI and reports health.
   const [testResults, setTestResults] = useState<
     Record<string, { ok: boolean; detail: string }>
   >({})
+  const [testingNames, setTestingNames] = useState<Set<string>>(() => new Set())
   const test = useMutation({
     mutationFn: (name: string) => testMcp(name, projectId),
+    onMutate: (name) => setTestingNames((s) => new Set(s).add(name)),
     onSuccess: (res, name) => {
       setTestResults((m) => ({ ...m, [name]: res }))
       refresh()
@@ -645,8 +705,13 @@ function ConnectServices({
       setTestResults((m) => ({ ...m, [name]: { ok: false, detail } }))
       toast.error(`${name} test failed`, { description: detail })
     },
+    onSettled: (_res, _err, name) =>
+      setTestingNames((s) => {
+        const next = new Set(s)
+        next.delete(name)
+        return next
+      }),
   })
-  const testingName = test.isPending ? (test.variables as string) : null
 
   // Functional MCP test (fetch ticket / read design / open browser).
   const [capInputs, setCapInputs] = useState<Record<string, string>>({})
@@ -673,22 +738,6 @@ function ConnectServices({
     if (name === 'mobile-mcp') return 'Mobile'
     if (name === 'appium-mcp') return 'Appium'
     return OAUTH_META[name as McpOauthProvider]?.label ?? name
-  }
-
-  // Card button that opens the functional-test dialog for a known server.
-  function functionalTestTrigger(name: string) {
-    if (!CAPABILITY[name]) return null
-    return (
-      <Button
-        size="sm"
-        variant="secondary"
-        onClick={() => setCapDialogName(name)}
-        className="w-full rounded-full transition-all duration-200 active:scale-[0.98]"
-      >
-        <FlaskConical className="h-3.5 w-3.5" />
-        Functional test
-      </Button>
-    )
   }
 
   // The functional-test dialog — a real action run through the MCP via Claude.
@@ -803,6 +852,7 @@ function ConnectServices({
       ),
     onSuccess: () => {
       toast.success('Playwright added', { description: 'No authentication required.' })
+      test.mutate('playwright')
       return refresh()
     },
     onError: (err) =>
@@ -818,7 +868,9 @@ function ConnectServices({
         {
           name: 'mobile-mcp',
           command: 'npx',
-          args: ['-y', '@mobilenext/mobile-mcp@latest'],
+          // No @latest: npx reuses the cached install instead of hitting the registry
+          // for a version check on every spawn — much faster startup for tests + QC runs.
+          args: ['-y', '@mobilenext/mobile-mcp'],
           type: 'stdio',
         },
         projectId,
@@ -827,6 +879,7 @@ function ConnectServices({
       toast.success('Mobile added', {
         description: 'Connect a device/simulator, then test.',
       })
+      test.mutate('mobile-mcp')
       return refresh()
     },
     onError: (err) =>
@@ -842,7 +895,8 @@ function ConnectServices({
         {
           name: 'appium-mcp',
           command: 'npx',
-          args: ['-y', 'appium-mcp@latest'],
+          // No @latest: npx reuses the cached install instead of a per-spawn registry check.
+          args: ['-y', 'appium-mcp'],
           type: 'stdio',
         },
         projectId,
@@ -851,6 +905,7 @@ function ConnectServices({
       toast.success('Appium added', {
         description: 'Needs Node 22 or 24 (not 23), JDK, Android SDK / Xcode. Connect a device, then test.',
       })
+      test.mutate('appium-mcp')
       return refresh()
     },
     onError: (err) =>
@@ -1133,18 +1188,37 @@ function ConnectServices({
     )
   }
 
-  // Actions shown once a service is connected: live Test + Disconnect.
+  // Actions shown once a service is connected. One prominent primary (Test
+  // connection) over a single compact row of equal, low-emphasis actions
+  // (Test feature · Details · Disconnect) — keeps connected cards short and calm
+  // instead of stacking four full-width buttons of four different weights.
   function connectedActions(name: string) {
-    const testing = testingName === name
-    const disconnecting = disconnectingName === name
+    const testing = testingNames.has(name)
+    const disconnecting = disconnectingNames.has(name)
     const result = testResults[name]
+    const hasFn = !!CAPABILITY[name]
     return (
       <div className="mt-auto space-y-1.5">
+        {result && (
+          <p
+            className={cn(
+              'flex items-start gap-1.5 rounded-lg px-2 py-1.5 text-[11px] leading-snug',
+              result.ok ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-700',
+            )}
+          >
+            {result.ok ? (
+              <CheckCircle2 className="mt-0.5 h-3 w-3 shrink-0" />
+            ) : (
+              <AlertCircle className="mt-0.5 h-3 w-3 shrink-0" />
+            )}
+            <span className="min-w-0 break-words">{result.detail}</span>
+          </p>
+        )}
         <Button
           size="sm"
           onClick={() => test.mutate(name)}
           disabled={testing || disconnecting}
-          className="w-full rounded-full transition-all duration-200 active:scale-[0.98]"
+          className="h-9 w-full rounded-full font-medium transition-all duration-200 hover:shadow-sm active:scale-[0.98]"
         >
           {testing ? (
             <>
@@ -1158,51 +1232,50 @@ function ConnectServices({
             </>
           )}
         </Button>
-        {result && (
-          <p
-            className={cn(
-              'flex items-start gap-1.5 rounded-md px-2 py-1.5 text-[11px] leading-snug',
-              result.ok ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-700',
-            )}
-          >
-            {result.ok ? (
-              <CheckCircle2 className="mt-0.5 h-3 w-3 shrink-0" />
-            ) : (
-              <AlertCircle className="mt-0.5 h-3 w-3 shrink-0" />
-            )}
-            <span className="min-w-0 break-words">{result.detail}</span>
-          </p>
-        )}
-        {functionalTestTrigger(name)}
-        <Button
-          size="sm"
-          variant="ghost"
-          onClick={() => openDetails(name)}
-          disabled={disconnecting}
-          className="w-full rounded-full text-muted-foreground transition-all duration-200 hover:text-foreground active:scale-[0.98]"
-        >
-          <FileJson className="h-3.5 w-3.5" />
-          View details
-        </Button>
-        <Button
-          size="sm"
-          variant="outline"
-          onClick={() => disconnect.mutate(name)}
-          disabled={disconnecting || testing}
-          className="w-full rounded-full transition-all duration-200 hover:border-destructive/30 hover:bg-destructive/10 hover:text-destructive active:scale-[0.98]"
-        >
-          {disconnecting ? (
-            <>
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              Disconnecting…
-            </>
-          ) : (
-            <>
-              <Unplug className="h-3.5 w-3.5" />
-              Disconnect
-            </>
+        {/* Segmented toolbar — three peer actions read as one cohesive control
+            instead of three loose ghost buttons; a hairline divider sets the
+            destructive Disconnect apart. */}
+        <div className="flex items-center gap-0.5 rounded-full border border-border/60 bg-muted/40 p-1">
+          {hasFn && (
+            <button
+              type="button"
+              onClick={() => setCapDialogName(name)}
+              disabled={disconnecting}
+              className="flex flex-1 items-center justify-center gap-1.5 rounded-full px-2 py-1.5 text-xs font-medium text-muted-foreground transition-all duration-200 hover:bg-background hover:text-foreground hover:shadow-sm active:scale-[0.97] disabled:pointer-events-none disabled:opacity-50"
+            >
+              <FlaskConical className="h-3.5 w-3.5" />
+              Test feature
+            </button>
           )}
-        </Button>
+          <button
+            type="button"
+            onClick={() => openDetails(name)}
+            disabled={disconnecting}
+            className="flex flex-1 items-center justify-center gap-1.5 rounded-full px-2 py-1.5 text-xs font-medium text-muted-foreground transition-all duration-200 hover:bg-background hover:text-foreground hover:shadow-sm active:scale-[0.97] disabled:pointer-events-none disabled:opacity-50"
+          >
+            <FileJson className="h-3.5 w-3.5" />
+            Details
+          </button>
+          <span className="mx-0.5 h-4 w-px shrink-0 bg-border/60" />
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                onClick={() => disconnect.mutate(name)}
+                disabled={disconnecting || testing}
+                aria-label="Disconnect"
+                className="flex shrink-0 items-center justify-center rounded-full px-2.5 py-1.5 text-muted-foreground transition-all duration-200 hover:bg-destructive/10 hover:text-destructive active:scale-[0.97] disabled:pointer-events-none disabled:opacity-50"
+              >
+                {disconnecting ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Unplug className="h-3.5 w-3.5" />
+                )}
+              </button>
+            </TooltipTrigger>
+            <TooltipContent>Disconnect</TooltipContent>
+          </Tooltip>
+        </div>
       </div>
     )
   }
@@ -1224,10 +1297,10 @@ function ConnectServices({
     return (
       <Card
         key={provider}
-        className="flex h-full flex-col gap-3 rounded-3xl border-border/60 p-5 shadow-none transition-all duration-200 hover:-translate-y-0.5 hover:border-border hover:shadow-sm"
+        className={mcpCardClass(statusByName[provider])}
       >
         <div className="flex items-center gap-3">
-          <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl border border-border/60 bg-muted/60 text-muted-foreground">
+          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl border border-border/60 bg-muted/60 text-muted-foreground">
             <Icon className="h-4 w-4" />
           </span>
           <div className="min-w-0 leading-tight">
@@ -1246,82 +1319,102 @@ function ConnectServices({
         {configured && envPreview(provider)}
 
         {checking ? (
-          <Button size="sm" disabled className="mt-auto w-full rounded-full">
+          <Button size="sm" disabled className="mt-auto h-9 w-full rounded-full font-medium">
             <Loader2 className="h-3.5 w-3.5 animate-spin" />
             Checking status…
           </Button>
         ) : configured ? (
           connectedActions(provider)
         ) : isOpen ? (
-          // Token-connect: token page opened in a new tab — paste it here.
-          <div className="mt-auto space-y-2">
+          // Token-connect: the provider's token page opened in a new tab — paste it here.
+          <div className="mt-auto space-y-2.5">
             {provider === 'jira' && (
               <>
-                <Input
-                  autoFocus
-                  type="url"
-                  placeholder="Site URL — https://you.atlassian.net"
-                  value={jiraUrl}
-                  onChange={(e) => setJiraUrl(e.target.value)}
-                  aria-label="Jira site URL"
-                  className="h-9 text-xs"
-                />
-                <Input
-                  type="email"
-                  placeholder="Account email"
-                  value={jiraEmail}
-                  onChange={(e) => setJiraEmail(e.target.value)}
-                  aria-label="Jira account email"
-                  className="h-9 text-xs"
-                />
+                <Field label="Site URL">
+                  <Input
+                    autoFocus
+                    type="url"
+                    placeholder="https://you.atlassian.net"
+                    value={jiraUrl}
+                    onChange={(e) => setJiraUrl(e.target.value)}
+                    aria-label="Jira site URL"
+                    className="h-9 rounded-xl text-xs"
+                  />
+                </Field>
+                <Field label="Account email">
+                  <Input
+                    type="email"
+                    placeholder="you@company.com"
+                    value={jiraEmail}
+                    onChange={(e) => setJiraEmail(e.target.value)}
+                    aria-label="Jira account email"
+                    className="h-9 rounded-xl text-xs"
+                  />
+                </Field>
               </>
             )}
             {provider === 'azure' && (
               <>
-                <Input
-                  autoFocus
-                  type="url"
-                  placeholder="Org URL — https://dev.azure.com/your-org"
-                  value={azureOrgUrl}
-                  onChange={(e) => setAzureOrgUrl(e.target.value)}
-                  aria-label="Azure DevOps organization URL"
-                  className="h-9 text-xs"
-                />
-                <Input
-                  type="text"
-                  placeholder="Default project (optional)"
-                  value={azureProject}
-                  onChange={(e) => setAzureProject(e.target.value)}
-                  aria-label="Azure DevOps default project"
-                  className="h-9 text-xs"
-                />
+                <Field label="Organization URL">
+                  <Input
+                    autoFocus
+                    type="url"
+                    placeholder="https://dev.azure.com/your-org"
+                    value={azureOrgUrl}
+                    onChange={(e) => setAzureOrgUrl(e.target.value)}
+                    aria-label="Azure DevOps organization URL"
+                    className="h-9 rounded-xl text-xs"
+                  />
+                </Field>
+                <Field label="Default project (optional)">
+                  <Input
+                    type="text"
+                    placeholder="e.g. Mobile App"
+                    value={azureProject}
+                    onChange={(e) => setAzureProject(e.target.value)}
+                    aria-label="Azure DevOps default project"
+                    className="h-9 rounded-xl text-xs"
+                  />
+                </Field>
               </>
             )}
-            <Input
-              autoFocus={provider !== 'jira' && provider !== 'azure'}
-              type="password"
-              placeholder={provider === 'azure' ? 'Paste your PAT' : 'Paste your API token'}
-              value={token}
-              onChange={(e) => setToken(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && canSave) saveToken.mutate(provider)
-              }}
-              aria-label={`${meta.label} API token`}
-              className="h-9 font-mono text-xs"
-            />
-            <div className="flex gap-2">
+            <Field label={provider === 'azure' ? 'Personal Access Token' : 'API token'}>
+              <div className="relative">
+                <Input
+                  autoFocus={provider !== 'jira' && provider !== 'azure'}
+                  type={showToken ? 'text' : 'password'}
+                  placeholder={provider === 'azure' ? 'Paste your PAT' : 'Paste your API token'}
+                  value={token}
+                  onChange={(e) => setToken(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && canSave) saveToken.mutate(provider)
+                  }}
+                  aria-label={`${meta.label} API token`}
+                  className="h-9 rounded-xl pr-9 font-mono text-xs"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowToken((v) => !v)}
+                  aria-label={showToken ? 'Hide token' : 'Show token'}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground transition-colors hover:text-foreground"
+                >
+                  {showToken ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+                </button>
+              </div>
+            </Field>
+            <div className="flex gap-2 pt-0.5">
               <Button
                 size="sm"
                 onClick={() => saveToken.mutate(provider)}
                 disabled={!canSave || saving}
-                className="flex-1 rounded-full transition-all duration-200 active:scale-[0.98]"
+                className="h-9 flex-1 rounded-full font-medium transition-all duration-200 hover:shadow-sm active:scale-[0.98]"
               >
                 {saving ? (
                   <Loader2 className="h-3.5 w-3.5 animate-spin" />
                 ) : (
                   <Check className="h-3.5 w-3.5" />
                 )}
-                Save
+                Save &amp; connect
               </Button>
               <Button
                 size="sm"
@@ -1329,44 +1422,52 @@ function ConnectServices({
                 onClick={() => {
                   setOpenProvider(null)
                   setToken('')
+                  setShowToken(false)
                   setJiraUrl('')
                   setJiraEmail('')
                   setAzureOrgUrl('')
                   setAzureProject('')
                 }}
                 disabled={saving}
+                className="h-9 rounded-full"
               >
                 Cancel
               </Button>
             </div>
-            <a
-              href={info?.tokenUrl}
-              target="_blank"
-              rel="noreferrer"
-              className="flex items-center justify-center gap-1 text-[11px] text-muted-foreground hover:text-foreground"
-            >
-              <ExternalLink className="h-3 w-3" />
-              {meta.tokenHint}
-            </a>
-            <Link
-              to="/document/mcp-tokens"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="flex items-center justify-center gap-1 text-[11px] text-muted-foreground hover:text-foreground"
-            >
-              <BookOpen className="h-3 w-3" />
-              Step-by-step token guide
-            </Link>
+            <div className="flex flex-wrap items-center justify-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
+              <a
+                href={info?.tokenUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center gap-1 transition-colors hover:text-foreground"
+              >
+                <ExternalLink className="h-3 w-3" />
+                {meta.tokenHint}
+              </a>
+              <span className="text-border">·</span>
+              <Link
+                to="/document/mcp-tokens"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1 transition-colors hover:text-foreground"
+              >
+                <BookOpen className="h-3 w-3" />
+                Step-by-step guide
+              </Link>
+            </div>
           </div>
         ) : (
-          <Button
-            size="sm"
-            onClick={() => beginConnect(provider)}
-            className="mt-auto w-full rounded-full transition-all duration-200 active:scale-[0.98]"
-          >
-            <Plug className="h-3.5 w-3.5" />
-            Connect
-          </Button>
+          <>
+            <PurposeBlurb name={provider} />
+            <Button
+              size="sm"
+              onClick={() => beginConnect(provider)}
+              className="mt-auto h-9 w-full rounded-full font-medium transition-all duration-200 hover:shadow-sm active:scale-[0.98]"
+            >
+              <Plug className="h-3.5 w-3.5" />
+              Connect
+            </Button>
+          </>
         )}
       </Card>
     )
@@ -1377,10 +1478,10 @@ function ConnectServices({
     return (
       <Card
         key="playwright"
-        className="flex h-full flex-col gap-3 rounded-3xl border-border/60 p-5 shadow-none transition-all duration-200 hover:-translate-y-0.5 hover:border-border hover:shadow-sm"
+        className={mcpCardClass(statusByName['playwright'])}
       >
         <div className="flex items-center gap-3">
-          <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl border border-border/60 bg-muted/60 text-muted-foreground">
+          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl border border-border/60 bg-muted/60 text-muted-foreground">
             <MousePointerClick className="h-4 w-4" />
           </span>
           <div className="min-w-0 leading-tight">
@@ -1397,14 +1498,16 @@ function ConnectServices({
           />
         </div>
         {checkingStatus ? (
-          <Button size="sm" disabled className="mt-auto w-full rounded-full">
+          <Button size="sm" disabled className="mt-auto h-9 w-full rounded-full font-medium">
             <Loader2 className="h-3.5 w-3.5 animate-spin" />
             Checking status…
           </Button>
         ) : playwrightAdded ? (
           connectedActions('playwright')
         ) : (
-          <div className="mt-auto space-y-2">
+          <>
+            <PurposeBlurb name="playwright" />
+            <div className="mt-auto space-y-2">
             <label className="flex items-center justify-between rounded-xl bg-muted/60 px-3 py-2 text-xs text-muted-foreground">
               <span>Headless</span>
               <input
@@ -1418,7 +1521,7 @@ function ConnectServices({
               size="sm"
               onClick={() => addPlaywright.mutate()}
               disabled={addPlaywright.isPending}
-              className="w-full rounded-full transition-all duration-200 active:scale-[0.98]"
+              className="h-9 w-full rounded-full font-medium transition-all duration-200 hover:shadow-sm active:scale-[0.98]"
             >
               {addPlaywright.isPending ? (
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -1427,7 +1530,8 @@ function ConnectServices({
               )}
               Connect
             </Button>
-          </div>
+            </div>
+          </>
         )}
       </Card>
     )
@@ -1438,10 +1542,10 @@ function ConnectServices({
     return (
       <Card
         key="mobile-mcp"
-        className="flex h-full flex-col gap-3 rounded-3xl border-border/60 p-5 shadow-none transition-all duration-200 hover:-translate-y-0.5 hover:border-border hover:shadow-sm"
+        className={mcpCardClass(statusByName['mobile-mcp'])}
       >
         <div className="flex items-center gap-3">
-          <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl border border-border/60 bg-muted/60 text-muted-foreground">
+          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl border border-border/60 bg-muted/60 text-muted-foreground">
             <Smartphone className="h-4 w-4" />
           </span>
           <div className="min-w-0 leading-tight">
@@ -1458,26 +1562,29 @@ function ConnectServices({
           />
         </div>
         {checkingStatus ? (
-          <Button size="sm" disabled className="mt-auto w-full rounded-full">
+          <Button size="sm" disabled className="mt-auto h-9 w-full rounded-full font-medium">
             <Loader2 className="h-3.5 w-3.5 animate-spin" />
             Checking status…
           </Button>
         ) : mobileAdded ? (
           connectedActions('mobile-mcp')
         ) : (
-          <Button
-            size="sm"
-            onClick={() => addMobile.mutate()}
-            disabled={addMobile.isPending}
-            className="mt-auto w-full rounded-full transition-all duration-200 active:scale-[0.98]"
-          >
-            {addMobile.isPending ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            ) : (
-              <Plug className="h-3.5 w-3.5" />
-            )}
-            Connect
-          </Button>
+          <>
+            <PurposeBlurb name="mobile-mcp" />
+            <Button
+              size="sm"
+              onClick={() => addMobile.mutate()}
+              disabled={addMobile.isPending}
+              className="mt-auto h-9 w-full rounded-full font-medium transition-all duration-200 hover:shadow-sm active:scale-[0.98]"
+            >
+              {addMobile.isPending ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Plug className="h-3.5 w-3.5" />
+              )}
+              Connect
+            </Button>
+          </>
         )}
       </Card>
     )
@@ -1490,10 +1597,10 @@ function ConnectServices({
     return (
       <Card
         key="appium-mcp"
-        className="flex h-full flex-col gap-3 rounded-3xl border-border/60 p-5 shadow-none transition-all duration-200 hover:-translate-y-0.5 hover:border-border hover:shadow-sm"
+        className={mcpCardClass(statusByName['appium-mcp'])}
       >
         <div className="flex items-center gap-3">
-          <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl border border-border/60 bg-muted/60 text-muted-foreground">
+          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl border border-border/60 bg-muted/60 text-muted-foreground">
             <Smartphone className="h-4 w-4" />
           </span>
           <div className="min-w-0 leading-tight">
@@ -1510,14 +1617,16 @@ function ConnectServices({
           />
         </div>
         {checkingStatus ? (
-          <Button size="sm" disabled className="mt-auto w-full rounded-full">
+          <Button size="sm" disabled className="mt-auto h-9 w-full rounded-full font-medium">
             <Loader2 className="h-3.5 w-3.5 animate-spin" />
             Checking status…
           </Button>
         ) : appiumAdded ? (
           connectedActions('appium-mcp')
         ) : (
-          <div className="mt-auto space-y-2">
+          <>
+            <PurposeBlurb name="appium-mcp" />
+            <div className="mt-auto space-y-2">
             <p className="flex items-start gap-1.5 rounded-xl bg-amber-50 px-2.5 py-2 text-[11px] leading-snug text-amber-700">
               <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
               <span>
@@ -1530,7 +1639,7 @@ function ConnectServices({
               size="sm"
               onClick={() => addAppium.mutate()}
               disabled={addAppium.isPending}
-              className="w-full rounded-full transition-all duration-200 active:scale-[0.98]"
+              className="h-9 w-full rounded-full font-medium transition-all duration-200 hover:shadow-sm active:scale-[0.98]"
             >
               {addAppium.isPending ? (
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -1539,7 +1648,8 @@ function ConnectServices({
               )}
               Connect
             </Button>
-          </div>
+            </div>
+          </>
         )}
       </Card>
     )
@@ -1584,7 +1694,7 @@ function ConnectServices({
       >
         {playwrightCard()}
         {mobileCard()}
-        {appiumCard()}
+        {APPIUM_ENABLED && appiumCard()}
       </McpGroup>
 
       {functionalTestDialog()}
@@ -1686,6 +1796,35 @@ function UvWarning() {
   )
 }
 
+// Persisted health cache — the live probe (`claude mcp list`) is slow, so we keep
+// the last-known { name: status } map per project in localStorage. On reload the
+// cards seed from it and show their previous Connected/… badge INSTANTLY, while a
+// fresh probe runs quietly in the background instead of flashing "Checking".
+type HealthMap = Record<string, McpServer['status']>
+function healthCacheKey(projectId: string) {
+  return `qc.mcpHealth.${projectId}`
+}
+function readHealthCache(projectId: string): { map: HealthMap; at: number } | null {
+  try {
+    const raw = localStorage.getItem(healthCacheKey(projectId))
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as { map?: HealthMap; at?: number }
+    if (parsed && typeof parsed === 'object' && parsed.map) {
+      return { map: parsed.map, at: typeof parsed.at === 'number' ? parsed.at : 0 }
+    }
+  } catch {
+    /* corrupt/absent cache — fall through to a live probe */
+  }
+  return null
+}
+function writeHealthCache(projectId: string, map: HealthMap) {
+  try {
+    localStorage.setItem(healthCacheKey(projectId), JSON.stringify({ map, at: Date.now() }))
+  } catch {
+    /* storage full/blocked — the in-memory query still works */
+  }
+}
+
 export default function McpPage() {
   const { activeProjectId, activeProject } = useProjects()
   // Two-phase load: the structural list comes back instantly (health=false), so
@@ -1699,14 +1838,27 @@ export default function McpPage() {
     refetchOnMount: false,
     refetchOnWindowFocus: false,
   })
+  // Seed from the persisted cache so a reload paints the last-known statuses
+  // immediately. initialDataUpdatedAt lets React Query decide freshness: a recent
+  // cache (< staleTime) is used as-is; an older one refetches quietly in the
+  // background (data stays visible, so no "Checking" flash — see checkingStatus).
+  const cached = useMemo(
+    () => (activeProjectId ? readHealthCache(activeProjectId) : null),
+    [activeProjectId],
+  )
   const { data: health, isFetching: healthChecking } = useQuery({
     queryKey: ['mcp-health', activeProjectId],
     queryFn: () => mcpHealth(activeProjectId as string),
     enabled: !!activeProjectId,
-    staleTime: Infinity,
-    refetchOnMount: false,
+    initialData: cached?.map,
+    initialDataUpdatedAt: cached?.at,
+    staleTime: 5 * 60_000,
     refetchOnWindowFocus: false,
   })
+  // Persist every resolved health map so the next reload can seed from it.
+  useEffect(() => {
+    if (activeProjectId && health) writeHealthCache(activeProjectId, health)
+  }, [activeProjectId, health])
   // Merge live statuses onto the structural list. Until health resolves, servers
   // keep their "unknown" status and the cards show a "Checking" badge.
   const data = useMemo(
@@ -1739,6 +1891,12 @@ export default function McpPage() {
   }
 
   const servers = data ?? []
+  // At-a-glance health for the header summary strip.
+  const connectedCount = servers.filter((s) => s.status === 'connected').length
+  const attentionCount = servers.filter(
+    (s) => s.status === 'pending' || s.status === 'needs-auth' || s.status === 'failed',
+  ).length
+  const coldChecking = (isLoading || healthChecking) && !health
 
   return (
     <div className="mx-auto max-w-6xl space-y-8">
@@ -1747,13 +1905,45 @@ export default function McpPage() {
           <span className="mt-0.5 flex size-11 shrink-0 items-center justify-center rounded-2xl bg-foreground text-background">
             <Plug className="size-5" />
           </span>
-          <div className="space-y-1">
+          <div className="min-w-0 flex-1 space-y-1">
             <h1 className="text-3xl font-semibold tracking-tight">MCP servers</h1>
             <p className="text-sm text-muted-foreground">
               Each project has its own Model Context Protocol config — these servers apply only to
               the active project's QC runs.
             </p>
           </div>
+          {/* At-a-glance connection health — answers "are my integrations up?" without
+              scanning each card. Hidden until there's at least one configured server. */}
+          {(servers.length > 0 || coldChecking) && (
+            <div className="mt-0.5 flex shrink-0 flex-wrap items-center justify-end gap-1.5 text-xs">
+              {coldChecking ? (
+                <span className="inline-flex items-center gap-1.5 rounded-full border border-border/60 bg-muted/60 px-3 py-1 font-medium text-muted-foreground">
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  Checking…
+                </span>
+              ) : (
+                <>
+                  <span
+                    className={cn(
+                      'inline-flex items-center gap-1.5 rounded-full px-3 py-1 font-medium',
+                      connectedCount > 0
+                        ? 'bg-emerald-50 text-emerald-700'
+                        : 'border border-border/60 bg-muted/60 text-muted-foreground',
+                    )}
+                  >
+                    <CheckCircle2 className="h-3.5 w-3.5" />
+                    {connectedCount}/{servers.length} connected
+                  </span>
+                  {attentionCount > 0 && (
+                    <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-50 px-3 py-1 font-medium text-amber-700">
+                      <AlertTriangle className="h-3.5 w-3.5" />
+                      {attentionCount} need attention
+                    </span>
+                  )}
+                </>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Per-project context: makes it unmistakable which .mcp.json is being edited. */}
@@ -1811,7 +2001,9 @@ export default function McpPage() {
         statusByName={Object.fromEntries(servers.map((s) => [s.name, s.status]))}
         envByName={Object.fromEntries(servers.map((s) => [s.name, s.env]))}
         serverByName={Object.fromEntries(servers.map((s) => [s.name, s]))}
-        checkingStatus={isLoading || healthChecking}
+        // Only show "Checking" on a cold load with nothing to display yet. Once we
+        // have statuses (from cache or a prior fetch), background refreshes are silent.
+        checkingStatus={(isLoading || healthChecking) && !health}
       />
     </div>
   )

@@ -37,12 +37,18 @@ export interface Project {
   defaultSkill: string // skill auto-selected on the Launch QC Run page ('' = no default)
 }
 
+/** Where a run drives the product under test. */
+export type TestTarget = 'web' | 'web-mobile' | 'app-mobile'
+
 export interface RunSummary {
   id: string
   projectId: string
   projectName: string | null // joined from projects for display
   ticketId: string
   appUrl: string
+  // Which surface this run tested, so History can label it. Runs recorded before
+  // this was persisted fall back to a best guess (see db.rowToSummary).
+  testTarget: TestTarget
   slug: string | null // testing/<slug> folder name once known
   status: RunStatus
   passCount: number
@@ -99,7 +105,7 @@ export interface CreateRunBody {
   model?: string // Claude model alias (haiku/sonnet/opus); omitted = Claude's configured default
   // where to run: desktop browser (default), the web app on a mobile device, or a
   // native app already installed on a mobile device — both mobile modes via Mobile MCP
-  testTarget?: 'web' | 'web-mobile' | 'app-mobile'
+  testTarget?: TestTarget
   // Advanced mode: a single run that covers a connected feature spanning several
   // tickets. `ticketId` is the lead ticket; `relatedTickets` are the rest, and
   // `workflowSteps` is the ordered end-to-end flow Claude should exercise.
@@ -119,10 +125,25 @@ export interface SkillFile {
   content: string
 }
 
+/**
+ * How a project's copy of a portal-bundled skill compares to the bundled master:
+ * - `in-sync`           — identical, nothing to do
+ * - `update-available`  — the portal ships a newer version and this copy is untouched
+ * - `customized`        — hand-edited (or predates fingerprinting), so it's never
+ *                         overwritten automatically; the UI offers the update
+ * - `missing`           — the project has no copy of this skill
+ */
+export interface SkillSyncStatus {
+  skill: string
+  state: 'in-sync' | 'update-available' | 'customized' | 'missing'
+}
+
 export interface SkillSummary {
   name: string // folder name / skill name
   description: string // from SKILL.md frontmatter
   files: string[] // file names in the skill folder
+  // Present only for skills bundled with the portal (today: qc-testing).
+  sync?: SkillSyncStatus['state']
 }
 
 // ---- mcp ----

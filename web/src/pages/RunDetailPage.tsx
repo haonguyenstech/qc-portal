@@ -21,6 +21,7 @@ import {
   CheckCircle2,
   ChevronDown,
   Compass,
+  Crosshair,
   File as FileIcon,
   FileCode2,
   FileText,
@@ -32,6 +33,7 @@ import {
   ListChecks,
   Loader2,
   Send,
+  TabletSmartphone,
   Terminal,
   Timer,
   Trash2,
@@ -52,6 +54,8 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 import { OpenFolderButton } from '@/components/OpenFolderButton'
 import ContinueSessionPanel from '@/components/ContinueSessionPanel'
 import { GuideTour, type TourStep } from '@/components/GuideTour'
+import { TargetTag } from '@/components/TargetTag'
+import { asTestTarget } from '@/lib/testTarget'
 import {
   createClickupIssueSubtasks,
   deleteRun,
@@ -158,6 +162,18 @@ function evidenceLinkClass(kind: RunFile['kind']): string {
   )
 }
 
+/**
+ * Resolve a path/filename mentioned in the report to one of the run's output files.
+ * Matching is by basename (lowercased) so `screenshots/ac1.png`, `./ac1.png` and a
+ * bare `ac1.png` all land on the same file. Returns undefined when the token names
+ * a file this run never produced — the caller then leaves the text as-is.
+ */
+function resolveEvidenceFile(byName: Map<string, RunFile>, token: string): RunFile | undefined {
+  const name = token.trim().split('/').pop()?.toLowerCase()
+  if (!name) return undefined
+  return byName.get(name)
+}
+
 function EvidenceLink({ file, onOpen }: { file: RunFile; onOpen: (f: RunFile) => void }) {
   const name = file.path.split('/').pop() ?? file.path
   return (
@@ -184,7 +200,7 @@ function linkifyEvidence(
     let i = 0
     while ((match = EVIDENCE_TOKEN.exec(node)) !== null) {
       const token = match[0]
-      const file = byName.get((token.split('/').pop() ?? token).toLowerCase())
+      const file = resolveEvidenceFile(byName, token)
       if (!file) continue
       if (match.index > last) parts.push(node.slice(last, match.index))
       parts.push(<EvidenceLink key={`${keyPrefix}-${i++}`} file={file} onOpen={onOpen} />)
@@ -280,6 +296,8 @@ function EvidenceReport({
     return <MarkdownView md={md} empty={empty} icon={icon} />
   }
 
+  const linkify = (children: React.ReactNode) => linkifyEvidence(children, byName, setActive)
+
   return (
     <>
       <div className={prose}>
@@ -287,9 +305,55 @@ function EvidenceReport({
           remarkPlugins={REMARK_PLUGINS}
           components={{
             ...mdTableComponents,
-            td: ({ children, ...props }) => (
-              <td {...props}>{linkifyEvidence(children, byName, setActive)}</td>
-            ),
+            td: ({ children, ...props }) => <td {...props}>{linkify(children)}</td>,
+            // issues.md states evidence in prose, not tables — "**Screenshot:**
+            // screenshots/ISSUE-foo.png" lives in a paragraph or list item. Linkify
+            // those too so every mentioned file is one click from its preview.
+            // (A chip is an <EvidenceLink> element with no children, so walking a
+            // node that already holds one never re-processes it.)
+            p: ({ children, ...props }) => <p {...props}>{linkify(children)}</p>,
+            li: ({ children, ...props }) => <li {...props}>{linkify(children)}</li>,
+            // An inline `code` path becomes the chip itself rather than a chip
+            // nested inside a code pill.
+            code: ({ children, className, ...props }) => {
+              const file = className ? undefined : resolveEvidenceFile(byName, nodeText(children))
+              if (file) return <EvidenceLink file={file} onOpen={setActive} />
+              return (
+                <code className={className} {...props}>
+                  {children}
+                </code>
+              )
+            },
+            // A markdown thumbnail (`![ac1](screenshots/ac1.png)`) has a path relative
+            // to the run folder, which the browser would resolve against the page URL
+            // and fail to load. Point it at the file API and make it open the viewer.
+            img: ({ src, alt, ...props }) => {
+              const raw = typeof src === 'string' ? src : ''
+              if (!raw || /^(https?:|data:)/i.test(raw)) {
+                return <img src={raw} alt={alt ?? ''} {...props} />
+              }
+              const file = resolveEvidenceFile(byName, raw)
+              const href = slug ? runFileUrl(projectId, slug, file?.path ?? raw) : raw
+              const image = (
+                <img
+                  src={href}
+                  alt={alt ?? ''}
+                  loading="lazy"
+                  className="max-h-64 rounded-lg border border-border/60"
+                />
+              )
+              if (!file) return image
+              return (
+                <button
+                  type="button"
+                  onClick={() => setActive(file)}
+                  className="inline-block cursor-zoom-in transition-transform hover:-translate-y-0.5"
+                  title={`Open ${file.path}`}
+                >
+                  {image}
+                </button>
+              )
+            },
           }}
         >
           {md}
@@ -2212,12 +2276,16 @@ export default function RunDetailPage() {
                 <Compass className="size-3.5" />
                 Guide tour
               </Button>
-              <Button asChild variant="outline" size="sm" className="rounded-full transition-all duration-200 active:scale-[0.98]">
-                <a href={run.appUrl} target="_blank" rel="noreferrer">
-                  Open app
-                  <ArrowUpRight className="ml-2 h-4 w-4" />
-                </a>
-              </Button>
+              {/* An app-on-device run has no URL to open — appUrl is the app's name /
+                  bundle id, so the button would go nowhere. Hide it for that target. */}
+              {asTestTarget(run.testTarget) !== 'app-mobile' && (
+                <Button asChild variant="outline" size="sm" className="rounded-full transition-all duration-200 active:scale-[0.98]">
+                  <a href={run.appUrl} target="_blank" rel="noreferrer">
+                    Open app
+                    <ArrowUpRight className="ml-2 h-4 w-4" />
+                  </a>
+                </Button>
+              )}
               {filesSlug && <OpenFolderButton open={() => openRunFolder(run.id)} label="run output" />}
               {!isRunActive && (
                 <Button
@@ -2303,17 +2371,30 @@ export default function RunDetailPage() {
           <MetaInline icon={<Timer className="h-4 w-4" />} label="Duration">
             <span className="font-mono">{duration ?? '—'}</span>
           </MetaInline>
-          <MetaInline icon={<Globe className="h-4 w-4" />} label="App URL">
-            <a
-              href={run.appUrl}
-              target="_blank"
-              rel="noreferrer"
-              className="font-mono text-primary underline-offset-2 hover:underline"
-              title={run.appUrl}
-            >
-              {run.appUrl}
-            </a>
+          <MetaInline icon={<Crosshair className="h-4 w-4" />} label="Target">
+            <TargetTag target={asTestTarget(run.testTarget)} />
           </MetaInline>
+          {/* An app-on-device run has no URL — appUrl holds the app's name / bundle id,
+              so render it as text instead of a link that can't be opened. */}
+          {asTestTarget(run.testTarget) === 'app-mobile' ? (
+            <MetaInline icon={<TabletSmartphone className="h-4 w-4" />} label="App">
+              <span className="font-mono" title={run.appUrl}>
+                {run.appUrl}
+              </span>
+            </MetaInline>
+          ) : (
+            <MetaInline icon={<Globe className="h-4 w-4" />} label="App URL">
+              <a
+                href={run.appUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="font-mono text-primary underline-offset-2 hover:underline"
+                title={run.appUrl}
+              >
+                {run.appUrl}
+              </a>
+            </MetaInline>
+          )}
           {filesSlug && (
             <MetaInline icon={<Folder className="h-4 w-4" />} label="Output">
               <span className="font-mono" title={`testing/${filesSlug}`}>

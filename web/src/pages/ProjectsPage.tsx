@@ -1963,6 +1963,7 @@ export default function ProjectsPage() {
           </TabsTrigger>
           <TabsTrigger
             value="models"
+            data-tour="tab-models"
             className="group h-auto justify-start gap-3 rounded-2xl border border-border/60 bg-card px-4 py-3 text-left shadow-none transition-all duration-200 hover:-translate-y-0.5 hover:border-border hover:bg-muted/60 hover:shadow-sm data-[state=active]:border-foreground data-[state=active]:bg-muted/60 data-[state=active]:text-foreground data-[state=active]:shadow-none"
           >
             <span className="flex size-10 shrink-0 items-center justify-center rounded-xl border border-border/60 bg-muted/60 text-muted-foreground transition-colors group-data-[state=active]:border-transparent group-data-[state=active]:bg-foreground group-data-[state=active]:text-background">
@@ -2032,7 +2033,7 @@ export default function ProjectsPage() {
           </section>
 
           {isLoading && (
-            <div data-tour="project-cards" className="grid gap-3 sm:grid-cols-2 2xl:grid-cols-3">
+            <div className="grid gap-3 sm:grid-cols-2 2xl:grid-cols-3">
               {Array.from({ length: 6 }).map((_, i) => (
                 <ProjectCardSkeleton key={i} />
               ))}
@@ -2047,7 +2048,7 @@ export default function ProjectsPage() {
           )}
 
           {hasProjects && filtered.length > 0 && (
-            <div className="grid gap-3 sm:grid-cols-2 2xl:grid-cols-3">
+            <div data-tour="project-cards" className="grid gap-3 sm:grid-cols-2 2xl:grid-cols-3">
               {filtered.map((p) => (
                 <ProjectCard key={p.id} project={p} />
               ))}

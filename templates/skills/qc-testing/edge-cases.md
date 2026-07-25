@@ -10,7 +10,7 @@ A "Pass" on the happy path means nothing if the negative and boundary cases are 
 > to. Most edge cases below are observable *before* commit (the field error, the disabled
 > button, the counter). Drive up to that point, screenshot it, and mark the scenario tested.
 > If a case can only be confirmed by committing (e.g. server-side uniqueness), mark it
-> **Partial — needs commit (not run on shared data)** and say so.
+> **⚠️ Passed-with-issue — needs commit (not run on shared data)** and say so.
 
 ---
 
@@ -26,6 +26,31 @@ A "Pass" on the happy path means nothing if the negative and boundary cases are 
 Not every row applies to every control — use judgment, but **default to testing more**. A row
 you deliberately skip should be named as "N/A — <why>" so coverage is visible, not silently
 dropped.
+
+### Prioritise, don't just pile rows on (this is what keeps the run finishable)
+
+Every extra row costs real browser time, and a run that dies half-way through capture is worth
+less than a complete run with honest gaps. So order the rows you pick by risk and work down:
+
+1. **Tier 1 — always test.** The AC's happy path; every validation/error the ticket names
+   verbatim; the enable/disable rule of the primary button; the empty state of any list the AC
+   mentions; the full option set + order of any dropdown the AC names.
+2. **Tier 2 — test whenever the control exists.** Boundary values at min/max (±1), required-field
+   empty, cancel/close discards, search with no match, sort/filter/clear, persistence after
+   reload if the AC implies it.
+3. **Tier 3 — test if budget remains.** Unicode / special characters, very long input, rapid
+   double-click, browser back/forward, network throttling, concurrency.
+
+Aim for roughly **4–8 rows for a simple AC and 8–14 for a form/dialog AC**, Tier 1 first. If you
+run out of room, the rows you drop are Tier 3 — and they are listed in the report as
+`◻️ Not Tested — Tier 3, budget` (never as a Pass, and never silently). Getting all of Tier 1 and
+Tier 2 done on every AC beats getting Tier 3 done on one AC and nothing on the rest.
+
+### Reuse evidence across scenarios
+One captured state can settle several rows (an open dropdown screenshot proves the option set,
+the order, *and* the wording). Note the evidence file each row will use when you build the matrix
+and reuse the same file when the state is identical — recapturing the same screen per row is the
+single most common way a run burns its time.
 
 ---
 

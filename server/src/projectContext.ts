@@ -19,7 +19,10 @@ import { readAccounts } from './accountsStore.js'
 const DEFAULT_MAX_CHARS = 32_000 // total budget for the whole block (multi-repo source maps need room)
 const PER_ITEM_CHARS = 6_000 // cap any single note/doc so one huge doc can't crowd out the rest
 const MEMORY_MAX_CHARS = 12_000 // memory packs first — bound it so notes can't starve knowledge docs
-const SOURCE_MAP_PREFIX = 'source-map-' // repo index docs (sourceMap.ts) — highest-value knowledge
+// Highest-value knowledge docs, packed before everything else: the repo indexes the
+// prompts steer by (sourceMap.ts) and the product's visual language (designSystem.ts).
+// Being crowded out would silently re-enable full repo exploration / generic-looking UI.
+const PRIORITY_DOCS = ['source-map-', 'design-system']
 const KNOWLEDGE_MARKER_RE = /^<!--\s*qc-portal:source:[\s\S]*?-->\s*\n?/ // provenance comment
 
 export interface ProjectContext {
@@ -109,16 +112,12 @@ export function readProjectContext(rootPath: string, opts?: { maxChars?: number 
     /* no memory folder */
   }
 
-  // Knowledge docs — source maps FIRST (the repo indexes the prompts steer by;
-  // being crowded out would silently re-enable full repo exploration), then the
-  // remaining reference material newest-first.
+  // Knowledge docs — the priority docs FIRST (see PRIORITY_DOCS), then the remaining
+  // reference material newest-first.
   try {
     const dir = knowledgeDir(rootPath)
-    const docs = listDocs(rootPath).sort((a, b) => {
-      const aMap = a.name.startsWith(SOURCE_MAP_PREFIX) ? 0 : 1
-      const bMap = b.name.startsWith(SOURCE_MAP_PREFIX) ? 0 : 1
-      return aMap - bMap // stable: keeps newest-first within each group
-    })
+    const rank = (name: string) => (PRIORITY_DOCS.some((p) => name.startsWith(p)) ? 0 : 1)
+    const docs = listDocs(rootPath).sort((a, b) => rank(a.name) - rank(b.name)) // stable: newest-first within each group
     for (const d of docs) {
       let raw: string
       try {
