@@ -6,6 +6,7 @@ import type { RunHandle } from './claude.js'
 import { groundReport } from './groundingCheck.js'
 import { fillExecutedTestcases } from './fillTestcases.js'
 import { runKnowledgeUpdate } from './learn.js'
+import { totpPromptHint } from './totp.js'
 import {
   appendEvent,
   getProject,
@@ -286,6 +287,7 @@ function spawnRun(
       workflowSteps: body.workflowSteps,
       testTarget: body.testTarget,
       resumeSessionId,
+      totpHint: totpPromptHint(project.id),
     },
     {
       onSession: (sessionId) => setRunSession(id, sessionId),

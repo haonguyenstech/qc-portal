@@ -23,6 +23,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { Textarea } from '@/components/ui/textarea'
 import { OpenFolderButton } from '@/components/OpenFolderButton'
+import { TotpCodes } from '@/components/TotpCodes'
 import { convertFileToMarkdown } from '@/lib/docConvert'
 import {
   deleteAccounts as deleteAccountsApi,
@@ -36,13 +37,13 @@ import {
 const ACCOUNTS_ACCEPT = '.csv,.xlsx,.xls,.md,.markdown,.txt'
 
 /** A sample CSV users can download to learn the expected columns/shape. */
-const EXAMPLE_CSV = `Environment,URL,Role,Username,Password,Notes
-Staging,https://staging.example.com,Admin,qa.admin@example.com,Test@1234,MFA disabled for QA
-Staging,https://staging.example.com,Manager,qa.manager@example.com,Test@1234,Can approve requests
-Staging,https://staging.example.com,User,qa.user@example.com,Test@1234,Standard end user
-QA,https://qa.example.com,Admin,qa.admin@example.com,Qa@12345,Reset nightly at 00:00
-QA,https://qa.example.com,User,qa.user@example.com,Qa@12345,No billing access
-UAT,https://uat.example.com,User,uat.user@example.com,Uat@6789,Client-facing acceptance env
+const EXAMPLE_CSV = `Environment,URL,Role,Username,Password,MFA,Notes
+Staging,https://staging.example.com,Admin,qa.admin@example.com,Test@1234,None,MFA disabled for QA
+Staging,https://staging.example.com,Manager,qa.manager@example.com,Test@1234,None,Can approve requests
+Staging,https://staging.example.com,User,qa.user@example.com,Test@1234,None,Standard end user
+QA,https://qa.example.com,Admin,qa.admin@example.com,Qa@12345,Fixed OTP 123456,Reset nightly at 00:00
+QA,https://qa.example.com,User,qa.user@example.com,Qa@12345,None,No billing access
+UAT,https://uat.example.com,User,uat.user@example.com,Uat@6789,Authenticator: uat-user,Real TOTP — code comes from the Authenticator section below
 `
 
 /** Trigger a browser download of the sample CSV so the user can fill it in and re-upload. */
@@ -61,10 +62,11 @@ function downloadExampleCsv() {
 /** A starting scaffold shown when the project has no sheet yet. */
 const PLACEHOLDER = `# Environments & test accounts
 
-| Environment | URL | Role | Username | Password | Notes |
-| --- | --- | --- | --- | --- | --- |
-| Staging | https://staging.example.com | Admin | qa.admin@example.com | ••••• | MFA off |
-| Staging | https://staging.example.com | User | qa.user@example.com | ••••• |  |
+| Environment | URL | Role | Username | Password | MFA | Notes |
+| --- | --- | --- | --- | --- | --- | --- |
+| Staging | https://staging.example.com | Admin | qa.admin@example.com | ••••• | None | MFA off |
+| Staging | https://staging.example.com | User | qa.user@example.com | ••••• | None |  |
+| Production | https://app.example.com | User | qa.user@example.com | ••••• | Authenticator: prod-user | Real TOTP — registered below |
 `
 
 function formatBytes(n: number): string {
@@ -413,6 +415,9 @@ function AccountsEditor({
           )}
         </CardContent>
       </Card>
+
+      {/* Real 2FA: the sheet says WHICH account, this says how the run gets its code. */}
+      <TotpCodes projectId={projectId} />
 
       {doc.exists && (
         <div className="flex justify-end">

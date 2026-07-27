@@ -1,6 +1,8 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import { testingDirFor } from './config.js'
+import { PORT, testingDirFor } from './config.js'
+import { projectIdForRoot } from './projectScope.js'
+import { hasTotp, listTotp } from './totp.js'
 
 // Keeps the project's CLAUDE.md lean by maintaining a small auto-generated block
 // that points Claude at the structured Knowledge + Memory folders instead of
@@ -26,7 +28,9 @@ function buildBlock(root: string): string {
   const hasKnowledge = hasMarkdown(path.join(testingDirFor(root), 'knowledge'))
   const hasMemory = hasMarkdown(path.join(testingDirFor(root), 'memory'), ['memory.md'])
   const hasEnvironments = fs.existsSync(path.join(testingDirFor(root), 'environments.md'))
-  if (!hasKnowledge && !hasMemory && !hasEnvironments) return ''
+  const projectId = projectIdForRoot(root)
+  const hasAuthenticators = !!projectId && hasTotp(projectId)
+  if (!hasKnowledge && !hasMemory && !hasEnvironments && !hasAuthenticators) return ''
 
   const lines = ['## Project context (managed by QC Portal)', '']
   lines.push(
@@ -39,6 +43,26 @@ function buildBlock(root: string): string {
       '- **Environments & test accounts** — app URLs and login credentials in ' +
         '`testing/environments.md`. Use these exact URLs and accounts for any login or ' +
         'setup step instead of inventing placeholders.',
+    )
+  }
+  if (hasAuthenticators && projectId) {
+    // Production-like environments have no fixed OTP — the six digits come from an
+    // authenticator app. The portal holds the enrollment secret and can compute the
+    // same code the phone shows, so the run fetches it instead of guessing or stalling.
+    const labels = listTotp(projectId)
+      .map((e) => `\`${e.label}\`${e.username ? ` (${e.username})` : ''}`)
+      .join(', ')
+    lines.push(
+      '- **Two-factor / OTP codes** — accounts marked as using an authenticator app have ' +
+        '**no fixed OTP**; never invent or reuse one. Get the real current code with ' +
+        '`curl -s "http://127.0.0.1:' +
+        PORT +
+        '/api/accounts/totp/<label>/code?projectId=' +
+        projectId +
+        '"` → `{"code":"123456","expiresIn":18}`. Available labels: ' +
+        labels +
+        '. Submit it immediately (it expires in `expiresIn` seconds), fetch a fresh one if ' +
+        'rejected, and never write a code into a report, note, or screenshot.',
     )
   }
   if (hasKnowledge) {

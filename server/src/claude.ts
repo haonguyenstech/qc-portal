@@ -126,6 +126,7 @@ export function runQc(
     workflowSteps?: string[] // advanced mode: ordered end-to-end flow to exercise
     testTarget?: 'web' | 'web-mobile' | 'app-mobile' // desktop browser (default), web app on device, or native app on device
     resumeSessionId?: string // continue a previously paused session instead of starting fresh
+    totpHint?: string // prompt block telling the run how to fetch live authenticator (2FA) codes
   },
   cb: RunCallbacks,
 ): RunHandle {
@@ -278,6 +279,12 @@ export function runQc(
       lines.push(`Follow the skill literally and in order.`)
     }
     lines.push(`Do not commit any mutating action on the shared environment.`)
+
+    // Authenticator-app 2FA: how to obtain the REAL current code instead of a fixed
+    // OTP that no longer exists on production-like environments. Built by totp.ts;
+    // empty (and thus a no-op) when the project registered no authenticators.
+    const totpHint = opts.totpHint?.trim()
+    if (totpHint) lines.push(``, totpHint)
 
     const notes = opts.instructions?.trim()
     if (notes) {

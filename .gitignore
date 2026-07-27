@@ -5,6 +5,7 @@ data/*.db
 data/*.db-*
 data/server.pid
 data/source-credentials.json
+data/totp/
 runtime/
 .playwright-mcp/
 .env

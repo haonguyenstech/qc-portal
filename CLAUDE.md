@@ -137,6 +137,9 @@ server/src/
                     MEMORY.md index) — shared by routes/memory.ts + learn.ts
   knowledgeStore.ts storage primitives for testing/knowledge docs (provenance marker) — shared
                     by routes/knowledge.ts + learn.ts
+  totp.ts           authenticator (TOTP) codes for accounts with REAL 2FA — RFC 6238 over
+                    node:crypto + a per-project seed store beside the DB (data/totp/<id>.json,
+                    0600, NOT in the project repo); see "Authenticator (2FA) codes" below
   projectContext.ts readProjectContext(root): packs testing/memory/*.md + testing/knowledge/*.md
                     into one capped block injected into prompts (test-case gen + grounding) so the
                     model uses real project terms/rules even when there's no project cwd
@@ -293,6 +296,41 @@ on `projects.groundingCheck` / `groundingCheckModel` / `autoLearn` / `autoLearnM
 (captured onto the job at start). The `QC_GROUNDING_CHECK` / `QC_AUTO_LEARN` env vars are now only the
 **default for newly-created projects** (seeded in `createProject`); migrated/existing projects default ON
 with `haiku`.
+
+**Authenticator (2FA) codes — when the OTP isn't fixed (`server/src/totp.ts`)** — a production-like
+environment has **no fixed OTP**: the six digits come from Google Authenticator / Authy on the QC
+engineer's phone. RFC 6238 makes the code a pure function of `secret + clock`, so the portal stores the
+account's **enrollment secret** once and computes the *same* code the phone shows — a headless run then
+gets through 2FA on its own instead of stalling or inventing digits.
+
+- **Storage is deliberately NOT `testing/`.** Unlike `environments.md`, a TOTP seed is a long-lived
+  second factor: it must not be committed to the project repo and must never be swept into a prompt by
+  `projectContext.ts`. It lives beside the portal's DB at `data/totp/<projectId>.json` (dir `0700`,
+  file `0600`). The seed is **write-only over the API** — `PublicTotpEntry` strips it, and the only
+  thing that ever leaves the process is a 6-digit code.
+- **Routes** (in `routes/accounts.ts`, all under `/totp` so they can't collide with the sheet routes):
+  `GET /api/accounts/totp` (entries, no secrets), `GET /totp/codes` (live code for each — drives the
+  UI), `PUT /totp` (register/replace; `secret` accepts a base32 setup key **or** a whole
+  `otpauth://totp/…` link, parsed by `parseOtpauth`), `DELETE /totp/:label`, and
+  `GET /totp/:label/code` — **the one a run calls**. A bad seed is rejected at `PUT` time by actually
+  generating a code with it, so a typo fails there and not mid-run. `PUT`/`DELETE` re-run
+  `syncContextPointer`.
+- **How the run learns to use it — two injections, mirroring Knowledge/Memory.** `totpPromptHint(projectId)`
+  builds a prompt block (labels + the exact `curl … /totp/<label>/code?projectId=…`, "submit immediately,
+  refetch if rejected, never write a code into a report/screenshot, report BLOCKED rather than invent one")
+  that `runManager.ts` passes to `runQc` as `totpHint`; and `contextPointer.ts` adds an equivalent bullet
+  to the managed `CLAUDE.md` block so an interactive terminal / Continue session gets it too. Both are
+  **empty no-ops when the project has no authenticators**, so fixed-OTP projects are unchanged.
+- **Test-case generation** gets a different instruction (`projectContext.ts`): never write a literal code —
+  say "enter the current authenticator code for `<account>`" — and don't raise cases about the code being
+  unavailable, because the portal supplies it. A hard-coded OTP in a case is wrong by the time it runs.
+- `projectScope.ts` `projectIdForRoot(root)` is what lets the root-path-only modules (`contextPointer`,
+  `projectContext`) reach a store keyed by project id — resolved there rather than threaded through all
+  ~12 `syncContextPointer` call sites, where one omission would point the block at the wrong project.
+- **UI:** `web/src/components/TotpCodes.tsx`, rendered at the bottom of `AccountsDoc` (the sheet says
+  *which* account, this hands out its code). Live codes poll `GET /totp/codes` once a second with a
+  drain-bar countdown, so the engineer can **eyeball-match a code against their phone** to confirm the
+  key — that verification is the point of showing codes in the UI at all.
 
 **How Knowledge/Memory reach the model — two paths, by run shape:**
 

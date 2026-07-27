@@ -3,6 +3,8 @@ import path from 'node:path'
 import { knowledgeDir, listDocs } from './knowledgeStore.js'
 import { listNotes, memoryDir, parseNote } from './memoryStore.js'
 import { readAccounts } from './accountsStore.js'
+import { projectIdForRoot } from './projectScope.js'
+import { listTotp } from './totp.js'
 
 // Reads a project's standing context — durable Memory facts (testing/memory/*.md)
 // and reference Knowledge docs (testing/knowledge/*.md) — and packs it into one
@@ -87,6 +89,30 @@ export function readProjectContext(rootPath: string, opts?: { maxChars?: number 
     }
   } catch {
     /* no environments sheet */
+  }
+
+  // Authenticator-app 2FA. A generated case must NOT contain literal six digits — on a
+  // production-like environment the code is time-based, so any hard-coded OTP is wrong by
+  // the time it's executed. The portal computes the real code for the run, so the case
+  // should just say "enter the current authenticator code".
+  try {
+    const projectId = projectIdForRoot(rootPath)
+    const auth = projectId ? listTotp(projectId) : []
+    if (auth.length) {
+      const rows = auth.map(
+        (e) => `- \`${e.label}\`${[e.issuer, e.username].filter(Boolean).length ? ` — ${[e.issuer, e.username].filter(Boolean).join(' · ')}` : ''}`,
+      )
+      push(
+        '### Two-factor (authenticator app)',
+        `These accounts use an authenticator app (TOTP), so there is NO fixed OTP:\n${rows.join('\n')}\n\n` +
+          `When a step needs a verification code, write it as "enter the current authenticator code ` +
+          `for <account>" — never a literal code, and never "use OTP 123456". The QC Portal supplies ` +
+          `the real time-based code to the run automatically, so this is not a blocker; do not add ` +
+          `cases about the code being unavailable.`,
+      )
+    }
+  } catch {
+    /* no authenticators registered */
   }
 
   // Memory first — small durable facts carry the most signal per character. Bounded

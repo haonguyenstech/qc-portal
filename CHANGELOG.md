@@ -3,6 +3,45 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.11.3 — 2026-07-27
+
+**Runs get past real 2FA on their own — authenticator codes, not a fixed OTP**
+
+### Added
+
+- **Authenticator (2FA) codes on the Accounts tab.** On a production-like environment the login code
+  isn't a fixed OTP you can write in your accounts sheet — it's the real six digits from Google
+  Authenticator / Authy, changing every 30 seconds. Until now a QC run hit that screen and either
+  stalled or made a code up. Now you register the account's **setup key** once (the base32 secret
+  shown next to the QR code when 2FA is enrolled — or just paste the whole `otpauth://…` link and the
+  issuer, account and settings fill themselves in), and the Portal computes the exact same code your
+  phone shows. A run fetches the live code itself when a login asks for one, so **it gets through 2FA
+  unattended**. The card shows each code with a countdown so you can compare it against your phone and
+  confirm the key is right.
+- **Test cases stop hard-coding OTPs.** When a project has an authenticator registered, generated
+  cases say "enter the current authenticator code for &lt;account&gt;" instead of a literal six digits —
+  which would be wrong by the time anyone ran the case — and no longer raise cases about the code
+  being unavailable.
+- **An MFA column in the accounts sheet.** The example CSV and the starting template now include an
+  **MFA** column (`None` / `Fixed OTP 123456` / `Authenticator: <label>`) so it's explicit per
+  environment how a login gets its code, and Claude can't assume a fixed OTP that doesn't exist.
+
+### Changed
+
+- **Runs are told never to invent a code.** The run prompt and the managed `CLAUDE.md` context block
+  both now spell out how to obtain a real code, that it must be submitted immediately (and refetched
+  if rejected), that a code must never be written into a report, note or screenshot, and that a login
+  with no matching authenticator is reported as **blocked** rather than guessed at. Projects with no
+  authenticators registered are completely unaffected.
+
+### Security
+
+- **Setup keys are stored outside the project folder.** Unlike the accounts sheet, an authenticator
+  secret is a long-lived second factor, so it never lands in your repo (and so can't be committed) and
+  is never packed into a prompt. It lives beside the Portal's own database with owner-only
+  permissions, is never shown again after saving, and is never sent to Claude — only a live code is.
+  Deleting an entry erases its key.
+
 ## 0.11.2 — 2026-07-26
 
 **Design-system-aware prototypes, several terminals at once, and skill updates that keep your edits**

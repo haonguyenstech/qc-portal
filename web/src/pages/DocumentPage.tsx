@@ -950,6 +950,25 @@ changes the next time they start.
 > Claude. Put only **throwaway QA/staging** test accounts there — never real user or production
 > credentials.
 
+### Authenticator (2FA) codes — when the OTP isn't fixed
+On a production-like environment the login code is **not** a fixed OTP you can write in the sheet — it's
+the real six digits from **Google Authenticator / Authy** on your phone, changing every 30 seconds. The
+**Authenticator (2FA) codes** section at the bottom of the Accounts tab solves that: register the
+account's **setup key** once (the base32 secret shown next to the QR code when 2FA is enrolled — or
+paste the whole \`otpauth://…\` link and the rest is filled in for you), and the Portal computes the
+exact same code your phone shows.
+
+Each entry gets a short **label**. A QC run is told to fetch the live code for that label from the
+Portal when a login asks for a verification code, so **it gets through 2FA on its own** — no waiting on
+you, and no invented code. Generated test cases say "enter the current authenticator code" instead of a
+hard-coded number. The card shows each live code with a countdown so you can **compare it with your
+phone** and confirm the key is right.
+
+> The setup key is stored **outside the project folder** (never in the repo, never in git), is never
+> shown again after saving, and is never sent to Claude — only a live code is. If an account is already
+> enrolled and you didn't keep the key, re-enroll its 2FA to see it again. Delete an entry to erase its
+> key.
+
 ### How context actually reaches the AI
 - **QC runs** spawn \`claude\` in the project root, so a managed pointer block in \`CLAUDE.md\` directs it
   to read \`testing/knowledge/*.md\` and \`testing/memory/*.md\`.

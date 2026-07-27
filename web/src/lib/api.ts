@@ -1357,6 +1357,61 @@ export function openAccountsFolder(projectId: string): Promise<{ ok: true; path:
   })
 }
 
+// ---- Authenticator (TOTP) codes for test accounts with real 2FA ----
+// The enrollment secret stays on the server; only 6-digit codes come back.
+
+export interface TotpEntry {
+  label: string // slug key — what a run references to fetch a code
+  issuer: string // display only, e.g. "Acme Production"
+  username: string // which account this authenticator belongs to
+  digits: number
+  period: number // seconds per code
+  algorithm: 'SHA1' | 'SHA256' | 'SHA512'
+  note: string
+  createdAt: string
+}
+
+export interface TotpCode {
+  label: string
+  code: string
+  expiresIn: number // seconds until it rolls over
+  period: number
+}
+
+export interface TotpInput {
+  label?: string
+  issuer?: string
+  username?: string
+  secret: string // base32 setup key OR a whole otpauth://totp/… link
+  note?: string
+}
+
+/** Registered authenticators for the project (never includes secrets). */
+export function listTotp(projectId: string): Promise<{ entries: TotpEntry[] }> {
+  return request(`/api/accounts/totp?projectId=${encodeURIComponent(projectId)}`)
+}
+
+/** Current code for every authenticator — polled to mirror what the phone shows. */
+export function getTotpCodes(projectId: string): Promise<{ codes: TotpCode[] }> {
+  return request(`/api/accounts/totp/codes?projectId=${encodeURIComponent(projectId)}`)
+}
+
+/** Register or replace one authenticator (same label = replace). */
+export function saveTotp(input: TotpInput, projectId: string): Promise<{ entry: TotpEntry }> {
+  return request(`/api/accounts/totp?projectId=${encodeURIComponent(projectId)}`, {
+    method: 'PUT',
+    body: JSON.stringify(input),
+  })
+}
+
+/** Forget one authenticator, deleting its stored secret. */
+export function deleteTotp(label: string, projectId: string): Promise<{ ok: true }> {
+  return request(
+    `/api/accounts/totp/${encodeURIComponent(label)}?projectId=${encodeURIComponent(projectId)}`,
+    { method: 'DELETE' },
+  )
+}
+
 // ---- Project memory (in-portal-authored fact notes, testing/memory/*.md) ----
 
 export interface MemoryNote {
