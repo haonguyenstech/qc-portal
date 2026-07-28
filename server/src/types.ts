@@ -104,7 +104,7 @@ export interface CreateRunBody {
   instructions?: string // free-form notes from the QC engineer, fed to the AI
   model?: string // Claude model alias (haiku/sonnet/opus); omitted = Claude's configured default
   // where to run: desktop browser (default), the web app on a mobile device, or a
-  // native app already installed on a mobile device — both mobile modes via Mobile MCP
+  // native app already installed on a mobile device — both mobile modes via Maestro MCP
   testTarget?: TestTarget
   // Advanced mode: a single run that covers a connected feature spanning several
   // tickets. `ticketId` is the lead ticket; `relatedTickets` are the rest, and

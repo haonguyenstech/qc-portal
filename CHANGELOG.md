@@ -3,6 +3,46 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.11.4 — 2026-07-28
+
+**One mobile driver instead of three — mobile runs now go through Maestro**
+
+### Added
+
+- **Maestro on the MCP page — one-click connect, with the two things it actually needs checked
+  first.** Maestro drives an iOS/Android simulator or a Chromium browser, and it's the only device
+  server the Portal can't install for you: it's a separate binary and it hard-requires **Java 17+**.
+  So the card checks both *before* writing anything — if the CLI is missing it shows you the install
+  command, and if your default Java is too old it says so (and which version it found) instead of
+  leaving you with a dead "failed" badge. When a newer JDK is installed alongside an old default
+  Java, Connect finds it and pins it for you, so you don't have to re-point your system Java.
+- **Functional test for Maestro.** "List devices" reports what can actually be driven right now —
+  booted simulators and devices, plus Maestro's built-in Chromium web device — and each detected
+  device gets a **Drive** check that reads its screen to prove control. Simulators that are merely
+  installed but shut down are left out, so the list means what it says. The test is given room for
+  the slow first drive of an iOS simulator (Maestro installs its driver on the device that one time).
+
+### Changed
+
+- **Mobile QC runs now require Maestro, not the Mobile server.** On **QC Run**, picking **Web on
+  mobile** or **App on device** checks for **Maestro** and points you there — the readiness row reads
+  *Device MCP*, and the hints beside each target link to it. The run itself is told to drive the
+  device through Maestro only, so it stops reaching for a different mobile server mid-run.
+- **The Mobile (mobile-next) card is hidden.** With Maestro covering both mobile-web and native-app
+  runs, there's one device server to set up instead of a choice between three. Appium was already
+  hidden for the same reason. **Existing projects are untouched** — a `mobile-mcp` entry already in
+  your `.mcp.json` keeps working; it just isn't shown or offered any more. Remove it there if you
+  want it gone.
+- **In-app manual and the MCP guide tour** now name Maestro as the mobile driver, and the run manual
+  no longer labels the two mobile targets "Coming soon" — they've been live for a while.
+
+### Fixed
+
+- **A mobile run that fails mid-action is diagnosed properly again.** The run detail page works out
+  *why* a run ended badly by looking at what it was doing at the time, but it only recognised the old
+  mobile server's tool names — so a Maestro run that died while driving the device got a vague
+  explanation instead of the real one.
+
 ## 0.11.3 — 2026-07-27
 
 **Runs get past real 2FA on their own — authenticator codes, not a fixed OTP**

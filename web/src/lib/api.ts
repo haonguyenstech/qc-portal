@@ -1739,6 +1739,32 @@ export function mcpUvStatus(): Promise<{
   return request('/api/mcp/uv')
 }
 
+/** Maestro CLI + JDK preflight. See `server/src/maestro.ts` for why both matter. */
+export interface MaestroPreflight {
+  available: boolean
+  version: string | null
+  javaHome: string | null
+  javaMajor: number | null
+  defaultJavaOk: boolean
+  platform: string
+}
+
+export function mcpMaestroStatus(): Promise<MaestroPreflight> {
+  return request('/api/mcp/maestro')
+}
+
+/**
+ * Connect Maestro. Unlike the other one-click cards this does NOT go through
+ * `addMcp` — the entry's JAVA_HOME/PATH env is resolved server-side, since the
+ * browser can't see the machine's PATH or its installed JDKs.
+ */
+export function connectMaestro(projectId: string): Promise<{ ok: boolean }> {
+  return request(`/api/mcp/maestro/connect?projectId=${encodeURIComponent(projectId)}`, {
+    method: 'POST',
+    body: JSON.stringify({ projectId }),
+  })
+}
+
 export function addMcp(body: Partial<McpServer>, projectId: string): Promise<void> {
   return request(`/api/mcp?projectId=${encodeURIComponent(projectId)}`, {
     method: 'POST',

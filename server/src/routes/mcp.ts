@@ -20,6 +20,7 @@ import {
 } from '../azure.js'
 import { resolveProjectJiraCreds, verifyToken as verifyJira, withJiraCreds } from '../jira.js'
 import { runMcpCapabilityTest } from '../mcpCapabilityTest.js'
+import { maestroEnvFor, probeMaestro, type MaestroPreflight } from '../maestro.js'
 import type { McpServer } from '../types.js'
 import { spawnEnv } from '../toolPath.js'
 
@@ -75,6 +76,62 @@ mcpRouter.get('/uv', async (_req, res) => {
     uvCache = { at: now, ...r }
   }
   res.json({ available: uvCache.available, version: uvCache.version, platform: process.platform })
+})
+
+// ---- Maestro CLI availability ---------------------------------------------
+// Maestro is the one device MCP the portal can't install on demand (separate
+// binary + Java 17). Same cached-probe shape as /uv, but a longer TTL: the probe
+// boots a JVM, so it's slow (~2-5s) compared to `uvx --version`.
+
+let maestroCache: { at: number; value: MaestroPreflight } | null = null
+
+mcpRouter.get('/maestro', async (_req, res) => {
+  const now = Date.now()
+  // Re-probe unavailable/unusable results sooner so a fresh install is picked up
+  // without a restart; cache a good result longer since it can't regress silently.
+  const ttl = maestroCache?.value.available ? 120_000 : 20_000
+  if (!maestroCache || now - maestroCache.at > ttl) {
+    maestroCache = { at: now, value: await probeMaestro() }
+  }
+  res.json(maestroCache.value)
+})
+
+/**
+ * Connect Maestro. This gets its own route (rather than the generic POST / the
+ * other one-click cards use) because the entry's `env` is resolved HERE: the
+ * JAVA_HOME pin and the PATH that puts that JDK's bin first are machine facts the
+ * browser can't know — it has no access to the server's PATH or its installed JDKs.
+ * Refuses up-front when the CLI or a Java 17+ is missing, so we never write a
+ * server entry that is guaranteed to show up as "failed".
+ */
+mcpRouter.post('/maestro/connect', async (req, res) => {
+  const file = mcpPath(req)
+  if (!file) return res.status(400).json({ error: 'project not found' })
+
+  const pf = await probeMaestro()
+  maestroCache = { at: Date.now(), value: pf }
+  if (!pf.available) {
+    return res.status(400).json({
+      error:
+        pf.javaHome === null && !pf.defaultJavaOk
+          ? 'Maestro needs Java 17 or higher, and no JDK 17+ was found on this machine.'
+          : 'The Maestro CLI is not installed on this machine.',
+      preflight: pf,
+    })
+  }
+
+  const data = readMcp(file)
+  if (!data.mcpServers) data.mcpServers = {}
+  if (data.mcpServers.maestro) return res.status(400).json({ error: 'server already exists' })
+
+  data.mcpServers.maestro = {
+    type: 'stdio',
+    command: 'maestro',
+    args: ['mcp'],
+    env: maestroEnvFor(pf),
+  }
+  writeMcp(file, data)
+  return res.status(201).json({ ok: true, preflight: pf })
 })
 
 interface McpTestResult {

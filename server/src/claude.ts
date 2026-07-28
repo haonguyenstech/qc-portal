@@ -75,6 +75,11 @@ function detectPhaseFromTool(name: string, input: unknown): Phase | undefined {
   // gesture, set_value, keyboard/mobile_*, page_source, navigate, snapshot) — NOT
   // the device-prep tools (select_device / prepare_* / session_management), which
   // fire early during probing and would otherwise jump the bar ahead prematurely.
+  // Maestro names its tools bare (inspect_screen / take_screenshot / run), so match
+  // them via their mcp__maestro__ prefix. `take_screenshot` already falls out of the
+  // /screenshot/ pattern below, but `inspect_screen` and `run` need naming — and
+  // `run` is FAR too generic to match unprefixed, hence the qualified form.
+  if (/mcp__maestro__(inspect_screen|take_screenshot|run)\b/.test(n)) return 'collect'
   if (
     n.includes('browser_') ||
     n.includes('mobile-mcp') ||
@@ -175,9 +180,11 @@ export function runQc(
             ? `The app under test is "${appName}" (a display name or package / bundle id) — find it ` +
               `on the device by this name and launch it. `
             : '') +
-          `Do NOT use the desktop/Playwright browser. Use the connected Mobile MCP tools: list the available ` +
-          `devices and drive a booted simulator/device (if none is booted, stop and report that as a ` +
-          `blocker). The app under test must already be INSTALLED on the device — launch it; if it is ` +
+          `Do NOT use the desktop/Playwright browser. Drive the device with the connected MAESTRO MCP ` +
+          `tools ONLY (no other mobile MCP is configured): call list_devices FIRST and drive a booted ` +
+          `simulator/device — every other Maestro tool needs the "device_id" from that listing (the ` +
+          `UDID/serial, never the human name). If nothing is booted, stop and report that as a ` +
+          `blocker. The app under test must already be INSTALLED on the device — launch it; if it is ` +
           `not installed${appName ? ` (or no app matching "${appName}" is present)` : ''}, stop and ` +
           `report that as a blocker rather than trying to install it. Perform ` +
           `ALL interaction and verification on the device, capturing mobile screenshots as evidence.`,
@@ -188,8 +195,11 @@ export function runQc(
         lines.push(
           ``,
           `TEST TARGET: the web app above, opened on a MOBILE device — do NOT use the desktop/Playwright ` +
-            `browser. Use the connected Mobile MCP tools: list the available devices and drive a booted ` +
-            `simulator/device (if none is booted, stop and report that as a blocker). Open the App URL ` +
+            `browser. Drive the device with the connected MAESTRO MCP tools ONLY (no other mobile MCP is ` +
+            `configured): call list_devices FIRST and drive a booted simulator/device — every other ` +
+            `Maestro tool needs the "device_id" from that listing (the UDID/serial, never the human ` +
+            `name); the synthetic "chromium" entry is a drivable web device even though it reports ` +
+            `connected:false. If nothing is available, stop and report that as a blocker. Open the App URL ` +
             `in the device's mobile browser and perform ALL interaction and verification on that device, ` +
             `capturing mobile screenshots as evidence. Test the responsive/mobile experience.`,
         )

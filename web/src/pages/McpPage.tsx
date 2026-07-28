@@ -19,6 +19,7 @@ import {
   FolderGit2,
   FolderOpen,
   FlaskConical,
+  Globe,
   Info,
   KeyRound,
   ListChecks,
@@ -49,6 +50,8 @@ import {
   mcpHealth,
   mcpOauthStatus,
   mcpUvStatus,
+  mcpMaestroStatus,
+  connectMaestro,
   openMcpFolder,
   removeMcp,
   revealMcpEnv,
@@ -109,6 +112,8 @@ const SERVER_PURPOSE: Record<string, string> = {
     'Drives a connected iOS/Android device or simulator so QC runs can test the mobile app.',
   'appium-mcp':
     'Drives a connected iOS/Android device or simulator through Appium (UiAutomator2/XCUITest) so QC runs can test the mobile app.',
+  maestro:
+    'Drives an iOS/Android simulator or a Chromium browser through Maestro, and can save a run as a reusable YAML flow you re-run as a regression test.',
 }
 
 /**
@@ -187,6 +192,12 @@ const CAPABILITY: Record<
     placeholder: '',
     action: 'List devices',
   },
+  maestro: {
+    needsInput: false,
+    inputLabel: '',
+    placeholder: '',
+    action: 'List devices',
+  },
 }
 
 // Badge shown on a connected card, driven by LIVE health — not just "is it in
@@ -216,6 +227,9 @@ function mcpCardClass(status?: string): string {
 // on). mobile-mcp covers the same web-on-mobile + native-app flows with a much lighter,
 // faster server. Flip this back to true to bring Appium back once it's on a supported Node.
 const APPIUM_ENABLED = false
+
+// Temporarily hide the Mobile (mobile-next/mobile-mcp) card. Flip back to true to bring it back.
+const MOBILE_MCP_ENABLED = false
 
 function playwrightArgs(headless: boolean): string[] {
   return [
@@ -356,6 +370,40 @@ function ResultLine({ result }: { result: { ok: boolean; warn?: boolean; detail:
 }
 
 /**
+ * Split a detected device label into something renderable. Maestro reports a
+ * simulator as one long string — "iPhone 15 Pro - iOS 17.2 - 240CB27F-…-F3485DDA3ED6"
+ * — while mobile-mcp / Appium usually report a bare name, so the primary line takes
+ * the first segment and the rest becomes a caption.
+ *
+ * `platform` is NOT a two-way iOS-or-Android guess: Maestro's always-present
+ * `chromium` entry is a desktop browser, and labeling it "Android" is simply wrong.
+ *
+ * The RAW string stays the value sent to the drive step (that prompt matches the
+ * device by name/id), so this only shapes what's on screen.
+ */
+function describeDevice(raw: string): {
+  name: string
+  caption: string
+  platform: 'iOS' | 'Android' | 'Web'
+} {
+  const parts = raw
+    .split(/\s+[-–—|·]\s+/)
+    .map((s) => s.trim())
+    .filter(Boolean)
+  const name = parts[0] || raw
+  const platform = /chromium|chrome|browser|safari|firefox|webkit|\bweb\b/i.test(raw)
+    ? 'Web'
+    : /iphone|ipad|ipod|\bios\b|simulator/i.test(raw)
+      ? 'iOS'
+      : 'Android'
+  // Don't prefix a platform the label already states — "iOS · iOS 17.2 · <udid>" reads
+  // like a bug.
+  const rest = parts.slice(1)
+  const stated = rest.some((p) => new RegExp(`^${platform}\\b`, 'i').test(p))
+  return { name, caption: [...(stated ? [] : [platform]), ...rest].join(' · '), platform }
+}
+
+/**
  * Mobile functional test — a two-step dialog. On open it auto-detects connected
  * devices/simulators (empty-input capability test); if any are found it shows a
  * device picker + an enabled "Run test" that actually drives the selected device.
@@ -414,7 +462,12 @@ function MobileFunctionalTest({
           </DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-3">
+        {/* min-w-0: DialogContent is a grid, so a grid item's automatic minimum size is
+            its min-content width — a device label containing an unbreakable 36-char udid
+            blows the column past the dialog's max-width and paints the rows and footer
+            outside the card. Verified: without this the content box measures 591px inside
+            a 448px dialog. */}
+        <div className="min-w-0 space-y-3">
           {detecting ? (
             <p className="flex items-center gap-2 rounded-md bg-muted/60 px-2.5 py-2 text-xs text-muted-foreground">
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -433,7 +486,8 @@ function MobileFunctionalTest({
               <div className="space-y-1.5">
                 {devices.map((d) => {
                   const active = selected === d
-                  const ios = /iphone|ipad|ipod/i.test(d)
+                  const info = describeDevice(d)
+                  const DeviceIcon = info.platform === 'Web' ? Globe : Smartphone
                   return (
                     <button
                       key={d}
@@ -441,6 +495,8 @@ function MobileFunctionalTest({
                       onClick={() => setDevice(d)}
                       disabled={testing}
                       aria-pressed={active}
+                      // The raw label carries the udid/serial, which the row truncates.
+                      title={d}
                       className={cn(
                         'flex w-full items-center gap-3 rounded-xl border px-3 py-2.5 text-left transition-all duration-200 active:scale-[0.99] disabled:opacity-60',
                         active
@@ -454,12 +510,12 @@ function MobileFunctionalTest({
                           active ? 'border-primary/30 text-primary' : 'border-border/60 text-muted-foreground',
                         )}
                       >
-                        <Smartphone className="h-4 w-4" />
+                        <DeviceIcon className="h-4 w-4" />
                       </span>
                       <span className="min-w-0 flex-1 leading-tight">
-                        <span className="block truncate text-sm font-medium">{d}</span>
-                        <span className="block text-[11px] text-muted-foreground">
-                          {ios ? 'iOS' : 'Android'}
+                        <span className="block truncate text-sm font-medium">{info.name}</span>
+                        <span className="block truncate text-[11px] text-muted-foreground">
+                          {info.caption}
                         </span>
                       </span>
                       {active && <CheckCircle2 className="h-4 w-4 shrink-0 text-primary" />}
@@ -481,7 +537,7 @@ function MobileFunctionalTest({
           )}
         </div>
 
-        <DialogFooter>
+        <DialogFooter className="min-w-0 sm:flex-wrap">
           <Button variant="ghost" onClick={onClose} disabled={detecting || testing}>
             Close
           </Button>
@@ -737,6 +793,7 @@ function ConnectServices({
     if (name === 'playwright') return 'Playwright'
     if (name === 'mobile-mcp') return 'Mobile'
     if (name === 'appium-mcp') return 'Appium'
+    if (name === 'maestro') return 'Maestro'
     return OAUTH_META[name as McpOauthProvider]?.label ?? name
   }
 
@@ -745,8 +802,8 @@ function ConnectServices({
     const name = capDialogName
     const spec = name ? CAPABILITY[name] : null
     if (!name || !spec) return null
-    // Mobile & Appium have their own auto-detect → pick device → run dialog (separate).
-    if (name === 'mobile-mcp' || name === 'appium-mcp') return null
+    // Mobile, Appium & Maestro have their own auto-detect → pick device → run dialog.
+    if (name === 'mobile-mcp' || name === 'appium-mcp' || name === 'maestro') return null
     const running = capTestingName === name
     const result = capResults[name]
     const input = capInputs[name] ?? ''
@@ -884,6 +941,31 @@ function ConnectServices({
     },
     onError: (err) =>
       toast.error('Failed to add Mobile', {
+        description: err instanceof Error ? err.message : 'Unknown error',
+      }),
+  })
+
+  const maestroAdded = existingNames.includes('maestro')
+  // Preflight the CLI + JDK only while the card would show a Connect button —
+  // the probe boots a JVM, so there's no reason to pay for it on every page view
+  // once the server is configured.
+  const { data: maestroPf, isFetching: maestroChecking } = useQuery({
+    queryKey: ['mcp-maestro'],
+    queryFn: mcpMaestroStatus,
+    enabled: !maestroAdded,
+    staleTime: 60_000,
+  })
+  const addMaestro = useMutation({
+    mutationFn: () => connectMaestro(projectId),
+    onSuccess: () => {
+      toast.success('Maestro added', {
+        description: 'Boot a simulator (or use the Chromium device), then test.',
+      })
+      test.mutate('maestro')
+      return refresh()
+    },
+    onError: (err) =>
+      toast.error('Failed to add Maestro', {
         description: err instanceof Error ? err.message : 'Unknown error',
       }),
   })
@@ -1590,6 +1672,92 @@ function ConnectServices({
     )
   }
 
+  // Maestro (mobile.dev) needs no token, but it IS the one card whose prerequisites
+  // the portal can't satisfy on demand: a separately-installed `maestro` binary and
+  // a JDK 17+. So the Connect button is gated on a live preflight, and an unmet
+  // prerequisite becomes an actionable install hint instead of a dead "failed" badge.
+  function maestroCard() {
+    const pf = maestroPf
+    const blocked = !!pf && !pf.available
+    const javaMissing = blocked && pf.javaHome === null && !pf.defaultJavaOk
+    return (
+      <Card key="maestro" className={mcpCardClass(statusByName.maestro)}>
+        <div className="flex items-center gap-3">
+          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl border border-border/60 bg-muted/60 text-muted-foreground">
+            <Smartphone className="h-4 w-4" />
+          </span>
+          <div className="min-w-0 leading-tight">
+            <div className="flex items-center gap-1.5 text-sm font-semibold tracking-tight">
+              <span className="truncate">Maestro</span>
+              <PurposeTip name="maestro" label="Maestro" />
+            </div>
+            <div className="truncate text-xs text-muted-foreground">
+              iOS / Android / web flows
+            </div>
+          </div>
+          <CardStatusBadge
+            configured={maestroAdded}
+            status={statusByName.maestro}
+            checking={checkingStatus}
+          />
+        </div>
+        {checkingStatus ? (
+          <Button size="sm" disabled className="mt-auto h-9 w-full rounded-full font-medium">
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            Checking status…
+          </Button>
+        ) : maestroAdded ? (
+          connectedActions('maestro')
+        ) : (
+          <>
+            <PurposeBlurb name="maestro" />
+            <div className="mt-auto space-y-2">
+              {blocked && (
+                <div className="space-y-1.5 rounded-xl bg-amber-50 px-2.5 py-2 text-[11px] leading-snug text-amber-700">
+                  <p className="flex items-start gap-1.5">
+                    <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                    <span>
+                      {javaMissing ? (
+                        <>
+                          Maestro needs <span className="font-medium">Java 17+</span>
+                          {pf.javaMajor ? ` (found Java ${pf.javaMajor})` : ''}. Install a JDK,
+                          then re-check.
+                        </>
+                      ) : (
+                        <>
+                          The <span className="font-medium">Maestro CLI</span> isn't installed on
+                          this machine. Install it, then re-check.
+                        </>
+                      )}
+                    </span>
+                  </p>
+                  <code className="block truncate rounded-md bg-amber-100/70 px-1.5 py-1 font-mono text-[10px] text-amber-900">
+                    {javaMissing
+                      ? 'brew install openjdk@21'
+                      : 'curl -fsSL "https://get.maestro.mobile.dev" | bash'}
+                  </code>
+                </div>
+              )}
+              <Button
+                size="sm"
+                onClick={() => addMaestro.mutate()}
+                disabled={addMaestro.isPending || maestroChecking || blocked}
+                className="h-9 w-full rounded-full font-medium transition-all duration-200 hover:shadow-sm active:scale-[0.98]"
+              >
+                {addMaestro.isPending || maestroChecking ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Plug className="h-3.5 w-3.5" />
+                )}
+                {maestroChecking ? 'Checking Maestro…' : 'Connect'}
+              </Button>
+            </div>
+          </>
+        )}
+      </Card>
+    )
+  }
+
   // Appium (appium/appium-mcp) needs no token — one-click project setup. Unlike
   // mobile-mcp it rides the full Appium stack (UiAutomator2 / XCUITest), so it needs
   // Node 22+, a JDK, and the Android SDK / Xcode on the machine running the server.
@@ -1693,13 +1861,16 @@ function ConnectServices({
         blurb="Drive the real app to exercise and verify it."
       >
         {playwrightCard()}
-        {mobileCard()}
+        {MOBILE_MCP_ENABLED && mobileCard()}
+        {maestroCard()}
         {APPIUM_ENABLED && appiumCard()}
       </McpGroup>
 
       {functionalTestDialog()}
       {detailsDialog()}
-      {(capDialogName === 'mobile-mcp' || capDialogName === 'appium-mcp') && (
+      {(capDialogName === 'mobile-mcp' ||
+        capDialogName === 'appium-mcp' ||
+        capDialogName === 'maestro') && (
         <MobileFunctionalTest
           name={capDialogName}
           label={serverLabel(capDialogName)}

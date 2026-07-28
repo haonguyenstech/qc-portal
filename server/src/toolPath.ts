@@ -19,6 +19,7 @@ function extraToolDirs(): string[] {
   const dirs = [
     path.join(home, '.local', 'bin'), // uv's default install dir (all platforms)
     path.join(home, '.cargo', 'bin'), // rustup/cargo installs (older uv installers)
+    path.join(home, '.maestro', 'bin'), // Maestro's curl installer (all platforms)
   ]
   if (process.platform === 'win32') {
     // winget puts shims for its packages (incl. astral-sh.uv) here.

@@ -149,15 +149,15 @@ function loadRunMode(): RunMode {
 
 // Where the QC run executes:
 //  web        — desktop browser (Playwright), the App URL
-//  web-mobile — the App URL opened in a mobile device's browser via Mobile MCP
-//  app-mobile — a native app driven on a mobile device via Mobile MCP (App URL optional)
+//  web-mobile — the App URL opened in a mobile device's browser via Maestro MCP
+//  app-mobile — a native app driven on a mobile device via Maestro MCP (App URL optional)
 // The type itself lives in lib/types.ts — a run now stores its target, so History and
 // the run detail page label it with the same vocabulary.
 const TEST_TARGET_KEY = 'qc.runTestTarget'
 const TEST_TARGETS: TestTarget[] = ['web', 'web-mobile', 'app-mobile']
 
 // "Web on mobile" and "App on device" are both live (they drive a booted device
-// via Mobile MCP). Nothing is coming-soon right now.
+// via Maestro MCP). Nothing is coming-soon right now.
 const COMING_SOON_TARGETS: TestTarget[] = []
 
 function loadTestTarget(): TestTarget {
@@ -694,7 +694,7 @@ export default function RunPage() {
     setTourOpen(false)
   }
   // Configured MCP servers — a web run drives a real browser via the Playwright
-  // MCP (mobile targets use Mobile MCP), so the run is blocked until the required
+  // MCP (mobile targets use Maestro MCP), so the run is blocked until the required
   // server is in the project's .mcp.json. Shares the McpRequiredNotice query cache.
   const { data: mcpServers } = useQuery({
     queryKey: ['mcp', activeProject?.id],
@@ -801,11 +801,12 @@ export default function RunPage() {
   // so the URL field is hidden and never required/validated in that mode.
   const isAppTarget = testTarget === 'app-mobile'
   // The MCP server(s) this target drives the browser/device with. Web → Playwright.
-  // Mobile targets → Mobile MCP (Appium is disabled — see APPIUM_ENABLED in McpPage).
-  const requiredMcpServers = testTarget === 'web' ? ['playwright'] : ['mobile-mcp']
+  // Mobile targets → Maestro (Mobile MCP and Appium are both hidden — see
+  // MOBILE_MCP_ENABLED / APPIUM_ENABLED in McpPage), so Maestro is the ONE device driver.
+  const requiredMcpServers = testTarget === 'web' ? ['playwright'] : ['maestro']
   // Single required server per target, so "any of" vs "all of" is moot — keep false.
   const mcpAnyOf = false
-  const requiredMcpLabel = testTarget === 'web' ? 'Playwright' : 'Mobile'
+  const requiredMcpLabel = testTarget === 'web' ? 'Playwright' : 'Maestro'
   // Only block once we've actually loaded the config (mcpServers !== undefined);
   // don't gate the button on a still-loading query.
   const mcpMissing =
@@ -1005,7 +1006,8 @@ export default function RunPage() {
     },
     { label: 'Skill', ok: !!skill, value: skill || 'Choose skill' },
     {
-      label: 'Browser MCP',
+      // Web drives a browser (Playwright); the mobile targets drive a device (Maestro).
+      label: testTarget === 'web' ? 'Browser MCP' : 'Device MCP',
       ok: !mcpMissing,
       value: mcpMissing ? `Configure ${requiredMcpLabel}` : requiredMcpLabel,
     },
@@ -1352,7 +1354,7 @@ export default function RunPage() {
             {/* 2 — where to run */}
             <section data-tour="destination" className="space-y-3">
               <StepHeader n={2} title="Where to run" hint="device or browser" />
-              {/* Test target — web (Playwright), the web app on a mobile device, or a native app on a device (Mobile MCP). */}
+              {/* Test target — web (Playwright), the web app on a mobile device, or a native app on a device (Maestro MCP). */}
               <div className="space-y-2">
                 <Label className="sr-only">Test target</Label>
                 <div className="grid grid-cols-3 gap-1.5">
@@ -1402,7 +1404,7 @@ export default function RunPage() {
                   <p className="text-[11px] text-muted-foreground">
                     Opens the App URL on a booted device via{' '}
                     <Link to="/mcp" className="font-medium text-primary hover:underline">
-                      Mobile MCP
+                      Maestro
                     </Link>{' '}
                     — connect it and boot a device first.
                   </p>
@@ -1446,7 +1448,7 @@ export default function RunPage() {
                         </span>{' '}
                         first, then connect the{' '}
                         <Link to="/mcp" className="font-medium underline">
-                          Mobile MCP
+                          Maestro
                         </Link>{' '}
                         server. Claude only <span className="font-medium">launches the
                         already-installed app</span> by this name — it won't install it for you.

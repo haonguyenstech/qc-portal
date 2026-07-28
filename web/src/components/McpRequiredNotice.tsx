@@ -11,6 +11,7 @@ const SERVER_LABELS: Record<string, string> = {
   playwright: 'Playwright',
   'mobile-mcp': 'Mobile',
   'appium-mcp': 'Appium',
+  maestro: 'Maestro',
 }
 
 function labelFor(name: string): string {

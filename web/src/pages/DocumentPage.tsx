@@ -203,8 +203,8 @@ The typical end-to-end flow, in order:
    the sidebar workspace switcher.
 2. **Connect ClickUp** — add your ClickUp token on the **MCP** page (or in the project's Settings) so
    the Portal can read tickets.
-3. **Connect tools (MCP)** — on the **MCP** page, enable Playwright (to drive a browser), Mobile (for
-   native-app testing), and any others (e.g. Figma for Design Check).
+3. **Connect tools (MCP)** — on the **MCP** page, enable Playwright (to drive a browser), Maestro (for
+   mobile-web and native-app testing), and any others (e.g. Figma for Design Check).
 4. **Add project context** — on **Instructions**, write a short \`CLAUDE.md\`, upload **Knowledge**
    docs, and jot **Memory** facts. This is what makes the AI use your real terms and rules.
 5. **Crawl tickets** — on **Tickets**, pick the tickets you'll work on and crawl them locally.
@@ -269,7 +269,7 @@ The sidebar is grouped by purpose. Here's what each page does.
 - **Skills** — view/edit the project's \`.claude/skills\` (including \`qc-testing\`); **create** a new
   skill, **import** skills, **edit** a skill's name/description, **delete** one (type-to-confirm), and
   set a **default skill** that auto-selects on the Run page.
-- **MCP** — manage \`.mcp.json\` servers (Playwright, Figma, ClickUp, Mobile) and test their live health.
+- **MCP** — manage \`.mcp.json\` servers (Playwright, Figma, ClickUp, Maestro) and test their live health.
 - **Templates** — the project's reusable **test-case** and **design-check** templates.
 
 ### Tools
@@ -310,7 +310,8 @@ has an **info tooltip** explaining its purpose:
 - **Figma** — lets **Design Check** open a design file.
 - **ClickUp** — ticket access from inside a run.
 - **Jira** — ticket access from inside a run (site URL + email + API token).
-- **Mobile** — drives a connected iOS/Android device or simulator, for native-app QC runs.
+- **Maestro** — drives a connected iOS/Android device or simulator (and a Maestro-launched browser),
+  for mobile-web and native-app QC runs. It is the only mobile driver — mobile runs go through it.
 
 Each server shows **live health** (a real test call), not just whether it's in the config — and a
 **Functional test** runs a real action through it (fetch a ticket, read a design, open a browser, list
@@ -657,9 +658,9 @@ a per-ticket grid once you queue two or more), pick a model, and start. Extras o
   AI instructions, managed in a dialog).
 - **Mark bug** — a per-ticket toggle for a ticket that has **no test cases**: the run reproduces the
   reported issue and judges Pass/Fail on whether it's fixed, instead of running a test-case sheet.
-- **Where to test** — **Web** (desktop browser via Playwright) works today; **Web on mobile** and
-  **App on device** (native, via Mobile MCP) are shown as **Coming soon**. Advanced **Feature** mode
-  (multiple related tickets as one connected workflow) is likewise **Coming soon**.
+- **Where to test** — **Web** (desktop browser via Playwright), **Web on mobile** and **App on device**
+  (both drive a booted device via the **Maestro** MCP server, which the run requires). Advanced
+  **Feature** mode (multiple related tickets as one connected workflow) is **Coming soon**.
 
 When a run needs to sign in, it uses the **environments + test accounts** from **Instructions →
 Accounts** (real URL and credentials) instead of a placeholder.
