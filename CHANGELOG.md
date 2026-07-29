@@ -3,6 +3,19 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.11.5 — 2026-07-29
+
+**A single definition for how the ClickUp server is launched**
+
+### Fixed
+
+- **The ClickUp MCP server's launch command lived in two places; now it lives in one.** Connecting
+  ClickUp through the sign-in flow and connecting it with an API token each wrote their own copy of
+  the same `uvx` command line into `.mcp.json`. Nothing was wrong with either copy — but the next
+  time that command needs to change (a new package location, a pinned version), only one of them
+  would have been updated, and you'd have got a working ClickUp on one path and a dead one on the
+  other. Both now share one definition. Nothing changes in your existing `.mcp.json`.
+
 ## 0.11.4 — 2026-07-28
 
 **One mobile driver instead of three — mobile runs now go through Maestro**

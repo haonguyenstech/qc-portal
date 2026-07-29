@@ -705,6 +705,13 @@ mcpRouter.delete('/:name', (req, res) => {
 
 type ProviderId = 'clickup' | 'figma' | 'jira' | 'azure'
 
+/** `uvx` args for clickup-mcp — one definition, used by both entry builders. */
+const CLICKUP_MCP_ARGS = [
+  '--from',
+  'git+https://github.com/DiversioTeam/clickup-mcp.git',
+  'clickup-mcp',
+]
+
 interface ProviderDef {
   /** Server name written into .mcp.json. */
   serverName: string
@@ -750,7 +757,7 @@ const PROVIDERS: Record<ProviderId, ProviderDef> = {
     buildEntry: (token) => ({
       type: 'stdio',
       command: 'uvx',
-      args: ['--from', 'git+https://github.com/DiversioTeam/clickup-mcp.git', 'clickup-mcp'],
+      args: CLICKUP_MCP_ARGS,
       env: { CLICKUP_API_KEY: token, CLICKUP_MCP_API_KEY: token },
     }),
   },
@@ -859,7 +866,7 @@ function buildTokenEntry(
     return {
       type: 'stdio',
       command: 'uvx',
-      args: ['--from', 'git+https://github.com/DiversioTeam/clickup-mcp.git', 'clickup-mcp'],
+      args: CLICKUP_MCP_ARGS,
       env: { CLICKUP_API_KEY: token, CLICKUP_MCP_API_KEY: token },
     }
   }
