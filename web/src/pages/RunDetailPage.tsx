@@ -723,12 +723,11 @@ const SIG_INTERRUPTED =
 /** A browser/device-driving tool whose presence signals the run was mid-browser-action. */
 function isBrowserTool(tool?: string): boolean {
   // Maestro is the mobile driver (see RunPage's requiredMcpServers), and it names its
-  // tools bare — so match the mcp__maestro__ prefix, plus the legacy mobile-mcp
-  // `mobile_*` tools for runs recorded before the switch.
+  // tools bare — so match the mcp__maestro__ prefix as well as the bare names.
   return (
     !!tool &&
     (tool.startsWith('browser_') ||
-      /playwright|^mobile_|^mcp__playwright|^mcp__maestro__|^(?:inspect_screen|list_devices|start_device|launch_app)$/i.test(
+      /playwright|^mcp__playwright|^mcp__maestro__|^(?:inspect_screen|list_devices|start_device|launch_app)$/i.test(
         tool,
       ))
   )

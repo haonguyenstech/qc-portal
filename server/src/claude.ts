@@ -71,23 +71,15 @@ function detectPhaseFromTool(name: string, input: unknown): Phase | undefined {
   if (n === 'task' || n === 'agent') return 'analyze'
 
   // Collect — DRIVING the live app: browser/device screen reads, taps, typing, or
-  // saving evidence. Matches the actual driving verbs (screenshot, find_element,
-  // gesture, set_value, keyboard/mobile_*, page_source, navigate, snapshot) — NOT
-  // the device-prep tools (select_device / prepare_* / session_management), which
-  // fire early during probing and would otherwise jump the bar ahead prematurely.
+  // saving evidence. Matches the actual driving verbs (screenshot, navigate, snapshot)
+  // — NOT the device-prep tools (list_devices / start_device), which fire early during
+  // probing and would otherwise jump the bar ahead prematurely.
   // Maestro names its tools bare (inspect_screen / take_screenshot / run), so match
   // them via their mcp__maestro__ prefix. `take_screenshot` already falls out of the
   // /screenshot/ pattern below, but `inspect_screen` and `run` need naming — and
   // `run` is FAR too generic to match unprefixed, hence the qualified form.
   if (/mcp__maestro__(inspect_screen|take_screenshot|run)\b/.test(n)) return 'collect'
-  if (
-    n.includes('browser_') ||
-    n.includes('mobile-mcp') ||
-    /appium_(screenshot|find_element|get_page_source|get_text|gesture|set_value|mobile_|press_key|perform_actions|scroll|swipe|tap|drag)/.test(
-      n,
-    ) ||
-    /screenshot|navigate|snapshot/.test(n)
-  ) {
+  if (n.includes('browser_') || /screenshot|navigate|snapshot/.test(n)) {
     return 'collect'
   }
   if ((n === 'write' || n === 'edit') && (path.includes('/evidence/') || path.includes('/screenshots/'))) {

@@ -801,8 +801,7 @@ export default function RunPage() {
   // so the URL field is hidden and never required/validated in that mode.
   const isAppTarget = testTarget === 'app-mobile'
   // The MCP server(s) this target drives the browser/device with. Web → Playwright.
-  // Mobile targets → Maestro (Mobile MCP and Appium are both hidden — see
-  // MOBILE_MCP_ENABLED / APPIUM_ENABLED in McpPage), so Maestro is the ONE device driver.
+  // Mobile targets → Maestro, the portal's ONE device driver.
   const requiredMcpServers = testTarget === 'web' ? ['playwright'] : ['maestro']
   // Single required server per target, so "any of" vs "all of" is moot — keep false.
   const mcpAnyOf = false

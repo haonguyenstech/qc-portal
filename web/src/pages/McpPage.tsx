@@ -108,10 +108,6 @@ const SERVER_PURPOSE: Record<string, string> = {
     'Pulls QC work items (bugs, user stories, tasks) from Azure DevOps Boards so runs and test-case work read requirements straight from the tracker.',
   playwright:
     'Drives a real browser — navigating, clicking, typing, screenshotting — so QC runs can exercise and verify the web app.',
-  'mobile-mcp':
-    'Drives a connected iOS/Android device or simulator so QC runs can test the mobile app.',
-  'appium-mcp':
-    'Drives a connected iOS/Android device or simulator through Appium (UiAutomator2/XCUITest) so QC runs can test the mobile app.',
   maestro:
     'Drives an iOS/Android simulator or a Chromium browser through Maestro, and can save a run as a reusable YAML flow you re-run as a regression test.',
 }
@@ -180,18 +176,6 @@ const CAPABILITY: Record<
     placeholder: '',
     action: 'Open Google & close',
   },
-  'mobile-mcp': {
-    needsInput: false,
-    inputLabel: '',
-    placeholder: '',
-    action: 'List devices',
-  },
-  'appium-mcp': {
-    needsInput: false,
-    inputLabel: '',
-    placeholder: '',
-    action: 'List devices',
-  },
   maestro: {
     needsInput: false,
     inputLabel: '',
@@ -220,16 +204,6 @@ function mcpCardClass(status?: string): string {
       : 'border-border/60 hover:border-border',
   )
 }
-
-// Temporarily hide the Appium card and use mobile-mcp for device automation.
-// Appium is heavier/slower (large cold start, needs a WebDriverAgent build) and its
-// stack refuses the odd Node versions (crashes on Node 23, which the portal often runs
-// on). mobile-mcp covers the same web-on-mobile + native-app flows with a much lighter,
-// faster server. Flip this back to true to bring Appium back once it's on a supported Node.
-const APPIUM_ENABLED = false
-
-// Temporarily hide the Mobile (mobile-next/mobile-mcp) card. Flip back to true to bring it back.
-const MOBILE_MCP_ENABLED = false
 
 function playwrightArgs(headless: boolean): string[] {
   return [
@@ -372,8 +346,7 @@ function ResultLine({ result }: { result: { ok: boolean; warn?: boolean; detail:
 /**
  * Split a detected device label into something renderable. Maestro reports a
  * simulator as one long string — "iPhone 15 Pro - iOS 17.2 - 240CB27F-…-F3485DDA3ED6"
- * — while mobile-mcp / Appium usually report a bare name, so the primary line takes
- * the first segment and the rest becomes a caption.
+ * — so the primary line takes the first segment and the rest becomes a caption.
  *
  * `platform` is NOT a two-way iOS-or-Android guess: Maestro's always-present
  * `chromium` entry is a desktop browser, and labeling it "Android" is simply wrong.
@@ -791,8 +764,6 @@ function ConnectServices({
 
   function serverLabel(name: string): string {
     if (name === 'playwright') return 'Playwright'
-    if (name === 'mobile-mcp') return 'Mobile'
-    if (name === 'appium-mcp') return 'Appium'
     if (name === 'maestro') return 'Maestro'
     return OAUTH_META[name as McpOauthProvider]?.label ?? name
   }
@@ -802,8 +773,8 @@ function ConnectServices({
     const name = capDialogName
     const spec = name ? CAPABILITY[name] : null
     if (!name || !spec) return null
-    // Mobile, Appium & Maestro have their own auto-detect → pick device → run dialog.
-    if (name === 'mobile-mcp' || name === 'appium-mcp' || name === 'maestro') return null
+    // Maestro has its own auto-detect → pick device → run dialog.
+    if (name === 'maestro') return null
     const running = capTestingName === name
     const result = capResults[name]
     const input = capInputs[name] ?? ''
@@ -918,33 +889,6 @@ function ConnectServices({
       }),
   })
 
-  const mobileAdded = existingNames.includes('mobile-mcp')
-  const addMobile = useMutation({
-    mutationFn: () =>
-      addMcp(
-        {
-          name: 'mobile-mcp',
-          command: 'npx',
-          // No @latest: npx reuses the cached install instead of hitting the registry
-          // for a version check on every spawn — much faster startup for tests + QC runs.
-          args: ['-y', '@mobilenext/mobile-mcp'],
-          type: 'stdio',
-        },
-        projectId,
-      ),
-    onSuccess: () => {
-      toast.success('Mobile added', {
-        description: 'Connect a device/simulator, then test.',
-      })
-      test.mutate('mobile-mcp')
-      return refresh()
-    },
-    onError: (err) =>
-      toast.error('Failed to add Mobile', {
-        description: err instanceof Error ? err.message : 'Unknown error',
-      }),
-  })
-
   const maestroAdded = existingNames.includes('maestro')
   // Preflight the CLI + JDK only while the card would show a Connect button —
   // the probe boots a JVM, so there's no reason to pay for it on every page view
@@ -966,32 +910,6 @@ function ConnectServices({
     },
     onError: (err) =>
       toast.error('Failed to add Maestro', {
-        description: err instanceof Error ? err.message : 'Unknown error',
-      }),
-  })
-
-  const appiumAdded = existingNames.includes('appium-mcp')
-  const addAppium = useMutation({
-    mutationFn: () =>
-      addMcp(
-        {
-          name: 'appium-mcp',
-          command: 'npx',
-          // No @latest: npx reuses the cached install instead of a per-spawn registry check.
-          args: ['-y', 'appium-mcp'],
-          type: 'stdio',
-        },
-        projectId,
-      ),
-    onSuccess: () => {
-      toast.success('Appium added', {
-        description: 'Needs Node 22 or 24 (not 23), JDK, Android SDK / Xcode. Connect a device, then test.',
-      })
-      test.mutate('appium-mcp')
-      return refresh()
-    },
-    onError: (err) =>
-      toast.error('Failed to add Appium', {
         description: err instanceof Error ? err.message : 'Unknown error',
       }),
   })
@@ -1619,59 +1537,6 @@ function ConnectServices({
     )
   }
 
-  // Mobile (mobile-next/mobile-mcp) needs no token — one-click project setup.
-  function mobileCard() {
-    return (
-      <Card
-        key="mobile-mcp"
-        className={mcpCardClass(statusByName['mobile-mcp'])}
-      >
-        <div className="flex items-center gap-3">
-          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl border border-border/60 bg-muted/60 text-muted-foreground">
-            <Smartphone className="h-4 w-4" />
-          </span>
-          <div className="min-w-0 leading-tight">
-            <div className="flex items-center gap-1.5 text-sm font-semibold tracking-tight">
-              <span className="truncate">Mobile</span>
-              <PurposeTip name="mobile-mcp" label="Mobile" />
-            </div>
-            <div className="truncate text-xs text-muted-foreground">iOS / Android driver</div>
-          </div>
-          <CardStatusBadge
-            configured={mobileAdded}
-            status={statusByName['mobile-mcp']}
-            checking={checkingStatus}
-          />
-        </div>
-        {checkingStatus ? (
-          <Button size="sm" disabled className="mt-auto h-9 w-full rounded-full font-medium">
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            Checking status…
-          </Button>
-        ) : mobileAdded ? (
-          connectedActions('mobile-mcp')
-        ) : (
-          <>
-            <PurposeBlurb name="mobile-mcp" />
-            <Button
-              size="sm"
-              onClick={() => addMobile.mutate()}
-              disabled={addMobile.isPending}
-              className="mt-auto h-9 w-full rounded-full font-medium transition-all duration-200 hover:shadow-sm active:scale-[0.98]"
-            >
-              {addMobile.isPending ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : (
-                <Plug className="h-3.5 w-3.5" />
-              )}
-              Connect
-            </Button>
-          </>
-        )}
-      </Card>
-    )
-  }
-
   // Maestro (mobile.dev) needs no token, but it IS the one card whose prerequisites
   // the portal can't satisfy on demand: a separately-installed `maestro` binary and
   // a JDK 17+. So the Connect button is gated on a live preflight, and an unmet
@@ -1758,71 +1623,6 @@ function ConnectServices({
     )
   }
 
-  // Appium (appium/appium-mcp) needs no token — one-click project setup. Unlike
-  // mobile-mcp it rides the full Appium stack (UiAutomator2 / XCUITest), so it needs
-  // Node 22+, a JDK, and the Android SDK / Xcode on the machine running the server.
-  function appiumCard() {
-    return (
-      <Card
-        key="appium-mcp"
-        className={mcpCardClass(statusByName['appium-mcp'])}
-      >
-        <div className="flex items-center gap-3">
-          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl border border-border/60 bg-muted/60 text-muted-foreground">
-            <Smartphone className="h-4 w-4" />
-          </span>
-          <div className="min-w-0 leading-tight">
-            <div className="flex items-center gap-1.5 text-sm font-semibold tracking-tight">
-              <span className="truncate">Appium</span>
-              <PurposeTip name="appium-mcp" label="Appium" />
-            </div>
-            <div className="truncate text-xs text-muted-foreground">iOS / Android driver</div>
-          </div>
-          <CardStatusBadge
-            configured={appiumAdded}
-            status={statusByName['appium-mcp']}
-            checking={checkingStatus}
-          />
-        </div>
-        {checkingStatus ? (
-          <Button size="sm" disabled className="mt-auto h-9 w-full rounded-full font-medium">
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            Checking status…
-          </Button>
-        ) : appiumAdded ? (
-          connectedActions('appium-mcp')
-        ) : (
-          <>
-            <PurposeBlurb name="appium-mcp" />
-            <div className="mt-auto space-y-2">
-            <p className="flex items-start gap-1.5 rounded-xl bg-amber-50 px-2.5 py-2 text-[11px] leading-snug text-amber-700">
-              <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-              <span>
-                Runs on the full Appium stack — needs <span className="font-medium">Node 22 or 24</span>{' '}
-                (not 23), a JDK, and Android SDK / Xcode on this machine. On Node 23 it fails to
-                connect.
-              </span>
-            </p>
-            <Button
-              size="sm"
-              onClick={() => addAppium.mutate()}
-              disabled={addAppium.isPending}
-              className="h-9 w-full rounded-full font-medium transition-all duration-200 hover:shadow-sm active:scale-[0.98]"
-            >
-              {addAppium.isPending ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : (
-                <Plug className="h-3.5 w-3.5" />
-              )}
-              Connect
-            </Button>
-            </div>
-          </>
-        )}
-      </Card>
-    )
-  }
-
   return (
     <div className="space-y-6">
       <div className="flex items-center gap-2">
@@ -1861,16 +1661,12 @@ function ConnectServices({
         blurb="Drive the real app to exercise and verify it."
       >
         {playwrightCard()}
-        {MOBILE_MCP_ENABLED && mobileCard()}
         {maestroCard()}
-        {APPIUM_ENABLED && appiumCard()}
       </McpGroup>
 
       {functionalTestDialog()}
       {detailsDialog()}
-      {(capDialogName === 'mobile-mcp' ||
-        capDialogName === 'appium-mcp' ||
-        capDialogName === 'maestro') && (
+      {capDialogName === 'maestro' && (
         <MobileFunctionalTest
           name={capDialogName}
           label={serverLabel(capDialogName)}

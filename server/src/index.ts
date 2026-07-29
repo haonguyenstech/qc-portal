@@ -7,7 +7,7 @@ import express from 'express'
 import { WebSocketServer } from 'ws'
 import type { WebSocket } from 'ws'
 import { PORT } from './config.js'
-import { getEvents, reconcileInterruptedRuns, seedDefaultProject } from './db.js'
+import { getEvents, listProjects, reconcileInterruptedRuns, seedDefaultProject } from './db.js'
 import { reconcileBundledSkills } from './skillSync.js'
 import * as hub from './hub.js'
 import { shutdownActiveRuns } from './runManager.js'
@@ -20,7 +20,7 @@ import {
 import { qcRouter } from './routes/qc.js'
 import { filesRouter } from './routes/files.js'
 import { skillsRouter } from './routes/skills.js'
-import { mcpRouter } from './routes/mcp.js'
+import { mcpRouter, pruneRetiredServers } from './routes/mcp.js'
 import { projectsRouter } from './routes/projects.js'
 import { clickupRouter } from './routes/clickup.js'
 import { jiraRouter } from './routes/jira.js'
@@ -39,6 +39,17 @@ import { versionRouter } from './routes/version.js'
 
 // Optionally seed a default project from QC_REPO_ROOT (no-op if unset / already seeded).
 const defaultProject = seedDefaultProject()
+
+// Strip retired device drivers (mobile-mcp / appium-mcp) from every project's config.
+// Maestro is the only mobile driver now, so a leftover entry has no card on the MCP
+// page — it would sit there invisibly and still be spawned on every run.
+for (const project of listProjects()) {
+  try {
+    pruneRetiredServers(project.rootPath)
+  } catch {
+    /* unreadable/absent .mcp.json — nothing to clean */
+  }
+}
 
 // Clean up runs orphaned by a previous shutdown so they don't stay "running".
 const interrupted = reconcileInterruptedRuns()

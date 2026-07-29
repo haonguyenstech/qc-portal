@@ -9,8 +9,6 @@ const SERVER_LABELS: Record<string, string> = {
   clickup: 'ClickUp',
   figma: 'Figma',
   playwright: 'Playwright',
-  'mobile-mcp': 'Mobile',
-  'appium-mcp': 'Appium',
   maestro: 'Maestro',
 }
 

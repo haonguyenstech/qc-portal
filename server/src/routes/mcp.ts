@@ -306,6 +306,33 @@ function writeMcp(file: string, data: McpFile): void {
   fs.writeFileSync(file, JSON.stringify(data, null, 2) + '\n', 'utf8')
 }
 
+/**
+ * Device drivers the portal no longer offers. Maestro is the ONE mobile driver now
+ * (it covers both mobile-web and native-app runs), so these two have no card, no
+ * functional test, and nothing that resolves them — an entry left behind by an older
+ * portal would just be an invisible, unremovable server that still gets spawned on
+ * every run. Pruned on read so upgrading cleans a project up without the engineer
+ * having to hand-edit .mcp.json (or ~/.claude.json for a local-scope entry).
+ */
+const RETIRED_SERVERS = ['mobile-mcp', 'appium-mcp']
+
+export function pruneRetiredServers(rootPath: string): void {
+  const file = mcpJsonFor(rootPath)
+  const data = readMcp(file)
+  const servers = data.mcpServers
+  if (servers) {
+    const gone = RETIRED_SERVERS.filter((name) => name in servers)
+    if (gone.length) {
+      for (const name of gone) delete servers[name]
+      writeMcp(file, data)
+    }
+  }
+  const local = localProjectMcpServers(rootPath)
+  for (const name of RETIRED_SERVERS) {
+    if (name in local) removeLocalProjectMcpServer(rootPath, name)
+  }
+}
+
 function claudeConfigPath(): string | null {
   // os.homedir() works on Windows too (USERPROFILE) — process.env.HOME is
   // usually unset there, which silently disabled ~/.claude.json reads/writes.
@@ -498,6 +525,9 @@ mcpRouter.get('/', async (req, res) => {
   const project = resolveProject(req)
   if (!project) return res.status(400).json({ error: 'project not found' })
 
+  // Drop any retired device driver left over from an older portal before listing,
+  // so it can't linger invisibly in the config (or get spawned on the next run).
+  pruneRetiredServers(project.rootPath)
   const projectServers = readMcp(mcpJsonFor(project.rootPath)).mcpServers ?? {}
   const localServers = localProjectMcpServers(project.rootPath)
   const configuredNames = new Set([

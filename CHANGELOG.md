@@ -3,6 +3,30 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.11.6 — 2026-07-29
+
+**Maestro is the only mobile driver — the old ones are gone, including from your config**
+
+### Changed
+
+- **The hidden Mobile and Appium servers are removed for good.** 0.11.4 hid both cards and pointed
+  mobile runs at Maestro, but the machinery behind them was still there — their connect buttons,
+  their device tests, and the code that recognised their tools. It's all gone now. There is one
+  device server to think about, and it's Maestro.
+- **A leftover `mobile-mcp` or `appium-mcp` in your project is cleaned up automatically.** 0.11.4
+  left those entries in `.mcp.json` and told you to remove them by hand — but with the card hidden
+  there was no way to do it from the Portal, and the server was still being started on every run in
+  that project, costing you time for nothing. The Portal now strips both on startup and whenever you
+  open the MCP page, for every project (and for a server saved to your personal Claude config too).
+  Nothing else in your `.mcp.json` is touched.
+
+### Fixed
+
+- **The mobile device test starts faster and explains itself better.** With only Maestro left, the
+  test no longer carries the other two servers' special cases — the Node-version check Appium
+  needed, and a separate device-detection path that only the Mobile server used. Maestro's own
+  check (is the CLI there, is Java new enough) is unchanged.
+
 ## 0.11.5 — 2026-07-29
 
 **A single definition for how the ClickUp server is launched**

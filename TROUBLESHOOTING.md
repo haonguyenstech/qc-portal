@@ -8,7 +8,7 @@ Everything here runs **on the user's own PC** (the portal is localhost).
 ## 1. ClickUp or Jira MCP shows `✘ failed` → install `uv`
 
 **Symptom.** On the MCP page (or `claude`'s `/mcp` view) the **clickup** and/or
-**jira** server is `✘ failed`, while `figma` / `playwright` / `mobile-mcp` are fine.
+**jira** server is `✘ failed`, while `figma` / `playwright` / `maestro` are fine.
 
 **Cause.** ClickUp (`clickup-mcp`) and Jira (`mcp-atlassian`) are **Python** MCP
 servers. The portal runs them with **`uvx`** (from Astral's **`uv`**) — the Python
