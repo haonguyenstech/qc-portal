@@ -320,8 +320,9 @@ devices). Use **Open folder** to jump to where \`.mcp.json\` lives.
 > ClickUp, Figma, and Jira connect with a **personal API token**. Step-by-step instructions for
 > creating each one are on the [Getting API tokens](/document/mcp-tokens) page.
 
-> Some MCP args are machine-specific (e.g. a Playwright \`--user-data-dir\` profile path). Adjust them
-> on the MCP page to match your machine.
+> Machine-specific args — such as Playwright's \`--user-data-dir\` browser-profile path — are filled
+> in for **your** machine when you connect, and a wrong one inherited from another machine is
+> corrected automatically. You shouldn't need to edit them by hand.
 
 ### Source repositories
 On **Source Code** you connect the project's Git repos — one or several, each with a **tag**

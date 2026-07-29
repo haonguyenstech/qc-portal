@@ -20,7 +20,7 @@ import {
 import { qcRouter } from './routes/qc.js'
 import { filesRouter } from './routes/files.js'
 import { skillsRouter } from './routes/skills.js'
-import { mcpRouter, pruneRetiredServers } from './routes/mcp.js'
+import { mcpRouter, repairProjectMcpConfig } from './routes/mcp.js'
 import { projectsRouter } from './routes/projects.js'
 import { clickupRouter } from './routes/clickup.js'
 import { jiraRouter } from './routes/jira.js'
@@ -40,12 +40,12 @@ import { versionRouter } from './routes/version.js'
 // Optionally seed a default project from QC_REPO_ROOT (no-op if unset / already seeded).
 const defaultProject = seedDefaultProject()
 
-// Strip retired device drivers (mobile-mcp / appium-mcp) from every project's config.
-// Maestro is the only mobile driver now, so a leftover entry has no card on the MCP
-// page — it would sit there invisibly and still be spawned on every run.
+// Bring every project's .mcp.json in line with this machine: strip retired device
+// drivers (mobile-mcp / appium-mcp), and repair a Playwright --user-data-dir that
+// points at another user's home (an EPERM that blocks every browser call).
 for (const project of listProjects()) {
   try {
-    pruneRetiredServers(project.rootPath)
+    repairProjectMcpConfig(project.rootPath)
   } catch {
     /* unreadable/absent .mcp.json — nothing to clean */
   }

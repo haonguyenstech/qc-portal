@@ -3,6 +3,28 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.11.7 — 2026-07-29
+
+**Fixes the Playwright `EPERM` error that blocked runs on other people's machines**
+
+### Fixed
+
+- **Runs no longer die with `EPERM: operation not permitted, mkdir 'C:\Users\hao.nguyen'`.** If your
+  QC runs were failing the moment the browser opened — every test case Blocked, no screenshots, a
+  report full of "environment blocker" — this was why. When you connected Playwright, the Portal
+  wrote a **browser-profile folder path belonging to the machine the Portal was built on** into your
+  project's `.mcp.json`. On your machine that folder can't be created, so Chrome refused to start
+  and nothing after that could run. The path is now worked out on **your** machine when you connect,
+  so a fresh Playwright connection is correct for whoever is using it.
+- **Projects that already have the wrong path are repaired for you.** You don't need to edit
+  `.mcp.json`, reconnect Playwright, or even know which projects are affected — on startup, and
+  whenever you open the MCP page, every project's Playwright profile path is checked and corrected.
+  A profile folder you deliberately pointed somewhere else inside your own home folder is left
+  exactly as it is, and nothing else in the file is touched.
+- **The browser profile is the same one everywhere.** "Scan a page for its APIs" and Playwright QC
+  runs now resolve the profile folder through one shared definition, so a run and a scan reuse the
+  same logged-in Chrome session instead of drifting apart.
+
 ## 0.11.6 — 2026-07-29
 
 **Maestro is the only mobile driver — the old ones are gone, including from your config**

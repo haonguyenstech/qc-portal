@@ -751,8 +751,15 @@ holds the actionable recipe; `web/src/pages/McpPage.tsx` is the canonical implem
   shell line. The repo path contains a space (`STS-Data /Project/...`) — always pass paths as args.
 - **`node:sqlite` is experimental** — the warning is suppressed via `--disable-warning` in the npm
   scripts. Requires Node 22.5+ (tested on 23).
-- **Machine-specific values exist.** `McpPage.tsx` hardcodes a Playwright `--user-data-dir`
-  (`/Users/hao.nguyen/.pw-agent-profile`); be aware when touching MCP server args.
+- **Never put a machine-specific path in the web bundle.** `web/` runs in a browser and cannot know
+  whose machine the server is on, so any absolute path it writes into `.mcp.json` is the path of the
+  machine the *code* was written on. `McpPage.tsx` used to hardcode a Playwright `--user-data-dir`
+  (`/Users/hao.nguyen/.pw-agent-profile`), which shipped to every install and killed every browser
+  call on Windows with `EPERM … mkdir 'C:\Users\hao.nguyen'`. Resolve such values **server-side**:
+  `browserProfile.ts` `agentProfileDir()` owns the profile dir (shared with `scanJobs.ts`), the POST
+  `/api/mcp` route fills it in, and `repairProjectMcpConfig()` (routes/mcp.ts — also run for every
+  project at boot from `index.ts`) rewrites a foreign one already on disk. Maestro's `env` is
+  resolved server-side for the same reason (see `POST /maestro/connect`).
 
 ## Env vars
 

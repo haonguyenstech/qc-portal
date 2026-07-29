@@ -220,8 +220,10 @@ function playwrightArgs(headless: boolean): string[] {
     '20000',
     '--viewport-size',
     '1280x720',
-    '--user-data-dir',
-    '/Users/hao.nguyen/.pw-agent-profile',
+    // NO --user-data-dir here. The profile directory is a fact about the machine
+    // running the server, which this bundle can't know — the server appends it (see
+    // normalizePlaywrightProfile in routes/mcp.ts). Hardcoding one shipped the
+    // author's own home path to every install and broke Chrome with EPERM.
   ]
 }
 

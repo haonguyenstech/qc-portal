@@ -1,7 +1,6 @@
 import { randomUUID } from 'node:crypto'
-import os from 'node:os'
-import path from 'node:path'
 import type { BrowserContext } from 'playwright-core'
+import { agentProfileDir } from './browserProfile.js'
 
 // In-memory background jobs for "Scan a page for its APIs". A job opens a real,
 // headed Chrome (using the QC's existing logged-in profile) and records the XHR/
@@ -117,10 +116,10 @@ function prune(): void {
   }
 }
 
-/** Where the persistent Chrome profile lives — defaults to the Playwright-MCP
- *  profile so the scan inherits the engineer's existing login session. */
+/** Where the persistent Chrome profile lives — the same directory the Playwright MCP
+ *  server is given, so the scan inherits the engineer's existing login session. */
 function scanProfileDir(): string {
-  return process.env.QC_SCAN_PROFILE_DIR || path.join(os.homedir(), '.pw-agent-profile')
+  return agentProfileDir()
 }
 
 // Lazy playwright-core handle (cached once resolved).

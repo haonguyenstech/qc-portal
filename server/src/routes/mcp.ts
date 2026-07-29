@@ -21,6 +21,7 @@ import {
 import { resolveProjectJiraCreds, verifyToken as verifyJira, withJiraCreds } from '../jira.js'
 import { runMcpCapabilityTest } from '../mcpCapabilityTest.js'
 import { maestroEnvFor, probeMaestro, type MaestroPreflight } from '../maestro.js'
+import { agentProfileDir, isForeignProfileDir } from '../browserProfile.js'
 import type { McpServer } from '../types.js'
 import { spawnEnv } from '../toolPath.js'
 
@@ -316,16 +317,62 @@ function writeMcp(file: string, data: McpFile): void {
  */
 const RETIRED_SERVERS = ['mobile-mcp', 'appium-mcp']
 
-export function pruneRetiredServers(rootPath: string): void {
+/**
+ * Point a Playwright entry's `--user-data-dir` at THIS machine's profile directory,
+ * mutating `entry` in place. Returns true when it changed something.
+ *
+ * The flag used to be written by the web app, which meant the portal author's own
+ * home directory was baked into the bundle and copied into every project that
+ * connected Playwright. On another machine — especially Windows, where it becomes
+ * `C:\Users\<someone-else>` — Chrome can't create it and EVERY browser call dies
+ * with `EPERM: operation not permitted, mkdir …` before the first page loads. A run
+ * that can't drive the browser can't test anything, so this is a total blocker, and
+ * the error names a stranger's path, which makes it look like anything but a config
+ * bug. Resolve it here, where `os.homedir()` is the real one.
+ *
+ * A profile the engineer pointed somewhere else INSIDE their own home is theirs to
+ * keep — only a path outside it (`isForeignProfileDir`) is rewritten.
+ */
+function normalizePlaywrightProfile(entry: McpEntry): boolean {
+  if (!Array.isArray(entry.args)) return false
+  const local = agentProfileDir()
+  const i = entry.args.indexOf('--user-data-dir')
+  if (i === -1) {
+    entry.args = [...entry.args, '--user-data-dir', local]
+    return true
+  }
+  const current = entry.args[i + 1]
+  // A trailing flag with no value is malformed — treat it as missing and fill it in.
+  if (typeof current !== 'string' || current.startsWith('--')) {
+    entry.args = [...entry.args.slice(0, i + 1), local, ...entry.args.slice(i + 1)]
+    return true
+  }
+  if (!isForeignProfileDir(current)) return false
+  entry.args = [...entry.args]
+  entry.args[i + 1] = local
+  return true
+}
+
+/**
+ * Bring one project's .mcp.json in line with what this portal (and this machine)
+ * actually supports: drop retired servers, and repair a Playwright profile path that
+ * belongs to a different user. Idempotent — writes only when something changed.
+ */
+export function repairProjectMcpConfig(rootPath: string): void {
   const file = mcpJsonFor(rootPath)
   const data = readMcp(file)
   const servers = data.mcpServers
   if (servers) {
-    const gone = RETIRED_SERVERS.filter((name) => name in servers)
-    if (gone.length) {
-      for (const name of gone) delete servers[name]
-      writeMcp(file, data)
+    let changed = false
+    for (const name of RETIRED_SERVERS) {
+      if (name in servers) {
+        delete servers[name]
+        changed = true
+      }
     }
+    const playwright = servers.playwright
+    if (playwright && normalizePlaywrightProfile(playwright)) changed = true
+    if (changed) writeMcp(file, data)
   }
   const local = localProjectMcpServers(rootPath)
   for (const name of RETIRED_SERVERS) {
@@ -525,9 +572,9 @@ mcpRouter.get('/', async (req, res) => {
   const project = resolveProject(req)
   if (!project) return res.status(400).json({ error: 'project not found' })
 
-  // Drop any retired device driver left over from an older portal before listing,
-  // so it can't linger invisibly in the config (or get spawned on the next run).
-  pruneRetiredServers(project.rootPath)
+  // Drop retired device drivers and repair a foreign Playwright profile path before
+  // listing, so neither can linger in the config (or break the next run).
+  repairProjectMcpConfig(project.rootPath)
   const projectServers = readMcp(mcpJsonFor(project.rootPath)).mcpServers ?? {}
   const localServers = localProjectMcpServers(project.rootPath)
   const configuredNames = new Set([
@@ -662,6 +709,9 @@ mcpRouter.post('/', (req, res) => {
     }
     if (Object.keys(clean).length) entry.env = clean
   }
+  // The browser can't know this machine's home directory, so it never sends a
+  // profile path — fill in (or correct) it here. See normalizePlaywrightProfile.
+  if (name === 'playwright') normalizePlaywrightProfile(entry)
   data.mcpServers[name] = entry
 
   writeMcp(file, data)
