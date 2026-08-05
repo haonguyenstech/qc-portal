@@ -28,7 +28,46 @@ export function getJsonPath(root: unknown, path: string): unknown {
 export interface AssertionResult {
   assertion: ApiAssertion
   pass: boolean
+  /** WHAT was checked — the JSON path, header name, `status`, `time`, `body`. */
+  key: string
+  /** The value actually observed in the response, ready to display. */
+  actual: string
+  /** The value the check wanted. '' when the check only asks that something exist. */
+  expected: string
+  /** One-line `key: actual — expected …` summary, composed from the three above. */
   detail: string
+}
+
+/** Longest actual/expected value shown before it's clipped for display. */
+const MAX_SHOWN = 140
+
+function show(v: string): string {
+  return v.length > MAX_SHOWN ? `${v.slice(0, MAX_SHOWN)}…` : v
+}
+
+/**
+ * Build one result. `key` / `actual` / `expected` are the three things a QC engineer
+ * needs to see per check ("what did I look at, what came back, what did I want"), and
+ * `detail` is derived from them so the row text and the flow-step summary can never
+ * disagree about the same check.
+ */
+function mk(
+  assertion: ApiAssertion,
+  pass: boolean,
+  key: string,
+  actual: string,
+  expected: string,
+): AssertionResult {
+  const a = show(actual)
+  const e = show(expected)
+  return {
+    assertion,
+    pass,
+    key,
+    actual: a,
+    expected: e,
+    detail: e ? `${key}: ${a} — expected ${e}` : `${key}: ${a}`,
+  }
 }
 
 /** Evaluate the request's assertions against a response — all client-side. */
@@ -49,90 +88,82 @@ export function evaluateAssertions(assertions: ApiAssertion[], res: ApiSendResul
       const status = res.status ?? 0
       switch (a.type) {
         case 'status-2xx':
-          return {
-            assertion: a,
-            pass: status >= 200 && status < 300,
-            detail: `status ${status}`,
-          }
+          return mk(a, status >= 200 && status < 300, 'status', String(status), '2xx')
         case 'status-equals': {
           const want = Number(a.expected)
-          return {
-            assertion: a,
-            pass: status === want,
-            detail: `status ${status} — expected ${a.expected || '?'}`,
-          }
+          return mk(a, status === want, 'status', String(status), a.expected || '?')
         }
-        case 'body-contains':
-          return {
-            assertion: a,
-            pass: !!a.expected && (res.bodyText ?? '').includes(a.expected),
-            detail: a.expected ? `looking for "${a.expected}"` : 'no text set',
-          }
+        case 'body-contains': {
+          const body = res.bodyText ?? ''
+          const at = a.expected ? body.indexOf(a.expected) : -1
+          return mk(
+            a,
+            !!a.expected && at >= 0,
+            'body',
+            !a.expected ? 'no text set' : at >= 0 ? `found at index ${at}` : 'not found',
+            a.expected ? `contains "${a.expected}"` : '',
+          )
+        }
         case 'body-matches': {
-          if (!a.expected) return { assertion: a, pass: false, detail: 'no pattern set' }
+          if (!a.expected) return mk(a, false, 'body', 'no pattern set', '')
+          let re: RegExp
           try {
-            const re = new RegExp(a.expected)
-            return {
-              assertion: a,
-              pass: re.test(res.bodyText ?? ''),
-              detail: `/${a.expected}/`,
-            }
+            re = new RegExp(a.expected)
           } catch {
-            return { assertion: a, pass: false, detail: 'invalid regex' }
+            return mk(a, false, 'body', 'invalid regex', `/${a.expected}/`)
           }
+          const m = re.exec(res.bodyText ?? '')
+          return mk(a, !!m, 'body', m ? `matched "${m[0]}"` : 'no match', `matches /${a.expected}/`)
         }
         case 'json-equals': {
-          if (!parsedOk) return { assertion: a, pass: false, detail: 'response is not JSON' }
+          const key = a.target || '(root)'
+          const want = a.expected || '?'
+          if (!parsedOk) return mk(a, false, key, 'response is not JSON', want)
           const actual = getJsonPath(parsedJson, a.target)
           const actualStr = actual === undefined ? 'undefined' : JSON.stringify(actual)
-          const want = a.expected
-          // Compare on the FULL value; only clip what we display so a big object at
-          // the path (or root) doesn't dump the whole body into the row.
-          const pass = String(actual) === want || actualStr === want
-          const shown = actualStr.length > 140 ? `${actualStr.slice(0, 140)}…` : actualStr
-          return {
-            assertion: a,
-            pass,
-            detail: `${a.target || '(root)'} = ${shown} — expected ${want || '?'}`,
-          }
+          // Compare on the FULL value; only clip what we display (mk does), so a big
+          // object at the path (or root) doesn't dump the whole body into the row.
+          const pass = String(actual) === a.expected || actualStr === a.expected
+          return mk(a, pass, key, actualStr, want)
         }
         case 'json-exists': {
-          if (!parsedOk) return { assertion: a, pass: false, detail: 'response is not JSON' }
+          const key = a.target || '(root)'
+          if (!parsedOk) return mk(a, false, key, 'response is not JSON', 'any value')
           const actual = getJsonPath(parsedJson, a.target)
-          return {
-            assertion: a,
-            pass: actual !== undefined,
-            detail: `${a.target || '(root)'} ${actual !== undefined ? 'present' : 'missing'}`,
-          }
+          return mk(
+            a,
+            actual !== undefined,
+            key,
+            actual === undefined ? 'missing' : JSON.stringify(actual),
+            'any value',
+          )
         }
         case 'header-equals': {
-          const key = a.target.toLowerCase()
-          const actual = res.headers?.[key]
-          return {
-            assertion: a,
-            pass: actual !== undefined && actual === a.expected,
-            detail: `${a.target || '?'}: ${actual ?? '(absent)'} — expected ${a.expected || '?'}`,
-          }
+          const actual = res.headers?.[a.target.toLowerCase()]
+          return mk(
+            a,
+            actual !== undefined && actual === a.expected,
+            a.target || '?',
+            actual ?? '(absent)',
+            a.expected || '?',
+          )
         }
         case 'header-exists': {
-          const key = a.target.toLowerCase()
-          const actual = res.headers?.[key]
-          return {
-            assertion: a,
-            pass: actual !== undefined,
-            detail: `${a.target || '?'} ${actual !== undefined ? 'present' : 'absent'}`,
-          }
+          const actual = res.headers?.[a.target.toLowerCase()]
+          return mk(a, actual !== undefined, a.target || '?', actual ?? '(absent)', 'any value')
         }
         case 'time-below': {
           const limit = Number(a.expected)
-          return {
-            assertion: a,
-            pass: Number.isFinite(limit) && res.timeMs < limit,
-            detail: `${res.timeMs}ms — limit ${a.expected || '?'}ms`,
-          }
+          return mk(
+            a,
+            Number.isFinite(limit) && res.timeMs < limit,
+            'time',
+            `${res.timeMs}ms`,
+            `under ${a.expected || '?'}ms`,
+          )
         }
         default:
-          return { assertion: a, pass: false, detail: 'unknown assertion' }
+          return mk(a, false, a.type, 'unknown assertion', '')
       }
     })
 }

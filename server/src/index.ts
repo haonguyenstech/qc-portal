@@ -9,6 +9,7 @@ import type { WebSocket } from 'ws'
 import { PORT } from './config.js'
 import { getEvents, listProjects, reconcileInterruptedRuns, seedDefaultProject } from './db.js'
 import { reconcileBundledSkills } from './skillSync.js'
+import { reconcileBundledTemplates } from './templateSync.js'
 import * as hub from './hub.js'
 import { shutdownActiveRuns } from './runManager.js'
 import {
@@ -31,11 +32,13 @@ import { autoAgentRouter } from './routes/autoAgent.js'
 import { aiRouter } from './routes/ai.js'
 import { templatesRouter } from './routes/templates.js'
 import { knowledgeRouter } from './routes/knowledge.js'
+import { overviewDocsRouter } from './routes/overviewDocs.js'
 import { memoryRouter } from './routes/memory.js'
 import { accountsRouter } from './routes/accounts.js'
 import { diagramsRouter } from './routes/diagrams.js'
 import { apiTestsRouter } from './routes/apiTests.js'
 import { prototypeRouter } from './routes/prototype.js'
+import { chatRouter } from './routes/chat.js'
 import { versionRouter } from './routes/version.js'
 
 // Optionally seed a default project from QC_REPO_ROOT (no-op if unset / already seeded).
@@ -70,6 +73,22 @@ if (interrupted) {
     const list = customized.map((c) => `${c.project}/${c.skill}`).join(', ')
     console.log(
       `Skill update available but not applied (locally edited): ${list} — update it on the Skills page`,
+    )
+  }
+}
+
+// Same deal for the project templates the portal ships (the common test-case
+// template): refresh every copy nobody has edited, leave edited ones alone —
+// /templates offers those a "Reset to default". See templateSync.ts.
+{
+  const { updated, customized } = reconcileBundledTemplates()
+  for (const u of updated) {
+    console.log(`Updated template "${u.key}" in ${u.project} from the portal's bundled default`)
+  }
+  if (customized.length) {
+    const list = customized.map((c) => `${c.project}/${c.key}`).join(', ')
+    console.log(
+      `Template default changed but not applied (locally edited): ${list} — reset it on the Templates page`,
     )
   }
 }
@@ -110,11 +129,13 @@ app.use('/api/auto-agent', autoAgentRouter)
 app.use('/api/ai', aiRouter)
 app.use('/api/templates', templatesRouter)
 app.use('/api/knowledge', knowledgeRouter)
+app.use('/api/overview-docs', overviewDocsRouter)
 app.use('/api/memory', memoryRouter)
 app.use('/api/accounts', accountsRouter)
 app.use('/api/diagrams', diagramsRouter)
 app.use('/api/api-tests', apiTestsRouter)
 app.use('/api/prototype', prototypeRouter)
+app.use('/api/chat', chatRouter)
 app.use('/api/version', versionRouter)
 
 // JSON error handler for /api routes: turn body-parser failures (notably

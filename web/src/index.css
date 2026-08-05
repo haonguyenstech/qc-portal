@@ -234,6 +234,24 @@
   border-radius: 0.5rem;
 }
 
+/* Waiting-for-an-answer dots (Chat page). Three of these with staggered
+ * animation-delays read as "still working" without a spinner's urgency. */
+@keyframes qc-dot {
+  0%,
+  75%,
+  100% {
+    opacity: 0.25;
+    transform: translateY(0);
+  }
+  35% {
+    opacity: 1;
+    transform: translateY(-2px);
+  }
+}
+.qc-dot {
+  animation: qc-dot 1.3s ease-in-out infinite;
+}
+
 /* Moving light sweep for loading skeletons (Prototype builder, etc.). */
 @keyframes qc-shimmer {
   100% {
@@ -294,4 +312,76 @@
     animation-duration: 0.01ms !important;
     transition-duration: 0.01ms !important;
   }
+}
+
+/* ---------------------------------------------------------------------------
+ * Syntax highlighting for fenced code blocks (components/CodeBlock.tsx).
+ *
+ * highlight.js emits `.hljs-<token>` spans but ships its palette as a separate
+ * theme stylesheet; we define the tokens here instead so the colours come from
+ * ONE place and no theme CSS has to be imported. The surface is always dark
+ * (zinc-950) in both light and dark mode — same as the portal's other code
+ * surfaces — so these are light-on-dark and deliberately theme-independent.
+ * ------------------------------------------------------------------------- */
+.hljs {
+  color: #e4e4e7; /* zinc-200 — plain code */
+}
+.hljs-comment,
+.hljs-quote {
+  color: #71717a; /* zinc-500 */
+  font-style: italic;
+}
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-literal,
+.hljs-doctag,
+.hljs-formula {
+  color: #c4b5fd; /* violet-300 */
+}
+.hljs-string,
+.hljs-regexp,
+.hljs-addition,
+.hljs-attribute,
+.hljs-meta .hljs-string {
+  color: #86efac; /* green-300 */
+}
+.hljs-number,
+.hljs-variable,
+.hljs-template-variable,
+.hljs-selector-attr,
+.hljs-selector-pseudo,
+.hljs-type {
+  color: #fdba74; /* orange-300 */
+}
+.hljs-title,
+.hljs-title.class_,
+.hljs-title.function_,
+.hljs-section,
+.hljs-name,
+.hljs-selector-id,
+.hljs-selector-class {
+  color: #93c5fd; /* blue-300 */
+}
+.hljs-attr,
+.hljs-property,
+.hljs-params,
+.hljs-template-tag {
+  color: #f9a8d4; /* pink-300 */
+}
+.hljs-built_in,
+.hljs-class .hljs-title,
+.hljs-symbol,
+.hljs-bullet,
+.hljs-link,
+.hljs-meta {
+  color: #7dd3fc; /* sky-300 */
+}
+.hljs-deletion {
+  color: #fca5a5; /* red-300 */
+}
+.hljs-emphasis {
+  font-style: italic;
+}
+.hljs-strong {
+  font-weight: 600;
 }

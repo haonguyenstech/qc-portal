@@ -4,6 +4,8 @@ import path from 'node:path'
 import { BUNDLED_TEMPLATES_DIR, bundledTemplateFile, testingDirFor } from '../config.js'
 import { resolveProject } from '../projectScope.js'
 import { revealFolderNative } from '../folderPicker.js'
+import { clearTemplateInstallHash } from '../db.js'
+import { markTemplateRemoved, recordTemplateInstall } from '../templateSync.js'
 
 export const templatesRouter = Router()
 
@@ -104,6 +106,10 @@ templatesRouter.put('/:key', (req, res) => {
   }
   fs.mkdirSync(templatesDir(project.rootPath), { recursive: true })
   fs.writeFileSync(target, content, 'utf8')
+  // Hand-edited/uploaded: drop any portal fingerprint so a portal update can't
+  // overwrite it (templateSync.ts then reports it `customized`). Content that
+  // happens to equal the bundled default is `in-sync` either way.
+  clearTemplateInstallHash(project.id, req.params.key)
   const stat = fs.statSync(target)
   res.json({
     key: req.params.key,
@@ -134,6 +140,9 @@ templatesRouter.post('/:key/reset', (req, res) => {
   }
   fs.mkdirSync(templatesDir(project.rootPath), { recursive: true })
   fs.writeFileSync(target, content, 'utf8')
+  // Back to the portal's default → fingerprint it, so future portal updates keep
+  // this copy current on their own (templateSync.ts).
+  recordTemplateInstall(project, req.params.key)
   const stat = fs.statSync(target)
   res.json({
     key: req.params.key,
@@ -154,5 +163,8 @@ templatesRouter.delete('/:key', (req, res) => {
   } catch {
     /* already gone */
   }
+  // Deleted on purpose — remember that, or the next boot's reconcile would helpfully
+  // re-seed the bundled default (templateSync.ts).
+  markTemplateRemoved(project.id, req.params.key)
   res.json({ ok: true })
 })

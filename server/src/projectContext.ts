@@ -1,14 +1,16 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { knowledgeDir, listDocs } from './knowledgeStore.js'
+import { listOverviewDocs, overviewDocsDir } from './overviewDocs.js'
 import { listNotes, memoryDir, parseNote } from './memoryStore.js'
 import { readAccounts } from './accountsStore.js'
 import { projectIdForRoot } from './projectScope.js'
 import { listTotp } from './totp.js'
 
-// Reads a project's standing context — durable Memory facts (testing/memory/*.md)
-// and reference Knowledge docs (testing/knowledge/*.md) — and packs it into one
-// capped, labeled block that can be injected directly into a one-shot prompt.
+// Reads a project's standing context — durable Memory facts (testing/memory/*.md),
+// the project's Overview documents (testing/overview/*.md) and reference Knowledge
+// docs (testing/knowledge/*.md) — and packs it into one capped, labeled block that
+// can be injected directly into a one-shot prompt.
 //
 // Why inject instead of relying on CLAUDE.md? Test-case generation now runs inside the
 // project (so the model CAN read CLAUDE.md and the source), but injecting the knowledge/
@@ -21,6 +23,7 @@ import { listTotp } from './totp.js'
 const DEFAULT_MAX_CHARS = 32_000 // total budget for the whole block (multi-repo source maps need room)
 const PER_ITEM_CHARS = 6_000 // cap any single note/doc so one huge doc can't crowd out the rest
 const MEMORY_MAX_CHARS = 12_000 // memory packs first — bound it so notes can't starve knowledge docs
+const OVERVIEW_MAX_CHARS = 12_000 // testing/overview/ — bound so a big product spec can't starve knowledge
 // Highest-value knowledge docs, packed before everything else: the repo indexes the
 // prompts steer by (sourceMap.ts) and the product's visual language (designSystem.ts).
 // Being crowded out would silently re-enable full repo exploration / generic-looking UI.
@@ -51,9 +54,10 @@ function clip(s: string, n: number): { text: string; clipped: boolean } {
 }
 
 /**
- * Read the active project's Memory + Knowledge into one capped context block.
- * Memory comes first (concise, high-signal facts), then Knowledge docs. Both are
- * newest-first. Returns an empty block when there's nothing to inject.
+ * Read the active project's Memory + Overview documents + Knowledge into one capped
+ * context block. Memory comes first (concise, high-signal facts), then the Overview
+ * documents (what the product IS), then Knowledge docs. All newest-first. Returns an
+ * empty block when there's nothing to inject.
  */
 export function readProjectContext(rootPath: string, opts?: { maxChars?: number }): ProjectContext {
   const maxChars = opts?.maxChars ?? DEFAULT_MAX_CHARS
@@ -138,6 +142,31 @@ export function readProjectContext(rootPath: string, opts?: { maxChars?: number 
     /* no memory folder */
   }
 
+  // Overview documents (testing/overview/) — what the project IS, uploaded on the
+  // Overview page. They pack before the knowledge docs because they describe the
+  // product itself, and are bounded so one big product spec can't starve the
+  // reference material behind them.
+  try {
+    const dir = overviewDocsDir(rootPath)
+    const overviewBudgetEnd = used + OVERVIEW_MAX_CHARS
+    for (const d of listOverviewDocs(rootPath)) {
+      if (used >= overviewBudgetEnd) {
+        truncated = true
+        break
+      }
+      let raw: string
+      try {
+        raw = fs.readFileSync(path.join(dir, `${d.name}.md`), 'utf8')
+      } catch {
+        continue
+      }
+      if (!push(`### Overview document — ${d.name}`, raw)) break
+      docCount++
+    }
+  } catch {
+    /* no overview folder */
+  }
+
   // Knowledge docs — the priority docs FIRST (see PRIORITY_DOCS), then the remaining
   // reference material newest-first.
   try {
@@ -162,7 +191,8 @@ export function readProjectContext(rootPath: string, opts?: { maxChars?: number 
 
   const intro =
     'The following is standing project context the QC engineer maintains (durable Memory ' +
-    'facts and reference Knowledge docs). Use it to ground your work in this project\'s real ' +
+    "facts, the project's Overview documents, and reference Knowledge docs). Use it to " +
+    'ground your work in this project\'s real ' +
     'terminology, screens, fields, roles, business rules, and known conventions, so you get ' +
     'details right instead of guessing. When it lists environments and test accounts, use ' +
     'those exact URLs and credentials for any login or setup step instead of inventing ' +
@@ -172,7 +202,7 @@ export function readProjectContext(rootPath: string, opts?: { maxChars?: number 
   // When something was clipped, say so INSIDE the block — the model is otherwise
   // told not to re-read these folders, and this is the one case where it should.
   const omissionNote = truncated
-    ? '\n\n(Note: some items above were clipped or omitted for space. If a detail you need is missing, read the full files in testing/knowledge/ and testing/memory/.)'
+    ? '\n\n(Note: some items above were clipped or omitted for space. If a detail you need is missing, read the full files in testing/overview/, testing/knowledge/ and testing/memory/.)'
     : ''
 
   const block = `--- PROJECT KNOWLEDGE & MEMORY START ---\n${intro}\n\n${sections.join(

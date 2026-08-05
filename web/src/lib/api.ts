@@ -496,6 +496,65 @@ export function overviewFromSources(body: {
   })
 }
 
+// ——— Overview documents (one file per uploaded document, testing/overview/) ———
+
+export interface OverviewDoc {
+  name: string
+  size: number
+  savedAt: string
+}
+
+export function listOverviewDocs(projectId: string): Promise<OverviewDoc[]> {
+  return request(`/api/overview-docs?projectId=${encodeURIComponent(projectId)}`)
+}
+
+export function getOverviewDoc(
+  projectId: string,
+  name: string,
+): Promise<OverviewDoc & { content: string }> {
+  return request(
+    `/api/overview-docs/${encodeURIComponent(name)}?projectId=${encodeURIComponent(projectId)}`,
+  )
+}
+
+export function saveOverviewDoc(
+  projectId: string,
+  name: string,
+  content: string,
+): Promise<OverviewDoc> {
+  return request(
+    `/api/overview-docs/${encodeURIComponent(name)}?projectId=${encodeURIComponent(projectId)}`,
+    { method: 'PUT', body: JSON.stringify({ content }) },
+  )
+}
+
+/**
+ * AI review & format ONE overview document, in place. `before` is the pre-review
+ * Markdown so the caller can offer an undo (the file has already been overwritten).
+ */
+export function reviewOverviewDoc(
+  projectId: string,
+  name: string,
+): Promise<{ name: string; changed: boolean; before: string; content: string }> {
+  return request(
+    `/api/overview-docs/${encodeURIComponent(name)}/review?projectId=${encodeURIComponent(projectId)}`,
+    { method: 'POST' },
+  )
+}
+
+export function deleteOverviewDoc(projectId: string, name: string): Promise<{ ok: true }> {
+  return request(
+    `/api/overview-docs/${encodeURIComponent(name)}?projectId=${encodeURIComponent(projectId)}`,
+    { method: 'DELETE' },
+  )
+}
+
+export function openOverviewDocsFolder(projectId: string): Promise<{ ok: true; path: string }> {
+  return request(`/api/overview-docs/open?projectId=${encodeURIComponent(projectId)}`, {
+    method: 'POST',
+  })
+}
+
 export function diagramFromSources(body: {
   team: string
   docs: { id: string; name: string }[]
@@ -2925,4 +2984,187 @@ export interface AutoAgentStatus {
 /** Poll Auto Agent's connection state (filesystem + pid probe on the server). */
 export function getAutoAgentStatus(): Promise<AutoAgentStatus> {
   return request('/api/auto-agent/status')
+}
+
+// ---- Chat (plain conversation with Claude Code, in the project folder) -------
+
+/** How much a chat turn is allowed to do. See routes/chat.ts `toolArgs`. */
+export type ChatTools = 'read' | 'full'
+
+export interface ChatMessage {
+  role: 'user' | 'assistant'
+  text: string
+  at: string
+  /** Tool names the turn used, in order (rendered as an activity trail). */
+  tools?: string[]
+  model?: string
+  error?: boolean
+  /** Images pasted with this message — file names, shown via `chatImageUrl`. */
+  images?: string[]
+}
+
+/** A pasted image on its way to the server: base64 bytes, typed by its MIME. */
+export interface ChatImageUpload {
+  mime: string
+  data: string
+}
+
+/**
+ * A project artifact tagged with `@` in a message. Only the reference travels — the server
+ * resolves it to files and tells Claude to Read them (see routes/chat.ts `resolveMentions`).
+ */
+export interface ChatMention {
+  kind: 'ticket' | 'testcase'
+  /** Crawled-ticket folder under testing/tickets/ (nested PARENT/CHILD for a subtask). */
+  folder: string
+  /** Test-case version, or omitted for the newest. */
+  version?: number
+}
+
+export interface Chat {
+  slug: string
+  name: string
+  createdAt: string
+  updatedAt: string
+  model: string
+  tools: ChatTools
+  /** The Claude CLI session backing the conversation (what makes follow-ups work). */
+  sessionId: string | null
+  messages: ChatMessage[]
+}
+
+/** A conversation without its messages — what the history rail lists. */
+export interface ChatSummary {
+  slug: string
+  name: string
+  createdAt: string
+  updatedAt: string
+  model: string
+  tools: ChatTools
+  messageCount: number
+  preview: string
+}
+
+/** The project's conversations, newest first. */
+export function listChats(projectId: string): Promise<{ chats: ChatSummary[] }> {
+  return request(`/api/chat?projectId=${encodeURIComponent(projectId)}`)
+}
+
+/** One conversation in full. */
+export function getChat(projectId: string, slug: string): Promise<Chat> {
+  return request(
+    `/api/chat/${encodeURIComponent(slug)}?projectId=${encodeURIComponent(projectId)}`,
+  )
+}
+
+/** Rename a conversation (display name only). */
+export function renameChat(projectId: string, slug: string, name: string): Promise<Chat> {
+  return request(`/api/chat/${encodeURIComponent(slug)}/rename`, {
+    method: 'POST',
+    body: JSON.stringify({ projectId, name }),
+  })
+}
+
+export function deleteChat(projectId: string, slug: string): Promise<{ ok: true }> {
+  return request(
+    `/api/chat/${encodeURIComponent(slug)}?projectId=${encodeURIComponent(projectId)}`,
+    { method: 'DELETE' },
+  )
+}
+
+/** Src for an image pasted into a message (served from testing/chats/images). */
+export function chatImageUrl(projectId: string, name: string): string {
+  return `/api/chat/images/${encodeURIComponent(name)}?projectId=${encodeURIComponent(projectId)}`
+}
+
+/** Reveal the project's testing/chats folder in the OS file explorer. */
+export function openChatsFolder(projectId: string): Promise<{ ok: boolean; path: string }> {
+  return request('/api/chat/open', { method: 'POST', body: JSON.stringify({ projectId }) })
+}
+
+/**
+ * Send a message and stream the reply (Server-Sent Events).
+ *
+ * `onStart` fires with the conversation's slug before any text — a brand-new chat is
+ * created server-side on the first turn, so the client has to adopt the slug it was
+ * given rather than inventing one. `onDelta` fires per token, `onTool` per tool call,
+ * `onDone` with the saved conversation. Pass a signal to Stop (it also kills the
+ * server-side CLI child). Resolves when the stream ends.
+ */
+export async function streamChat(
+  projectId: string,
+  body: {
+    slug?: string
+    prompt: string
+    model: string
+    tools: ChatTools
+    /** Pasted screenshots; the server writes them and tells Claude to Read them. */
+    images?: ChatImageUpload[]
+    /** `@`-tagged tickets / test cases the question is about. */
+    mentions?: ChatMention[]
+  },
+  handlers: {
+    onStart?: (slug: string, name: string) => void
+    onDelta: (text: string) => void
+    onTool?: (name: string) => void
+    onDone: (chat: Chat) => void
+    onError: (message: string) => void
+    onLog?: (level: 'info' | 'success' | 'error', text: string) => void
+  },
+  signal: AbortSignal,
+): Promise<void> {
+  const res = await fetch('/api/chat/stream', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ projectId, ...body }),
+    signal,
+  })
+  if (!res.ok || !res.body) {
+    handlers.onError((await res.text().catch(() => '')) || `${res.status} ${res.statusText}`)
+    return
+  }
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buf = ''
+  let settled = false // saw a terminal (done/error) frame
+  for (;;) {
+    const { value, done } = await reader.read()
+    if (done) break
+    buf += decoder.decode(value, { stream: true })
+    let idx: number
+    while ((idx = buf.indexOf('\n\n')) !== -1) {
+      const frame = buf.slice(0, idx)
+      buf = buf.slice(idx + 2)
+      const dataLine = frame.split('\n').find((l) => l.startsWith('data:'))
+      if (!dataLine) continue
+      let msg: {
+        type?: string
+        text?: string
+        name?: string
+        slug?: string
+        level?: 'info' | 'success' | 'error'
+        chat?: Chat
+        error?: string
+      }
+      try {
+        msg = JSON.parse(dataLine.slice(5).trim())
+      } catch {
+        continue
+      }
+      if (msg.type === 'delta') handlers.onDelta(msg.text ?? '')
+      else if (msg.type === 'tool') handlers.onTool?.(msg.name ?? '')
+      else if (msg.type === 'start' && msg.slug) handlers.onStart?.(msg.slug, msg.name ?? '')
+      else if (msg.type === 'log') handlers.onLog?.(msg.level ?? 'info', msg.text ?? '')
+      else if (msg.type === 'done' && msg.chat) {
+        settled = true
+        handlers.onDone(msg.chat)
+      } else if (msg.type === 'error') {
+        settled = true
+        handlers.onError(msg.error ?? 'The message failed')
+      }
+    }
+  }
+  // The stream closed with no done/error frame (server ended early) — don't leave the
+  // caller stuck showing a spinner forever.
+  if (!settled) handlers.onError('The answer ended before finishing. Please try again.')
 }

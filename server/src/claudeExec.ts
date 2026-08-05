@@ -183,6 +183,10 @@ export function runClaudeStream(
     // already consumes it through onDelta doesn't want it duplicated into the log).
     // Tool-use and other events are still logged.
     suppressAssistantText?: boolean
+    // The CLI's session id, reported once from the stream-json `init` event. A caller
+    // that wants a MULTI-TURN conversation stores it and passes `--resume <id>` on the
+    // next run — otherwise every turn starts from an empty context (see routes/chat.ts).
+    onSession?: (sessionId: string) => void
   },
 ): Promise<StreamResult> {
   return new Promise((resolve) => {
@@ -279,6 +283,7 @@ export function runClaudeStream(
         type?: string
         subtype?: string
         model?: string
+        session_id?: string
         result?: string
         is_error?: boolean
         message?: { content?: { type?: string; text?: string; name?: string }[] }
@@ -300,6 +305,7 @@ export function runClaudeStream(
         }
         case 'system':
           if (msg.subtype === 'init') {
+            if (msg.session_id) opts?.onSession?.(msg.session_id)
             onLog({ level: 'info', text: `Claude session started — model ${msg.model ?? 'default'}` })
           }
           return

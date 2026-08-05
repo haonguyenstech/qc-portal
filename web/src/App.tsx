@@ -28,6 +28,7 @@ import {
   ScrollText,
   Settings,
   TerminalSquare,
+  MessagesSquare,
   Ticket,
   Upload,
   Wrench,
@@ -63,6 +64,7 @@ import TicketsPage from '@/pages/TicketsPage'
 import TestCasePage from '@/pages/TestCasePage'
 import ApiTestingPage from '@/pages/ApiTestingPage'
 import PrototypePage from '@/pages/PrototypePage'
+import ChatPage from '@/pages/ChatPage'
 import McpPage from '@/pages/McpPage'
 import ProjectsPage from '@/pages/ProjectsPage'
 import ProjectSettingsPage from '@/pages/ProjectSettingsPage'
@@ -151,6 +153,7 @@ const navGroups: { label: string; items: NavItemDef[] }[] = [
   {
     label: 'Tools',
     items: [
+      { to: '/chat', label: 'Chat', icon: MessagesSquare, end: false },
       { to: '/prototype', label: 'Prototype', icon: Layout, end: false },
       { to: '/terminal', label: 'Terminal', icon: TerminalSquare, end: false },
     ],
@@ -927,9 +930,9 @@ function App() {
         <div
           className={cn(
             'mx-auto px-4 py-4 sm:px-6 sm:py-6 lg:px-8 lg:py-8',
-            // The Prototype workspace (chat + live preview) needs the full width;
-            // every other page stays comfortably capped.
-            pathname === '/prototype' ? 'max-w-none' : 'max-w-6xl',
+            // The Prototype workspace (chat + live preview) and Chat (history rail +
+            // transcript) need the full width; every other page stays comfortably capped.
+            pathname === '/prototype' || pathname === '/chat' ? 'max-w-none' : 'max-w-6xl',
           )}
         >
           {!projectsLoading && projects.length === 0 && !isProjectAgnostic(pathname) ? (
@@ -949,6 +952,7 @@ function App() {
             <Route path="/testcases" element={<TestCasePage />} />
             <Route path="/verify" element={<VerifyDesignPage />} />
             <Route path="/api-testing" element={<ApiTestingPage />} />
+            <Route path="/chat" element={<ChatPage />} />
             <Route path="/prototype" element={<PrototypePage />} />
             <Route path="/terminal" element={<TerminalPage />} />
             <Route path="/skills" element={<SkillsPage />} />

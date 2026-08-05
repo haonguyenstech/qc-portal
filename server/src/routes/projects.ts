@@ -20,6 +20,7 @@ import {
 } from '../config.js'
 import { pickFolderNative } from '../folderPicker.js'
 import { recordSkillInstall } from '../skillSync.js'
+import { recordTemplateInstall } from '../templateSync.js'
 import { listTestcaseJobs } from '../testcaseJobs.js'
 import { listCrawlJobs } from '../crawlJobs.js'
 import type { Project } from '../types.js'
@@ -355,6 +356,13 @@ function initializeProjectFolder(project: Project): { created: string[]; templat
       fs.mkdirSync(path.dirname(targetTcTemplate), { recursive: true })
       fs.copyFileSync(sourceTc, targetTcTemplate)
       created.push('testing/templates/testcase.md')
+      // Fingerprint it as portal-written ONLY when it IS the bundled default, so a
+      // later portal update may refresh it silently (templateSync.ts). A copy cloned
+      // from a template project may carry that project's own edits — leaving it
+      // unfingerprinted means we treat it as customized and never overwrite it.
+      if (sourceTc === bundledTemplateFile('testcase')) {
+        recordTemplateInstall(project, 'testcase')
+      }
     }
   }
 

@@ -373,6 +373,37 @@ const needsExpected = (t: ApiAssertionType) =>
   t !== 'status-2xx' && t !== 'json-exists' && t !== 'header-exists'
 const isEquals = (t: ApiAssertionType) => t === 'json-equals' || t === 'header-equals'
 
+/**
+ * One labeled cell of a check's result (key / actual / expected). `break-all` +
+ * line-clamp keeps a long JSON value from stretching the row, and the full text stays
+ * reachable via the row's title.
+ */
+function ResultCell({
+  label,
+  value,
+  tone,
+}: {
+  label: string
+  value: string
+  tone?: 'pass' | 'fail'
+}) {
+  return (
+    <div className="min-w-0 rounded-lg border border-border/60 bg-background/60 px-2 py-1.5">
+      <span className="block text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+        {label}
+      </span>
+      <span
+        className={cn(
+          'block line-clamp-2 break-all font-mono text-[11px]',
+          tone === 'fail' ? 'text-red-600' : tone === 'pass' ? 'text-emerald-700' : 'text-foreground',
+        )}
+      >
+        {value}
+      </span>
+    </div>
+  )
+}
+
 function AssertionEditor({
   rows,
   onChange,
@@ -554,17 +585,18 @@ function AssertionEditor({
                     <Trash2 className="size-4" />
                   </Button>
                 </div>
-                {/* The actual observed value — why it passed or failed. */}
+                {/* Key · actual · expected — the three things needed to see WHY it
+                    passed or failed, side by side instead of one run-on sentence. */}
                 {r && (
-                  <p
-                    className={cn(
-                      'mt-1.5 line-clamp-2 break-all pl-6 font-mono text-[11px]',
-                      r.pass ? 'text-muted-foreground' : 'text-red-600',
-                    )}
-                    title={r.detail}
-                  >
-                    {r.detail}
-                  </p>
+                  <div className="mt-2 grid gap-2 pl-6 sm:grid-cols-3" title={r.detail}>
+                    <ResultCell label="Key" value={r.key} />
+                    <ResultCell
+                      label="Actual value"
+                      value={r.actual}
+                      tone={r.pass ? 'pass' : 'fail'}
+                    />
+                    <ResultCell label="Expected value" value={r.expected || '—'} />
+                  </div>
                 )}
               </div>
             )

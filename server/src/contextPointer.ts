@@ -26,11 +26,14 @@ function hasMarkdown(dir: string, exclude: string[] = []): boolean {
 /** Build the managed block, or '' when there's nothing to point at. */
 function buildBlock(root: string): string {
   const hasKnowledge = hasMarkdown(path.join(testingDirFor(root), 'knowledge'))
+  const hasOverview = hasMarkdown(path.join(testingDirFor(root), 'overview'))
   const hasMemory = hasMarkdown(path.join(testingDirFor(root), 'memory'), ['memory.md'])
   const hasEnvironments = fs.existsSync(path.join(testingDirFor(root), 'environments.md'))
   const projectId = projectIdForRoot(root)
   const hasAuthenticators = !!projectId && hasTotp(projectId)
-  if (!hasKnowledge && !hasMemory && !hasEnvironments && !hasAuthenticators) return ''
+  if (!hasKnowledge && !hasOverview && !hasMemory && !hasEnvironments && !hasAuthenticators) {
+    return ''
+  }
 
   const lines = ['## Project context (managed by QC Portal)', '']
   lines.push(
@@ -63,6 +66,13 @@ function buildBlock(root: string): string {
         labels +
         '. Submit it immediately (it expires in `expiresIn` seconds), fetch a fresh one if ' +
         'rejected, and never write a code into a report, note, or screenshot.',
+    )
+  }
+  if (hasOverview) {
+    lines.push(
+      '- **Overview documents** — what this project IS: the product/spec documents the QC ' +
+        'engineer uploaded, one file each in `testing/overview/*.md`. Read them to get the ' +
+        'real feature names, flows and rules right.',
     )
   }
   if (hasKnowledge) {

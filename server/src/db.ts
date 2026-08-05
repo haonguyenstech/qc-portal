@@ -291,6 +291,19 @@ db.exec(`
   );
 `)
 
+// What the portal last wrote into a project for a bundled single-file project
+// template (testing/templates/<key>.md). Lets a portal update refresh an untouched
+// copy silently and leave a hand-edited one alone. See templateSync.ts.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS template_installs (
+    projectId TEXT NOT NULL,
+    templateKey TEXT NOT NULL,
+    installedHash TEXT NOT NULL,
+    syncedAt TEXT NOT NULL,
+    PRIMARY KEY (projectId, templateKey)
+  );
+`)
+
 // Migration: record WHICH files the portal wrote, not just their combined hash. The
 // hash alone can't tell a file the engineer added to the folder from a leftover of an
 // older bundled version, so pruning risked deleting their own file.
@@ -1174,4 +1187,47 @@ export function setSkillInstall(
 /** Forget the fingerprint (the skill was deleted from the project). */
 export function clearSkillInstallHash(projectId: string, skill: string): void {
   deleteSkillInstallStmt.run(projectId, skill)
+}
+
+// ---- bundled project-template install fingerprints (see templateSync.ts) ----
+//
+// Same idea as skill_installs, for the single-file project templates the portal
+// ships (testing/templates/<key>.md): remember the hash of what WE wrote, so a
+// later portal update can tell an untouched copy (safe to refresh silently) from
+// one the QC engineer edited (theirs — never overwrite).
+
+const getTemplateInstallStmt = db.prepare(
+  `SELECT installedHash FROM template_installs WHERE projectId = ? AND templateKey = ?`,
+)
+const setTemplateInstallStmt = db.prepare(`
+  INSERT INTO template_installs (projectId, templateKey, installedHash, syncedAt)
+  VALUES (?, ?, ?, ?)
+  ON CONFLICT(projectId, templateKey) DO UPDATE SET
+    installedHash = excluded.installedHash,
+    syncedAt = excluded.syncedAt
+`)
+const deleteTemplateInstallStmt = db.prepare(
+  `DELETE FROM template_installs WHERE projectId = ? AND templateKey = ?`,
+)
+
+/** Hash of the template file the portal last wrote into this project, if known. */
+export function getTemplateInstallHash(projectId: string, templateKey: string): string | null {
+  const row = getTemplateInstallStmt.get(projectId, templateKey) as
+    | { installedHash?: string }
+    | undefined
+  return row?.installedHash ?? null
+}
+
+/** Remember what we just wrote, so a later boot can tell untouched from customized. */
+export function setTemplateInstallHash(
+  projectId: string,
+  templateKey: string,
+  hash: string,
+): void {
+  setTemplateInstallStmt.run(projectId, templateKey, hash, new Date().toISOString())
+}
+
+/** Forget the fingerprint (the template was deleted from the project). */
+export function clearTemplateInstallHash(projectId: string, templateKey: string): void {
+  deleteTemplateInstallStmt.run(projectId, templateKey)
 }

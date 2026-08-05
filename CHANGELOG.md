@@ -3,6 +3,67 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.11.9 — 2026-08-05
+
+**A Chat page: ask Claude about your project, paste a screenshot, tag a ticket with `@`**
+
+### Added
+
+- **Chat (under Tools) — just ask.** Every other AI screen in the Portal is a form: pick a ticket,
+  pick a model, press Generate. This one is a conversation. "Why did run 14 fail?", "what does this
+  endpoint validate?", "are these test cases enough?" — Claude answers from inside your project
+  folder, so your CLAUDE.md, Knowledge and Memory are already in scope, and a follow-up question
+  understands what "it" refers to. Conversations are saved per project (searchable, renameable,
+  grouped Today / Yesterday / 7 days) and each one picks up where you left it.
+- **Two answer modes, and read-only is the default.** **Read-only** lets Claude read your repo but
+  not change it, and skips loading MCP servers so answers start in about a second. **Full tools** can
+  write files and drive the project's MCP servers (a browser, ClickUp) when you actually want the
+  work done, not just described. The toggle sits next to the model picker and always says which one
+  you're in.
+- **Paste a screenshot into the chat.** Cmd/Ctrl-V a screenshot, drop an image on the box, or use the
+  paperclip — up to 4 images per message. Claude opens each one and can see it, so "what's wrong with
+  this screen?" is a paste and a question rather than a paragraph of description. An image on its own
+  is a valid message. Your images stay with the conversation, so reopening it shows what you asked
+  about.
+- **Tag a ticket or its test cases with `@`.** Type `@` in the chat box and pick from your crawled
+  tickets — or `@TICKET/testcases` for the cases generated for it. Claude reads the real files, so it
+  answers about your actual ticket and your actual cases instead of guessing which folder you meant.
+  Deleting the `@TICKET` text is how you take a tag back, and a tag whose files are gone says so
+  rather than failing quietly.
+- **Attach a spec to a question.** The paperclip also takes Word / PDF / Excel / CSV / Markdown and
+  converts it in your browser — the document itself never leaves your machine.
+- **Overview is a list of documents now.** Upload your product docs — Word, PDF, Excel, CSV,
+  Markdown — and each file becomes its own document you can preview, re-review or delete on its own.
+  Ten files show as ten documents instead of one blob nobody can unpick. Uploading is all it takes for
+  the AI to have them: test-case generation, prototypes and the grounding check all read them.
+- **Per-document "AI review & format".** Cleans up a converted document — fixes the Markdown, merges
+  duplicated passages, strips PDF page numbers and running headers — while adding no facts of its own,
+  and leaves tables, links, IDs and numbers exactly as they were. It rewrites that one file, so there's
+  an **Undo** right there in the row: keep it, or put the original back.
+
+### Changed
+
+- **Code in an answer is a proper code block** — coloured for its language (TypeScript, SQL, bash,
+  Python, JSON, YAML, Java, C#, Kotlin, Swift, Dart, Go and more), labelled, and with a **Copy**
+  button in its header. Selecting thirty lines out of a scrolling transcript by hand was the part
+  that went wrong.
+- **The waiting state says what's happening.** Instead of a bare spinner (two of them, in fact),
+  a waiting answer shows what Claude is doing right now — "Reading the project", "Searching the
+  project" — how long it's been at it, and a placeholder for the answer taking shape. A long wait
+  reads as working rather than stuck.
+- **Every message shows its time**, with the date too when it isn't today, and which model answered.
+- **The chat uses the whole screen.** On a large display the conversation was a narrow ribbon between
+  empty margins; it now widens with the window, while paragraphs keep a comfortable line length and
+  code blocks and tables get the extra room.
+- **The bundled test-case template keeps itself up to date.** A new project starts with the team's
+  common CSV template already in place, and when the Portal ships a newer one, `qc-portal --update`
+  refreshes the copy in every project that hasn't been edited. A template you customised is left
+  exactly as it is (the Templates page still offers "Reset to default"), and one you deleted on
+  purpose stays deleted.
+- **API Testing shows what each check actually compared.** A result now spells out the key it looked
+  at, the value that came back, and the value it wanted, instead of one run-together line — so a
+  failing assertion tells you why in place.
+
 ## 0.11.8 — 2026-08-05
 
 **API scenarios that run like a Postman collection, test cases from an attached spec, and the device you picked**

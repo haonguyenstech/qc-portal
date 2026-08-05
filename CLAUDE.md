@@ -153,7 +153,15 @@ server/src/
   clickup.ts        ClickUp ticket lookup + crawl
   folderPicker.ts   native OS dialogs: pickFolderNative (choose-folder picker, used by skill
                     import) + revealFolderNative (open a folder in Finder/Explorer/xdg-open)
-  contextPointer.ts managed CLAUDE.md pointer block linking Knowledge + Memory (keeps CLAUDE.md lean)
+  contextPointer.ts managed CLAUDE.md pointer block linking Overview docs + Knowledge + Memory
+                    (keeps CLAUDE.md lean)
+  overviewDocs.ts   storage primitives for testing/overview — the project's overview documents, one
+                    file per upload (see the /overview section); packed into prompts by
+                    projectContext.ts, so uploading one is all it takes for the AI to have it
+  docReview.ts      "AI review & format" for an engineer-authored/uploaded document: a copy-editor
+                    pass that adds no facts. Its output is SAVED OVER the file, so it refuses rather
+                    than degrades — oversize input is 413 (never truncated), a collapsed rewrite is
+                    rejected, and it never throws
   memoryStore.ts    storage primitives for testing/memory notes (frontmatter description + source,
                     MEMORY.md index) — shared by routes/memory.ts + learn.ts
   knowledgeStore.ts storage primitives for testing/knowledge docs (provenance marker) — shared
@@ -168,7 +176,7 @@ server/src/
                     {{account.<label>.username}} / .password, resolved server-side in
                     routes/apiTests.ts `resolveSendVars` together with a LIVE
                     {{otp.<label>}} from totp.ts. See "API Testing flows" below
-  projectContext.ts readProjectContext(root): packs testing/memory/*.md + testing/knowledge/*.md
+  projectContext.ts readProjectContext(root): packs testing/memory/*.md + testing/overview/*.md + testing/knowledge/*.md
                     into one capped block injected into prompts (test-case gen + grounding) so the
                     model uses real project terms/rules even when there's no project cwd
   learn.ts          AI auto-capture: reflect on a finished QC run / test-case gen and persist
@@ -177,7 +185,7 @@ server/src/
                     ticket) + groundReport (report verdicts vs documented evidence); auto-revises
                     in place. Cheap (haiku), best-effort, never throws — see section below
   routes/           projects, qc, files, skills, mcp, clickup, source, ai, templates,
-                    knowledge, memory, diagrams, prototype, version
+                    knowledge, memory, diagrams, prototype, chat, version
 
 web/src/
   App.tsx           sidebar nav + React Router routes + ProjectSwitcher + always-mounted
@@ -191,6 +199,7 @@ web/src/
                     TicketsPage, TestCasePage, RunPage, RunningPage, HistoryPage,
                     RunDetailPage, SkillsPage, McpPage, NotificationsPage, TerminalPage (at /terminal),
                     PrototypePage (at /prototype — see "Prototype page" below),
+                    ChatPage (at /chat — see "Chat page" below),
                     InstructionsPage (at /instructions — CLAUDE.md + Knowledge + Memory hub),
                     ReleaseNotesPage
                     (at /releases — renders CHANGELOG.md + check-for-updates),
@@ -205,7 +214,10 @@ web/src/
                     ContinueSessionPanel (resume a finished run's session in a terminal, see "Continue session" below),
                     GenerateFromClickUp (shared ClickUp source picker for Overview + Diagrams),
                     KnowledgeDocs (Instructions → Knowledge tab) + MemoryNotes (Instructions → Memory tab),
+                    OverviewDocs (the /overview document list: per-document AI review, preview, delete),
                     MermaidDiagram (lazy mermaid render, used by DiagramsPage),
+                    CodeBlock (a fenced code block in rendered markdown: language label,
+                    copy button, syntax colours via lib/highlight.ts),
                     OpenFolderButton (reveals a project folder in the OS file explorer),
                     dialogs (RunPresetsDialog, ManageHintsDialog, TicketPicker, …)
   lib/
@@ -214,6 +226,12 @@ web/src/
     project-context.tsx  useProjects() — active project + list, persisted
     notifications.tsx    NotificationProvider + useNotifications() — bell store, localStorage-backed
     testRules.ts    DEFAULT_RULES + useTestRules() + buildInstructions() for test-case prompts
+    highlight.ts    highlightCode()/resolveLanguage() for CodeBlock — `highlight.js/lib/core`
+                    plus a CURATED language set, every one a dynamic import so none of it
+                    lands in the main bundle (the barrel would add ~1 MB). Fence labels are
+                    mapped through ALIASES (ts→typescript, html→xml, sh→bash, …); an unknown
+                    language returns null and the caller renders plain text. Token colours
+                    live in index.css (`.hljs-*`), NOT an imported hljs theme
     apiAssert.ts    evaluateAssertions()/getJsonPath() — the API-Testing assertion engine,
                     shared by the request builder and the flow runner (see "API Testing
                     flows"); one copy on purpose, so a step can't grade differently
@@ -452,10 +470,50 @@ map lives in `crawl.ts` and is re-imported by `routes/clickup.ts`). Notable beha
   a violet "N test cases" row badge and an **amber warning in the delete dialog** (deleting the folder
   also removes its `testcases/`, which a re-crawl won't restore).
 
-**`/overview` (`OverviewPage.tsx`)** — the project's free-text **intro** (markdown, persisted on
-`projects.description`) and an AI **"Generate from ClickUp"** picker (overview mode). Editing the
-intro hides the generator; a generated draft lands in the editor for review before saving. (The AI
-**knowledge documents** section moved to `/instructions` → Knowledge tab — see that section above.)
+**`/overview` (`OverviewPage.tsx`)** — the project's **overview documents**: the product/spec files
+that say what this project IS. The page is deliberately just two things — an upload zone and the list
+of documents (`OverviewDocs.tsx`). There is no intro editor, no merge mode, and no "add to intro":
+**one upload = one document**, so 10 files show as 10 documents, each reviewable on its own. Every
+richer shape was tried and removed — merging uploads into `projects.description` produced a single
+blob nobody could review or replace piecemeal, and a mode switch just made the engineer choose
+between two paths to the same place. `projects.description` still exists in the DB but nothing on
+this page reads or writes it any more.
+
+**Uploading is all it takes for the AI to have the file.** Both context paths carry
+`testing/overview/`:
+- `projectContext.ts` packs the folder into the injected block — after Memory, **before** Knowledge
+  (it describes the product itself), bounded by `OVERVIEW_MAX_CHARS` so one big spec can't crowd out
+  the reference docs. So test-case generation, prototypes and the grounding check all see it.
+- `contextPointer.ts` adds an **Overview documents** bullet to the managed `CLAUDE.md` block for
+  in-project runs, so `PUT`/`DELETE` in `routes/overviewDocs.ts` both call `syncContextPointer` —
+  the first upload adds the bullet, deleting the last one strips it.
+
+Storage + routes: `server/src/overviewDocs.ts` (store) and `routes/overviewDocs.ts`
+(`GET /api/overview-docs`, `GET`/`PUT`/`DELETE /:name`, `POST /:name/review`, `POST /open`). Name
+sanitizing is shared with `knowledgeStore.safeDocName`, so a file lands on the same on-disk name in
+either store. Knowledge (`/instructions`) is still the place for standing reference material the AI
+must always have; Overview is "what the product is", and the two are separate folders so the
+Overview page owns its own list and gets packed first.
+
+Client: `uploadFiles()` converts each file with the shared in-browser `docConvert` **sequentially**
+(the parsers are heavy main-thread dynamic imports, so parallel conversion only janks the page) and
+`PUT`s each under its own name. A per-file failure (scanned PDF, wrong type) never aborts the batch:
+the toast reads `Added N of M files` and names each failure, so a doc that silently dropped out can't
+be mistaken for a clean import.
+
+**Per-document "AI review"** (`POST /api/overview-docs/:name/review` → `server/src/docReview.ts`
+`reviewMarkdown()`) is a **copy-editor** pass, not a generator: fix Markdown structure, merge
+duplicated passages, strip conversion noise (PDF page numbers, running headers), keep the author's
+wording — and add **no** fact, with tables/links/IDs/URLs/numbers surviving verbatim. It rewrites
+that one file in place, which is why every failure mode is a data-loss risk and the module **refuses
+rather than degrades**:
+- Input over `MAX_REVIEW_CHARS` is **413, never truncated** — unlike a normal prompt, the output is
+  written *over* the engineer's file, so half a document in means the other half deleted.
+- A result under 25% of the original length is rejected as a collapsed rewrite.
+- `reviewMarkdown` never throws; a failure is an `{ok:false, status, error}` and the route saves
+  nothing.
+- The response returns `before`, which the row's amber **Restore** / **Keep it** strip re-`PUT`s. An
+  AI edit the engineer can't undo is one they have to fight — keep that undo.
 
 **`/diagrams` (`DiagramsPage.tsx`)** — multiple named **Mermaid diagrams** per project (sidebar
 "Diagrams", under Source Code in the Project group). Diagrams are generated from ClickUp sources via
@@ -662,6 +720,28 @@ to expose a new upload slot. Current kinds:
   project's `testing/templates/testcase.md` when one exists, else the portal-bundled default
   (`templates/project-templates/testcase.md` via `bundledTemplateFile`), so a new project starts
   with a test-case template already in place. Never overwrites an existing file.
+  The bundled default is the team's **common CSV template** (`ID,Feature,Test suite,Summary,
+  Pre-condition,Steps,Expected result,Actual result,Priority,Status,Reference,Note` + sample rows).
+  Note the file name stays `<key>.md` while the CONTENT is CSV — that's the existing design, not a
+  mistake: `detectTemplateFormat` (testcaseGen.ts) / `looksLikeCsv` (CsvTable.tsx) decide the format
+  from the first content line, and uploading a `.csv` on `/templates` has always been stored as
+  `testcase.md`. So a generation against it writes a real `v<N>.csv`.
+- **Bundled templates auto-update with the portal (`server/src/templateSync.ts`)** — the template a
+  run actually reads is the project's copy, so without this a `qc-portal --update` would leave every
+  project drafting against the old default forever. Same rule (and shape) as `skillSync.ts`:
+  `reconcileBundledTemplates()` runs once at boot from `index.ts` and, per project × bundled key,
+  compares `testing/templates/<key>.md` against the bundled master —
+  missing → seed; identical → just fingerprint it (so the NEXT update is silent);
+  identical to the fingerprint the portal recorded when it last wrote the file
+  (`template_installs`, db.ts) → **refresh silently**; anything else → the engineer edited it, so
+  **leave it alone** and log it as customized (`/templates` already offers "Reset to default").
+  A copy matching an older shipped default counts as untouched via `LEGACY_DEFAULTS` (hashes of past
+  bundled files) — fingerprinting only started with this module, so pre-existing copies have no row
+  and would otherwise read as hand-edited; **append** the outgoing hash there whenever you change a
+  bundled default. Route side: `PUT /:key` clears the fingerprint (now the user's), `POST /:key/reset`
+  records it, and `DELETE /:key` writes the `TEMPLATE_ABSENT` sentinel so the next boot doesn't
+  helpfully re-seed a template someone deleted on purpose. Project seeding only fingerprints the copy
+  when it came from the bundled file, never from a template project's (possibly customized) one.
 - `design-check` — the project's **standard Design Check checklist**. `verifyDesign.ts` injects it into
   the verify prompt as criteria the model must report a finding for (capped at 6 KB,
   `MAX_CHECKLIST_CHARS`). Resolution mirrors `/testcases`: a one-off file uploaded on `/verify` wins
@@ -767,6 +847,103 @@ including the `questions` / `decisions` handling.
 `buildContextFor(project, {ticket, matchApp, decisions})` is the single place that assembles a
 build's grounding (ticket + knowledge block + source-reading + design-system flag + ledger), so all
 three entry points ground identically. Prefer extending it over re-deriving context at a call site.
+
+## Chat page (ask Claude Code about the project)
+
+**`/chat` (`ChatPage.tsx`, `routes/chat.ts`, "Chat" under the sidebar's Tools group)** — a plain
+conversation with Claude Code. Every other AI surface here is a FORM (pick a ticket, pick a model,
+press Generate); this is the one place a QC engineer can just ask ("why did run 14 fail?", "what
+does this endpoint validate?").
+
+- **Not the Terminal page's pty.** That runs the interactive TUI, whose ANSI redraw output is fine
+  in xterm and unrenderable as chat bubbles. Chat runs `claude -p --output-format stream-json
+  --include-partial-messages`, giving clean assistant text (streamed as `delta` frames) plus
+  structured tool events. `cwd = project.rootPath`, so CLAUDE.md / Knowledge / Memory are in scope.
+- **Multi-turn is the CLI's own session, not a replayed transcript.** `runClaudeStream` gained an
+  `onSession` opt that reports the stream-json `init` event's `session_id`; it's stored on the
+  conversation and passed back as `--resume <id>` next turn. **This is the whole reason a follow-up
+  understands "it"** — don't replace it with prompt-stuffing. A `--resume` whose session the CLI no
+  longer has fails outright, so the route **retries once as a fresh session** rather than losing the
+  question. A session id is only adopted once a turn actually produced text.
+- **Two tool modes** (`toolArgs`): `read` (default) = `--allowedTools Read Grep Glob
+  --strict-mcp-config` — answers start in ~1s and the repo can't be modified; `full` =
+  `--permission-mode bypassPermissions` — can write files and use the project's MCP servers. The
+  composer's toggle (the reference's mic slot) makes this explicit; never make `full` the default.
+  The prompt goes over **stdin**, so the variadic `--allowedTools` can't swallow it.
+- **Storage** is `<root>/testing/chats/<slug>.json` (mirrors `routes/prototype.ts`, no DB). A new
+  conversation is named after its first question. Routes: `GET /api/chat`, `POST /stream` (SSE:
+  `start` / `delta` / `tool` / `log` / `done` / `error`), `GET /:slug`, `POST /:slug/rename`,
+  `DELETE /:slug`, `POST /open`, `GET /images/:name` — **the fixed paths must stay above
+  `GET /:slug`**.
+- **Pasted screenshots** — QC evidence is usually an image, so Cmd/Ctrl-V (and drop, and the
+  paperclip) attaches one to the message. The CLI takes a prompt, **not image bytes**, so the path is:
+  the browser sends base64 → `saveImages` writes the file under `testing/chats/images/` (name generated
+  server-side from timestamp + MIME, **never** the client's file name) → `imagePromptBlock` names the
+  ABSOLUTE paths in the prompt and tells the model to open them with **Read**, which renders images.
+  That's why the default `read` tool mode is enough — don't remove `Read` from `toolArgs`. The user
+  message stores the file names (`ChatMessage.images`), and `GET /images/:name` serves them back so a
+  reopened transcript still shows what was asked about; a turn still in flight previews from the data
+  URLs already in memory (the files aren't on disk until it finishes). Limits are mirrored on both
+  sides (4 images, 8 MB, png/jpeg/webp/gif) — the client copy only exists so the engineer hears why
+  before waiting on a turn. **An image with no text is a valid message**; the server supplies the
+  wording rather than 400-ing.
+- **UI is a port of shadcnuikit's "AI Chat v2"** (bordered shell, w-72 rail with search + Today /
+  Yesterday / 7 Days Ago groups + footer nav + New Chat, centered column, gradient
+  greeting, tinted composer well with a hint strip). It deliberately uses the reference's **small
+  radii** rather than the portal's rounded-3xl house style. Every mock control is wired to something
+  real: the paperclip converts a spec through the shared in-browser `docConvert` and appends it to
+  the prompt (the file never reaches the server) or stages an image (see above — that one does), the
+  mic slot became the tools toggle, and the hero
+  orb is layered SVG gradients standing in for the reference's Lottie (150 KB of generated paths, and
+  their artwork). `ChatWorkspace` is mounted `key={projectId}` so switching project resets cleanly
+  **without setState-in-effect**.
+- **`@` tags a ticket or its test cases** — "are these cases enough?" only means something next to
+  a ticket, and the alternative is pasting a folder path or hoping the model greps for the right one.
+  Typing `@` in the composer opens a picker over `GET /api/clickup/crawled` (fetched only once `@` is
+  typed, then cached): one row per crawled ticket, plus a `@<id>/testcases` row when it has versions.
+  ↑/↓ + Enter/Tab pick, Escape closes — while the menu is open **Enter means "pick", not "send"**.
+  Only the REFERENCE travels (`mentions: [{kind, folder, version?}]`); `resolveMentions`
+  (routes/chat.ts) turns each into absolute file paths — `ticket.md`/`comments.md`/`summary.md`, or the
+  version `listTestcaseVersions` reports (newest when no version is given) — and the model Reads them.
+  Nothing is inlined, so five tags cost a few prompt lines instead of 200 KB of ticket text. The
+  `@ABC-123` token stays in the message text and **deleting it is how you untag**: send filters
+  mentions to those whose token is still in the text. An unresolvable tag (renamed folder, deleted
+  cases) is dropped and reported in a `log` frame — a silent drop reads as the model ignoring the tag.
+  Folder guarding is **per path segment**, since a subtask folder legitimately contains `/`.
+- **Width: the column grows past the reference's `max-w-4xl`** (`xl:max-w-5xl 2xl:max-w-[88rem]`) —
+  4xl on a 1440px+ screen left the answer in a ribbon between empty gutters. Three pieces make that
+  work together, so don't change one alone: the assistant bubble is **`w-fit`** (a one-line answer
+  stretched across 75% of a 1300px column read as a layout bug), prose carries a **measure**
+  (`[&_p]:max-w-[85ch]`, likewise `li`/`blockquote`) while code blocks and tables deliberately do NOT
+  (they want every pixel), and `ThinkingBubble`'s skeleton uses **rem widths** because a % width has
+  nothing to resolve against inside a fit-content box.
+- **The waiting state is a `ThinkingBubble`, not a spinner** — three drifting dots (`.qc-dot`),
+  what the turn is DOING (`phaseLabel` names it after the latest tool: "Reading the project",
+  "Searching the project", …), an elapsed reading once past 3s, and shimmer skeleton lines standing
+  in for the answer. It replaced a `Loader2` + "Thinking…" line that sat under a SECOND spinner the
+  tool trail drew — two spinners in an empty bubble. Once text starts arriving the indicator stays
+  **mounted** (keyed, `compact`, moved below the answer) so its timer doesn't restart mid-answer, and
+  elapsed is measured against a start TIMESTAMP rather than counted in ticks — a backgrounded tab has
+  its timers throttled and a counter read 10s for a 35s wait.
+- **Every message carries its time** (`MessageTime`) — time of day, plus the date when it isn't today,
+  full stamp in the `title`. The user's shows under the bubble; the assistant's sits in the footer
+  beside Copy with the model that answered. The in-flight turn stamps `pending.at` at send, so the
+  time doesn't pop in only once the answer saves — and that same value is what the elapsed reading
+  counts from.
+- **Code in an answer is a `CodeBlock`** (`web/src/components/CodeBlock.tsx`) — language label,
+  **Copy** button, syntax colours. The swap happens on markdown's **`pre`**, not `code`:
+  react-markdown v9 dropped the `inline` prop, so `pre` is the only reliable "this was a fenced
+  block" signal — keying off `code` and guessing from "contains a newline" renders a one-line fence
+  as an inline pill. Highlighting arrives a beat after mount (lazy import) and is stamped with the
+  code it came from, so a streaming answer falls back to plain text instead of showing the previous
+  frame's markup; it must never be why code doesn't appear.
+- **The quick chips are category EXPANDERS, not one-shot prompts** — verified against the reference:
+  clicking a chip replaces the chip row with that category's four concrete prompts (bold verb
+  `prefix` + muted `rest`), and clicking one **types it into the composer instead of sending**, then
+  restores the chips. The list is absolutely positioned over the chips' slot so the composer doesn't
+  jump. Typing-not-sending is the point: "the newest crawled ticket" usually wants a real ticket id
+  first. The reference dead-ends once a category is open (no way back to pick another), so Escape and
+  an outside click also restore the chips — no extra control on screen.
 
 ## Terminal page (device shell)
 
