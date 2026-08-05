@@ -106,6 +106,10 @@ export interface CreateRunBody {
   // where to run: desktop browser (default), the web app on a mobile device, or a
   // native app already installed on a mobile device — both mobile modes via Maestro MCP
   testTarget?: TestTarget
+  // Mobile targets only: the Maestro `device_id` (UDID / adb serial / "chromium") the
+  // run must drive, picked in the Run form when several devices are booted. Omitted =
+  // let the run pick whatever `list_devices` reports first, the previous behavior.
+  deviceId?: string
   // Advanced mode: a single run that covers a connected feature spanning several
   // tickets. `ticketId` is the lead ticket; `relatedTickets` are the rest, and
   // `workflowSteps` is the ordered end-to-end flow Claude should exercise.

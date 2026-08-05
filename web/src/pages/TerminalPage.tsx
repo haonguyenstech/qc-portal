@@ -3,6 +3,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import {
   AlertCircle,
+  ClipboardCopy,
   Command,
   CornerDownLeft,
   FolderGit2,
@@ -231,6 +232,8 @@ interface PaneApi {
   kill: () => void
   sendText: (text: string) => void
   focus: () => void
+  /** Copy the selection, or the whole scrollback when nothing is selected. */
+  copy: () => Promise<boolean>
 }
 
 /**
@@ -265,7 +268,8 @@ function TerminalPane({
   // code). We must NOT re-attach on our own: both windows would keep stealing it back
   // and flap between connecting/connected forever. The user takes over explicitly.
   const [takenOver, setTakenOver] = useState(false)
-  const { hostRef, status, connect, disconnect, sendText, focus } = useXtermSession(
+  const { hostRef, status, connect, disconnect, sendText, focus, copySelectionOrAll } =
+    useXtermSession(
     () => ({ projectId, tab: tab.id }),
     {
       // Auto-launch Claude (skipping the per-action permission prompts) once the
@@ -302,9 +306,9 @@ function TerminalPane({
   )
 
   useEffect(() => {
-    onApi(tab.id, { connect: open, kill, sendText, focus })
+    onApi(tab.id, { connect: open, kill, sendText, focus, copy: copySelectionOrAll })
     return () => onApi(tab.id, null)
-  }, [tab.id, open, kill, sendText, focus, onApi])
+  }, [tab.id, open, kill, sendText, focus, copySelectionOrAll, onApi])
 
   // Open the shell without being asked when this tab was just created by the user or
   // when the server still has its session (then it's a re-attach). Driven by `status`,
@@ -641,6 +645,20 @@ function TerminalWorkspace({
             : 'Each tab is its own shell and Claude session. Use + in the terminal to open another.'}
         </p>
         <div data-tour="session" className="flex items-center gap-2">
+        {/* Copying Claude's output is a core reason to open this page, and the key
+            combo differs per OS (Ctrl+C is SIGINT on Windows) — so give it a button
+            that always works. Copies the selection, or the whole scrollback when
+            nothing is selected. */}
+        <Button
+          variant="outline"
+          onClick={() => void apis.current.get(activeId)?.copy()}
+          disabled={activeStatus === 'idle' || !activeId}
+          className="rounded-full active:scale-[0.98]"
+          title="Copy the selected text — or the whole terminal output when nothing is selected"
+        >
+          <ClipboardCopy className="h-4 w-4" />
+          Copy output
+        </Button>
         <Button
           variant="outline"
           onClick={() => setCmdOpen(true)}

@@ -7,6 +7,16 @@ import { resolveProject } from '../projectScope.js'
 import { revealFolderNative } from '../folderPicker.js'
 import { runClaude, parseClaudeJsonResult, CRAWL_SUMMARY_MODELS } from '../claudeExec.js'
 import { scanAvailable, startScanJob, getScanJob, stopScanJob } from '../scanJobs.js'
+import {
+  apiAccountVars,
+  apiAuthVars,
+  deleteApiAccount,
+  listApiAccounts,
+  parseAccountSheet,
+  upsertApiAccount,
+} from '../apiAccounts.js'
+import { readAccounts } from '../accountsStore.js'
+import { allCodes, codeFor } from '../totp.js'
 
 export const apiTestsRouter = Router()
 
@@ -67,6 +77,13 @@ interface ApiCapture {
 
 interface ApiRequestDef {
   name: string
+  /**
+   * The module this request belongs to — the Swagger-style grouping shown in the
+   * saved-requests list (`''` = ungrouped). It's collection *organization*, not
+   * request content, so it's set by the `/group` routes below rather than by the
+   * page's request-draft auto-save; a PUT that omits it keeps what's on disk.
+   */
+  group: string
   method: string
   url: string
   query: ApiKV[]
@@ -140,12 +157,20 @@ function toCaptures(v: unknown): ApiCapture[] {
     .slice(0, 20)
 }
 
+const MAX_GROUP_LEN = 60
+
+/** Normalize a module name: single-line, trimmed, capped. `''` = ungrouped. */
+function toGroup(v: unknown): string {
+  return typeof v === 'string' ? v.replace(/\s+/g, ' ').trim().slice(0, MAX_GROUP_LEN) : ''
+}
+
 function toRequestDef(name: string, b: Record<string, unknown>): ApiRequestDef {
   const method = typeof b.method === 'string' ? b.method.toUpperCase() : 'GET'
   const bodyMode: BodyMode =
     b.bodyMode === 'json' || b.bodyMode === 'text' ? (b.bodyMode as BodyMode) : 'none'
   return {
     name,
+    group: toGroup(b.group),
     method: HTTP_METHODS.has(method) ? method : 'GET',
     url: typeof b.url === 'string' ? b.url.slice(0, 4000) : '',
     query: toKV(b.query),
@@ -290,6 +315,52 @@ function resolveActiveVars(root: string): Map<string, { value: string; secret: b
   return map
 }
 
+/**
+ * Everything a send can substitute: the active environment, plus the project's test
+ * ACCOUNTS (`{{account.<label>.username}}` / `.password`, from the secure store beside
+ * the DB) and a LIVE authenticator code per registered 2FA account (`{{otp.<label>}}`).
+ *
+ * The OTP is computed here, per send, on purpose: it's a function of the clock, so it
+ * must not be cached, stored, or resolved a step earlier than it's used. Both it and
+ * passwords are marked `secret`, which is what keeps them out of the echoed request,
+ * the response view, and the on-disk run history (see `maskSecrets`).
+ *
+ * The environment wins on a key collision — an engineer who defines `otp.foo` by hand
+ * for a fixed-OTP environment keeps their value.
+ */
+function resolveSendVars(
+  root: string,
+  projectId: string,
+  auth?: { account?: string; totp?: string },
+): Map<string, { value: string; secret: boolean }> {
+  const map = new Map<string, { value: string; secret: boolean }>()
+  for (const [k, v] of apiAccountVars(projectId)) map.set(k, v)
+  for (const code of allCodes(projectId)) {
+    map.set(`otp.${code.label}`, { value: code.code, secret: true })
+  }
+  // The flow's SELECTED account/authenticator, as label-free `auth.*` — so one login
+  // request can run as whichever account the flow picked (see apiAuthVars).
+  if (auth?.account) {
+    for (const [k, v] of apiAuthVars(projectId, auth.account)) map.set(k, v)
+  }
+  if (auth?.totp) {
+    const code = codeFor(projectId, auth.totp)
+    if (code) map.set('auth.otp', { value: code.code, secret: true })
+  }
+  for (const [k, v] of resolveActiveVars(root)) map.set(k, v)
+  return map
+}
+
+/** `auth` as sent by the flow runner — two labels, nothing sensitive. */
+function toAuthSelection(v: unknown): { account?: string; totp?: string } | undefined {
+  if (!v || typeof v !== 'object') return undefined
+  const r = v as Record<string, unknown>
+  const account = typeof r.account === 'string' ? r.account.trim().slice(0, 60) : ''
+  const totp = typeof r.totp === 'string' ? r.totp.trim().slice(0, 60) : ''
+  if (!account && !totp) return undefined
+  return { account: account || undefined, totp: totp || undefined }
+}
+
 const VAR_TOKEN_RE = /\{\{\s*([\w.-]+)\s*\}\}/g
 
 /**
@@ -336,7 +407,7 @@ apiTestsRouter.post('/send', async (req, res) => {
   // sends placeholders, so secret values (tokens/passwords) never travel to the client.
   const project = resolveProject(req)
   const vars = project
-    ? resolveActiveVars(project.rootPath)
+    ? resolveSendVars(project.rootPath, project.id, toAuthSelection(body.auth))
     : new Map<string, { value: string; secret: boolean }>()
 
   const rawUrlInput = typeof body.url === 'string' ? body.url.trim() : ''
@@ -689,13 +760,429 @@ apiTestsRouter.post('/environments/capture', (req, res) => {
   res.json({ ok: true, env: targetName, key })
 })
 
+// ---------------------------------------------------------------- accounts (secure)
+
+// The login credentials a flow's first step posts. Stored OUTSIDE the project (see
+// apiAccounts.ts for why), so these routes only ever hand back `PublicApiAccount` —
+// the password is write-only, and the live 2FA code for the same label comes from the
+// existing /api/accounts/totp routes.
+
+/** GET /api/api-tests/accounts — registered accounts (no passwords). */
+apiTestsRouter.get('/accounts', (req, res) => {
+  const project = resolveProject(req)
+  if (!project) return res.status(400).json({ error: 'project not found' })
+  res.json({ accounts: listApiAccounts(project.id) })
+})
+
+/** PUT /api/api-tests/accounts — register/replace one. Empty password = keep stored. */
+apiTestsRouter.put('/accounts', (req, res) => {
+  const project = resolveProject(req)
+  if (!project) return res.status(400).json({ error: 'project not found' })
+  const b = (req.body ?? {}) as Record<string, unknown>
+  try {
+    const account = upsertApiAccount(project.id, {
+      label: typeof b.label === 'string' ? b.label : '',
+      username: typeof b.username === 'string' ? b.username : undefined,
+      password: typeof b.password === 'string' ? b.password : undefined,
+      note: typeof b.note === 'string' ? b.note : undefined,
+    })
+    res.json({ account })
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : 'invalid account' })
+  }
+})
+
+/**
+ * GET /api/api-tests/accounts/candidates — logins found in `testing/environments.md`.
+ *
+ * The engineer already typed their test accounts on the Instructions → Accounts page;
+ * without this, the flow's account picker says "No account" while they're looking at
+ * one. Passwords are NOT returned — the import below re-reads the sheet server-side, so
+ * a credential never makes the round trip. Declared above `/accounts/:label` (DELETE),
+ * which is a different method, but keep the order for the next route that isn't.
+ */
+apiTestsRouter.get('/accounts/candidates', (req, res) => {
+  const project = resolveProject(req)
+  if (!project) return res.status(400).json({ error: 'project not found' })
+  const sheet = readAccounts(project.rootPath)
+  const existing = new Set(listApiAccounts(project.id).map((a) => a.username.toLowerCase()))
+  const candidates = parseAccountSheet(sheet.content ?? '')
+    // Already imported (matched on username, since the label is only a suggestion).
+    .filter((c) => !existing.has(c.username.toLowerCase()))
+    .map(({ password: _password, ...rest }) => rest)
+  res.json({ candidates })
+})
+
+/**
+ * POST /api/api-tests/accounts/import — copy sheet rows into the secure store.
+ * Body: `{ usernames: string[] }`. The password comes from re-parsing the sheet here.
+ */
+apiTestsRouter.post('/accounts/import', (req, res) => {
+  const project = resolveProject(req)
+  if (!project) return res.status(400).json({ error: 'project not found' })
+  const wanted = Array.isArray(req.body?.usernames)
+    ? new Set(
+        (req.body.usernames as unknown[])
+          .filter((u): u is string => typeof u === 'string')
+          .map((u) => u.toLowerCase()),
+      )
+    : new Set<string>()
+  if (!wanted.size) return res.status(400).json({ error: 'usernames is required' })
+  const sheet = readAccounts(project.rootPath)
+  const rows = parseAccountSheet(sheet.content ?? '').filter((c) =>
+    wanted.has(c.username.toLowerCase()),
+  )
+  if (!rows.length) return res.status(404).json({ error: 'no matching row in environments.md' })
+  const imported: string[] = []
+  for (const row of rows) {
+    try {
+      const account = upsertApiAccount(project.id, {
+        label: row.label,
+        username: row.username,
+        // '' would mean "keep existing" in upsert — which is right here too: a sheet
+        // with a blank password must not wipe a password already stored.
+        password: row.password || undefined,
+        note: row.note,
+      })
+      imported.push(account.label)
+    } catch {
+      /* skip one bad row rather than failing the whole import */
+    }
+  }
+  res.json({ imported })
+})
+
+/** DELETE /api/api-tests/accounts/:label */
+apiTestsRouter.delete('/accounts/:label', (req, res) => {
+  const project = resolveProject(req)
+  if (!project) return res.status(400).json({ error: 'project not found' })
+  if (!deleteApiAccount(project.id, req.params.label)) {
+    return res.status(404).json({ error: 'account not found' })
+  }
+  res.json({ ok: true })
+})
+
+// ---------------------------------------------------------------- flows (collection runs)
+
+// A flow is an ORDERED list of saved requests run as one scenario — the Postman
+// "run collection" shape: log in, capture the token, then exercise the steps that
+// need it. Steps reference a saved request BY NAME rather than copying it, so editing
+// the request in the builder updates every flow that uses it (and a rename is
+// followed by the /:name/rename route below).
+//
+// The run itself is driven from the browser, one `POST /send` per step: assertions and
+// captures already live there, and re-implementing the assertion engine server-side
+// would leave two copies to drift apart. What the server owns is the flow DEFINITION
+// and the saved REPORT.
+
+interface ApiFlowStep {
+  id: string
+  requestName: string
+  enabled: boolean
+  /** Keep going even when this step fails (a soft/optional check). */
+  continueOnFail: boolean
+}
+
+interface ApiFlow {
+  name: string
+  description: string
+  /** Stop the run at the first failing step (per-step continueOnFail overrides it). */
+  stopOnFail: boolean
+  /**
+   * Which identity the whole flow runs as: an account label from the secure store and
+   * an authenticator label from totp.ts (the SAME authenticators the Instructions →
+   * Accounts page registers). Only LABELS are stored here — this file is versioned
+   * with the project, so a credential must never land in it. The runner passes them
+   * with every step, and `resolveSendVars` turns them into `{{auth.username}}` /
+   * `{{auth.password}}` / `{{auth.otp}}`.
+   */
+  auth: { accountLabel: string; totpLabel: string }
+  steps: ApiFlowStep[]
+  savedAt?: string
+}
+
+const FLOWS_FILE = '_flows.json'
+const MAX_FLOWS = 30
+const MAX_STEPS = 40
+const MAX_FLOW_RUNS = 20
+
+function toFlowStep(v: unknown, i: number): ApiFlowStep | null {
+  if (!v || typeof v !== 'object') return null
+  const r = v as Record<string, unknown>
+  const requestName = typeof r.requestName === 'string' ? r.requestName.trim() : ''
+  if (!requestName) return null
+  return {
+    id: typeof r.id === 'string' && r.id ? r.id.slice(0, 40) : `s${i}`,
+    requestName: requestName.slice(0, 60),
+    enabled: r.enabled !== false,
+    continueOnFail: r.continueOnFail === true,
+  }
+}
+
+function toFlow(name: string, v: unknown): ApiFlow {
+  const r = (v && typeof v === 'object' ? v : {}) as Record<string, unknown>
+  const steps: ApiFlowStep[] = []
+  if (Array.isArray(r.steps)) {
+    for (const [i, raw] of r.steps.slice(0, MAX_STEPS * 2).entries()) {
+      const step = toFlowStep(raw, i)
+      if (step) steps.push(step)
+    }
+  }
+  const rawAuth = (r.auth && typeof r.auth === 'object' ? r.auth : {}) as Record<string, unknown>
+  const authLabel = (v: unknown) => (typeof v === 'string' ? v.trim().slice(0, 60) : '')
+  return {
+    name,
+    description: typeof r.description === 'string' ? r.description.slice(0, 500) : '',
+    stopOnFail: r.stopOnFail !== false,
+    auth: {
+      accountLabel: authLabel(rawAuth.accountLabel),
+      totpLabel: authLabel(rawAuth.totpLabel),
+    },
+    steps: steps.slice(0, MAX_STEPS),
+    savedAt: typeof r.savedAt === 'string' ? r.savedAt : undefined,
+  }
+}
+
+function flowsFilePath(root: string): string {
+  return path.join(collectionDir(root), FLOWS_FILE)
+}
+
+function readFlows(root: string): ApiFlow[] {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(flowsFilePath(root), 'utf8'))
+    if (!Array.isArray(parsed?.flows)) return []
+    return (parsed.flows as unknown[])
+      .map((f) => {
+        const name = typeof (f as { name?: unknown })?.name === 'string' ? (f as { name: string }).name : ''
+        return NAME_RE.test(name) ? toFlow(name, f) : null
+      })
+      .filter((f): f is ApiFlow => f != null)
+  } catch {
+    return []
+  }
+}
+
+function writeFlows(root: string, flows: ApiFlow[]): void {
+  fs.mkdirSync(collectionDir(root), { recursive: true })
+  fs.writeFileSync(flowsFilePath(root), JSON.stringify({ flows }, null, 2), 'utf8')
+}
+
+/** GET /api/api-tests/flows — every flow in the project. */
+apiTestsRouter.get('/flows', (req, res) => {
+  const project = resolveProject(req)
+  if (!project) return res.status(400).json({ error: 'project not found' })
+  res.json({ flows: readFlows(project.rootPath) })
+})
+
+/** PUT /api/api-tests/flows/:name — create or replace one flow. */
+apiTestsRouter.put('/flows/:name', (req, res) => {
+  const project = resolveProject(req)
+  if (!project) return res.status(400).json({ error: 'project not found' })
+  const name = req.params.name
+  if (!NAME_RE.test(name)) return res.status(400).json({ error: 'invalid flow name' })
+  const flows = readFlows(project.rootPath)
+  const existing = flows.findIndex((f) => f.name === name)
+  if (existing < 0 && flows.length >= MAX_FLOWS) {
+    return res.status(422).json({ error: `at most ${MAX_FLOWS} flows per project` })
+  }
+  const flow: ApiFlow = { ...toFlow(name, req.body), savedAt: new Date().toISOString() }
+  if (existing >= 0) flows[existing] = flow
+  else flows.push(flow)
+  writeFlows(project.rootPath, flows)
+  res.json({ flow })
+})
+
+/** POST /api/api-tests/flows/:name/rename — rename a flow (keeps its steps). */
+apiTestsRouter.post('/flows/:name/rename', (req, res) => {
+  const project = resolveProject(req)
+  if (!project) return res.status(400).json({ error: 'project not found' })
+  const to = typeof req.body?.to === 'string' ? req.body.to.trim() : ''
+  if (!NAME_RE.test(to)) return res.status(400).json({ error: 'invalid new name' })
+  const flows = readFlows(project.rootPath)
+  const flow = flows.find((f) => f.name === req.params.name)
+  if (!flow) return res.status(404).json({ error: 'flow not found' })
+  if (flows.some((f) => f.name === to)) {
+    return res.status(409).json({ error: 'a flow with that name already exists' })
+  }
+  const from = flow.name
+  flow.name = to
+  flow.savedAt = new Date().toISOString()
+  writeFlows(project.rootPath, flows)
+  // Carry the saved reports across, so renaming doesn't orphan the run history.
+  const fromDir = flowRunsDirFor(project.rootPath, from)
+  const toDir = flowRunsDirFor(project.rootPath, to)
+  if (fromDir && toDir && fs.existsSync(fromDir) && !fs.existsSync(toDir)) {
+    try {
+      fs.renameSync(fromDir, toDir)
+    } catch {
+      /* history is best-effort — the rename itself already succeeded */
+    }
+  }
+  res.json({ flow })
+})
+
+/** DELETE /api/api-tests/flows/:name — remove a flow (and its saved reports). */
+apiTestsRouter.delete('/flows/:name', (req, res) => {
+  const project = resolveProject(req)
+  if (!project) return res.status(400).json({ error: 'project not found' })
+  const flows = readFlows(project.rootPath)
+  const next = flows.filter((f) => f.name !== req.params.name)
+  if (next.length === flows.length) return res.status(404).json({ error: 'flow not found' })
+  writeFlows(project.rootPath, next)
+  const dir = flowRunsDirFor(project.rootPath, req.params.name)
+  if (dir) fs.rmSync(dir, { recursive: true, force: true })
+  res.json({ ok: true })
+})
+
+// --- flow run reports (evidence a scenario passed, kept with the project) ---
+
+interface FlowRunStepRecord {
+  requestName: string
+  method: string
+  url: string
+  status: number | null
+  timeMs: number
+  outcome: 'pass' | 'fail' | 'skipped' | 'error'
+  checks: { passed: number; total: number }
+  detail: string
+  captured: string[]
+}
+
+interface FlowRunRecord {
+  id: string
+  at: string
+  flow: string
+  env: string | null
+  account: string | null
+  totalMs: number
+  summary: { passed: number; failed: number; skipped: number; total: number }
+  steps: FlowRunStepRecord[]
+}
+
+function flowRunsDirFor(root: string, name: string): string | null {
+  const safe = name.replace(/[^\w .-]/g, '_').slice(0, 60)
+  if (!safe) return null
+  const base = path.join(collectionDir(root), '_flow-runs')
+  const target = path.resolve(base, safe)
+  if (path.dirname(target) !== base) return null
+  return target
+}
+
+function toFlowRunStep(v: unknown): FlowRunStepRecord {
+  const r = (v && typeof v === 'object' ? v : {}) as Record<string, unknown>
+  const outcome = r.outcome
+  return {
+    requestName: typeof r.requestName === 'string' ? r.requestName.slice(0, 60) : '',
+    method: typeof r.method === 'string' ? r.method.slice(0, 10) : '',
+    url: typeof r.url === 'string' ? r.url.slice(0, 2000) : '',
+    status: Number.isFinite(Number(r.status)) ? Number(r.status) : null,
+    timeMs: num(r.timeMs),
+    outcome:
+      outcome === 'pass' || outcome === 'fail' || outcome === 'skipped' || outcome === 'error'
+        ? outcome
+        : 'error',
+    checks: {
+      passed: num((r.checks as Record<string, unknown>)?.passed),
+      total: num((r.checks as Record<string, unknown>)?.total),
+    },
+    detail: typeof r.detail === 'string' ? r.detail.slice(0, 2000) : '',
+    captured: Array.isArray(r.captured)
+      ? r.captured.filter((c): c is string => typeof c === 'string').slice(0, 20)
+      : [],
+  }
+}
+
+/**
+ * POST /api/api-tests/flows/:name/runs — store one run report.
+ *
+ * The browser sends only the per-step VERDICTS (status, timing, assertion counts,
+ * which variables were captured) — never response bodies, so a token in a login
+ * response can't be written into the project's history by this path.
+ */
+apiTestsRouter.post('/flows/:name/runs', (req, res) => {
+  const project = resolveProject(req)
+  if (!project) return res.status(400).json({ error: 'project not found' })
+  const dir = flowRunsDirFor(project.rootPath, req.params.name)
+  if (!dir) return res.status(400).json({ error: 'invalid flow name' })
+  const b = (req.body ?? {}) as Record<string, unknown>
+  const steps = Array.isArray(b.steps) ? b.steps.slice(0, MAX_STEPS).map(toFlowRunStep) : []
+  const record: FlowRunRecord = {
+    id: randomUUID(),
+    at: new Date().toISOString(),
+    flow: req.params.name,
+    env: typeof b.env === 'string' && b.env ? b.env.slice(0, 40) : null,
+    account: typeof b.account === 'string' && b.account ? b.account.slice(0, 60) : null,
+    totalMs: num(b.totalMs),
+    summary: {
+      passed: steps.filter((s) => s.outcome === 'pass').length,
+      failed: steps.filter((s) => s.outcome === 'fail' || s.outcome === 'error').length,
+      skipped: steps.filter((s) => s.outcome === 'skipped').length,
+      total: steps.length,
+    },
+    steps,
+  }
+  try {
+    fs.mkdirSync(dir, { recursive: true })
+    fs.writeFileSync(path.join(dir, `${record.id}.json`), JSON.stringify(record, null, 2), 'utf8')
+    // Keep the newest MAX_FLOW_RUNS reports so history can't grow without bound.
+    const files = fs
+      .readdirSync(dir)
+      .filter((f) => f.endsWith('.json'))
+      .map((f) => ({ f, at: fs.statSync(path.join(dir, f)).mtimeMs }))
+      .sort((a, b2) => b2.at - a.at)
+    for (const stale of files.slice(MAX_FLOW_RUNS)) {
+      fs.rmSync(path.join(dir, stale.f), { force: true })
+    }
+  } catch (err) {
+    return res
+      .status(500)
+      .json({ error: err instanceof Error ? err.message : 'failed to store the run' })
+  }
+  res.status(201).json({ run: record })
+})
+
+/** GET /api/api-tests/flows/:name/runs — saved reports, newest first. */
+apiTestsRouter.get('/flows/:name/runs', (req, res) => {
+  const project = resolveProject(req)
+  if (!project) return res.status(400).json({ error: 'project not found' })
+  const dir = flowRunsDirFor(project.rootPath, req.params.name)
+  if (!dir) return res.status(400).json({ error: 'invalid flow name' })
+  let runs: FlowRunRecord[] = []
+  try {
+    runs = fs
+      .readdirSync(dir)
+      .filter((f) => f.endsWith('.json'))
+      .map((f) => {
+        try {
+          return JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8')) as FlowRunRecord
+        } catch {
+          return null
+        }
+      })
+      .filter((r): r is FlowRunRecord => r != null)
+      .sort((a, b) => (a.at < b.at ? 1 : -1))
+  } catch {
+    runs = [] // no runs yet
+  }
+  res.json({ runs })
+})
+
 // ---------------------------------------------------------------- collection (disk)
 
 const NAME_RE = /^[\w .-]{1,60}$/
 const MAX_ITEM_BYTES = 256 * 1024 // a saved request is small metadata, not an asset
-// `results` is the per-request run-history subfolder, `_environments` is the env
-// store — reserve both so a saved request can't clobber them.
-const RESERVED_NAMES = new Set(['results', '_environments'])
+// `results` is the per-request run-history subfolder, `_environments` the env store,
+// `_flows` the flow definitions and `_flow-runs` their reports — reserve them all so a
+// saved request can't clobber one. (`accounts` and `flows` are ROUTE paths, not files,
+// but a request saved under either name would make `/accounts` / `/flows` ambiguous.)
+const RESERVED_NAMES = new Set([
+  'results',
+  '_environments',
+  '_flows',
+  '_flow-runs',
+  'accounts',
+  'flows',
+])
 
 function collectionDir(root: string): string {
   return path.join(testingDirFor(root), 'api-tests')
@@ -754,7 +1241,10 @@ apiTestsRouter.get('/', (req, res) => {
   try {
     const out = fs
       .readdirSync(dir, { withFileTypes: true })
-      .filter((d) => d.isFile() && d.name.endsWith('.json') && d.name !== ENV_FILE)
+      .filter(
+        (d) =>
+          d.isFile() && d.name.endsWith('.json') && d.name !== ENV_FILE && d.name !== FLOWS_FILE,
+      )
       .map((d): ApiRequestDef | null => {
         const full = path.join(dir, d.name)
         const name = d.name.replace(/\.json$/, '')
@@ -792,6 +1282,71 @@ apiTestsRouter.post('/open', async (req, res) => {
   return res.json({ ok: true, path: dir })
 })
 
+/** Read one saved request off disk, or null when it's missing/corrupt. */
+function readItem(root: string, name: string): ApiRequestDef | null {
+  const file = itemFile(root, name)
+  if (!file) return null
+  try {
+    return toRequestDef(name, JSON.parse(fs.readFileSync(file, 'utf8')))
+  } catch {
+    return null
+  }
+}
+
+/**
+ * POST /api/api-tests/groups/rename — rename a module across every request in it.
+ * MUST stay above `/:name/rename`, which would otherwise match this path with
+ * `name = "groups"`. `to` may be empty, which moves the whole module to ungrouped.
+ */
+apiTestsRouter.post('/groups/rename', (req, res) => {
+  const project = resolveProject(req)
+  if (!project) return res.status(400).json({ error: 'project not found' })
+  const from = toGroup(req.body?.from)
+  const to = toGroup(req.body?.to)
+  if (!from) return res.status(400).json({ error: 'from is required' })
+  const dir = collectionDir(project.rootPath)
+  let moved = 0
+  let entries: string[]
+  try {
+    entries = fs
+      .readdirSync(dir, { withFileTypes: true })
+      .filter(
+        (d) =>
+          d.isFile() && d.name.endsWith('.json') && d.name !== ENV_FILE && d.name !== FLOWS_FILE,
+      )
+      .map((d) => d.name.replace(/\.json$/, ''))
+  } catch {
+    return res.json({ ok: true, moved: 0 }) // no api-tests dir yet
+  }
+  for (const name of entries) {
+    const def = readItem(project.rootPath, name)
+    const file = itemFile(project.rootPath, name)
+    if (!def || !file || def.group !== from) continue
+    def.group = to
+    try {
+      fs.writeFileSync(file, JSON.stringify(def, null, 2), 'utf8')
+      moved++
+    } catch {
+      /* best-effort — one unwritable file shouldn't abort the rename */
+    }
+  }
+  return res.json({ ok: true, moved })
+})
+
+/** POST /api/api-tests/:name/group — move one saved request into a module (`''` = ungrouped). */
+apiTestsRouter.post('/:name/group', (req, res) => {
+  const project = resolveProject(req)
+  if (!project) return res.status(400).json({ error: 'project not found' })
+  const name = req.params.name
+  const target = itemFile(project.rootPath, name)
+  const def = readItem(project.rootPath, name)
+  if (!target || !def) return res.status(404).json({ error: 'request not found' })
+  def.group = toGroup(req.body?.group)
+  fs.writeFileSync(target, JSON.stringify(def, null, 2), 'utf8')
+  const stat = fs.statSync(target)
+  res.json({ ...def, savedAt: stat.mtime.toISOString() })
+})
+
 /** PUT /api/api-tests/:name — create or overwrite a saved request. */
 apiTestsRouter.put('/:name', (req, res) => {
   const project = resolveProject(req)
@@ -799,7 +1354,11 @@ apiTestsRouter.put('/:name', (req, res) => {
   const name = req.params.name
   const target = itemFile(project.rootPath, name)
   if (!target) return res.status(400).json({ error: 'invalid request name' })
-  const def = toRequestDef(name, (req.body ?? {}) as Record<string, unknown>)
+  const body = (req.body ?? {}) as Record<string, unknown>
+  const def = toRequestDef(name, body)
+  // The module isn't part of the request draft the page auto-saves, so a PUT that
+  // doesn't mention it must keep the one already on disk (see ApiRequestDef.group).
+  if (body.group === undefined) def.group = readItem(project.rootPath, name)?.group ?? ''
   const json = JSON.stringify(def, null, 2)
   if (Buffer.byteLength(json, 'utf8') > MAX_ITEM_BYTES) {
     return res.status(413).json({ error: 'request too large (256 KB max)' })
@@ -848,6 +1407,21 @@ apiTestsRouter.post('/:name/rename', (req, res) => {
     } catch {
       /* best-effort — history move is non-fatal */
     }
+  }
+  // Flow steps reference a request BY NAME, so a rename has to follow them or every
+  // flow using this request silently loses that step.
+  if (fromName !== newName) {
+    const flows = readFlows(project.rootPath)
+    let touched = false
+    for (const flow of flows) {
+      for (const step of flow.steps) {
+        if (step.requestName === fromName) {
+          step.requestName = newName
+          touched = true
+        }
+      }
+    }
+    if (touched) writeFlows(project.rootPath, flows)
   }
   const stat = fs.statSync(to)
   res.json({ ...def, savedAt: stat.mtime.toISOString() })

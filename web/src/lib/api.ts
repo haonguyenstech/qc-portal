@@ -202,6 +202,8 @@ export function createRun(body: {
   relatedTickets?: string[]
   workflowSteps?: string[]
   testTarget?: 'web' | 'web-mobile' | 'app-mobile'
+  /** Mobile targets: the Maestro device_id to drive; omitted = let the run pick. */
+  deviceId?: string
 }): Promise<{ runId: string } & RunSummary> {
   return request('/api/qc/run', { method: 'POST', body: JSON.stringify(body) })
 }
@@ -1487,6 +1489,12 @@ export function generateTestCases(body: {
   projectId: string
   folder: string
   template?: { name: string; content: string } | null
+  /**
+   * A specification document attached by the QC engineer, already converted to Markdown
+   * in the browser (docx/pdf/xlsx/csv via lib/docConvert). For tickets that only LINK to
+   * their spec: it becomes a requirement source on par with the ticket.
+   */
+  spec?: { name: string; content: string } | null
   instructions?: string
   projectName?: string
   model?: string
@@ -1670,6 +1678,12 @@ export function startTestCaseJob(body: {
   /** Optional per-folder live app URL (folder → url) to ground that ticket's cases. */
   appUrls?: Record<string, string>
   template?: { name: string; content: string } | null
+  /**
+   * A specification document attached by the QC engineer, already converted to Markdown
+   * in the browser (docx/pdf/xlsx/csv via lib/docConvert). For tickets that only LINK to
+   * their spec: it becomes a requirement source on par with the ticket.
+   */
+  spec?: { name: string; content: string } | null
   instructions?: string
   projectName?: string
   model?: string
@@ -2037,6 +2051,8 @@ export interface ApiCapture {
 
 export interface ApiRequestDef {
   name: string
+  /** Module this request is filed under in the saved list (Swagger-style); '' = ungrouped. */
+  group: string
   method: string
   url: string
   query: ApiKV[]
@@ -2129,6 +2145,12 @@ export function sendApiRequest(body: {
   bodyMode: ApiBodyMode
   body: string
   timeoutMs?: number
+  /**
+   * The identity this send runs as (a flow's picked account / authenticator, by
+   * label). Resolves `{{auth.username}}` / `{{auth.password}}` / `{{auth.otp}}` on the
+   * server, so one login request can run as any account without being edited.
+   */
+  auth?: { account?: string; totp?: string }
 }): Promise<ApiSendResult> {
   return request('/api/api-tests/send', { method: 'POST', body: JSON.stringify(body) })
 }
@@ -2142,7 +2164,7 @@ export function listApiRequests(projectId: string): Promise<ApiRequestDef[]> {
 export function saveApiRequest(
   projectId: string,
   name: string,
-  def: Omit<ApiRequestDef, 'name' | 'savedAt'>,
+  def: Omit<ApiRequestDef, 'name' | 'savedAt' | 'group'> & { group?: string },
 ): Promise<ApiRequestDef> {
   return request(`/api/api-tests/${encodeURIComponent(name)}?projectId=${encodeURIComponent(projectId)}`, {
     method: 'PUT',
@@ -2162,6 +2184,30 @@ export function renameApiRequest(
   })
 }
 
+/** Move a saved API request into a module ('' = ungrouped). */
+export function setApiRequestGroup(
+  projectId: string,
+  name: string,
+  group: string,
+): Promise<ApiRequestDef> {
+  return request(`/api/api-tests/${encodeURIComponent(name)}/group?projectId=${encodeURIComponent(projectId)}`, {
+    method: 'POST',
+    body: JSON.stringify({ group }),
+  })
+}
+
+/** Rename a module across every request filed under it (empty `to` = ungroup them). */
+export function renameApiGroup(
+  projectId: string,
+  from: string,
+  to: string,
+): Promise<{ ok: true; moved: number }> {
+  return request(`/api/api-tests/groups/rename?projectId=${encodeURIComponent(projectId)}`, {
+    method: 'POST',
+    body: JSON.stringify({ from, to }),
+  })
+}
+
 /** Delete a saved API request. */
 export function deleteApiRequest(projectId: string, name: string): Promise<{ ok: true }> {
   return request(
@@ -2176,6 +2222,178 @@ export function openApiTestsFolder(projectId: string): Promise<{ ok: true; path:
     method: 'POST',
     body: JSON.stringify({ projectId }),
   })
+}
+
+// ---- API test accounts (login credentials for a flow's first step) ----
+
+/**
+ * A test account a flow logs in as. The password is **never** returned — it lives in
+ * the portal's own data dir (not the project repo) and only the server substitutes it
+ * into `{{account.<label>.password}}` when it sends the request.
+ */
+export interface ApiAccount {
+  label: string
+  username: string
+  note: string
+  savedAt: string
+  hasPassword: boolean
+}
+
+export function listApiAccounts(projectId: string): Promise<{ accounts: ApiAccount[] }> {
+  return request(`/api/api-tests/accounts?projectId=${encodeURIComponent(projectId)}`)
+}
+
+/** Create/replace an account. An empty `password` keeps the stored one. */
+export function saveApiAccount(
+  projectId: string,
+  body: { label: string; username: string; password?: string; note?: string },
+): Promise<{ account: ApiAccount }> {
+  return request(`/api/api-tests/accounts?projectId=${encodeURIComponent(projectId)}`, {
+    method: 'PUT',
+    body: JSON.stringify(body),
+  })
+}
+
+/** A login found in testing/environments.md (Instructions → Accounts), ready to import. */
+export interface ApiAccountCandidate {
+  label: string
+  username: string
+  role: string
+  environment: string
+  note: string
+  hasPassword: boolean
+}
+
+/** Rows of the project's environments.md sheet that aren't in the store yet. */
+export function listApiAccountCandidates(
+  projectId: string,
+): Promise<{ candidates: ApiAccountCandidate[] }> {
+  return request(`/api/api-tests/accounts/candidates?projectId=${encodeURIComponent(projectId)}`)
+}
+
+/** Copy sheet rows into the secure store. The password is read server-side. */
+export function importApiAccounts(
+  projectId: string,
+  usernames: string[],
+): Promise<{ imported: string[] }> {
+  return request(`/api/api-tests/accounts/import?projectId=${encodeURIComponent(projectId)}`, {
+    method: 'POST',
+    body: JSON.stringify({ usernames }),
+  })
+}
+
+export function deleteApiAccount(projectId: string, label: string): Promise<{ ok: true }> {
+  return request(
+    `/api/api-tests/accounts/${encodeURIComponent(label)}?projectId=${encodeURIComponent(projectId)}`,
+    { method: 'DELETE' },
+  )
+}
+
+// ---- API flows (run a collection of saved requests as one scenario) ----
+
+export interface ApiFlowStep {
+  id: string
+  /** The saved request this step runs — flows reference requests, never copy them. */
+  requestName: string
+  enabled: boolean
+  continueOnFail: boolean
+}
+
+export interface ApiFlow {
+  name: string
+  description: string
+  stopOnFail: boolean
+  /** Which account / authenticator the flow runs as — LABELS only, never credentials. */
+  auth: { accountLabel: string; totpLabel: string }
+  steps: ApiFlowStep[]
+  savedAt?: string
+}
+
+export function listApiFlows(projectId: string): Promise<{ flows: ApiFlow[] }> {
+  return request(`/api/api-tests/flows?projectId=${encodeURIComponent(projectId)}`)
+}
+
+export function saveApiFlow(
+  projectId: string,
+  name: string,
+  body: {
+    description: string
+    stopOnFail: boolean
+    auth: { accountLabel: string; totpLabel: string }
+    steps: ApiFlowStep[]
+  },
+): Promise<{ flow: ApiFlow }> {
+  return request(
+    `/api/api-tests/flows/${encodeURIComponent(name)}?projectId=${encodeURIComponent(projectId)}`,
+    { method: 'PUT', body: JSON.stringify(body) },
+  )
+}
+
+export function renameApiFlow(
+  projectId: string,
+  name: string,
+  to: string,
+): Promise<{ flow: ApiFlow }> {
+  return request(
+    `/api/api-tests/flows/${encodeURIComponent(name)}/rename?projectId=${encodeURIComponent(projectId)}`,
+    { method: 'POST', body: JSON.stringify({ to }) },
+  )
+}
+
+export function deleteApiFlow(projectId: string, name: string): Promise<{ ok: true }> {
+  return request(
+    `/api/api-tests/flows/${encodeURIComponent(name)}?projectId=${encodeURIComponent(projectId)}`,
+    { method: 'DELETE' },
+  )
+}
+
+/** One step's verdict in a saved flow report — verdicts only, never response bodies. */
+export interface ApiFlowRunStep {
+  requestName: string
+  method: string
+  url: string
+  status: number | null
+  timeMs: number
+  outcome: 'pass' | 'fail' | 'skipped' | 'error'
+  checks: { passed: number; total: number }
+  detail: string
+  captured: string[]
+}
+
+export interface ApiFlowRun {
+  id: string
+  at: string
+  flow: string
+  env: string | null
+  account: string | null
+  totalMs: number
+  summary: { passed: number; failed: number; skipped: number; total: number }
+  steps: ApiFlowRunStep[]
+}
+
+export function saveApiFlowRun(
+  projectId: string,
+  name: string,
+  body: {
+    env: string | null
+    account: string | null
+    totalMs: number
+    steps: ApiFlowRunStep[]
+  },
+): Promise<{ run: ApiFlowRun }> {
+  return request(
+    `/api/api-tests/flows/${encodeURIComponent(name)}/runs?projectId=${encodeURIComponent(projectId)}`,
+    { method: 'POST', body: JSON.stringify(body) },
+  )
+}
+
+export function listApiFlowRuns(
+  projectId: string,
+  name: string,
+): Promise<{ runs: ApiFlowRun[] }> {
+  return request(
+    `/api/api-tests/flows/${encodeURIComponent(name)}/runs?projectId=${encodeURIComponent(projectId)}`,
+  )
 }
 
 // ---- API result history ----
@@ -2678,4 +2896,33 @@ export interface TerminalSessionInfo {
 /** Live terminal sessions — used to re-attach instead of starting a second shell. */
 export function listTerminalSessions(): Promise<{ sessions: TerminalSessionInfo[] }> {
   return request('/api/terminal/sessions')
+}
+
+// ---------------- Auto Agent (company Claude-credential CLI) ----------------
+
+export type AutoAgentState =
+  | 'connected'
+  | 'expiring'
+  | 'stalled'
+  | 'expired'
+  | 'logged-out'
+  | 'not-installed'
+
+/** Whether the company's Auto Agent CLI is still supplying a Claude credential. */
+export interface AutoAgentStatus {
+  state: AutoAgentState
+  ok: boolean
+  message: string
+  username: string | null
+  serverUrl: string | null
+  role: string | null
+  expiresAt: string | null
+  watcherRunning: boolean
+  lastError: string | null
+  checkedAt: string
+}
+
+/** Poll Auto Agent's connection state (filesystem + pid probe on the server). */
+export function getAutoAgentStatus(): Promise<AutoAgentStatus> {
+  return request('/api/auto-agent/status')
 }

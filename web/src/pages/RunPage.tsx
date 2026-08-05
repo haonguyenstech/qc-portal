@@ -17,6 +17,7 @@ import {
   Clock,
   Compass,
   Cpu,
+  Eye,
   Gauge,
   Globe,
   Layers,
@@ -27,7 +28,9 @@ import {
   Pencil,
   Play,
   Plus,
+  RefreshCw,
   Search,
+  Smartphone,
   Settings2,
   Sparkles,
   TabletSmartphone,
@@ -58,10 +61,12 @@ import {
   listMcp,
   listRuns,
   listSkills,
+  runMcpTest,
   type CrawledTicket,
   type TestCaseFormat,
 } from '@/lib/api'
 import { cn } from '@/lib/utils'
+import { devicesFromDetection } from '@/lib/devices'
 import { TEST_TARGET_META } from '@/lib/testTarget'
 import type { TestTarget } from '@/lib/types'
 import { useProjects } from '@/lib/project-context'
@@ -74,7 +79,9 @@ import { RunPresetsDialog } from '@/components/RunPresetsDialog'
 import { useRunPresets, type RunPreset } from '@/lib/presets'
 import { CrawledStatusHeader, CrawledTicketRow } from '@/components/CrawledTicketRow'
 import { buildCrawledTree } from '@/lib/crawled-tickets'
-import { TicketTestCasePicker, testcaseRelPath } from '@/components/TicketTestCasePicker'
+import { TicketTestCasePicker } from '@/components/TicketTestCasePicker'
+import { TestCaseVersionsDialog } from '@/components/TestCaseVersionsDialog'
+import { testcaseRelPath } from '@/lib/testcases'
 import { McpRequiredNotice } from '@/components/McpRequiredNotice'
 import { GuideTour, type TourStep } from '@/components/GuideTour'
 
@@ -210,6 +217,28 @@ function saveAppName(projectId: string, name: string): void {
   }
 }
 
+// The device a mobile run drives, remembered per project: a QC engineer keeps the
+// same emulator/simulator booted across runs, so re-picking it every time is noise.
+// The stored value is a Maestro device_id, and it's only ever APPLIED when that id
+// still shows up in a fresh detection — a device that's no longer booted must fall
+// back to "let Claude pick" rather than blocking the run on a stale id.
+const RUN_DEVICE_KEY = 'qc.runDevice.'
+function loadRunDevice(projectId: string): string {
+  try {
+    return localStorage.getItem(RUN_DEVICE_KEY + projectId) ?? ''
+  } catch {
+    return ''
+  }
+}
+function saveRunDevice(projectId: string, deviceId: string): void {
+  try {
+    if (deviceId) localStorage.setItem(RUN_DEVICE_KEY + projectId, deviceId)
+    else localStorage.removeItem(RUN_DEVICE_KEY + projectId)
+  } catch {
+    /* ignore quota / disabled storage */
+  }
+}
+
 // Shared with History + a run's detail header, so a run is described the same way
 // when it's started and when it's read back later (see lib/testTarget.ts).
 const TARGET_META = TEST_TARGET_META
@@ -224,6 +253,174 @@ function StepHeader({ n, title, hint }: { n: number; title: string; hint?: strin
       <h3 className="text-sm font-semibold tracking-tight">{title}</h3>
       {hint && <span className="text-xs text-muted-foreground">· {hint}</span>}
     </div>
+  )
+}
+
+/**
+ * Which booted device a mobile run drives. With one device the run is unambiguous,
+ * but a QC engineer often has an Android emulator, an iOS simulator and Maestro's
+ * synthetic "chromium" web device up at once — and `list_devices` order decides
+ * which one gets tested, which is a coin toss. So: detect, list them by NAME (the
+ * shared `describeDevice` labeling, same as the MCP page), and pin the pick onto the
+ * run. "Auto" keeps the old behavior for anyone who doesn't care.
+ *
+ * Detection spawns a real Claude/Maestro probe (~20s, and it costs), so it is NOT
+ * run on page load: it fires the first time a mobile target is selected and is then
+ * cached by React Query for the session, with an explicit Re-scan for after booting
+ * a device. `onResolve` reports back which id the form should actually send —
+ * `''` whenever the pick isn't in the current listing, so a stale remembered device
+ * can never silently redirect a run.
+ */
+function RunDevicePicker({
+  projectId,
+  value,
+  onChange,
+  disabled,
+}: {
+  projectId: string
+  value: string
+  onChange: (deviceId: string) => void
+  disabled?: boolean
+}) {
+  const {
+    data: detection,
+    isFetching,
+    isError,
+    error,
+    refetch,
+  } = useQuery({
+    queryKey: ['maestro-devices', projectId],
+    queryFn: () => runMcpTest('maestro', projectId, ''),
+    // A booted device doesn't come and go on its own — one detection per session is
+    // plenty, and Re-scan covers the case where the engineer boots another one.
+    staleTime: Infinity,
+    refetchOnWindowFocus: false,
+    retry: false,
+  })
+  const devices = devicesFromDetection(detection)
+  // A remembered device that isn't booted any more is shown as unavailable rather
+  // than quietly used — the run would fail the "device_id not in the listing" check.
+  const missing = !!value && devices.length > 0 && !devices.some((d) => d.deviceId === value)
+
+  return (
+    <div className="space-y-2 rounded-xl border border-border/60 bg-muted/40 px-3 py-2.5">
+      <div className="flex items-center justify-between gap-2">
+        <Label className="flex items-center gap-1.5 text-xs">
+          <Smartphone className="size-3.5 text-muted-foreground" />
+          Device to test on
+        </Label>
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          onClick={() => refetch()}
+          disabled={disabled || isFetching}
+          className="h-7 rounded-full px-2 text-[11px] text-muted-foreground hover:text-foreground"
+        >
+          {isFetching ? (
+            <Loader2 className="size-3.5 animate-spin" />
+          ) : (
+            <RefreshCw className="size-3.5" />
+          )}
+          {isFetching ? 'Detecting…' : 'Re-scan'}
+        </Button>
+      </div>
+
+      {isFetching && devices.length === 0 ? (
+        <p className="text-[11px] text-muted-foreground">
+          Detecting booted devices via Maestro — this takes a few seconds.
+        </p>
+      ) : isError ? (
+        <p className="text-[11px] text-amber-700">
+          Couldn't detect devices ({error instanceof Error ? error.message : 'probe failed'}). The
+          run will pick whichever device Maestro reports.
+        </p>
+      ) : devices.length === 0 ? (
+        <p className="text-[11px] text-amber-700">
+          No device detected. Boot a simulator/emulator, then Re-scan — or start the run anyway and
+          let it report the blocker.
+        </p>
+      ) : (
+        <>
+          <div className="flex flex-wrap gap-1.5">
+            {/* Auto first: it's the default, and the only option that can't go stale. */}
+            <DeviceChip
+              label="Auto"
+              caption="Maestro picks"
+              icon={Sparkles}
+              active={!value}
+              disabled={disabled}
+              onClick={() => onChange('')}
+            />
+            {devices.map((d) => (
+              <DeviceChip
+                key={d.deviceId}
+                label={d.name}
+                caption={d.caption}
+                icon={d.platform === 'Web' ? Globe : Smartphone}
+                active={value === d.deviceId}
+                disabled={disabled}
+                onClick={() => onChange(d.deviceId)}
+              />
+            ))}
+          </div>
+          {missing && (
+            <p className="text-[11px] text-amber-700">
+              The device you picked before (<span className="font-mono">{value}</span>) isn't booted
+              — the run will fall back to Auto unless you pick one above.
+            </p>
+          )}
+          {devices.length > 1 && !value && !missing && (
+            <p className="text-[11px] text-muted-foreground">
+              {devices.length} devices are available — pick one so the run doesn't test whichever
+              Maestro happens to list first.
+            </p>
+          )}
+        </>
+      )}
+    </div>
+  )
+}
+
+/** One selectable device in the run form's picker. */
+function DeviceChip({
+  label,
+  caption,
+  icon: Icon,
+  active,
+  disabled,
+  onClick,
+}: {
+  label: string
+  caption: string
+  icon: typeof Globe
+  active: boolean
+  disabled?: boolean
+  onClick: () => void
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      aria-pressed={active}
+      title={caption ? `${label} · ${caption}` : label}
+      className={cn(
+        'flex max-w-[15rem] items-center gap-2 rounded-xl border px-2.5 py-1.5 text-left transition-all duration-200 active:scale-[0.98] disabled:opacity-60',
+        active
+          ? 'border-primary/40 bg-primary/5'
+          : 'border-border/60 bg-background hover:border-border hover:bg-muted/70',
+      )}
+    >
+      <Icon className={cn('size-3.5 shrink-0', active ? 'text-primary' : 'text-muted-foreground')} />
+      <span className="min-w-0 leading-tight">
+        <span className="block truncate text-xs font-medium">{label}</span>
+        {caption && (
+          <span className="block truncate text-[10px] text-muted-foreground">{caption}</span>
+        )}
+      </span>
+      {active && <Check className="size-3.5 shrink-0 text-primary" />}
+    </button>
   )
 }
 
@@ -244,6 +441,7 @@ function FeatureTicketsPicker({
   variant = 'feature',
   bugTickets,
   onToggleBug,
+  projectId,
 }: {
   tickets: CrawledTicket[]
   value: string[]
@@ -253,8 +451,15 @@ function FeatureTicketsPicker({
   /** Ids tagged as bugs (queue mode) — those run without test cases. */
   bugTickets?: Set<string>
   onToggleBug?: (id: string) => void
+  /** Enables the per-row "Test cases" preview (needs a project to read them from). */
+  projectId?: string
 }) {
   const [query, setQuery] = useState('')
+  // Ticket folder whose test cases are being previewed (null = dialog closed).
+  // Row-level, so a ticket's cases can be read before/while picking it — including
+  // in a multi-ticket queue or an advanced feature run, where the single-ticket
+  // version picker below doesn't apply.
+  const [previewFolder, setPreviewFolder] = useState<string | null>(null)
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
   const toggleCollapse = (name: string) =>
     setCollapsed((prev) => {
@@ -322,7 +527,8 @@ function FeatureTicketsPicker({
       {value.length > 0 && (
         <div className="flex flex-col gap-1.5">
           {value.map((id, i) => {
-            const title = tickets.find((t) => ticketIdOf(t) === id)?.title
+            const picked = tickets.find((t) => ticketIdOf(t) === id)
+            const title = picked?.title
             return (
             <span
               key={id}
@@ -355,12 +561,29 @@ function FeatureTicketsPicker({
                   {title}
                 </span>
               )}
+              {/* View this ticket's test cases without deselecting it. */}
+              {projectId && picked?.hasTestcases && (
+                <button
+                  type="button"
+                  aria-label={`View test cases for ${id}`}
+                  title="View test cases"
+                  onClick={() => setPreviewFolder(picked.name)}
+                  className="ml-auto inline-flex shrink-0 items-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 transition-colors hover:bg-emerald-100"
+                >
+                  <Eye className="size-3" />
+                  Test cases
+                </button>
+              )}
               {!disabled && (
                 <button
                   type="button"
                   aria-label={`Remove ${id}`}
                   onClick={() => toggle(id)}
-                  className="ml-auto grid size-4 shrink-0 place-items-center rounded-full text-muted-foreground/60 transition-colors hover:bg-muted hover:text-foreground"
+                  className={cn(
+                    'grid size-4 shrink-0 place-items-center rounded-full text-muted-foreground/60 transition-colors hover:bg-muted hover:text-foreground',
+                    // The preview pill already claimed the auto margin when present.
+                    !(projectId && picked?.hasTestcases) && 'ml-auto',
+                  )}
                 >
                   <X className="size-3" />
                 </button>
@@ -445,6 +668,11 @@ function FeatureTicketsPicker({
                           onToggleExpand={() => toggleCollapse(t.name)}
                           selected={isSel}
                           onSelect={() => toggle(id)}
+                          onView={
+                            projectId && t.hasTestcases
+                              ? () => setPreviewFolder(t.name)
+                              : undefined
+                          }
                           blocked={disabled || (!isSel && atMax)}
                           bug={isBug}
                           onToggleBug={canTagBug ? () => onToggleBug!(id) : undefined}
@@ -478,6 +706,13 @@ function FeatureTicketsPicker({
           under its folder.
         </p>
       )}
+
+      {/* Read-only preview of whichever ticket's test cases were clicked. */}
+      <TestCaseVersionsDialog
+        folder={previewFolder}
+        projectId={projectId}
+        onOpenChange={(open) => !open && setPreviewFolder(null)}
+      />
     </div>
   )
 }
@@ -605,6 +840,9 @@ export default function RunPage() {
   // Blank = the ticket uses the shared App URL field as its default.
   const [ticketUrls, setTicketUrls] = useState<Record<string, string>>({})
   const [testTarget, setTestTarget] = useState<TestTarget>(loadTestTarget)
+  // Maestro device_id the mobile run must drive ('' = let the run pick). Restored
+  // per project below, and only sent when the picker confirms it's still booted.
+  const [deviceId, setDeviceId] = useState('')
   const [skill, setSkill] = useState('')
   const [model, setModel] = useState<string>(loadRunModel)
   const [instructions, setInstructions] = useState('')
@@ -760,6 +998,7 @@ export default function RunPage() {
     setSimpleTickets([...new Set([...lead, ...savedBugs])].slice(0, MAX_QUEUE_TICKETS))
     setAppUrl(saved?.appUrl ?? '')
     setAppName(loadAppName(activeProject.id))
+    setDeviceId(loadRunDevice(activeProject.id))
     setInstructions(saved?.instructions ?? '')
     // The project's default skill (set on the Skills page) wins on load; otherwise
     // restore the last-used skill. Reconciled against the skills list below.
@@ -800,6 +1039,8 @@ export default function RunPage() {
   // app-mobile drives a native app already installed on the device — there's no URL,
   // so the URL field is hidden and never required/validated in that mode.
   const isAppTarget = testTarget === 'app-mobile'
+  // Both mobile targets drive a real device through Maestro, so both get the picker.
+  const isMobileTarget = testTarget !== 'web'
   // The MCP server(s) this target drives the browser/device with. Web → Playwright.
   // Mobile targets → Maestro, the portal's ONE device driver.
   const requiredMcpServers = testTarget === 'web' ? ['playwright'] : ['maestro']
@@ -1063,6 +1304,18 @@ export default function RunPage() {
           ? `Verify against the manual test cases in ${testcaseRelPath(selectedFolder, testcaseVersion, testcaseFormat ?? 'markdown')} — treat each case as an acceptance check.`
           : ''
 
+      // The device to pin, read from the picker's own cached detection: a remembered
+      // id that isn't in the current listing is dropped rather than sent, because the
+      // run would stop on "device_id not found" instead of just testing. Web target
+      // never pins (the server drops it too — belt and braces).
+      const detected = devicesFromDetection(
+        queryClient.getQueryData(['maestro-devices', activeProject.id]),
+      )
+      const pinnedDevice =
+        isMobileTarget && deviceId && (detected.length === 0 || detected.some((d) => d.deviceId === deviceId))
+          ? deviceId
+          : undefined
+
       if (mode === 'simple') {
         // One run per ticket. The server executes runs strictly one at a time —
         // the first starts now, the rest are queued and run in this order.
@@ -1082,6 +1335,7 @@ export default function RunPage() {
             instructions: finalInstructions || undefined,
             model,
             testTarget,
+            deviceId: pinnedDevice,
           })
         }
       } else {
@@ -1096,6 +1350,7 @@ export default function RunPage() {
           relatedTickets: runTickets.length > 1 ? runTickets.slice(1) : undefined,
           workflowSteps: cleanSteps.length ? cleanSteps : undefined,
           testTarget,
+          deviceId: pinnedDevice,
         })
       }
       saveLastInputs(activeProject.id, {
@@ -1302,6 +1557,7 @@ export default function RunPage() {
                     disabled={!activeProject}
                     bugTickets={bugTickets}
                     onToggleBug={toggleBug}
+                    projectId={activeProject?.id}
                   />
 
                   {simpleTickets.length > 1 && (
@@ -1340,6 +1596,7 @@ export default function RunPage() {
                     value={featureTickets}
                     onChange={setFeatureTickets}
                     disabled={!activeProject}
+                    projectId={activeProject?.id}
                   />
                   <WorkflowStepsEditor
                     steps={workflowSteps}
@@ -1409,6 +1666,22 @@ export default function RunPage() {
                   </p>
                 )}
               </div>
+
+              {/* Which booted device drives the run. Only for the Maestro targets, and
+                  only once Maestro is actually configured — the picker's detection
+                  probe needs the server, and McpRequiredNotice already covers the
+                  "not connected yet" case. */}
+              {isMobileTarget && activeProject && !mcpMissing && (
+                <RunDevicePicker
+                  projectId={activeProject.id}
+                  value={deviceId}
+                  onChange={(id) => {
+                    setDeviceId(id)
+                    saveRunDevice(activeProject.id, id)
+                  }}
+                  disabled={submitting}
+                />
+              )}
 
               {isAppTarget ? (
                 // Native app: no URL — instead the engineer names the app that is

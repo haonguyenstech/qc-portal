@@ -1,11 +1,13 @@
 node_modules/
 dist/
 *.log
-data/*.db
-data/*.db-*
-data/server.pid
-data/source-credentials.json
-data/totp/
+# The whole data/ dir is this install's own runtime state — the DB plus several
+# credential stores (2FA seeds, DB passwords, API-test account passwords). NOTHING in
+# here belongs in git: it's per-machine, and half of it is secret. Ignoring the folder
+# wholesale rather than file-by-file is deliberate — the file-by-file list had already
+# missed `database-credentials.json` and `api-accounts/`, so every new store under
+# data/ was one forgotten line away from being committed.
+data/
 runtime/
 .playwright-mcp/
 .env

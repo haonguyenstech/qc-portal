@@ -9,10 +9,28 @@ import {
 } from './dbConnect.js'
 
 // Read-only query execution for the Database page — the manual SQL editor and the
-// "ask your data" AI both run through here. SAFETY: only a single SELECT/WITH/SHOW/
-// EXPLAIN statement is allowed, execution runs inside a READ-ONLY transaction where
-// the driver supports it, results are capped, and the password is scrubbed from any
-// error. This is a QC helper against a staging/dev DB — never a general SQL console.
+// "ask your data" AI both run through here. This is a QC helper against a staging/dev
+// DB, never a general SQL console.
+//
+// SAFETY IS LAYERED, because the AI writes SQL nobody reviews before it runs. No
+// single layer is trusted to be perfect:
+//
+//   1. PARSE (assertReadOnly) — comments stripped and string/identifier contents
+//      masked first (so nothing hides in a comment and ordinary literals don't false-
+//      alarm), then: exactly one statement, must START with SELECT/WITH/SHOW/EXPLAIN,
+//      and no write/DDL/side-effect keyword anywhere in the code.
+//   2. ENGINE — every driver runs the statement in a transaction that never commits:
+//      Postgres/MySQL open an explicit READ ONLY transaction (fail CLOSED if the
+//      server won't), SQL Server wraps it in a transaction that is always rolled back
+//      (T-SQL has no read-only mode, but its DDL *is* transactional). So a write that
+//      ever slipped past layer 1 still cannot persist.
+//   3. BLAST RADIUS — row cap, statement timeout, and the password scrubbed from
+//      every error that reaches a log or the UI.
+//
+// Both entry points are covered: runReadQuery calls assertReadOnly itself, so the
+// AI's SQL is re-validated at execution time and not merely when it was generated.
+// If you touch this file, keep every layer — they exist because the one above it
+// might be wrong.
 
 const MAX_ROWS = 200
 const STATEMENT_TIMEOUT_MS = 20_000
@@ -25,20 +43,111 @@ export interface QueryResult {
   truncated: boolean
 }
 
-/** Throw unless `sql` is a single read-only statement. Best-effort but strict. */
+/**
+ * Reduce SQL to the bare CODE the guard should judge: comments removed, and the
+ * CONTENTS of every string literal / quoted identifier replaced by a placeholder.
+ *
+ * Both halves matter. Without comment stripping, `SELECT 1 /* … *​/` lets text hide
+ * from the keyword scan; with it, a keyword can't be smuggled past in a comment.
+ * Without literal masking, an ordinary query like `WHERE status = 'update'` is
+ * rejected as a "write keyword" — false alarms train people to work around the
+ * guard, which is worse than the guard not existing.
+ *
+ * Throws on an unterminated comment or quote: if we can't tell where the code ends,
+ * we can't vouch for it, so refuse rather than guess.
+ */
+export function sqlCodeOnly(sql: string): string {
+  let out = ''
+  let i = 0
+  const n = sql.length
+  while (i < n) {
+    const c = sql[i]
+    const next = sql[i + 1]
+    // -- line comment
+    if (c === '-' && next === '-') {
+      const nl = sql.indexOf('\n', i)
+      if (nl === -1) break
+      out += ' '
+      i = nl + 1
+      continue
+    }
+    // /* block comment */ (SQL block comments do not nest in the engines we target)
+    if (c === '/' && next === '*') {
+      const end = sql.indexOf('*/', i + 2)
+      if (end === -1) throw new Error('Unterminated comment in the query.')
+      out += ' '
+      i = end + 2
+      continue
+    }
+    // '…' string literal — '' is an escaped quote and stays inside the literal.
+    if (c === "'") {
+      i++
+      while (i < n) {
+        if (sql[i] === "'") {
+          if (sql[i + 1] === "'") i += 2
+          else break
+        } else i++
+      }
+      if (i >= n) throw new Error('Unterminated string literal in the query.')
+      out += "''" // placeholder: an empty literal, so the shape of the code survives
+      i++
+      continue
+    }
+    // "…" / `…` / [ … ] quoted identifiers — masked so a table named "delete_log"
+    // can be selected from without tripping the keyword scan.
+    const closer = c === '"' ? '"' : c === '`' ? '`' : c === '[' ? ']' : ''
+    if (closer) {
+      const end = sql.indexOf(closer, i + 1)
+      if (end === -1) throw new Error('Unterminated quoted identifier in the query.')
+      out += 'x' // placeholder identifier
+      i = end + 1
+      continue
+    }
+    out += c
+    i++
+  }
+  return out
+}
+
+/**
+ * Throw unless `sql` is a single read-only statement.
+ *
+ * This is layer 1 of the protection on the Database page and it is deliberately
+ * strict — it runs BEFORE the driver sees the text, on both the hand-typed SQL and
+ * whatever the AI wrote. It is NOT the only layer: every driver additionally runs
+ * the statement inside a transaction that is rolled back / declared READ ONLY (see
+ * runReadQuery), so anything that ever slips past this parser still cannot persist.
+ */
 export function assertReadOnly(sql: string): string {
   const trimmed = sql.trim().replace(/;\s*$/, '')
   if (!trimmed) throw new Error('Enter a SQL query.')
+  // Judge the CODE, not comments or string contents.
+  const code = sqlCodeOnly(trimmed).trim()
+  if (!code) throw new Error('Enter a SQL query.')
   // A stray inner `;` means multiple statements — refuse (defends against `SELECT 1; DROP …`).
-  if (/;/.test(trimmed)) throw new Error('Only a single statement is allowed.')
-  const lead = trimmed.replace(/^\(+/, '').trimStart().slice(0, 12).toLowerCase()
+  if (/;/.test(code)) throw new Error('Only a single statement is allowed.')
+  const lead = code.replace(/^\(+/, '').trimStart().slice(0, 12).toLowerCase()
   const ok = ['select', 'with', 'show', 'explain', 'describe', 'desc '].some((k) => lead.startsWith(k))
   if (!ok) throw new Error('Only read-only queries are allowed (SELECT / WITH / SHOW / EXPLAIN).')
-  // Blacklist write / DDL keywords anywhere (covers `SELECT … INTO`, CTE-hidden writes).
+  // Blacklist write / DDL / privilege / side-effect keywords anywhere — covers
+  // `SELECT … INTO`, data-modifying CTEs (`WITH x AS (DELETE … RETURNING)`), and
+  // procedure calls that could write behind a SELECT.
+  // NOTE: `replace` and `comment` are deliberately NOT here — REPLACE() is a common
+  // string function and `comment` a common column name, and MySQL's write form
+  // (`REPLACE INTO`) is already caught by `into`. A guard that cries wolf on ordinary
+  // queries gets worked around.
   const forbidden =
-    /\b(insert|update|delete|drop|alter|truncate|create|grant|revoke|merge|call|exec|execute|replace|into|attach|vacuum|reindex|pragma)\b/i
-  if (forbidden.test(trimmed)) {
-    throw new Error('The query contains a write or DDL keyword — only read-only SELECTs are permitted.')
+    /\b(insert|update|delete|drop|alter|truncate|create|grant|revoke|deny|merge|call|exec|execute|sp_executesql|xp_cmdshell|openrowset|opendatasource|upsert|into|attach|detach|vacuum|reindex|pragma|backup|restore|shutdown|kill|reconfigure|dbcc|bulk|load_file|outfile|dumpfile|waitfor|commit|rollback|savepoint|begin|set|lock|unlock|rename|copy)\b/i
+  const hit = code.match(forbidden)
+  if (hit) {
+    throw new Error(
+      `The query contains a write, DDL or side-effect keyword ("${hit[0].toUpperCase()}") — only read-only SELECTs are permitted.`,
+    )
+  }
+  // `FOR UPDATE` / `FOR SHARE` take write locks — caught by `update` above, but
+  // `FOR SHARE` needs its own check.
+  if (/\bfor\s+(share|key\s+share|no\s+key\s+update)\b/i.test(code)) {
+    throw new Error('Locking clauses (FOR SHARE / FOR UPDATE) are not permitted.')
   }
   return trimmed
 }
@@ -99,13 +208,25 @@ async function queryMysql(config: DbConfig, cred: DbCredential | undefined, sql:
     rowsAsArray: true,
   })
   try {
-    await conn.query('SET SESSION TRANSACTION READ ONLY').catch(() => {})
+    // FAIL CLOSED: if the server won't give us a read-only transaction we refuse to
+    // run at all, rather than quietly executing with no engine-level protection.
+    // (This was previously `.catch(() => {})`, which turned the safety net into a
+    // no-op on any server that rejected the statement — silently.)
+    try {
+      await conn.query('START TRANSACTION READ ONLY')
+    } catch {
+      throw new Error(
+        'Could not open a read-only transaction on this MySQL server (needs 5.6+), so the query was not run.',
+      )
+    }
+    // Statement timeout is a resource guard, not a safety guard — best-effort is fine.
     await conn.query(`SET SESSION MAX_EXECUTION_TIME = ${STATEMENT_TIMEOUT_MS}`).catch(() => {})
     const [rows, fields] = await conn.query(sql)
     const columns = (fields as { name: string }[] | undefined)?.map((f) => f.name) ?? []
     const data = Array.isArray(rows) ? (rows as unknown[][]) : []
     return { columns, rows: capRows(data), rowCount: data.length, truncated: data.length > MAX_ROWS }
   } finally {
+    await conn.query('ROLLBACK').catch(() => {})
     await conn.end().catch(() => {})
   }
 }
@@ -124,13 +245,16 @@ async function queryPostgres(config: DbConfig, cred: DbCredential | undefined, s
   })
   await client.connect()
   try {
+    // Not caught on purpose — if the read-only transaction can't be opened, the query
+    // must not run (fail closed). Postgres rejects every write inside it, DDL included.
     await client.query('BEGIN TRANSACTION READ ONLY')
     const result = await client.query({ text: sql, rowMode: 'array' })
-    await client.query('ROLLBACK').catch(() => {})
     const columns = (result.fields ?? []).map((f) => f.name)
     const data = (result.rows ?? []) as unknown[][]
     return { columns, rows: capRows(data), rowCount: data.length, truncated: data.length > MAX_ROWS }
   } finally {
+    // In `finally`, so a failing query also leaves nothing open behind it.
+    await client.query('ROLLBACK').catch(() => {})
     await client.end().catch(() => {})
   }
 }
@@ -145,10 +269,19 @@ async function querySqlServer(config: DbConfig, cred: DbCredential | undefined, 
     database: config.database,
     connectionTimeout: CONNECT_TIMEOUT_MS,
     requestTimeout: STATEMENT_TIMEOUT_MS,
+    // readOnlyIntent is ONLY an Always On routing hint — it enforces nothing. The
+    // real protection is the always-rolled-back transaction below.
     options: { encrypt: config.ssl, trustServerCertificate: true, readOnlyIntent: true },
   })
+  // T-SQL has no "READ ONLY transaction", so wrap the statement in an explicit
+  // transaction that is ALWAYS rolled back. SQL Server makes DDL transactional too,
+  // so even a CREATE/DROP/ALTER that somehow got past assertReadOnly is undone —
+  // this is the safety net that makes the keyword guard non-load-bearing.
+  const tx = new mssql.Transaction(pool)
+  await tx.begin()
+  let committed = false
   try {
-    const request = pool.request()
+    const request = new mssql.Request(tx)
     request.arrayRowMode = true
     const result = await request.query(sql)
     // With arrayRowMode the rows are arrays; `columns` may come back as an array
@@ -161,6 +294,10 @@ async function querySqlServer(config: DbConfig, cred: DbCredential | undefined, 
     const data = (result.recordset ?? []) as unknown as unknown[][]
     return { columns, rows: capRows(data), rowCount: data.length, truncated: data.length > MAX_ROWS }
   } finally {
+    // Never commit — a read query has nothing to keep, and rolling back is what
+    // guarantees a write can't survive. `committed` stays false by design; it exists
+    // so a future edit that adds a commit path has to think about this.
+    if (!committed) await tx.rollback().catch(() => {})
     await pool.close().catch(() => {})
   }
 }

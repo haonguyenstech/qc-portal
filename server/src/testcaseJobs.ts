@@ -44,6 +44,8 @@ interface TestcaseJob {
   rootPath: string
   sources: { tag: string; path: string }[]
   template: { name?: string; content?: string } | null
+  /** Spec document attached for this batch (Markdown), applied to every ticket in it. */
+  spec: { name: string; content: string } | null
   instructions: string
   model: string
   // Per-project AI post-step settings, captured when the job starts.
@@ -169,6 +171,7 @@ async function processItem(job: TestcaseJob, item: TestcaseJobItem, i: number): 
       projectName: job.projectName,
       folder: item.folder,
       template: job.template,
+      spec: job.spec,
       instructions: job.instructions,
       model: job.model,
       appUrl: item.appUrl,
@@ -306,6 +309,8 @@ export function startTestcaseJob(opts: {
   /** Optional per-folder live app URL (folder → url) to ground that ticket's cases. */
   appUrls?: Record<string, string>
   template: { name?: string; content?: string } | null
+  /** Spec document (Markdown) attached for this batch — applied to every ticket in it. */
+  spec: { name: string; content: string } | null
   instructions: string
   model: string
   groundingCheck: boolean
@@ -320,6 +325,7 @@ export function startTestcaseJob(opts: {
     rootPath: opts.rootPath,
     sources: opts.sources,
     template: opts.template,
+    spec: opts.spec,
     instructions: opts.instructions,
     model: opts.model,
     groundingCheck: opts.groundingCheck,

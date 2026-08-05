@@ -48,6 +48,7 @@ import { checkForUpdate, getVersion, triggerUpdate } from '@/lib/api'
 import { listRuns } from '@/lib/api'
 import { useProjects } from '@/lib/project-context'
 import NotificationBell from '@/components/NotificationBell'
+import { AutoAgentStatusIndicator } from '@/components/AutoAgentStatus'
 import TestCaseJobWatcher from '@/components/TestCaseJobWatcher'
 import CrawlJobWatcher from '@/components/CrawlJobWatcher'
 import VerifyJobWatcher from '@/components/VerifyJobWatcher'
@@ -556,6 +557,8 @@ function VersionFooter({ collapsed }: { collapsed: boolean }) {
     const releasesActive = pathname === '/releases'
     return (
       <div className="mt-auto flex shrink-0 flex-col items-center gap-1.5 border-t border-sidebar-border/60 px-2 py-4">
+        {/* Auto Agent credential status — above Release notes, as in the expanded footer. */}
+        <AutoAgentStatusIndicator collapsed />
         <Tooltip>
           <TooltipTrigger asChild>
             <NavLink
@@ -638,6 +641,10 @@ function VersionFooter({ collapsed }: { collapsed: boolean }) {
 
   return (
     <div className="mt-auto flex shrink-0 flex-col gap-1.5 border-t border-sidebar-border/60 px-3 py-3.5 text-xs text-muted-foreground">
+      {/* Auto Agent credential status — every AI feature shells out to `claude`, so
+          this sits above Release notes where it's always in view. */}
+      <AutoAgentStatusIndicator collapsed={false} />
+
       {/* Version + live update status */}
       <div
         className={cn(

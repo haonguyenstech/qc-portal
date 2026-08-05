@@ -21,6 +21,7 @@ import {
   Globe,
   Info,
   ListChecks,
+  FileSpreadsheet,
   Loader2,
   Pause,
   Play,
@@ -78,6 +79,7 @@ import {
 } from '@/lib/api'
 import { OpenFolderButton } from '@/components/OpenFolderButton'
 import { GuideTour, type TourStep } from '@/components/GuideTour'
+import { convertFileToMarkdown, MAX_FILE_BYTES } from '@/lib/docConvert'
 import { buildInstructions, useTestRules } from '@/lib/testRules'
 import { useProjects } from '@/lib/project-context'
 import {
@@ -89,6 +91,9 @@ import {
 // Template formats we accept: Markdown, CSV, and Excel. Excel is binary — we parse
 // its first sheet to CSV in the browser (see onPickTemplate) before feeding Claude.
 const TEMPLATE_ACCEPT = '.md,.csv,.xlsx,.xls'
+// Spec formats. Same converters the Knowledge uploads use (lib/docConvert), minus .txt
+// — a spec arrives as a Word/PDF/Excel document in practice.
+const SPEC_ACCEPT = '.docx,.pdf,.xlsx,.xls,.csv,.md,.markdown'
 const MAX_TEMPLATE_BYTES = 200 * 1024 // keep uploads sane; server caps chars too
 
 // Cap how many tickets can be generated at once. Each ticket is a separate Claude
@@ -402,12 +407,18 @@ function looksLikeCsv(name: string, content: string): boolean {
   return (first.match(/,/g)?.length ?? 0) >= 2
 }
 
-/** Read-only dialog that previews a template file — CSV as a table, else raw text. */
+/**
+ * Read-only dialog that previews an attached file — CSV as a table, else raw text.
+ * Shared by the template upload and the spec upload, so `hint` says WHICH it is (a
+ * spec previewed as "Template Claude will match" reads like the wrong file attached).
+ */
 function TemplatePreviewDialog({
   template,
+  hint,
   onOpenChange,
 }: {
   template: { name: string; content: string } | null
+  hint?: string
   onOpenChange: (open: boolean) => void
 }) {
   const isCsv = template ? looksLikeCsv(template.name, template.content) : false
@@ -420,7 +431,7 @@ function TemplatePreviewDialog({
             <span className="truncate font-mono text-sm">{template?.name}</span>
           </DialogTitle>
           <DialogDescription>
-            Template Claude will match when writing the cases.
+            {hint ?? 'Template Claude will match when writing the cases.'}
             {isCsv ? ' Shown as a table.' : ''}
           </DialogDescription>
         </DialogHeader>
@@ -1546,6 +1557,7 @@ export default function TestCasePage() {
   const { activeProject, activeProjectId } = useProjects()
   const queryClient = useQueryClient()
   const fileInput = useRef<HTMLInputElement>(null)
+  const specInput = useRef<HTMLInputElement>(null)
 
   // Preselect a ticket when arriving from "Generate test cases" (/testcases?ticket=<folder>).
   const [selectedFolders, setSelectedFolders] = useState<Set<string>>(() => {
@@ -1568,9 +1580,15 @@ export default function TestCasePage() {
       return next
     })
   const [previewFolder, setPreviewFolder] = useState<string | null>(null)
+  const [previewHint, setPreviewHint] = useState<string | undefined>(undefined)
   const [previewTemplate, setPreviewTemplate] = useState<{ name: string; content: string } | null>(
     null,
   )
+  // A specification document attached for this generation (converted to Markdown in the
+  // browser). Not persisted: it belongs to the run being configured, and the extracted
+  // text of a large PDF would blow past localStorage.
+  const [spec, setSpec] = useState<{ name: string; content: string } | null>(null)
+  const [specLoading, setSpecLoading] = useState(false)
   const [template, setTemplate] = useState<{ name: string; content: string; size: number } | null>(
     null,
   )
@@ -1744,6 +1762,7 @@ export default function TestCasePage() {
         folders: [...selectedFolders],
         appUrls: cleanUrls,
         template: effectiveTemplate,
+        spec,
         instructions: buildInstructions(rules, picked, instructions),
         projectName: activeProject?.name,
         model,
@@ -1836,6 +1855,45 @@ export default function TestCasePage() {
     // `jobs` is rebuilt each render; `doneSignature` is the stable trigger.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [doneSignature, activeProjectId, queryClient])
+
+  /**
+   * Read an attached specification. Conversion runs in the BROWSER via the shared
+   * `convertFileToMarkdown` (the same docx/pdf/xlsx pipeline the Knowledge uploads use),
+   * so the .docx/.pdf never leaves the machine and the server needs no upload endpoint.
+   * A scanned/image-only PDF yields no text — that surfaces as a clear error rather than
+   * an empty spec silently reaching the prompt.
+   */
+  async function onPickSpec(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]
+    e.target.value = '' // allow re-picking the same file later
+    if (!file) return
+    if (file.size > MAX_FILE_BYTES) {
+      toast.error('That file is too large', {
+        description: `Max ${(MAX_FILE_BYTES / (1024 * 1024)).toFixed(0)} MB.`,
+      })
+      return
+    }
+    setSpecLoading(true)
+    try {
+      const { markdown } = await convertFileToMarkdown(file)
+      if (!markdown.trim()) {
+        toast.error('No text found in that document', {
+          description: 'A scanned PDF has no extractable text — export a text PDF or paste the spec into Instructions.',
+        })
+        return
+      }
+      setSpec({ name: file.name, content: markdown })
+      toast.success(`Attached “${file.name}”`, {
+        description: `${(markdown.length / 1024).toFixed(1)} KB of text will be used as the requirement source.`,
+      })
+    } catch (err) {
+      toast.error('Could not read that document', {
+        description: err instanceof Error ? err.message : undefined,
+      })
+    } finally {
+      setSpecLoading(false)
+    }
+  }
 
   function onPickTemplate(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0]
@@ -2205,9 +2263,10 @@ export default function TestCasePage() {
                 </span>
                 <button
                   type="button"
-                  onClick={() =>
+                  onClick={() => {
+                    setPreviewHint(undefined)
                     setPreviewTemplate({ name: template.name, content: template.content })
-                  }
+                  }}
                   className="shrink-0 rounded-lg p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
                   aria-label="Preview template"
                   title="Preview template"
@@ -2236,12 +2295,13 @@ export default function TestCasePage() {
                   type="button"
                   variant="outline"
                   size="sm"
-                  onClick={() =>
+                  onClick={() => {
+                    setPreviewHint(undefined)
                     setPreviewTemplate({
                       name: 'testcase.md (project)',
                       content: savedTemplate.content,
                     })
-                  }
+                  }}
                   className="shrink-0 rounded-full transition-all duration-200 active:scale-[0.98]"
                 >
                   <Eye className="h-3.5 w-3.5" />
@@ -2275,6 +2335,76 @@ export default function TestCasePage() {
               {!template && !savedTemplate && (
                 <>Set a reusable one in Settings → File templates.</>
               )}
+            </p>
+          </CardContent>
+        </Card>
+
+        {/* Spec upload — for a ticket that only LINKS to its specification. */}
+        <Card className="overflow-hidden rounded-3xl border-border/60 shadow-none">
+          <div className="flex items-center gap-2 border-b border-border/60 bg-muted/30 px-4 py-2.5 text-sm font-medium">
+            <FileSpreadsheet className="h-4 w-4 text-muted-foreground" />
+            Specification
+            <span className="text-xs font-normal text-muted-foreground">optional</span>
+          </div>
+          <CardContent className="space-y-3 p-4">
+            <input
+              ref={specInput}
+              type="file"
+              accept={SPEC_ACCEPT}
+              onChange={onPickSpec}
+              className="hidden"
+            />
+            {spec ? (
+              <div className="flex items-center gap-2 rounded-xl border border-border/60 bg-muted/60 px-3 py-2">
+                <FileSpreadsheet className="h-4 w-4 shrink-0 text-muted-foreground" />
+                <span className="min-w-0 flex-1 truncate text-sm">{spec.name}</span>
+                <span className="shrink-0 text-[11px] text-muted-foreground">
+                  {(spec.content.length / 1024).toFixed(1)} KB text
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPreviewHint(
+                      'The text extracted from your document. Claude drafts the cases from this, with the ticket deciding which part is in scope.',
+                    )
+                    setPreviewTemplate({ name: spec.name, content: spec.content })
+                  }}
+                  className="shrink-0 rounded-lg p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                  aria-label="Preview specification"
+                  title="Preview the extracted text"
+                >
+                  <Eye className="h-3.5 w-3.5" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSpec(null)}
+                  className="shrink-0 rounded-lg p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                  aria-label="Remove specification"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            ) : (
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => specInput.current?.click()}
+                disabled={specLoading}
+                className="w-full justify-center rounded-full transition-all duration-200 active:scale-[0.98]"
+              >
+                {specLoading ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <FileUp className="h-4 w-4" />
+                )}
+                {specLoading ? 'Reading the document…' : 'Upload specification'}
+              </Button>
+            )}
+            <p className="text-xs text-muted-foreground">
+              Word, PDF, Excel, CSV or Markdown (.docx, .pdf, .xlsx, .csv, .md). For a ticket that
+              only <span className="font-medium">links</span> to its spec instead of describing the
+              requirement — Claude then drafts from the spec, with the ticket deciding which part of
+              it is in scope. Converted to text in your browser; the file itself is never uploaded.
             </p>
           </CardContent>
         </Card>
@@ -2441,6 +2571,7 @@ export default function TestCasePage() {
 
       <TemplatePreviewDialog
         template={previewTemplate}
+        hint={previewHint}
         onOpenChange={(open) => !open && setPreviewTemplate(null)}
       />
 

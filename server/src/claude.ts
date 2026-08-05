@@ -122,6 +122,7 @@ export function runQc(
     relatedTickets?: string[] // advanced mode: extra tickets covered by the same feature run
     workflowSteps?: string[] // advanced mode: ordered end-to-end flow to exercise
     testTarget?: 'web' | 'web-mobile' | 'app-mobile' // desktop browser (default), web app on device, or native app on device
+    deviceId?: string // mobile targets: the Maestro device_id to drive (several booted devices → the engineer picks); omitted = whatever list_devices reports
     resumeSessionId?: string // continue a previously paused session instead of starting fresh
     totpHint?: string // prompt block telling the run how to fetch live authenticator (2FA) codes
   },
@@ -196,6 +197,23 @@ export function runQc(
             `capturing mobile screenshots as evidence. Test the responsive/mobile experience.`,
         )
       }
+    }
+
+    // Several devices/simulators booted at once means list_devices is ambiguous —
+    // the engineer picked one in the Run form, so name it and forbid substituting
+    // another (running the whole suite on the wrong emulator wastes the run, and the
+    // report wouldn't say which device it was). No pick = previous behavior.
+    const pinnedDevice = opts.testTarget !== 'web' ? opts.deviceId?.trim() : ''
+    if (pinnedDevice) {
+      lines.push(
+        ``,
+        `DEVICE: drive device_id "${pinnedDevice}" — the QC engineer picked this device for the run. ` +
+          `Still call list_devices first (Maestro needs it), then pass EXACTLY this device_id to every ` +
+          `subsequent Maestro tool. Do NOT switch to another entry in the listing even if others are ` +
+          `booted. If this device_id is not in the listing, stop and report that as a blocker (name the ` +
+          `device_ids you did find) rather than testing a different device. Say which device was tested ` +
+          `in the report.`,
+      )
     }
 
     if (steps.length) {

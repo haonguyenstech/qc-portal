@@ -98,8 +98,29 @@ server/src/
                     row per connected repo; legacy projects.source* columns migrate on boot);
                     seed/reconcile on boot
   claude.ts         headless claude launcher + stream-json parser (QC runs, over WebSocket)
+  autoAgent.ts      Auto Agent status: the company's `auto-agent-ai` CLI
+                    (@saigontechnology/auto-agent) distributes the shared Claude Code
+                    credential — signs in via Microsoft, pulls it into the keychain, and
+                    leaves a WATCHER running to keep it fresh. Every AI feature here
+                    shells out to `claude`, so when Auto Agent logs out / its watcher dies
+                    / the credential lapses, runs fail with confusing mid-run auth errors.
+                    readAutoAgentStatus() reports that as one of connected | expiring |
+                    stalled | expired | logged-out | not-installed from ~/.auto-agent-ai/
+                    state.json + a pid probe + the tail of watch.log (a ✖ line followed by
+                    a later "Watcher started" is stale, not current). SECRET: read
+                    state.json ONLY — the sibling .config.json holds auth.accessToken and
+                    the distributed Claude credentials and must never be opened here.
+                    Surfaced by GET /api/auto-agent/status (routes/autoAgent.ts) and the
+                    sidebar's AutoAgentStatusIndicator, ABOVE Release notes.
   claudeExec.ts     shared one-shot claude helpers: runClaude (buffered JSON),
-                    runClaudeStream (stream-json → log callback), parseClaudeJsonResult
+                    runClaudeStream (stream-json → log callback), parseClaudeJsonResult —
+                    which MUST accept BOTH `--output-format json` shapes: a single
+                    `{type:'result',result,is_error}` object (older CLI) and the whole
+                    message ARRAY ending in that object (current CLI). Reading `.result`
+                    off the array yields undefined, which all ~12 callers report as "the AI
+                    produced nothing" (Ask AI on /database, crawl summaries, grounding
+                    check, auto-learn, source map, design system, verify design, …).
+                    Don't narrow it back to one shape.
   testcaseGen.ts    core test-case generation: read ticket → stream claude → write versioned .md
   testcaseJobs.ts   in-memory background-job registry for test-case generation (logs + per-item status)
   crawl.ts          core single-ticket crawl: download detail+comments+attachments (+ optional summary.md)
@@ -140,6 +161,13 @@ server/src/
   totp.ts           authenticator (TOTP) codes for accounts with REAL 2FA — RFC 6238 over
                     node:crypto + a per-project seed store beside the DB (data/totp/<id>.json,
                     0600, NOT in the project repo); see "Authenticator (2FA) codes" below
+  apiAccounts.ts    login credentials an API-Testing FLOW authenticates with — the same
+                    "beside the DB, never in the project" store totp.ts uses
+                    (data/api-accounts/<projectId>.json, 0700/0600). Password is
+                    write-only over the API; requests reference an account as
+                    {{account.<label>.username}} / .password, resolved server-side in
+                    routes/apiTests.ts `resolveSendVars` together with a LIVE
+                    {{otp.<label>}} from totp.ts. See "API Testing flows" below
   projectContext.ts readProjectContext(root): packs testing/memory/*.md + testing/knowledge/*.md
                     into one capped block injected into prompts (test-case gen + grounding) so the
                     model uses real project terms/rules even when there's no project cwd
@@ -153,7 +181,10 @@ server/src/
 
 web/src/
   App.tsx           sidebar nav + React Router routes + ProjectSwitcher + always-mounted
-                    NotificationBell + TestCaseJobWatcher + CrawlJobWatcher
+                    NotificationBell + TestCaseJobWatcher + CrawlJobWatcher; the sidebar
+                    footer (VersionFooter) carries AutoAgentStatusIndicator ABOVE the
+                    Release notes card — keep it in BOTH the collapsed and expanded
+                    branches, they render separately
   main.tsx          React Query + Project + Notification providers + Toaster mount
   index.css         Tailwind v4 theme — oklch design tokens (light + .dark)
   pages/            OverviewPage, DiagramsPage (at /diagrams), SourceCodePage (at /source),
@@ -183,6 +214,14 @@ web/src/
     project-context.tsx  useProjects() — active project + list, persisted
     notifications.tsx    NotificationProvider + useNotifications() — bell store, localStorage-backed
     testRules.ts    DEFAULT_RULES + useTestRules() + buildInstructions() for test-case prompts
+    apiAssert.ts    evaluateAssertions()/getJsonPath() — the API-Testing assertion engine,
+                    shared by the request builder and the flow runner (see "API Testing
+                    flows"); one copy on purpose, so a step can't grade differently
+    devices.ts      describeDevice()/devicesFromDetection() — labels one Maestro `list_devices`
+                    entry for a picker (name primary, device_id only in the caption; AVD
+                    underscores humanized). Shared by the MCP page's functional-test dialog
+                    and the Run form's device picker so a device reads the SAME in both.
+                    See "Picking the device a mobile run drives" below.
     utils.ts        cn() (clsx + tailwind-merge)
     useRunStream.ts WebSocket hook for live run events
 ```
@@ -450,6 +489,14 @@ tickets and have Claude draft manual test cases. Key behaviors:
   `/testcases` (inline), the **Run form** picker (`CrawledTicketPicker`) + Run **queue** list
   (`FeatureTicketsPicker`, RunPage), and the **Design Check** picker (`VerifyDesignPage`). The shared
   `CrawledTicketRow` takes `depth`/`hasChildren`/`isOpen`/`onToggleExpand` for the indent + chevron.
+  Its emerald **"Test cases" badge is a preview button wherever `onView` is passed** — on the Run
+  form both the row badge and each selected chip open
+  `web/src/components/TestCaseVersionsDialog.tsx`, the shared read-only preview (version dropdown →
+  `CsvTable` / rendered markdown). That dialog is keyed by folder and derives the shown version
+  during render (no setState-in-effect); `TicketTestCasePicker`'s Eye button opens the same one with
+  `initialVersion`, and the path helper `testcaseRelPath` lives in `web/src/lib/testcases.ts`.
+  Reading test cases must not depend on how many tickets are selected — a queue of 2+ tickets and a
+  feature run get the same preview as a single pick. Editing/deleting stays on `/testcases`.
   (`GenerateFromClickUp` on Overview/Diagrams reads ClickUp **live by id**, not from disk, so it stays a
   flat ClickUp list; `TicketPicker.tsx` is unused/dead.)
 - **Model picker** — same `haiku` / `sonnet` / `opus` options as the crawl picker on `/tickets`,
@@ -458,6 +505,30 @@ tickets and have Claude draft manual test cases. Key behaviors:
 - **Versioned output** — each generation writes `testing/tickets/<folder>/testcases/v<N>.md`
   (a pre-versioning `testcases.md` surfaces as `v0 (legacy)`). The crawled-tickets list shows a
   badge; an Eye button opens a wide, scrollable **preview dialog** with a version dropdown.
+
+**Attach a specification document** — a ClickUp/Jira ticket often just LINKS to the spec (or to a
+section of it) and carries no acceptance criteria, so generating from the ticket alone drafts almost
+nothing. The `/testcases` page therefore has a **Specification** upload card beside the Template one:
+**.docx / .pdf / .xlsx / .csv / .md**, converted to Markdown **in the browser** by the shared
+`web/src/lib/docConvert.ts` (the same pipeline Knowledge uploads use), so the file itself is never
+uploaded and the server needs no upload route or temp files. The extracted text rides along as
+`spec: { name, content }` on `POST /api/ai/testcases` and `/testcases/jobs` (`parseSpec` in
+routes/ai.ts → `startTestcaseJob` → `generateTestcaseVersion`), capped at `MAX_SPEC_CHARS` (120 KB —
+deliberately larger than the 40 KB ticket cap, since here the spec IS the requirement).
+
+- In the prompt it's an **authoritative requirement source on par with the ticket**, not background:
+  a requirement that appears ONLY in the spec is in scope. The **ticket still bounds WHICH PART** of a
+  (usually much larger) spec this run covers. Spec-vs-ticket disagreement → cover the ticket's version
+  and note the discrepancy; spec-vs-code disagreement → assert the spec and note it, since that is
+  the bug worth finding.
+- **It is also passed to `groundTestcases`** (appended to `ticketContent` under an
+  `ATTACHED SPECIFICATION` heading). Non-negotiable: the audit deletes cases the ticket doesn't
+  support, so without this it would strip every spec-derived case — i.e. all of them, for exactly
+  the stub-ticket case this feature exists for.
+- The spec is **not** persisted anywhere (not on the job's public shape, not in localStorage): it
+  belongs to the run being configured, and a converted PDF would blow past localStorage.
+- A scanned/image-only PDF extracts no text; that surfaces as an explicit error instead of an empty
+  spec silently reaching the prompt.
 
 **Background jobs** (`testcaseJobs.ts`) — clicking Generate starts a server-side job; the route
 returns immediately. The job runs items **sequentially**, holds per-item status + a bounded
@@ -485,6 +556,95 @@ once per job (deduped via a module-level `handled` set), invalidates the relevan
 `['crawled', …]` / `['testcase-versions', …]`; crawl: `['crawled-tickets', …]` / `['crawled', …]`),
 and clears the stored job id. Keep completion ownership in the watcher to avoid duplicate/again-missed
 notifications — pages only *start* jobs and *poll* for live progress.
+
+## API Testing flows (run a collection, Postman-style)
+
+`/api-testing` sends one request at a time; a real acceptance criterion is usually a **scenario**
+("log in → create a claim → verify it's listed"). A **flow** is an ordered list of the project's
+saved requests, run in sequence with each step's `captures` feeding the next step's `{{variables}}`.
+
+- **Definition lives on the server, the RUN happens in the browser.** `routes/apiTests.ts` stores
+  flows in `testing/api-tests/_flows.json` (`GET/PUT/DELETE /flows`, `POST /flows/:name/rename`) and
+  reports under `testing/api-tests/_flow-runs/<flow>/` (`POST`/`GET /flows/:name/runs`, newest 20).
+  `web/src/components/ApiFlowPanel.tsx` drives the run itself — one `POST /send` per step — because
+  `/send` already resolves variables and masks secrets, and assertions are graded by
+  **`web/src/lib/apiAssert.ts`**, the engine extracted out of `ApiTestingPage.tsx` so the builder and
+  the runner **cannot** grade the same response differently. Don't add a second server-side
+  assertion evaluator.
+- **Steps reference a saved request by NAME, never a copy** — editing the request updates every flow,
+  and `POST /:name/rename` rewrites the matching `requestName` in every flow (otherwise a rename
+  silently empties a step). A deleted request leaves the step in place, flagged `missing`, and fails
+  its step rather than being skipped in silence.
+- **Verdict rules:** a step passes when all its enabled assertions pass, or — with no assertions —
+  on a 2xx. `stopOnFail` (per flow) marks every later step `skipped`; a per-step `continueOnFail`
+  ("soft") overrides it. Captures are applied even for a failing step (a 4xx can still carry an id
+  the next step needs). The stored report holds **verdicts only** (status, timing, check counts,
+  captured variable names) — never response bodies, so a token in a login response can't reach the
+  project repo through it.
+- **Authentication — the flow PICKS an identity ("Run as").** `flow.auth` holds only two LABELS
+  (`accountLabel` from `apiAccounts.ts`, `totpLabel` from `totp.ts` — the **same authenticators the
+  Instructions → Accounts page registers**, which is why `FlowAuthPicker` links there instead of
+  duplicating that editor). The runner passes them with **every** step's send, and `resolveSendVars`
+  turns them into `{{auth.username}}` / `{{auth.password}}` / `{{auth.otp}}` — so ONE login request
+  runs as any account and re-testing as a different role is a dropdown, not a request edit. A
+  specific account stays addressable as `{{account.<label>.username}}`. The report records which
+  account ran (`account` in the run record); `_flows.json` is versioned with the project, so only
+  labels may ever go in it.
+  - The OTP is computed **per send** (function of the clock — never cache it), and it + the password
+    are marked `secret`, which keeps them out of the echoed request and the stored history. The
+    active environment wins on a key collision, so a hand-defined `otp.*` for a fixed-OTP
+    environment still works.
+  - **The store is separate from `testing/environments.md`, so it starts empty** — and an empty
+    picker reading "No account" while the engineer is looking at their account on Instructions →
+    Accounts is the confusing part. `GET /accounts/candidates` parses that sheet's markdown table
+    (columns matched by HEADER NAME, never position; a row with no username is skipped) and offers
+    the rows for one-click **import**; `POST /accounts/import` re-reads the sheet server-side so a
+    password never makes the round trip to the browser. Rows already imported are filtered out by
+    username. Both pickers also carry an explicit empty-state line instead of a bare "No account".
+  - The runner **refuses to start** when a step references `{{auth.username|password}}` / `{{auth.otp}}`
+    and nothing is picked. Verified: unresolved tokens are sent literally, the API answers 401, and
+    that reads as "wrong password" rather than "you didn't pick an account" — a wasted debugging trip
+    the pre-run check removes.
+- `_flows`, `_flow-runs`, `accounts` and `flows` are in `RESERVED_NAMES`, and `_flows.json` is
+  excluded from the saved-request listing — otherwise a flow file shows up as a broken "request".
+- **Never open a second Radix `Dialog` from inside the flow dialog without guarding it.** Radix
+  portals the inner dialog OUTSIDE the outer `DialogContent`, so every click in it counts as an
+  interaction *outside* the flow dialog: Radix dismisses the flow dialog, unmounting the unsaved
+  `steps` draft. Verified — the original "Add steps" dialog closed both dialogs and added nothing.
+  The step picker is therefore **inline** (`AddStepPicker`, appends on each click, no confirm
+  button), and the accounts dialog — which genuinely has to be a dialog — is paired with
+  `onPointerDownOutside` / `onInteractOutside` / `onEscapeKeyDown` guards on the flow's
+  `DialogContent` (so Escape closes only the inner one, and normal dismissal still works when
+  nothing is stacked).
+  - Those guards must **NOT** test an `accountsOpen`-style boolean. Radix also decides
+    "interacted outside" on TRAILING events — the focus-outside fired as the inner dialog unmounts —
+    by which time the flag is already false, so the guard passes and BOTH dialogs close. Verified
+    with a real pointer sequence on the inner dialog's Close button (a synthetic `.click()` does not
+    reproduce it). Hence `guardedUntil` (a ref): armed while stacked and kept armed ~400 ms past the
+    close. Re-test all four dismissals — Close, ✕, Escape, click-outside — plus "flow dialog still
+    closes normally afterwards", when touching this.
+
+## Picking the device a mobile run drives
+
+Both mobile targets on `/qc-run` ("Web on mobile", "App on device") drive a real device through
+Maestro, and `list_devices` **order** used to decide which one — a coin toss whenever an Android
+emulator, an iOS simulator and Maestro's synthetic `chromium` web device are up at once. So the Run
+form pins the choice:
+
+- **`RunDevicePicker`** (in `RunPage.tsx`) renders **Auto** + one chip per detected device, labeled
+  by `web/src/lib/devices.ts` (`describeDevice`) — the **name** is the chip, the `device_id` only the
+  caption. Detection is the same probe the MCP page's functional test uses
+  (`runMcpTest('maestro', projectId, '')`), so it costs a real Claude/Maestro run (~20 s): it is
+  **not** run on page load, only when a mobile target is selected, then cached for the session
+  (`['maestro-devices', projectId]`, `staleTime: Infinity`) with an explicit **Re-scan**.
+- The pick persists per project (`qc.runDevice.<projectId>`), because the same emulator usually stays
+  booted across runs. It is only **sent** when it's still in the current listing — a remembered device
+  that's no longer booted falls back to Auto (and says so) instead of failing the run on a stale id.
+- `deviceId` threads `createRun` → `POST /api/qc/run` (validated `/^[\w.:@-]{1,80}$/`, and **dropped
+  for the `web` target**) → `CreateRunBody` → `runManager` → `runQc`, which adds a `DEVICE:` prompt
+  block: still call `list_devices`, then pass EXACTLY this `device_id`, never substitute another, and
+  report a blocker (naming what it did find) if it's absent. **No pick = the previous behavior**, so
+  single-device setups are unchanged.
 
 ## Design Check page & project templates
 
@@ -745,6 +905,19 @@ holds the actionable recipe; `web/src/pages/McpPage.tsx` is the canonical implem
 
 - **Localhost only.** Server binds `127.0.0.1`. No auth in this MVP — do not add network exposure.
 - **Never log/persist secrets.** OTPs and credentials must not hit the log stream, DB, or disk.
+- **The Database page must never be able to write.** `/database` runs SQL the AI wrote and
+  nobody reviewed, so `server/src/dbQuery.ts` protects the DB in **layers, none of which may be
+  removed on the assumption another one is enough**: (1) `assertReadOnly` — `sqlCodeOnly` strips
+  comments and masks string/identifier CONTENTS first (nothing hides in a comment; ordinary
+  literals like `status = 'update'` don't false-alarm), then one statement only, must start
+  SELECT/WITH/SHOW/EXPLAIN, no write/DDL/side-effect keyword in the code; (2) **engine-level** —
+  Postgres/MySQL open an explicit `READ ONLY` transaction and **fail closed** if the server
+  won't, SQL Server (which has no read-only transaction, and whose `readOnlyIntent` is only an
+  Always On routing hint that enforces NOTHING) wraps the statement in a transaction that is
+  **always rolled back** — its DDL is transactional, so even a `DROP`/`CREATE` that got past
+  layer 1 is undone; (3) row cap + statement timeout + password scrubbed from errors. Both the
+  SQL editor and Ask AI funnel through `runReadQuery`, which re-validates — never add a path
+  that reaches a driver without it.
 - **Headless runs use `--permission-mode bypassPermissions`** so they never block on a prompt; the
   `qc-testing` skill itself forbids final mutating actions on shared environments. Don't weaken that.
 - **Cross-platform (Win + Mac).** Use `cross-spawn`, `path.join`; never string-concat paths into a

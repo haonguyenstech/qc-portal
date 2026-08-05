@@ -187,6 +187,7 @@ qcRouter.post('/run', (req, res) => {
     relatedTickets,
     workflowSteps,
     testTarget,
+    deviceId,
   } = req.body ?? {}
   if (typeof projectId !== 'string' || !projectId.trim()) {
     return res.status(400).json({ error: 'projectId is required' })
@@ -228,6 +229,14 @@ qcRouter.post('/run', (req, res) => {
   const stepsClean = sanitizeList(workflowSteps, 30, 500)
   // app-mobile may have no id — store a readable label so history/messages aren't blank.
   const appUrlValue = appUrlClean || (target === 'app-mobile' ? 'Mobile app' : '')
+  // Pin the device only for the mobile targets that actually drive one — a web run
+  // has no device, and a stale id from a target switch must not reach the prompt.
+  // It goes into the prompt verbatim, so keep it to the characters a UDID / adb
+  // serial / "chromium" can contain.
+  const deviceClean =
+    target !== 'web' && typeof deviceId === 'string' && /^[\w.:@-]{1,80}$/.test(deviceId.trim())
+      ? deviceId.trim()
+      : undefined
   try {
     const summary = startRun({
       projectId: projectId.trim(),
@@ -239,6 +248,7 @@ qcRouter.post('/run', (req, res) => {
       relatedTickets: relatedClean.length ? relatedClean : undefined,
       workflowSteps: stepsClean.length ? stepsClean : undefined,
       testTarget: target,
+      deviceId: deviceClean,
     })
     return res.status(201).json({ runId: summary.id, ...summary })
   } catch (err) {

@@ -1,19 +1,9 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
-import ReactMarkdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
 import { Bug, ClipboardList, Eye, FileText, Loader2, Wand2 } from 'lucide-react'
-import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog'
 import {
   Select,
   SelectContent,
@@ -21,18 +11,10 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import { CsvTable } from '@/components/CsvTable'
-import { getTestCaseVersion, listTestCaseVersions, type TestCaseFormat } from '@/lib/api'
+import { TestCaseVersionsDialog } from '@/components/TestCaseVersionsDialog'
+import { listTestCaseVersions, type TestCaseFormat } from '@/lib/api'
 import { relativeTime } from '@/lib/format'
-
-/** Compact markdown styling for the preview dialog (subset of TestCasePage's MD_CLASS). */
-const MD_CLASS = cn(
-  'text-sm leading-relaxed text-foreground/90',
-  '[&_h1]:mt-5 [&_h1]:mb-2 [&_h1]:text-lg [&_h1]:font-semibold [&_h2]:mt-4 [&_h2]:mb-1.5 [&_h2]:text-base [&_h2]:font-semibold [&_h3]:mt-3 [&_h3]:mb-1 [&_h3]:text-sm [&_h3]:font-semibold',
-  '[&_p]:my-2 [&_ul]:my-2 [&_ul]:list-disc [&_ul]:pl-5 [&_ol]:my-2 [&_ol]:list-decimal [&_ol]:pl-5 [&_li]:my-0.5',
-  '[&_code]:rounded [&_code]:bg-muted [&_code]:px-1.5 [&_code]:py-0.5 [&_code]:font-mono [&_code]:text-xs',
-  '[&_table]:my-3 [&_table]:w-full [&_table]:text-left [&_th]:border [&_th]:bg-muted/50 [&_th]:px-2 [&_th]:py-1 [&_th]:text-xs [&_th]:font-semibold [&_td]:border [&_td]:px-2 [&_td]:py-1 [&_td]:text-xs [&_td]:align-top',
-)
+import { testcaseRelPath } from '@/lib/testcases'
 
 interface Props {
   /** The crawled ticket's folder under testing/tickets/ (null when no ticket picked). */
@@ -47,78 +29,11 @@ interface Props {
   isBug?: boolean
 }
 
-/** Build the on-disk path of a test-case version (mirrors the server layout). */
-export function testcaseRelPath(
-  folder: string,
-  version: number,
-  format: TestCaseFormat = 'markdown',
-): string {
-  if (version === 0) return `testing/tickets/${folder}/testcases.md`
-  const ext = format === 'csv' ? 'csv' : 'md'
-  return `testing/tickets/${folder}/testcases/v${version}.${ext}`
-}
-
 /**
  * Lets the user pick which generated test-case version a QC run should verify
  * against. If the picked ticket has no test cases yet, it informs the user and
  * offers a shortcut to generate them on the Test Case page.
  */
-/** Read-only dialog showing the selected test-case version — CSV as a table, markdown rendered. */
-function TestCasePreviewDialog({
-  open,
-  onOpenChange,
-  folder,
-  projectId,
-  version,
-}: {
-  open: boolean
-  onOpenChange: (open: boolean) => void
-  folder: string
-  projectId: string
-  version: number
-}) {
-  const { data, isFetching } = useQuery({
-    queryKey: ['testcase-preview', projectId, folder, version],
-    queryFn: () => getTestCaseVersion(folder, version, projectId),
-    enabled: open,
-  })
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="flex max-h-[92vh] w-[97vw] flex-col gap-0 overflow-hidden p-0 sm:max-w-[90rem]">
-        <DialogHeader className="shrink-0 space-y-1 border-b border-border/60 bg-muted/30 px-5 py-3">
-          <DialogTitle className="flex items-center gap-2 text-base">
-            <ClipboardList className="size-4 text-muted-foreground" />
-            Test cases · {version === 0 ? 'v0 (legacy)' : `v${version}`}
-          </DialogTitle>
-          <DialogDescription className="text-xs">
-            {testcaseRelPath(folder, version, data?.format ?? 'markdown')}
-          </DialogDescription>
-        </DialogHeader>
-        <div className="min-h-0 flex-1 overflow-auto px-6 py-5">
-          {isFetching && !data ? (
-            <p className="flex items-center justify-center gap-2 py-12 text-sm text-muted-foreground">
-              <Loader2 className="size-4 animate-spin" />
-              Loading…
-            </p>
-          ) : data?.testcases ? (
-            data.format === 'csv' ? (
-              <CsvTable csv={data.testcases} />
-            ) : (
-              <div className={MD_CLASS}>
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>{data.testcases}</ReactMarkdown>
-              </div>
-            )
-          ) : (
-            <p className="py-12 text-center text-sm text-muted-foreground">
-              No test cases found for this version.
-            </p>
-          )}
-        </div>
-      </DialogContent>
-    </Dialog>
-  )
-}
-
 export function TicketTestCasePicker({
   folder,
   projectId,
@@ -290,15 +205,12 @@ export function TicketTestCasePicker({
           ? `Claude will verify against ${testcaseRelPath(folder, selected.version, selected.format)}.`
           : 'Choose which generated test-case version to verify against.'}
       </p>
-      {projectId && value != null && (
-        <TestCasePreviewDialog
-          open={previewOpen}
-          onOpenChange={setPreviewOpen}
-          folder={folder}
-          projectId={projectId}
-          version={value}
-        />
-      )}
+      <TestCaseVersionsDialog
+        folder={previewOpen ? folder : null}
+        projectId={projectId}
+        initialVersion={value}
+        onOpenChange={(open) => setPreviewOpen(open)}
+      />
     </div>
   )
 }

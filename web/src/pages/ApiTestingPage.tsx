@@ -10,6 +10,7 @@ import {
   Clipboard,
   Clock3,
   FileJson,
+  FolderTree,
   History as HistoryIcon,
   Check,
   Info,
@@ -57,6 +58,8 @@ import { useProjects } from '@/lib/project-context'
 import { cn } from '@/lib/utils'
 import { parseCurl, toCurl } from '@/lib/curl'
 import { scanResponse, type ApiFinding, type Severity } from '@/lib/apiChecks'
+import { evaluateAssertions, getJsonPath, type AssertionResult } from '@/lib/apiAssert'
+import { ApiFlowsCard } from '@/components/ApiFlowPanel'
 import {
   aiCheckApi,
   captureApiVariable,
@@ -69,7 +72,9 @@ import {
   listApiRequests,
   listApiResults,
   openApiTestsFolder,
+  renameApiGroup,
   renameApiRequest,
+  setApiRequestGroup,
   saveApiEnvironments,
   saveApiRequest,
   saveApiResult,
@@ -160,7 +165,10 @@ const ASSERTION_LABELS: Record<ApiAssertionType, string> = {
   'time-below': 'Response time < (ms)',
 }
 
-type Draft = Omit<ApiRequestDef, 'name' | 'savedAt'>
+// The request the builder edits. `group` (the module a saved request is filed under)
+// is deliberately NOT part of it — it's collection organization, changed from the
+// saved list, and a PUT without it keeps whatever the server has on disk.
+type Draft = Omit<ApiRequestDef, 'name' | 'savedAt' | 'group'>
 
 function emptyDraft(): Draft {
   return {
@@ -232,6 +240,39 @@ function deriveName(d: Draft): string {
   return base || d.method
 }
 
+// ---------------------------------------------------------------- modules (groups)
+
+/** Bucket key for requests with no module — never a real module name (those are trimmed). */
+const UNGROUPED = ''
+
+/**
+ * Guess a module from a URL the Swagger way: the first meaningful path segment
+ * after any `/api`/version prefix (`/api/v1/orders/12` → `orders`). Returns '' when
+ * there's nothing usable, which leaves the request ungrouped.
+ */
+function moduleFromUrl(url: string): string {
+  let pathname = url
+  try {
+    pathname = new URL(url).pathname
+  } catch {
+    pathname = url.replace(/^[a-z]+:\/\/[^/]*/i, '').split('?')[0]
+  }
+  const segments = pathname
+    .split('/')
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .filter((s) => !/^(api|rest|v\d+)$/i.test(s))
+  const first = segments[0] ?? ''
+  // A leading id/uuid/placeholder isn't a module name.
+  if (!first || /^[\d.]+$/.test(first) || /^[{:]/.test(first) || first.length > 60) return ''
+  return first
+}
+
+/** Module label for display — real name, or the ungrouped bucket's heading. */
+function moduleLabel(group: string): string {
+  return group || 'Ungrouped'
+}
+
 function statusTone(status?: number): string {
   if (!status) return 'bg-muted text-muted-foreground'
   if (status >= 200 && status < 300) return 'bg-emerald-100 text-emerald-700'
@@ -245,134 +286,6 @@ function formatBytes(n?: number): string {
   if (n < 1024) return `${n} B`
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
   return `${(n / (1024 * 1024)).toFixed(2)} MB`
-}
-
-/** Resolve a simple dotted/bracket JSON path (e.g. `data.items[0].id`). */
-function getJsonPath(root: unknown, path: string): unknown {
-  if (!path) return root
-  const parts = path
-    .replace(/\[(\w+)\]/g, '.$1')
-    .split('.')
-    .map((p) => p.trim())
-    .filter(Boolean)
-  let cur: unknown = root
-  for (const p of parts) {
-    if (cur == null || typeof cur !== 'object') return undefined
-    cur = (cur as Record<string, unknown>)[p]
-  }
-  return cur
-}
-
-interface AssertionResult {
-  assertion: ApiAssertion
-  pass: boolean
-  detail: string
-}
-
-/** Evaluate the request's assertions against a response — all client-side. */
-function evaluateAssertions(assertions: ApiAssertion[], res: ApiSendResult): AssertionResult[] {
-  let parsedJson: unknown
-  let parsedOk = false
-  if (res.bodyText) {
-    try {
-      parsedJson = JSON.parse(res.bodyText)
-      parsedOk = true
-    } catch {
-      parsedOk = false
-    }
-  }
-  return assertions
-    .filter((a) => a.enabled)
-    .map((a) => {
-      const status = res.status ?? 0
-      switch (a.type) {
-        case 'status-2xx':
-          return {
-            assertion: a,
-            pass: status >= 200 && status < 300,
-            detail: `status ${status}`,
-          }
-        case 'status-equals': {
-          const want = Number(a.expected)
-          return {
-            assertion: a,
-            pass: status === want,
-            detail: `status ${status} — expected ${a.expected || '?'}`,
-          }
-        }
-        case 'body-contains':
-          return {
-            assertion: a,
-            pass: !!a.expected && (res.bodyText ?? '').includes(a.expected),
-            detail: a.expected ? `looking for "${a.expected}"` : 'no text set',
-          }
-        case 'body-matches': {
-          if (!a.expected) return { assertion: a, pass: false, detail: 'no pattern set' }
-          try {
-            const re = new RegExp(a.expected)
-            return {
-              assertion: a,
-              pass: re.test(res.bodyText ?? ''),
-              detail: `/${a.expected}/`,
-            }
-          } catch {
-            return { assertion: a, pass: false, detail: 'invalid regex' }
-          }
-        }
-        case 'json-equals': {
-          if (!parsedOk) return { assertion: a, pass: false, detail: 'response is not JSON' }
-          const actual = getJsonPath(parsedJson, a.target)
-          const actualStr = actual === undefined ? 'undefined' : JSON.stringify(actual)
-          const want = a.expected
-          // Compare on the FULL value; only clip what we display so a big object at
-          // the path (or root) doesn't dump the whole body into the row.
-          const pass = String(actual) === want || actualStr === want
-          const shown = actualStr.length > 140 ? `${actualStr.slice(0, 140)}…` : actualStr
-          return {
-            assertion: a,
-            pass,
-            detail: `${a.target || '(root)'} = ${shown} — expected ${want || '?'}`,
-          }
-        }
-        case 'json-exists': {
-          if (!parsedOk) return { assertion: a, pass: false, detail: 'response is not JSON' }
-          const actual = getJsonPath(parsedJson, a.target)
-          return {
-            assertion: a,
-            pass: actual !== undefined,
-            detail: `${a.target || '(root)'} ${actual !== undefined ? 'present' : 'missing'}`,
-          }
-        }
-        case 'header-equals': {
-          const key = a.target.toLowerCase()
-          const actual = res.headers?.[key]
-          return {
-            assertion: a,
-            pass: actual !== undefined && actual === a.expected,
-            detail: `${a.target || '?'}: ${actual ?? '(absent)'} — expected ${a.expected || '?'}`,
-          }
-        }
-        case 'header-exists': {
-          const key = a.target.toLowerCase()
-          const actual = res.headers?.[key]
-          return {
-            assertion: a,
-            pass: actual !== undefined,
-            detail: `${a.target || '?'} ${actual !== undefined ? 'present' : 'absent'}`,
-          }
-        }
-        case 'time-below': {
-          const limit = Number(a.expected)
-          return {
-            assertion: a,
-            pass: Number.isFinite(limit) && res.timeMs < limit,
-            detail: `${res.timeMs}ms — limit ${a.expected || '?'}ms`,
-          }
-        }
-        default:
-          return { assertion: a, pass: false, detail: 'unknown assertion' }
-      }
-    })
 }
 
 // ---------------------------------------------------------------- KV editor
@@ -1080,6 +993,8 @@ function ScanPageDialog({
   const [removed, setRemoved] = useState<Set<string>>(new Set())
   const [unchecked, setUnchecked] = useState<Set<string>>(new Set())
   const [importing, setImporting] = useState(false)
+  // File each imported endpoint under the module its URL path implies (Swagger-style).
+  const [groupByPath, setGroupByPath] = useState(true)
 
   const setJob = (id: string | null) => {
     setJobId(id)
@@ -1159,7 +1074,10 @@ function ScanPageDialog({
       while (taken.has(name)) name = `${base} (${n++})`.slice(0, 60)
       taken.add(name)
       try {
-        await saveApiRequest(projectId, name, draft)
+        await saveApiRequest(projectId, name, {
+          ...draft,
+          group: groupByPath ? moduleFromUrl(draft.url) : '',
+        })
         ok++
       } catch {
         /* skip a single bad save (oversize / bad name) — keep importing the rest */
@@ -1417,7 +1335,17 @@ function ScanPageDialog({
           </div>
         )}
 
-        <DialogFooter>
+        <DialogFooter className="sm:items-center sm:justify-between">
+          {/* A scan usually spans several features — file them like Swagger does. */}
+          <label className="flex items-center gap-2 text-xs text-muted-foreground sm:mr-auto">
+            <input
+              type="checkbox"
+              checked={groupByPath}
+              onChange={(e) => setGroupByPath(e.target.checked)}
+              className="size-3.5 rounded border-border accent-primary"
+            />
+            Group into modules by URL path
+          </label>
           <Button
             variant="ghost"
             onClick={() => {
@@ -1961,6 +1889,96 @@ function HistoryPanel({
   )
 }
 
+/**
+ * Move one saved request into a module: pick an existing one, start a new one, or
+ * clear it. Mounted only while a request is picked, so its state seeds fresh from
+ * that request (no setState-in-effect).
+ */
+function MoveToModuleDialog({
+  request,
+  modules,
+  pending,
+  onCancel,
+  onMove,
+}: {
+  request: ApiRequestDef
+  modules: string[]
+  pending: boolean
+  onCancel: () => void
+  onMove: (group: string) => void
+}) {
+  const NONE = '__none__'
+  const NEW = '__new__'
+  const [choice, setChoice] = useState<string>(request.group || NONE)
+  // Seed a new module with the Swagger-style guess from the URL — usually right.
+  const [fresh, setFresh] = useState(() => moduleFromUrl(request.url))
+  const group = choice === NONE ? '' : choice === NEW ? fresh.trim() : choice
+  const canSave = choice !== NEW || !!fresh.trim()
+
+  return (
+    <Dialog open onOpenChange={(v) => !v && onCancel()}>
+      <DialogContent className="rounded-3xl sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <FolderTree className="size-4 text-primary" />
+            Move to module
+          </DialogTitle>
+          <DialogDescription>
+            Group <span className="font-medium text-foreground">{request.name}</span> with the rest
+            of its module, the way Swagger groups endpoints by tag.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-3">
+          <Select value={choice} onValueChange={setChoice}>
+            <SelectTrigger className="h-9 rounded-xl text-sm shadow-none">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value={NONE} className="text-sm">
+                Ungrouped
+              </SelectItem>
+              {modules.map((m) => (
+                <SelectItem key={m} value={m} className="text-sm">
+                  {m}
+                </SelectItem>
+              ))}
+              <SelectItem value={NEW} className="text-sm">
+                New module…
+              </SelectItem>
+            </SelectContent>
+          </Select>
+          {choice === NEW && (
+            <Input
+              autoFocus
+              value={fresh}
+              onChange={(e) => setFresh(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && canSave) onMove(group)
+              }}
+              placeholder="Module name (e.g. Orders)"
+              maxLength={60}
+              className="h-9 rounded-xl text-sm shadow-none"
+            />
+          )}
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={onCancel} className="rounded-full active:scale-[0.98]">
+            Cancel
+          </Button>
+          <Button
+            onClick={() => onMove(group)}
+            disabled={!canSave || pending}
+            className="gap-1.5 rounded-full active:scale-[0.98]"
+          >
+            {pending && <Loader2 className="size-3.5 animate-spin" />}
+            Move
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 // ---------------------------------------------------------------- page
 
 /** Lazily read the persisted working draft for a project (no setState-in-effect). */
@@ -1978,6 +1996,18 @@ function loadDraft(projectId: string): { draft: Draft; selected: string | null }
     /* corrupt / unavailable — fall through to a fresh draft */
   }
   return { draft: emptyDraft(), selected: null }
+}
+
+/** Lazily read which modules the user has folded shut in the saved list. */
+function loadCollapsedModules(projectId: string): Set<string> {
+  try {
+    const raw = localStorage.getItem(`qc.apiTest.modules.${projectId}`)
+    const parsed = raw ? JSON.parse(raw) : null
+    if (Array.isArray(parsed)) return new Set(parsed.filter((x): x is string => typeof x === 'string'))
+  } catch {
+    /* corrupt / unavailable — start with everything expanded */
+  }
+  return new Set()
 }
 
 export default function ApiTestingPage() {
@@ -2013,6 +2043,22 @@ function ApiTesting({ projectId }: { projectId: string }) {
   const [deleting, setDeleting] = useState<string | null>(null)
   // Filter text for the saved-requests sidebar (shown once the collection grows).
   const [filter, setFilter] = useState('')
+  // Modules (Swagger-style groups): the request being moved, the module header being
+  // renamed, and which modules are folded shut (persisted per project).
+  const [moving, setMoving] = useState<ApiRequestDef | null>(null)
+  const [renamingGroup, setRenamingGroup] = useState<string | null>(null)
+  const [groupRenameValue, setGroupRenameValue] = useState('')
+  const collapsedKey = `qc.apiTest.modules.${projectId}`
+  const [collapsed, setCollapsed] = useState<Set<string>>(() => loadCollapsedModules(projectId))
+  const [autoGrouping, setAutoGrouping] = useState(false)
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(collapsedKey, JSON.stringify([...collapsed]))
+    } catch {
+      /* storage unavailable — non-fatal */
+    }
+  }, [collapsed, collapsedKey])
 
   // Persist the working draft + which request is open (writing to localStorage is
   // an external-system sync, not a setState, so this effect is fine).
@@ -2222,6 +2268,52 @@ function ApiTesting({ projectId }: { projectId: string }) {
       }),
   })
 
+  // Move one request into a module. The module lives only on the server's copy (it's
+  // not part of the draft), so this is a targeted call rather than a full re-save.
+  const moveMut = useMutation({
+    mutationFn: ({ name, group }: { name: string; group: string }) =>
+      setApiRequestGroup(projectId, name, group),
+    onSuccess: (d) => {
+      queryClient.invalidateQueries({ queryKey: ['api-requests', projectId] })
+      setMoving(null)
+      if (d.group) setCollapsed((s) => new Set([...s].filter((g) => g !== d.group)))
+      toast.success(d.group ? `Moved to “${d.group}”` : 'Removed from its module')
+    },
+    onError: (e) =>
+      toast.error('Could not move the request', {
+        description: e instanceof Error ? e.message : 'Unknown error',
+      }),
+  })
+
+  // Rename a module across every request filed under it.
+  const groupRenameMut = useMutation({
+    mutationFn: ({ from, to }: { from: string; to: string }) => renameApiGroup(projectId, from, to),
+    onSuccess: (_r, { from, to }) => {
+      queryClient.invalidateQueries({ queryKey: ['api-requests', projectId] })
+      setCollapsed((s) => {
+        if (!s.has(from)) return s
+        const next = new Set([...s].filter((g) => g !== from))
+        if (to) next.add(to)
+        return next
+      })
+      setRenamingGroup(null)
+      toast.success(to ? `Module renamed to “${to}”` : 'Module removed')
+    },
+    onError: (e) =>
+      toast.error('Could not rename the module', {
+        description: e instanceof Error ? e.message : 'Unknown error',
+      }),
+  })
+
+  const commitGroupRename = (from: string) => {
+    const to = groupRenameValue.trim()
+    if (!to || to === from) {
+      setRenamingGroup(null)
+      return
+    }
+    groupRenameMut.mutate({ from, to })
+  }
+
   const commitRename = (from: string) => {
     const to = renameValue.trim()
     if (!to || to === from) {
@@ -2394,6 +2486,68 @@ function ApiTesting({ projectId }: { projectId: string }) {
     )
   }, [saved, filter])
 
+  // Every module in use, for the move dialog's picker.
+  const modules = useMemo(() => {
+    const set = new Set<string>()
+    for (const s of saved ?? []) if ((s.group ?? '').trim()) set.add(s.group.trim())
+    return [...set].sort((a, b) => a.localeCompare(b))
+  }, [saved])
+
+  // The sidebar list, folded into modules — named ones A→Z, ungrouped last.
+  const sections = useMemo(() => {
+    const map = new Map<string, ApiRequestDef[]>()
+    for (const s of filteredSaved) {
+      const g = (s.group ?? '').trim()
+      const list = map.get(g)
+      if (list) list.push(s)
+      else map.set(g, [s])
+    }
+    const out = [...map.keys()]
+      .filter(Boolean)
+      .sort((a, b) => a.localeCompare(b))
+      .map((group) => ({ group, items: map.get(group)! }))
+    const loose = map.get(UNGROUPED)
+    if (loose) out.push({ group: UNGROUPED, items: loose })
+    return out
+  }, [filteredSaved])
+
+  // Headers only earn their space once something is actually grouped.
+  const showModules = modules.length > 0
+  // While filtering, everything stays open so a match can't hide inside a folded module.
+  const isCollapsed = (group: string) => !filter.trim() && collapsed.has(group)
+  const toggleModule = (group: string) =>
+    setCollapsed((s) => {
+      const next = new Set(s)
+      if (next.has(group)) next.delete(group)
+      else next.add(group)
+      return next
+    })
+
+  // Requests with no module whose URL suggests one — what "Auto-group" would file.
+  const autoGroupable = useMemo(
+    () => (saved ?? []).filter((s) => !(s.group ?? '').trim() && moduleFromUrl(s.url)),
+    [saved],
+  )
+
+  /** File every ungrouped request under the module its URL path implies (Swagger-style). */
+  const autoGroup = async () => {
+    if (!autoGroupable.length) return
+    setAutoGrouping(true)
+    let ok = 0
+    for (const s of autoGroupable) {
+      try {
+        await setApiRequestGroup(projectId, s.name, moduleFromUrl(s.url))
+        ok++
+      } catch {
+        /* skip one failure — keep grouping the rest */
+      }
+    }
+    setAutoGrouping(false)
+    queryClient.invalidateQueries({ queryKey: ['api-requests', projectId] })
+    if (ok) toast.success(`Grouped ${ok} request${ok === 1 ? '' : 's'} by URL path`)
+    else toast.error('Could not group the requests')
+  }
+
   // Toggle a preset criterion line in/out of the AI expectation text.
   const hasCriterion = (text: string) =>
     draft.aiExpect.split('\n').some((l) => l.trim() === `- ${text}`)
@@ -2496,6 +2650,24 @@ function ApiTesting({ projectId }: { projectId: string }) {
               />
             </div>
           )}
+          {/* One click to file everything loose under the module its URL path implies. */}
+          {autoGroupable.length > 0 && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={autoGroup}
+              disabled={autoGrouping}
+              className="h-8 w-full gap-1.5 rounded-full text-xs active:scale-[0.98]"
+              title="Group ungrouped requests by the first path segment of their URL"
+            >
+              {autoGrouping ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : (
+                <FolderTree className="size-3.5" />
+              )}
+              Auto-group {autoGroupable.length} by path
+            </Button>
+          )}
           <div className="space-y-1">
             {(saved ?? []).length === 0 && (
               <p className="rounded-xl border border-dashed border-border/60 px-3 py-4 text-center text-xs text-muted-foreground">
@@ -2507,116 +2679,218 @@ function ApiTesting({ projectId }: { projectId: string }) {
                 No requests match “{filter.trim()}”.
               </p>
             )}
-            {filteredSaved.map((item) => {
-              const isRenaming = renaming === item.name
-              return (
-                <div
-                  key={item.name}
-                  role={isRenaming ? undefined : 'button'}
-                  tabIndex={isRenaming ? undefined : 0}
-                  onClick={isRenaming ? undefined : () => loadItem(item)}
-                  onKeyDown={
-                    isRenaming
-                      ? undefined
-                      : (e) => {
-                          if (e.key === 'Enter' || e.key === ' ') {
-                            e.preventDefault()
-                            loadItem(item)
-                          }
-                        }
-                  }
-                  className={cn(
-                    'group flex items-center gap-2 rounded-xl border px-2.5 py-2 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
-                    !isRenaming && 'cursor-pointer',
-                    selected === item.name
-                      ? 'border-primary/40 bg-primary/5'
-                      : 'border-transparent hover:border-border/60 hover:bg-muted/40',
-                  )}
-                >
-                  {isRenaming ? (
-                    <>
-                      <Input
-                        autoFocus
-                        value={renameValue}
-                        onClick={(e) => e.stopPropagation()}
-                        onChange={(e) => setRenameValue(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter') commitRename(item.name)
-                          if (e.key === 'Escape') setRenaming(null)
-                        }}
-                        className="h-7 flex-1 rounded-md px-2 text-xs shadow-none"
-                      />
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          commitRename(item.name)
-                        }}
-                        disabled={renameMut.isPending}
-                        className="size-6 shrink-0 rounded-md text-emerald-600 hover:text-emerald-700"
-                        aria-label="Confirm rename"
-                      >
-                        {renameMut.isPending ? (
-                          <Loader2 className="size-3.5 animate-spin" />
-                        ) : (
-                          <Check className="size-3.5" />
+            {sections.map((section) => (
+              <div key={section.group || '__ungrouped__'} className="space-y-1">
+                {/* Module header — Swagger-style grouping; hidden until something is grouped. */}
+                {showModules && (
+                  <div className="flex items-center gap-1 px-1 pt-1">
+                    {renamingGroup === section.group ? (
+                      <>
+                        <Input
+                          autoFocus
+                          value={groupRenameValue}
+                          onChange={(e) => setGroupRenameValue(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') commitGroupRename(section.group)
+                            if (e.key === 'Escape') setRenamingGroup(null)
+                          }}
+                          maxLength={60}
+                          className="h-7 flex-1 rounded-md px-2 text-xs shadow-none"
+                        />
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          onClick={() => commitGroupRename(section.group)}
+                          disabled={groupRenameMut.isPending}
+                          className="size-6 shrink-0 rounded-md text-emerald-600 hover:text-emerald-700"
+                          aria-label="Confirm module rename"
+                        >
+                          {groupRenameMut.isPending ? (
+                            <Loader2 className="size-3.5 animate-spin" />
+                          ) : (
+                            <Check className="size-3.5" />
+                          )}
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          onClick={() => setRenamingGroup(null)}
+                          className="size-6 shrink-0 rounded-md text-muted-foreground hover:text-foreground"
+                          aria-label="Cancel module rename"
+                        >
+                          <X className="size-3.5" />
+                        </Button>
+                      </>
+                    ) : (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => toggleModule(section.group)}
+                          className="group/mod flex min-w-0 flex-1 items-center gap-1.5 rounded-lg py-1 text-left text-[11px] font-semibold uppercase tracking-wide text-muted-foreground transition-colors hover:text-foreground"
+                        >
+                          <ChevronRight
+                            className={cn(
+                              'size-3.5 shrink-0 transition-transform',
+                              !isCollapsed(section.group) && 'rotate-90',
+                            )}
+                          />
+                          <span className="min-w-0 truncate" title={moduleLabel(section.group)}>
+                            {moduleLabel(section.group)}
+                          </span>
+                          <span className="shrink-0 rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium tabular-nums">
+                            {section.items.length}
+                          </span>
+                        </button>
+                        {section.group && (
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => {
+                              setRenamingGroup(section.group)
+                              setGroupRenameValue(section.group)
+                            }}
+                            className="size-6 shrink-0 rounded-md text-muted-foreground hover:text-foreground"
+                            aria-label={`Rename module ${section.group}`}
+                            title="Rename this module"
+                          >
+                            <Pencil className="size-3" />
+                          </Button>
                         )}
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          setRenaming(null)
-                        }}
-                        className="size-6 shrink-0 rounded-md text-muted-foreground hover:text-foreground"
-                        aria-label="Cancel rename"
+                      </>
+                    )}
+                  </div>
+                )}
+                {!isCollapsed(section.group) &&
+                  section.items.map((item) => {
+                    const isRenaming = renaming === item.name
+                    return (
+                      <div
+                        key={item.name}
+                        role={isRenaming ? undefined : 'button'}
+                        tabIndex={isRenaming ? undefined : 0}
+                        onClick={isRenaming ? undefined : () => loadItem(item)}
+                        onKeyDown={
+                          isRenaming
+                            ? undefined
+                            : (e) => {
+                                if (e.key === 'Enter' || e.key === ' ') {
+                                  e.preventDefault()
+                                  loadItem(item)
+                                }
+                              }
+                        }
+                        className={cn(
+                          'group flex items-center gap-2 rounded-xl border px-2.5 py-2 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+                          !isRenaming && 'cursor-pointer',
+                          showModules && 'ml-2',
+                          selected === item.name
+                            ? 'border-primary/40 bg-primary/5'
+                            : 'border-transparent hover:border-border/60 hover:bg-muted/40',
+                        )}
                       >
-                        <X className="size-3.5" />
-                      </Button>
-                    </>
-                  ) : (
-                    <>
-                      <span className="flex min-w-0 flex-1 items-center gap-2">
-                        <span className={cn('shrink-0 font-mono text-[10px] font-bold', methodColor(item.method))}>
-                          {item.method}
-                        </span>
-                        <span className="min-w-0 truncate text-xs font-medium" title={item.name}>
-                          {item.name}
-                        </span>
-                      </span>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          setRenaming(item.name)
-                          setRenameValue(item.name)
-                        }}
-                        className="size-6 shrink-0 rounded-md text-muted-foreground opacity-0 transition-opacity hover:text-foreground group-hover:opacity-100"
-                        aria-label={`Rename ${item.name}`}
-                      >
-                        <Pencil className="size-3.5" />
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          setDeleting(item.name)
-                        }}
-                        className="size-6 shrink-0 rounded-md text-muted-foreground opacity-0 transition-opacity hover:text-destructive group-hover:opacity-100"
-                        aria-label={`Delete ${item.name}`}
-                      >
-                        <Trash2 className="size-3.5" />
-                      </Button>
-                    </>
-                  )}
-                </div>
-              )
-            })}
+                        {isRenaming ? (
+                          <>
+                            <Input
+                              autoFocus
+                              value={renameValue}
+                              onClick={(e) => e.stopPropagation()}
+                              onChange={(e) => setRenameValue(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') commitRename(item.name)
+                                if (e.key === 'Escape') setRenaming(null)
+                              }}
+                              className="h-7 flex-1 rounded-md px-2 text-xs shadow-none"
+                            />
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                commitRename(item.name)
+                              }}
+                              disabled={renameMut.isPending}
+                              className="size-6 shrink-0 rounded-md text-emerald-600 hover:text-emerald-700"
+                              aria-label="Confirm rename"
+                            >
+                              {renameMut.isPending ? (
+                                <Loader2 className="size-3.5 animate-spin" />
+                              ) : (
+                                <Check className="size-3.5" />
+                              )}
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                setRenaming(null)
+                              }}
+                              className="size-6 shrink-0 rounded-md text-muted-foreground hover:text-foreground"
+                              aria-label="Cancel rename"
+                            >
+                              <X className="size-3.5" />
+                            </Button>
+                          </>
+                        ) : (
+                          <>
+                            <span className="flex min-w-0 flex-1 items-center gap-2">
+                              <span className={cn('shrink-0 font-mono text-[10px] font-bold', methodColor(item.method))}>
+                                {item.method}
+                              </span>
+                              <span className="min-w-0 truncate text-xs font-medium" title={item.name}>
+                                {item.name}
+                              </span>
+                            </span>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                setMoving(item)
+                              }}
+                              className="size-6 shrink-0 rounded-md text-muted-foreground opacity-0 transition-opacity hover:text-foreground group-hover:opacity-100"
+                              aria-label={`Move ${item.name} to a module`}
+                              title="Move to module"
+                            >
+                              <FolderTree className="size-3.5" />
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                setRenaming(item.name)
+                                setRenameValue(item.name)
+                              }}
+                              className="size-6 shrink-0 rounded-md text-muted-foreground opacity-0 transition-opacity hover:text-foreground group-hover:opacity-100"
+                              aria-label={`Rename ${item.name}`}
+                            >
+                              <Pencil className="size-3.5" />
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                setDeleting(item.name)
+                              }}
+                              className="size-6 shrink-0 rounded-md text-muted-foreground opacity-0 transition-opacity hover:text-destructive group-hover:opacity-100"
+                              aria-label={`Delete ${item.name}`}
+                            >
+                              <Trash2 className="size-3.5" />
+                            </Button>
+                          </>
+                        )}
+                      </div>
+                    )
+                  })}
+              </div>
+            ))}
           </div>
+
+          {/* Flows — multi-step scenarios built from the requests above (Postman's
+              "run collection"), plus the test accounts a login step uses. */}
+          <ApiFlowsCard projectId={projectId} saved={saved ?? []} />
         </aside>
 
         {/* Request builder + response */}
@@ -3008,6 +3282,16 @@ function ApiTesting({ projectId }: { projectId: string }) {
           projectId={projectId}
           initial={environments}
           onClose={() => setManageEnvOpen(false)}
+        />
+      )}
+
+      {moving && (
+        <MoveToModuleDialog
+          request={moving}
+          modules={modules}
+          pending={moveMut.isPending}
+          onCancel={() => setMoving(null)}
+          onMove={(group) => moveMut.mutate({ name: moving.name, group })}
         />
       )}
 

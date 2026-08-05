@@ -13,6 +13,29 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
+/**
+ * Where the Android SDK usually lives, so `adb` (and `emulator`) resolve for
+ * Maestro's Android driver and for our friendly-device-name lookup. Android
+ * Studio doesn't put platform-tools on PATH, so a portal launched from a shortcut
+ * almost never sees it.
+ */
+function androidSdkDirs(): string[] {
+  const home = os.homedir()
+  const roots: string[] = []
+  for (const env of [process.env.ANDROID_HOME, process.env.ANDROID_SDK_ROOT]) {
+    if (env) roots.push(env)
+  }
+  if (process.platform === 'win32') {
+    const local = process.env.LOCALAPPDATA
+    if (local) roots.push(path.join(local, 'Android', 'Sdk'))
+  } else if (process.platform === 'darwin') {
+    roots.push(path.join(home, 'Library', 'Android', 'sdk'))
+  } else {
+    roots.push(path.join(home, 'Android', 'Sdk'))
+  }
+  return roots.flatMap((root) => [path.join(root, 'platform-tools'), path.join(root, 'emulator')])
+}
+
 /** Well-known per-user tool dirs that are frequently missing from a stale PATH. */
 function extraToolDirs(): string[] {
   const home = os.homedir()
@@ -20,6 +43,7 @@ function extraToolDirs(): string[] {
     path.join(home, '.local', 'bin'), // uv's default install dir (all platforms)
     path.join(home, '.cargo', 'bin'), // rustup/cargo installs (older uv installers)
     path.join(home, '.maestro', 'bin'), // Maestro's curl installer (all platforms)
+    ...androidSdkDirs(),
   ]
   if (process.platform === 'win32') {
     // winget puts shims for its packages (incl. astral-sh.uv) here.

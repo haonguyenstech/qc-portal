@@ -23,6 +23,10 @@ const MAX_TICKET_CHARS = 40_000 // ticket.md + comments.md fed into the test-cas
 const MAX_TEMPLATE_CHARS = 30_000 // uploaded test-case template
 const MAX_INSTRUCTIONS_CHARS = 4_000 // extra QC instructions + selected rules
 const MAX_PROTOTYPE_CHARS = 60_000 // UI prototype HTML fed in as observed UI
+// An attached SPEC document. Larger than the ticket cap on purpose: this exists for the
+// case where the ticket is a stub that only links to the spec, so the spec IS the
+// requirement and truncating it loses the scope the cases have to cover.
+const MAX_SPEC_CHARS = 120_000
 
 /** An Error carrying an HTTP status the route can surface. */
 function statusError(message: string, status: number): Error {
@@ -314,6 +318,7 @@ function testCasesPrompt(
   knowledgeBlock: string,
   sourceWhere: string,
   prototypeUi: { name: string; html: string } | null,
+  spec: { name: string; content: string } | null,
 ): string {
   // The run executes inside the project repo, so the model should READ the feature's
   // real implementation before drafting — this is what makes cases match the app
@@ -396,6 +401,20 @@ Use your browser/Playwright tool to OPEN this URL and explore the actual running
 - Expected result: state the observable outcome briefly and tie it to the step it applies to ("At step 3, the 'Appointment Management' screen is shown"). No long prose paragraphs, no rationale.
 - Use the exact UI labels / field names instead of describing them; trim filler words. If a step or expected line runs long, split or shorten it.`
 
+  // The attached spec. A ticket that only LINKS to its spec has no acceptance criteria
+  // of its own, so the spec has to be treated as a first-class requirement source — not
+  // as background — or the run drafts almost nothing. The ticket still bounds WHICH part
+  // of a (usually much larger) spec is in scope for this run.
+  const specBlock = spec
+    ? `
+
+SPECIFICATION DOCUMENT — the QC engineer attached "${spec.name}" because the ticket links to the spec instead of restating it. Treat it as an AUTHORITATIVE requirement source, on par with the ticket:
+- Draft cases from the spec's stated behaviour, rules, fields, states and error handling — a requirement that appears ONLY in the spec is still in scope and must be covered.
+- The TICKET still decides WHICH PART of the spec this run covers: a spec usually describes far more than one ticket. Cover the spec sections the ticket points at (and what they depend on), not the whole document.
+- If the spec and the ticket disagree, cover the TICKET's version and note the discrepancy inline on that case — do not silently pick one.
+- If the spec and the SOURCE CODE disagree, the spec states the requirement (so the case asserts the spec) — note the difference inline, since that is exactly the bug a tester should find.`
+    : ''
+
   // Hard scope boundary — this run may auto-load the machine's global/user-level
   // config (e.g. ~/.claude/CLAUDE.md) and, with file tools, could reach sibling
   // project folders. Everything the model grounds cases in must come from THIS
@@ -408,7 +427,9 @@ Do NOT read, import, or rely on anything outside this project: no global or user
 
   return `You are a senior QC engineer writing manual acceptance test cases for the project "${projectName}".
 
-Below is a ClickUp ticket (its details and comments). Read it and produce a thorough, executable set of test cases a QC engineer can run to verify this ticket is correctly implemented.
+Below is a ClickUp ticket (its details and comments)${
+    spec ? ', plus a SPECIFICATION DOCUMENT the QC engineer attached' : ''
+  }. Read ${spec ? 'both' : 'it'} and produce a thorough, executable set of test cases a QC engineer can run to verify this ticket is correctly implemented.
 
 ${scopeBlock}
 
@@ -417,7 +438,7 @@ ${sourceBlock}
 ${formatBlock}
 
 ${styleBlock}
-${appBlock}${prototypeBlock}${instructionBlock}${knowledge}
+${appBlock}${prototypeBlock}${specBlock}${instructionBlock}${knowledge}
 Coverage — be EXHAUSTIVE, not representative:
 - Silently (do NOT write this out) take stock of every distinct area this ticket spans: each feature/module it touches, each trigger or event it describes, each screen/view, and each user role/permission. A ticket that touches N modules or N triggers needs cases for ALL of them.
 - Then write cases covering EVERY one of those areas — do not stop after the first few modules and do not sample. If you are wrapping up with whole areas of the ticket still uncovered, keep writing until they are all covered.
@@ -427,7 +448,7 @@ Coverage — be EXHAUSTIVE, not representative:
 - Do not narrate your plan or list files/areas in prose — go straight from reading to writing the cases.
 
 Rules:
-- Ground every case in what you actually saw — the ticket plus the real SOURCE CODE you read (real names, validation, states, branches). Use the ticket for scope and intent; use the code for the concrete details. Do not invent unrelated features or acceptance criteria that neither the ticket nor the code supports.
+- Ground every case in what you actually saw — the ticket${spec ? ', the attached specification' : ''} plus the real SOURCE CODE you read (real names, validation, states, branches). Use the ticket for scope and intent; use the code for the concrete details. Do not invent unrelated features or acceptance criteria that neither the ticket nor the code supports.
 - When PROJECT KNOWLEDGE & MEMORY is provided, use it for this project's real screen/field/button names, roles, terminology, and business rules instead of guessing — but it is background context, NOT scope: only add a case for something it mentions if THIS ticket requires it.
 - Be specific and executable, but CONCISE — real steps and expected results, never placeholders like "TBD", and never padded with rationale (see Writing style above).
 - ${outputRule}
@@ -449,6 +470,14 @@ ${template.content}
 --- UI PROTOTYPE ("${prototypeUi.name}") START ---
 ${prototypeUi.html}
 --- UI PROTOTYPE END ---`
+      : ''
+  }${
+    spec
+      ? `
+
+--- SPECIFICATION ("${spec.name}") START ---
+${spec.content}
+--- SPECIFICATION END ---`
       : ''
   }
 
@@ -511,6 +540,15 @@ export async function generateTestcaseVersion(opts: {
    * owns scope. Capped before it reaches the prompt.
    */
   prototypeUi?: { name: string; html: string } | null
+  /**
+   * A specification document the QC engineer attached (converted to Markdown in the
+   * browser). ClickUp/Jira tickets often carry only a LINK to the spec, so the ticket
+   * alone has no acceptance criteria to draft from — this supplies them. It is a
+   * requirement source ON PAR with the ticket (not "observed UI" like prototypeUi), and
+   * it is also handed to the grounding check, or the audit would delete every case the
+   * ticket doesn't restate.
+   */
+  spec?: { name: string; content: string } | null
   /** Called with each streamed log line so callers can surface progress live. */
   onLog?: (log: StreamLog) => void
   /** Fires to cancel an in-flight generation (pause/cancel of a job). */
@@ -588,9 +626,23 @@ export async function generateTestcaseVersion(opts: {
           : html,
     }
   })()
+  const spec = (() => {
+    const raw = opts.spec
+    const content = typeof raw?.content === 'string' ? raw.content.trim() : ''
+    if (!content) return null
+    return {
+      name: raw?.name?.trim() || 'spec',
+      content:
+        content.length > MAX_SPEC_CHARS
+          ? `${content.slice(0, MAX_SPEC_CHARS)}\n\n…(spec truncated)`
+          : content,
+    }
+  })()
   onLog({
     level: 'info',
     text: `Reading ticket (${ticketContent.length.toLocaleString()} chars)…${
+      spec ? ` + spec "${spec.name}" (${spec.content.length.toLocaleString()} chars)` : ''
+    }${
       prototypeUi ? ` · grounding in UI prototype "${prototypeUi.name}"` : ''
     } output: ${format.toUpperCase()} · reading source code${
       ctx.hasContent
@@ -620,7 +672,10 @@ export async function generateTestcaseVersion(opts: {
     : ['--allowedTools', 'Read', 'Grep', 'Glob', '--strict-mcp-config']
   // Reading source (and, with a live app, driving a browser) costs more than a plain
   // draft — give it more headroom before the cost cap cuts in.
+  // A spec attached means far more requirement text to read and cover, so the run
+  // needs headroom — a stub ticket + 100-page spec is the whole point of the feature.
   const budget = appUrl ? '3.50' : format === 'csv' ? '3.00' : '2.00'
+  const budgetUsd = spec ? (Number(budget) + 1).toFixed(2) : budget
   // The prompt embeds the whole ticket + project context + instructions, so it goes
   // over stdin (opts.input) rather than as an argv positional — a long prompt would
   // otherwise blow the OS command-line limit (Windows: spawn ENAMETOOLONG).
@@ -634,9 +689,10 @@ export async function generateTestcaseVersion(opts: {
     ctx.block,
     sourceWhere,
     prototypeUi,
+    spec,
   )
   const result = await runClaudeStream(
-    [...baseArgs, ...toolArgs, '--max-budget-usd', budget],
+    [...baseArgs, ...toolArgs, '--max-budget-usd', budgetUsd],
     // Reading the source, writing a full CSV, or exploring a live app all take far
     // longer to stream than a plain Markdown table. With reading time-boxed in the
     // prompt, a full exhaustive write fits comfortably; give it up to 14 min before the
@@ -691,7 +747,12 @@ export async function generateTestcaseVersion(opts: {
       const g = await groundTestcases({
         rootPath: opts.rootPath,
         projectName: opts.projectName,
-        ticketContent,
+        // The attached spec goes in as requirement source as well. Without it the audit
+        // sees a case whose behaviour the ticket never mentions and deletes it — which
+        // for a ticket that only links to its spec is EVERY case.
+        ticketContent: spec
+          ? `${ticketContent}\n\n--- ATTACHED SPECIFICATION ("${spec.name}") ---\n${spec.content}`
+          : ticketContent,
         output: testcases,
         format: outFormat,
         model: opts.groundingCheckModel,

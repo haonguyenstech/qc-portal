@@ -63,6 +63,7 @@ import {
   type McpOauthProvider,
 } from '@/lib/api'
 import type { McpServer } from '@/lib/types'
+import { devicesFromDetection, type DetectedDevice } from '@/lib/devices'
 import { useProjects } from '@/lib/project-context'
 
 const OAUTH_META: Record<
@@ -346,39 +347,6 @@ function ResultLine({ result }: { result: { ok: boolean; warn?: boolean; detail:
 }
 
 /**
- * Split a detected device label into something renderable. Maestro reports a
- * simulator as one long string — "iPhone 15 Pro - iOS 17.2 - 240CB27F-…-F3485DDA3ED6"
- * — so the primary line takes the first segment and the rest becomes a caption.
- *
- * `platform` is NOT a two-way iOS-or-Android guess: Maestro's always-present
- * `chromium` entry is a desktop browser, and labeling it "Android" is simply wrong.
- *
- * The RAW string stays the value sent to the drive step (that prompt matches the
- * device by name/id), so this only shapes what's on screen.
- */
-function describeDevice(raw: string): {
-  name: string
-  caption: string
-  platform: 'iOS' | 'Android' | 'Web'
-} {
-  const parts = raw
-    .split(/\s+[-–—|·]\s+/)
-    .map((s) => s.trim())
-    .filter(Boolean)
-  const name = parts[0] || raw
-  const platform = /chromium|chrome|browser|safari|firefox|webkit|\bweb\b/i.test(raw)
-    ? 'Web'
-    : /iphone|ipad|ipod|\bios\b|simulator/i.test(raw)
-      ? 'iOS'
-      : 'Android'
-  // Don't prefix a platform the label already states — "iOS · iOS 17.2 · <udid>" reads
-  // like a bug.
-  const rest = parts.slice(1)
-  const stated = rest.some((p) => new RegExp(`^${platform}\\b`, 'i').test(p))
-  return { name, caption: [...(stated ? [] : [platform]), ...rest].join(' · '), platform }
-}
-
-/**
  * Mobile functional test — a two-step dialog. On open it auto-detects connected
  * devices/simulators (empty-input capability test); if any are found it shows a
  * device picker + an enabled "Run test" that actually drives the selected device.
@@ -407,11 +375,9 @@ function MobileFunctionalTest({
   }, [])
 
   const detectResult = detect.data
-  const devices =
-    detectResult && Array.isArray(detectResult.data?.devices)
-      ? (detectResult.data!.devices as unknown[]).map(String)
-      : []
-  const selected = device || devices[0] || ''
+  const devices: DetectedDevice[] = devicesFromDetection(detectResult)
+  // Selection keys on the device_id — that's what the drive step must be given.
+  const selected = devices.some((d) => d.deviceId === device) ? device : devices[0]?.deviceId ?? ''
   const detecting = detect.isPending
   const testing = runTest.isPending
   const detectError = detect.isError
@@ -459,19 +425,18 @@ function MobileFunctionalTest({
                 {devices.length} device{devices.length > 1 ? 's' : ''} detected · pick one to test
               </label>
               <div className="space-y-1.5">
-                {devices.map((d) => {
-                  const active = selected === d
-                  const info = describeDevice(d)
+                {devices.map((info) => {
+                  const active = selected === info.deviceId
                   const DeviceIcon = info.platform === 'Web' ? Globe : Smartphone
                   return (
                     <button
-                      key={d}
+                      key={info.deviceId}
                       type="button"
-                      onClick={() => setDevice(d)}
+                      onClick={() => setDevice(info.deviceId)}
                       disabled={testing}
                       aria-pressed={active}
-                      // The raw label carries the udid/serial, which the row truncates.
-                      title={d}
+                      // The caption carries the udid/serial, which the row truncates.
+                      title={`${info.name} · ${info.caption}`}
                       className={cn(
                         'flex w-full items-center gap-3 rounded-xl border px-3 py-2.5 text-left transition-all duration-200 active:scale-[0.99] disabled:opacity-60',
                         active

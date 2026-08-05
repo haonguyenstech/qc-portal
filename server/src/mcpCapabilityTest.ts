@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { parseClaudeJsonResult, runClaude } from './claudeExec.js'
 import { probeMaestro } from './maestro.js'
+import { androidDeviceNames } from './mobileDevices.js'
 
 export interface McpCapabilityResult {
   ok: boolean
@@ -47,6 +48,65 @@ export const CAPABILITY_TESTS: Record<
     inputPlaceholder: '',
     action: 'List devices',
   },
+}
+
+/**
+ * One drivable device, as the mobile functional-test dialog renders it: `name` is
+ * what the engineer reads, `deviceId` is what Maestro is actually given.
+ */
+export interface MobileDevice {
+  deviceId: string
+  name: string
+  platform: string | null
+  type: string | null
+}
+
+/** An adb serial we should replace with a real name (`emulator-5554`, `R58M12ABCDE`). */
+function looksLikeSerial(value: string): boolean {
+  return /^emulator-\d+$/i.test(value) || /^[A-Z0-9]{6,}$/.test(value)
+}
+
+/**
+ * Turn whatever the model reported into `MobileDevice[]`, then give the Android
+ * entries a human name.
+ *
+ * Maestro names an iOS simulator properly but hands back the ADB serial as the
+ * name on Android, which is exactly the "shows a device id instead of the
+ * simulator I set up" complaint. adb knows the AVD/model name, so ask it and
+ * prefer that. Legacy plain-string entries are still accepted so a cached result
+ * (or an older reply shape) renders instead of vanishing.
+ */
+async function normalizeDevices(raw: unknown[]): Promise<MobileDevice[]> {
+  const devices: MobileDevice[] = []
+  for (const entry of raw) {
+    if (typeof entry === 'string') {
+      const value = entry.trim()
+      if (value) devices.push({ deviceId: value, name: value, platform: null, type: null })
+      continue
+    }
+    if (!entry || typeof entry !== 'object') continue
+    const e = entry as Record<string, unknown>
+    const deviceId = String(e.device_id ?? e.deviceId ?? e.id ?? '').trim()
+    const name = String(e.name ?? '').trim()
+    if (!deviceId && !name) continue
+    devices.push({
+      deviceId: deviceId || name,
+      name: name || deviceId,
+      platform: e.platform ? String(e.platform) : null,
+      type: e.type ? String(e.type) : null,
+    })
+  }
+
+  // Only pay for the adb round-trip when something actually needs renaming.
+  const needsName = devices.filter((d) => d.name === d.deviceId && looksLikeSerial(d.deviceId))
+  if (needsName.length) {
+    const names = await androidDeviceNames()
+    for (const device of needsName) {
+      const friendly = names.get(device.deviceId)
+      if (friendly) device.name = friendly
+    }
+  }
+  return devices
 }
 
 function statusError(message: string, status: number): Error {
@@ -104,8 +164,9 @@ No prose, no markdown, no code fence.`
 Each entry has "device_id", "name", "platform", "type" and a "connected" boolean.
 An empty result is still a SUCCESSFUL one; it only means nothing is available right now.
 Reply with ONLY a JSON object and nothing else:
-- if the tool ran: {"ok": true, "devices": ["<name>", ...]}
+- if the tool ran: {"ok": true, "devices": [{"device_id": "<device_id>", "name": "<name>", "platform": "<platform>", "type": "<type>"}, ...]}
 - only if the tool itself errored: {"ok": false, "error": "<short reason>"}
+Copy each field VERBATIM from the tool result — never invent, shorten or reformat a name or id.
 In "devices" include ONLY entries that can actually be driven right now, namely:
 - any entry whose "connected" is true, AND
 - the web/browser entry (device_id "chromium") if present — Maestro launches it on demand, so include it even though its "connected" is false.
@@ -276,10 +337,16 @@ export async function runMcpCapabilityTest(opts: {
     detail = `Opened & closed browser · page title: ${String(data.title ?? '(none)')}`
   } else if (isMaestro) {
     if (Array.isArray(data.devices)) {
-      // DETECT step (empty input) — report the device list.
-      const devices = data.devices.map(String)
+      // DETECT step (empty input) — report the device list. Normalize + name it
+      // properly before it reaches the UI (see normalizeDevices), so the picker can
+      // show "Pixel 7 API 34" and still drive the udid/serial behind it.
+      const devices = await normalizeDevices(data.devices)
+      data.devices = devices
       if (devices.length) {
-        detail = `Found ${devices.length} device(s): ${devices.slice(0, 5).join(', ')}`
+        detail = `Found ${devices.length} device(s): ${devices
+          .slice(0, 5)
+          .map((d) => d.name)
+          .join(', ')}`
       } else {
         // The MCP works, but there's nothing to drive — surface it as a caveat (amber),
         // not a clean green "success", so the engineer knows to boot a simulator/device.
@@ -287,8 +354,12 @@ export async function runMcpCapabilityTest(opts: {
         warn = true
       }
     } else {
-      // DRIVE step (a device was selected) — confirm we controlled it.
-      detail = `Drove ${String(data.device ?? 'device')}: ${String(data.info ?? 'screen read')}`
+      // DRIVE step (a device was selected) — confirm we controlled it. The UI sends
+      // the device_id, so name it the same way the picker did rather than echoing a
+      // serial back at the engineer.
+      const droven = String(data.device ?? 'device')
+      const [named] = await normalizeDevices([droven])
+      detail = `Drove ${named?.name ?? droven}: ${String(data.info ?? 'screen read')}`
     }
   } else {
     detail = 'MCP responded.'

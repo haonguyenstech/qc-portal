@@ -327,15 +327,41 @@ export function runClaudeStream(
   })
 }
 
-/** Pull the `result` text out of `claude -p --output-format json` output. */
+/**
+ * Pull the `result` text out of `claude -p --output-format json` output.
+ *
+ * The CLI has TWO shapes for this format and both are still in the wild:
+ *  - a single result object `{type:'result', result:'…', is_error:false}` (older), and
+ *  - the whole message array `[{type:'system'…}, {type:'assistant'…}, {type:'result'…}]`
+ *    (current CLI), where the answer is the LAST `type:'result'` entry.
+ * Reading `.result` off the array yields `undefined`, which every caller reports as
+ * "the AI produced nothing" — so handle both rather than assuming one.
+ */
 export function parseClaudeJsonResult(raw: string): { text: string; isError: boolean } {
-  let parsed: { result?: string; is_error?: boolean } = {}
+  interface ResultMsg {
+    type?: string
+    result?: string
+    is_error?: boolean
+  }
+  let parsed: unknown
   try {
-    parsed = JSON.parse(raw.trim()) as typeof parsed
+    parsed = JSON.parse(raw.trim())
   } catch {
     /* non-json CLI error */
+    return { text: '', isError: false }
   }
-  return { text: (parsed.result ?? '').trim(), isError: !!parsed.is_error }
+  let msg: ResultMsg = {}
+  if (Array.isArray(parsed)) {
+    // Last result message wins; fall back to any entry carrying a `result` string.
+    const msgs = parsed as ResultMsg[]
+    msg =
+      [...msgs].reverse().find((m) => m?.type === 'result') ??
+      [...msgs].reverse().find((m) => typeof m?.result === 'string') ??
+      {}
+  } else if (parsed && typeof parsed === 'object') {
+    msg = parsed as ResultMsg
+  }
+  return { text: (msg.result ?? '').trim(), isError: !!msg.is_error }
 }
 
 /** Claude model aliases the portal exposes for crawl summaries. */

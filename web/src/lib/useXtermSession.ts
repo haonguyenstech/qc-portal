@@ -1,9 +1,41 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
+import { toast } from 'sonner'
 import '@xterm/xterm/css/xterm.css'
+import { copyText } from '@/lib/clipboard'
 
 export type TerminalStatus = 'idle' | 'connecting' | 'connected'
+
+/**
+ * Copy text out of the terminal and SAY whether it worked. A silent failure here is
+ * the worst outcome: the user thinks they have Claude's output on the clipboard,
+ * pastes the previous thing into a ticket, and never learns why.
+ */
+async function copySelectionText(text: string): Promise<boolean> {
+  const ok = await copyText(text)
+  if (ok) {
+    const lines = text.split('\n').length
+    toast.success(`Copied ${lines > 1 ? `${lines} lines` : 'selection'}`)
+  } else {
+    toast.error('Could not copy', {
+      description:
+        'The browser blocked clipboard access. Open the portal on http://localhost (not an IP address), or select the text and use your browser’s right-click → Copy.',
+    })
+  }
+  return ok
+}
+
+/** Whole scrollback as text, trailing blank lines trimmed. */
+function bufferText(term: Terminal): string {
+  const buf = term.buffer.active
+  const lines: string[] = []
+  for (let i = 0; i < buf.length; i++) {
+    lines.push(buf.getLine(i)?.translateToString(true) ?? '')
+  }
+  while (lines.length && !lines[lines.length - 1].trim()) lines.pop()
+  return lines.join('\n')
+}
 
 /**
  * Drive an xterm.js terminal bridged to the server's `/ws/terminal` pseudo-terminal.
@@ -115,24 +147,47 @@ export function useXtermSession(
       },
       allowProposedApi: true,
     })
-    // Windows/Linux clipboard: xterm handles the Ctrl+V keydown itself — it
-    // sends the ^V control byte to the shell and preventDefaults the browser's
-    // native paste, so nothing is ever pasted. Returning false here makes xterm
-    // skip the keydown, letting the native paste event reach its textarea (which
-    // xterm does handle). Ctrl+Shift+C copies the selection (plain Ctrl+C must
-    // stay SIGINT). macOS is untouched — Cmd+V/Cmd+C already work natively, and
-    // Ctrl+V there is a real shell keybinding (literal-next).
-    const isMac = /mac/i.test(navigator.platform)
+    // Windows/Linux clipboard. macOS is untouched below — Cmd+C/Cmd+V already work
+    // natively there (the browser's own copy event reaches xterm), and Ctrl+V on a
+    // mac shell is a real keybinding (literal-next) we must not steal.
+    //
+    // The rules that matter on Windows, where QC engineers actually run the portal:
+    //  - Ctrl+C WITH a selection copies; with NO selection it stays SIGINT. This is
+    //    what Windows Terminal / VS Code / PuTTY do, and it's what people's hands
+    //    expect. Without it, selecting Claude's output and hitting Ctrl+C out of
+    //    habit interrupts the run instead of copying it — the reported bug.
+    //  - Ctrl+Shift+C / Ctrl+Insert always copy (the explicit, unambiguous forms).
+    //  - Ctrl+V / Shift+Insert: xterm would otherwise handle the keydown, send the
+    //    control byte and preventDefault the browser's native paste, so nothing is
+    //    pasted. Returning false lets the native paste event reach xterm's textarea,
+    //    which it does handle.
+    // `userAgentData` is Chromium-only and absent from TS's DOM lib, so it's read
+    // through a narrow cast; `navigator.platform` (deprecated but universal) is the
+    // fallback, which is why both are consulted rather than either alone.
+    const uaPlatform = (navigator as Navigator & { userAgentData?: { platform?: string } })
+      .userAgentData?.platform
+    const isMac = /mac/i.test(uaPlatform || navigator.platform || '')
     term.attachCustomKeyEventHandler((ev) => {
       if (ev.type !== 'keydown' || isMac) return true
       const key = ev.key.toLowerCase()
       if (ev.ctrlKey && !ev.altKey && key === 'v') return false
-      if (ev.ctrlKey && ev.shiftKey && key === 'c') {
+      if (ev.shiftKey && key === 'insert') return false // paste
+      const wantsCopy =
+        (ev.ctrlKey && ev.shiftKey && key === 'c') || (ev.ctrlKey && key === 'insert')
+      // Plain Ctrl+C copies ONLY when something is selected — otherwise it has to
+      // fall through as SIGINT, which is how you stop a runaway command.
+      const plainCtrlC = ev.ctrlKey && !ev.shiftKey && !ev.altKey && key === 'c'
+      if (wantsCopy || plainCtrlC) {
         const sel = term.getSelection()
         if (sel) {
-          void navigator.clipboard?.writeText(sel).catch(() => {})
+          void copySelectionText(sel)
+          // Clear the selection so the NEXT Ctrl+C is a real SIGINT again — otherwise
+          // a stale selection would silently swallow every interrupt after this one.
+          term.clearSelection()
           return false
         }
+        // No selection: Ctrl+Shift+C / Ctrl+Insert do nothing, plain Ctrl+C interrupts.
+        if (wantsCopy) return false
       }
       return true
     })
@@ -222,5 +277,34 @@ export function useXtermSession(
     [teardown],
   )
 
-  return { hostRef, status, connect, disconnect, sendText, focus }
+  /**
+   * Copy the current selection, or the WHOLE scrollback when nothing is selected.
+   * Selecting hundreds of lines of Claude output with the mouse is miserable, and
+   * "copy what the AI just wrote" is the actual job — so the button always has a
+   * sensible answer instead of being disabled.
+   */
+  const copySelectionOrAll = useCallback(async () => {
+    const term = termRef.current
+    if (!term) return false
+    const text = term.getSelection() || bufferText(term)
+    if (!text.trim()) {
+      toast.info('Nothing to copy yet')
+      return false
+    }
+    return copySelectionText(text)
+  }, [])
+
+  /** True when the user has an active mouse selection (drives the button's label). */
+  const hasSelection = useCallback(() => !!termRef.current?.getSelection(), [])
+
+  return {
+    hostRef,
+    status,
+    connect,
+    disconnect,
+    sendText,
+    focus,
+    copySelectionOrAll,
+    hasSelection,
+  }
 }

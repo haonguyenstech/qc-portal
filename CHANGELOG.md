@@ -3,6 +3,90 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.11.8 — 2026-08-05
+
+**API scenarios that run like a Postman collection, test cases from an attached spec, and the device you picked**
+
+### Added
+
+- **API Testing runs a whole scenario, not one request at a time.** A "Flows" list sits under your
+  saved requests: put the requests in the order they should run, hit **Run flow**, and each step's
+  captured values feed the next one — log in, capture the token, then every step that needs it. Each
+  step shows its status code, timing and how many of its checks passed; a failure stops the run (or
+  keeps going, if you mark that step "soft") and everything after it is reported as skipped instead
+  of silently vanishing. Each run is saved with the ticket's project as evidence, verdicts only —
+  never response bodies, so a token in a login response can't end up in your repo.
+- **Somewhere to put the login for the first step, including real 2FA.** Store a test account (label
+  + username + password) in API Testing, pick it under **Run as**, and write `{{auth.username}}` /
+  `{{auth.password}}` in your login request — the Portal fills them in when it sends. Pick an
+  authenticator too and `{{auth.otp}}` becomes the live six-digit code, the same authenticators you
+  registered on Instructions → Accounts. Because the flow picks the identity, one login request can
+  be re-run as a different role by changing a dropdown instead of editing the request. The password
+  is stored outside your project (never committed, never sent to an AI prompt) and is never sent back
+  to the page.
+- **Accounts you already wrote on Instructions → Accounts can be imported in one click.** If your
+  accounts sheet has them, API Testing offers those rows for import instead of making you type them
+  again — which is why the account picker used to say "No account" while you were looking at your
+  account on the other page.
+- **Save your API requests into modules, the way Swagger groups endpoints.** Requests fold under
+  collapsible module headers, one click files everything loose under the module its URL path implies,
+  and a module can be renamed across every request in it.
+- **Generate test cases from an attached specification.** For a ClickUp/Jira ticket that only *links*
+  to its spec and has no details of its own, upload the document on the Test cases page — **Word,
+  PDF, Excel, CSV or Markdown**. Claude then drafts from the spec, with the ticket deciding which
+  part of it is in scope; where the spec and the code disagree it writes the case against the spec
+  and says so, since that is the bug worth finding. The document is read in your browser, so the file
+  itself never leaves your machine.
+- **Pick which device a mobile run drives.** With an Android emulator, an iOS simulator and Maestro's
+  Chromium device all up at once, "Web on mobile" and "App on device" used to test whichever one
+  Maestro happened to list first. The Run form now detects them and lets you choose — by **name**,
+  not by `emulator-5554` — and remembers your choice per project. Leave it on **Auto** for the old
+  behaviour.
+- **Mobile devices are listed by their real names.** An Android device used to appear as its raw ADB
+  serial (`emulator-5554`, `R58M12ABCDE`), so two identical-looking ids gave you no way to tell which
+  of your emulators was which. The Portal now asks `adb` for the AVD name you created in Device
+  Manager (`Pixel 6 API 36`) or the phone's model, and shows that instead.
+- **The sidebar tells you when Auto Agent has logged out.** Every AI feature here shells out to
+  `claude`, so when the shared credential lapses or its watcher dies, runs start failing with
+  confusing mid-run auth errors. There's now a status line above Release notes — connected, expiring,
+  stalled, expired or logged out — plus a toast the moment it drops, so you find out before a run
+  does.
+- **Read your test cases from the Run form.** The "Test cases" badge on a crawled ticket — and on each
+  selected ticket chip — opens the same read-only preview with a version dropdown, whether you picked
+  one ticket or queued several.
+
+### Fixed
+
+- **Ctrl+C in the Terminal copies your selection instead of killing the run.** On Windows, selecting
+  Claude's output and pressing Ctrl+C out of habit used to send SIGINT and interrupt the run. It now
+  copies when text is selected and stays SIGINT when nothing is — what Windows Terminal and VS Code
+  do. Ctrl+V, Ctrl+Shift+C and Ctrl+Insert work as you'd expect too, and if the browser blocks
+  clipboard access (opening the Portal by IP address rather than `localhost`), you get told so
+  instead of quietly copying nothing.
+- **`adb` is found even when the Portal was started from a shortcut.** Android Studio doesn't put
+  platform-tools on the PATH, so a Portal launched outside a terminal couldn't see `adb` — which is
+  exactly the setup where the friendly device names above would have silently fallen back to raw
+  serials.
+- **The Database page's read-only protection is layered, and each layer was tightened.** The page runs
+  SQL the AI wrote and nobody reviewed, so no single check is trusted: comments are stripped and
+  string contents masked before the statement is parsed (nothing hides in a comment, and an ordinary
+  value like `status = 'update'` no longer false-alarms), every driver runs inside a transaction that
+  is never committed — including SQL Server, whose DDL is transactional so even a `DROP` that somehow
+  got past the parser is rolled back — and row caps, statement timeouts and password scrubbing apply
+  on top.
+- **"The AI produced nothing" errors are gone.** A newer Claude CLI returns its result in a different
+  shape, and roughly a dozen features that read it — Ask AI on the Database page, crawl summaries, the
+  grounding check, auto-learn, the source map, the design system, Design Check — reported an empty
+  answer instead. Both shapes are now understood.
+
+### Changed
+
+- **Nothing under `data/` can be committed any more.** That folder is this install's own runtime
+  state — the database plus several credential stores (2FA seeds, database passwords, API test-account
+  passwords) — and it was being ignored file-by-file, which had already missed two of them. The whole
+  folder is ignored now, so a new credential store can't be one forgotten line away from ending up in
+  a commit.
+
 ## 0.11.7 — 2026-07-29
 
 **Fixes the Playwright `EPERM` error that blocked runs on other people's machines**

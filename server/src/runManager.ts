@@ -270,6 +270,7 @@ function spawnRun(
     relatedTickets?: string[]
     workflowSteps?: string[]
     testTarget?: 'web' | 'web-mobile' | 'app-mobile'
+    deviceId?: string
   },
   resumeSessionId?: string,
 ): void {
@@ -286,6 +287,7 @@ function spawnRun(
       relatedTickets: body.relatedTickets,
       workflowSteps: body.workflowSteps,
       testTarget: body.testTarget,
+      deviceId: body.deviceId,
       resumeSessionId,
       totpHint: totpPromptHint(project.id),
     },

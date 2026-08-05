@@ -706,6 +706,20 @@ function parseTemplate(raw: unknown): { name?: string; content?: string } | null
 }
 
 /**
+ * An attached spec document (already converted to Markdown in the browser, the same way
+ * Knowledge uploads are). Only a name + text — the original .docx/.pdf never reaches the
+ * server, so there is no upload path or temp file to manage. Capped in testcaseGen.
+ */
+function parseSpec(raw: unknown): { name: string; content: string } | null {
+  if (!raw || typeof raw !== 'object') return null
+  const r = raw as Record<string, unknown>
+  const content = typeof r.content === 'string' ? r.content : ''
+  if (!content.trim()) return null
+  const name = typeof r.name === 'string' && r.name.trim() ? r.name.trim().slice(0, 200) : 'spec'
+  return { name, content }
+}
+
+/**
  * Generate manual test cases for ONE already-crawled ticket, synchronously. Reads
  * the ticket's on-disk files, has Claude draft the cases, and saves a new version
  * under testing/tickets/<folder>/testcases/v<N>.md. Body:
@@ -728,6 +742,7 @@ aiRouter.post('/testcases', async (req, res) => {
       projectName,
       folder,
       template: parseTemplate(req.body?.template),
+      spec: parseSpec(req.body?.spec),
       instructions: typeof req.body?.instructions === 'string' ? req.body.instructions : '',
       model: typeof req.body?.model === 'string' ? req.body.model : undefined,
       appUrl: typeof req.body?.appUrl === 'string' ? req.body.appUrl : undefined,
@@ -1057,6 +1072,7 @@ aiRouter.post('/testcases/jobs', (req, res) => {
     folders,
     appUrls,
     template: parseTemplate(req.body?.template),
+    spec: parseSpec(req.body?.spec),
     instructions: typeof req.body?.instructions === 'string' ? req.body.instructions : '',
     model: typeof req.body?.model === 'string' ? req.body.model : '',
     groundingCheck: project.groundingCheck,
