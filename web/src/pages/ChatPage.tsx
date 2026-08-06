@@ -21,6 +21,7 @@ import {
   ClipboardList,
   Compass,
   Copy,
+  Download,
   FileSearch,
   FileText,
   Globe,
@@ -564,6 +565,25 @@ function bucketOf(iso: string): string {
 }
 const BUCKETS = ['Today', 'Yesterday', '7 Days Ago', 'Older']
 
+/**
+ * The rail row's second line: when this conversation was last worked on.
+ *
+ * Relative inside a week (the group header already says which day, so "3h ago" is what adds
+ * information), then a plain date — "37d ago" is nobody's mental model of last month.
+ */
+function railTime(iso: string): string {
+  const then = new Date(iso).getTime()
+  if (Number.isNaN(then)) return ''
+  const mins = Math.max(0, Math.round((Date.now() - then) / 60_000))
+  if (mins < 1) return 'just now'
+  if (mins < 60) return `${mins}m ago`
+  const hrs = Math.round(mins / 60)
+  if (hrs < 24) return `${hrs}h ago`
+  const days = Math.round(hrs / 24)
+  if (days <= 7) return `${days}d ago`
+  return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+}
+
 // ------------------------------------------------------------------ history rail
 
 /**
@@ -575,11 +595,17 @@ function RowMenu({
   onPin,
   onRename,
   onDelete,
+  onExport,
+  always,
 }: {
   pinned: boolean
   onPin: () => void
   onRename: () => void
   onDelete: () => void
+  /** Only the header offers this — a rail row doesn't need a download in a two-item menu. */
+  onExport?: () => void
+  /** The rail reveals the trigger on row hover; the header's is always there. */
+  always?: boolean
 }) {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement | null>(null)
@@ -598,7 +624,8 @@ function RowMenu({
         onClick={() => setOpen((v) => !v)}
         aria-label="Conversation options"
         className={cn(
-          'flex size-9 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground md:opacity-0 md:group-hover:opacity-100',
+          'flex size-9 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground',
+          !always && 'md:opacity-0 md:group-hover:opacity-100',
           open && 'bg-accent md:opacity-100',
         )}
       >
@@ -628,6 +655,19 @@ function RowMenu({
             <PenLine className="size-3.5" />
             Rename
           </button>
+          {onExport && (
+            <button
+              type="button"
+              onClick={() => {
+                setOpen(false)
+                onExport()
+              }}
+              className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm transition-colors hover:bg-accent"
+            >
+              <Download className="size-3.5" />
+              Export .md
+            </button>
+          )}
           <button
             type="button"
             onClick={() => {
@@ -828,83 +868,121 @@ function ChatRail({
   return (
     <div className="hidden md:flex">
       <div className="flex h-full flex-col border-e lg:w-72">
-        <div className="border-b px-4 py-2">
-          <div className="relative">
-            <Search className="pointer-events-none absolute left-0 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+        {/* h-14, exactly like the chat header next to it: this row's bottom border and the
+            header's are the SAME line across the page, so any difference in height (it used
+            to be an h-11 input + py-2 = 60px) shows up as a visible step at the seam. */}
+        <div className="flex h-14 shrink-0 items-center border-b px-4">
+          {/* The icon sits in the same text column the rows start in (px-3 → 28px from the
+              rail edge) rather than hanging outside it at left-0. */}
+          <div className="flex w-full items-center gap-2 px-3">
+            <Search className="size-4 shrink-0 text-muted-foreground" />
+            {/* Flat search field: the Input base adds a ring + shadow on focus, which reads
+                as a white pill lifting off the rail. Kill all three on focus. */}
             <Input
               value={q}
               onChange={(e) => setQ(e.target.value)}
               placeholder="Search chats..."
-              className="border-transparent bg-background pl-6 text-sm shadow-none focus:border-transparent! focus:shadow-none focus:ring-0!"
+              className="h-8 border-transparent bg-transparent px-0 text-sm shadow-none focus-visible:border-transparent focus-visible:shadow-none focus-visible:ring-0"
             />
           </div>
         </div>
 
         <div className="grow space-y-4 overflow-y-auto p-4 lg:space-y-8">
           {groups.length === 0 ? (
-            <p className="px-1 text-xs text-muted-foreground">
+            <p className="px-3 text-xs text-muted-foreground">
               {q.trim() ? 'No conversation matches that.' : 'No conversations yet.'}
             </p>
           ) : (
             groups.map((group) => (
               <div key={group.label}>
-                <h3 className="mb-4 text-xs text-muted-foreground">{group.label}</h3>
+                {/* px-3 = the rows' own padding, so label, row text and the search field all
+                    start on one text column. */}
+                <h3 className="mb-2 px-3 text-xs text-muted-foreground">{group.label}</h3>
                 <div className="space-y-0.5">
-                  {group.items.map((c) => (
-                    <div key={c.slug} className="group flex items-center">
-                      <button
-                        type="button"
-                        onClick={() => onSelect(c.slug)}
-                        title={c.preview || c.name}
-                        className={cn(
-                          'flex w-full min-w-0 items-center gap-1.5 rounded-lg p-2 px-3 text-start text-sm transition-colors hover:bg-muted',
-                          c.slug === activeSlug && 'bg-muted font-medium',
-                        )}
-                      >
-                        {/* The star stays on the row itself, not only in the group header:
-                            once a search filters the list the group is off screen, and
-                            "why is this one first?" needs an answer on the row. */}
-                        {c.pinned && (
-                          <Star className="size-3 shrink-0 fill-amber-400 text-amber-500" />
-                        )}
-                        <span className="min-w-0 truncate">{c.name}</span>
-                        {/* Still generating — the answer keeps being written even when
-                            you leave the page, so the rail has to say which one. */}
-                        {c.running && (
+                  {group.items.map((c) => {
+                    const active = c.slug === activeSlug
+                    return (
+                      /**
+                       * Two lines, and the "…" sits ON the row rather than beside it.
+                       *
+                       * A one-line row of bare text said only the name — not when it was last
+                       * worked on, not which one is open — and the menu button shared the
+                       * row's width, so every title truncated 36px early even when nothing
+                       * was hovered. Now the button owns the full row (`pe-10` keeps the text
+                       * clear of the menu) and the second line carries the time, or
+                       * "Answering…" while a reply is still being written.
+                       */
+                      <div key={c.slug} className="group relative">
+                        {active && (
                           <span
-                            title="Still answering"
-                            className="qc-pulse ms-auto size-1.5 shrink-0 rounded-full bg-emerald-500"
+                            className="absolute inset-y-2 left-0 w-0.5 rounded-full bg-primary"
+                            aria-hidden
                           />
                         )}
-                      </button>
-                      <RowMenu
-                        pinned={!!c.pinned}
-                        onPin={() => onPin(c.slug, !c.pinned)}
-                        onRename={() => onRename(c.slug, c.name)}
-                        onDelete={() => onDelete(c.slug)}
-                      />
-                    </div>
-                  ))}
+                        <button
+                          type="button"
+                          onClick={() => onSelect(c.slug)}
+                          title={c.preview || c.name}
+                          className={cn(
+                            'w-full min-w-0 rounded-xl px-3 py-2 pe-10 text-start transition-colors hover:bg-muted',
+                            active && 'bg-muted',
+                          )}
+                        >
+                          <div className="flex min-w-0 items-center gap-1.5">
+                            {/* The star stays on the row itself, not only in the group header:
+                                once a search filters the list the group is off screen, and
+                                "why is this one first?" needs an answer on the row. */}
+                            {c.pinned && (
+                              <Star className="size-3 shrink-0 fill-amber-400 text-amber-500" />
+                            )}
+                            <span
+                              className={cn(
+                                'min-w-0 flex-1 truncate text-sm',
+                                active && 'font-medium',
+                              )}
+                            >
+                              {c.name}
+                            </span>
+                          </div>
+                          <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[11px] text-muted-foreground">
+                            {/* Still generating — the answer keeps being written even when
+                                you leave the page, so the rail has to say which one. */}
+                            {c.running ? (
+                              <>
+                                <span className="qc-pulse size-1.5 shrink-0 rounded-full bg-emerald-500" />
+                                <span className="truncate text-emerald-600 dark:text-emerald-400">
+                                  Answering…
+                                </span>
+                              </>
+                            ) : (
+                              <time
+                                dateTime={c.updatedAt}
+                                title={new Date(c.updatedAt).toLocaleString()}
+                                className="tabular-nums"
+                              >
+                                {railTime(c.updatedAt)}
+                              </time>
+                            )}
+                          </div>
+                        </button>
+                        <div className="absolute right-0.5 top-1.5">
+                          <RowMenu
+                            pinned={!!c.pinned}
+                            onPin={() => onPin(c.slug, !c.pinned)}
+                            onRename={() => onRename(c.slug, c.name)}
+                            onDelete={() => onDelete(c.slug)}
+                          />
+                        </div>
+                      </div>
+                    )
+                  })}
                 </div>
               </div>
             ))
           )}
         </div>
 
-        <div className="space-y-0.5 px-4 pb-2">
-          {RAIL_LINKS.map((l) => (
-            <NavLink
-              key={l.to}
-              to={l.to}
-              className="flex items-center gap-2 rounded-lg p-2 px-3 text-sm text-foreground transition-colors hover:bg-muted"
-            >
-              <l.icon className="size-4 text-muted-foreground" />
-              {l.label}
-            </NavLink>
-          ))}
-        </div>
-
-        <div className="space-y-2 p-4">
+        <div className="space-y-2 border-t border-border/60 p-4">
           <Button onClick={onNew} className="w-full">
             <span className="text-base leading-none">+</span>
             New Chat
@@ -925,6 +1003,32 @@ function ChatRail({
               committed with the project.
             </TooltipContent>
           </Tooltip>
+
+          {/**
+           * Shortcuts OUT of the rail, as one quiet row of icons.
+           *
+           * These four were full-width labelled rows above the primary buttons — but every one
+           * of them is already in the app sidebar two inches to the left, so the rail was
+           * spending its most valuable space (the bottom, next to the primary action) repeating
+           * the nav and making New Chat compete with four look-alike links. Icons keep the
+           * shortcut without the duplication reading as navigation.
+           */}
+          <div className="flex items-center gap-1 pt-1">
+            {RAIL_LINKS.map((l) => (
+              <Tooltip key={l.to}>
+                <TooltipTrigger asChild>
+                  <NavLink
+                    to={l.to}
+                    aria-label={l.label}
+                    className="flex h-9 flex-1 items-center justify-center rounded-xl text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                  >
+                    <l.icon className="size-4" />
+                  </NavLink>
+                </TooltipTrigger>
+                <TooltipContent>{l.label}</TooltipContent>
+              </Tooltip>
+            ))}
+          </div>
         </div>
       </div>
     </div>
@@ -1606,6 +1710,125 @@ const Turn = memo(function Turn({ m, projectId }: { m: ChatMessage; projectId: s
   )
 })
 
+// ------------------------------------------------------------------ chat header
+
+/** The transcript as a portable markdown file — client-side only, no route (cf. Prototype's
+ *  `downloadHtml`). Speaker + time per turn, so a pasted answer keeps its provenance. */
+function downloadTranscript(name: string, messages: ChatMessage[]) {
+  const body = messages
+    .map((m) => {
+      const who = m.role === 'user' ? 'Me' : 'AI Assistant'
+      const when = m.at ? ` — ${new Date(m.at).toLocaleString()}` : ''
+      return `## ${who}${when}\n\n${m.text}`
+    })
+    .join('\n\n---\n\n')
+  const md = `# ${name}\n\n${body}\n`
+  const url = URL.createObjectURL(new Blob([md], { type: 'text/markdown' }))
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `${name.replace(/[^\w.-]+/g, '-').replace(/^-+|-+$/g, '') || 'chat'}.md`
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
+/**
+ * The bar above the transcript.
+ *
+ * Two problems it exists for. (1) The notification bell is `fixed right-6 top-5`, so with the
+ * page padding gone it floated straight over the transcript with no surface under it — hence
+ * `pe-16`, which keeps the header's own controls clear of it. (2) Nothing on screen said which
+ * conversation was open, whether this turn can WRITE to the repo, or how to rename/export/delete
+ * it without going back to the rail.
+ *
+ * The tool-mode pill is deliberately read-ONLY here: the composer owns that toggle (making
+ * `full` an explicit, per-message choice), and a second control for it would let the two
+ * disagree on screen.
+ */
+function ChatHeader({
+  name,
+  streaming,
+  tools,
+  temporary,
+  onPin,
+  onRename,
+  onDelete,
+  onExport,
+  pinned,
+}: {
+  name: string | null
+  streaming: boolean
+  tools: ChatTools
+  temporary: boolean
+  pinned: boolean
+  onPin?: () => void
+  onRename?: () => void
+  onDelete?: () => void
+  onExport?: () => void
+}) {
+  const live = !!onRename // a conversation exists (the new-chat screen has nothing to act on)
+  return (
+    <div className="flex h-14 shrink-0 items-center gap-3 border-b px-4 pe-14">
+      <div className="flex min-w-0 flex-1 items-center gap-2">
+        <span className="truncate text-sm font-medium">{name ?? 'New chat'}</span>
+        {temporary && (
+          <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-violet-500/30 bg-violet-500/10 px-2 py-0.5 text-[11px] text-violet-600 dark:text-violet-400">
+            <MessageSquareDashed className="size-3" />
+            Temporary
+          </span>
+        )}
+        {streaming && (
+          <span className="inline-flex shrink-0 items-center gap-1.5 text-[11px] text-muted-foreground">
+            <span className="size-1.5 animate-pulse rounded-full bg-emerald-500" />
+            Answering…
+          </span>
+        )}
+      </div>
+
+      <span
+        title={
+          tools === 'full'
+            ? 'This conversation can write files and use the project’s MCP servers'
+            : 'Read-only tools — the project can’t be modified'
+        }
+        className={cn(
+          'inline-flex shrink-0 items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px]',
+          tools === 'full'
+            ? 'border-amber-500/40 bg-amber-500/10 text-amber-600 dark:text-amber-400'
+            : 'border-border/60 bg-muted/60 text-muted-foreground',
+        )}
+      >
+        <ShieldCheck className="size-3" />
+        {tools === 'full' ? 'Full access' : 'Read-only'}
+      </span>
+
+      {live && (
+        <>
+          {/* Starring is the one action worth a click of its own — it's how a conversation
+              stays at the top of the rail. `temporary` refuses it server-side. */}
+          {!temporary && (
+            <button
+              type="button"
+              onClick={onPin}
+              aria-label={pinned ? 'Unstar this conversation' : 'Star this conversation'}
+              className="flex size-9 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+            >
+              <Star className={cn('size-4', pinned && 'fill-amber-400 text-amber-500')} />
+            </button>
+          )}
+          <RowMenu
+            always
+            pinned={pinned}
+            onPin={() => onPin?.()}
+            onRename={() => onRename?.()}
+            onDelete={() => onDelete?.()}
+            onExport={onExport}
+          />
+        </>
+      )}
+    </div>
+  )
+}
+
 // ---------------------------------------------------------------------- the page
 
 /**
@@ -2277,7 +2500,7 @@ function ChatWorkspace({
   })
 
   return (
-    <div className="relative flex h-[calc(100svh-2rem)] min-h-[34rem] rounded-md sm:h-[calc(100svh-3rem)] lg:h-[calc(100svh-4rem)] lg:border">
+    <div className="relative flex h-svh min-h-[34rem]">
       <ChatRail
         chats={chats}
         activeSlug={openSlug}
@@ -2321,12 +2544,38 @@ function ChatWorkspace({
         onConfirm={() => deleting && removeChat.mutate(deleting.slug)}
       />
 
-      <div className="flex w-full grow flex-col">
+      <div className="flex w-full min-w-0 grow flex-col">
+        <ChatHeader
+          name={openSlug ? (chat?.name ?? null) : null}
+          streaming={streaming}
+          tools={tools}
+          temporary={isTemporary && !!openSlug}
+          pinned={!!chat?.pinned}
+          onPin={openSlug ? () => pin.mutate({ slug: openSlug, pinned: !chat?.pinned }) : undefined}
+          onRename={
+            openSlug
+              ? () => setRenaming({ slug: openSlug, name: chat?.name ?? '' })
+              : undefined
+          }
+          onDelete={
+            openSlug
+              ? () => setDeleting({ slug: openSlug, name: chat?.name ?? 'this conversation' })
+              : undefined
+          }
+          onExport={
+            openSlug && messages.length
+              ? () => downloadTranscript(chat?.name ?? 'chat', messages)
+              : undefined
+          }
+        />
+
         {/* The reference caps this column at max-w-4xl, which on a 1440px+ screen leaves the
             answer in a narrow ribbon with empty gutters either side — and answers here carry
             code blocks and CSV tables that want the room. So it widens with the viewport
             instead of stopping at 4xl. */}
-        <div className="mx-auto flex h-full w-full max-w-4xl flex-col items-center justify-center space-y-4 p-4 xl:max-w-5xl 2xl:max-w-[88rem]">
+        {/* min-h-0 + flex-1, not h-full: the header above is a sibling in the same flex column,
+            so h-full would size this to the WHOLE column and push the composer off-screen. */}
+        <div className="mx-auto flex min-h-0 w-full max-w-4xl flex-1 flex-col gap-4 p-4 xl:max-w-5xl 2xl:max-w-[88rem]">
           {/* Above everything, in both the empty and the answered state: what this
               conversation is has to be visible BEFORE the question is typed, not explained
               afterwards. */}
@@ -2334,17 +2583,95 @@ function ChatWorkspace({
             <TemporaryNotice live={!!openSlug} onEnd={() => startNew(true)} />
           )}
 
-          {/* Transcript. Hidden (not unmounted) when empty, exactly like the reference,
-              so the greeting + composer sit centred in the column. */}
+          {/**
+           * THE scroll area, in both states — and the composer below it never moves.
+           *
+           * The reference centres greeting + composer in the column and only then, once a
+           * message exists, drops the composer to the bottom: so sending the very first
+           * question re-laid out the whole page under the cursor. Here the greeting (and its
+           * quick prompts) live INSIDE this scroller, centred by `flex-1`, so the composer is
+           * pinned to the bottom from the first frame and the first send changes nothing but
+           * the content of this box.
+           */}
           <div
             ref={logRef}
             onScroll={onScroll}
             role="log"
-            className={cn(
-              'relative w-full flex-1 flex-col space-y-4 overflow-y-auto pe-2 pt-10 md:pt-0',
-              empty ? 'hidden' : 'flex',
-            )}
+            className="relative flex min-h-0 w-full flex-1 flex-col space-y-4 overflow-y-auto pe-2"
           >
+            {empty && (
+              <div className="flex flex-1 flex-col items-center justify-center">
+                <div className="mb-10">
+                  <HeroOrb />
+                  <h1 className="text-center text-2xl font-medium leading-normal lg:text-4xl">
+                    {greeting()}
+                    {projectName ? `, ${projectName}` : ''} <br /> How Can I{' '}
+                    <span className="bg-gradient-to-r from-purple-400 to-indigo-300 bg-clip-text text-transparent">
+                      Assist You Today?
+                    </span>
+                  </h1>
+                </div>
+
+                {/**
+                 * Quick prompts. The reference overlays a category's four prompts on the chips'
+                 * own slot (`absolute`, a 36px-tall row) so the composer below can't move — but
+                 * the composer is pinned now, and this block lives INSIDE the scroller, which
+                 * clips: the overlay's 4th row was cut off by the scroller's edge. So the list
+                 * takes real height in flow, and the centred greeting shifts a little instead.
+                 */}
+                <div
+                  ref={quickRef}
+                  className="flex w-full flex-col items-center justify-center space-y-2"
+                >
+                  {openCategory ? (
+                    <div className="w-full">
+                      <div className="flex w-full flex-col space-y-1">
+                        {openCategory.items.map((rest) => {
+                          const full = `${openCategory.prefix}${rest}`
+                          return (
+                            <Button
+                              key={rest}
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => {
+                                // Types it in for review — the engineer edits and sends.
+                                setInput(full)
+                                setOpenCategory(null)
+                                taRef.current?.focus()
+                              }}
+                              className="w-full justify-start"
+                            >
+                              <span className="whitespace-pre-wrap font-medium text-primary">
+                                {openCategory.prefix}
+                              </span>
+                              <span className="whitespace-pre-wrap text-muted-foreground">
+                                {rest}
+                              </span>
+                            </Button>
+                          )
+                        })}
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex flex-wrap justify-center gap-2">
+                      {QUICK.map((q) => (
+                        <Button
+                          key={q.label}
+                          variant="outline"
+                          size="sm"
+                          onClick={() => setOpenCategory(q)}
+                          className="rounded-full"
+                        >
+                          <q.icon className="size-4" />
+                          {q.label}
+                        </Button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
             {messages.map((m, i) => (
               <Turn key={`${m.at}-${i}`} m={m} projectId={projectId} />
             ))}
@@ -2393,19 +2720,6 @@ function ChatWorkspace({
               <ChevronDown className="size-4" />
             </Button>
           </div>
-
-          {empty && (
-            <div className="mb-10">
-              <HeroOrb />
-              <h1 className="text-center text-2xl font-medium leading-normal lg:text-4xl">
-                {greeting()}
-                {projectName ? `, ${projectName}` : ''} <br /> How Can I{' '}
-                <span className="bg-gradient-to-r from-purple-400 to-indigo-300 bg-clip-text text-transparent">
-                  Assist You Today?
-                </span>
-              </h1>
-            </div>
-          )}
 
           {/* Composer well — a tinted tray whose hint strip sits above the input card.
               Drop anywhere on the well, not just the textarea: a dropped screenshot that
@@ -2765,59 +3079,6 @@ function ChatWorkspace({
             </div>
           </div>
 
-          {/* Quick prompts. A category's list is absolutely positioned over the same
-              slot the chips occupy, so expanding one swaps the row in place instead of
-              shoving the composer up the page — same trick as the reference. */}
-          {empty && (
-            <div
-              ref={quickRef}
-              className="relative flex min-h-9 w-full flex-col items-center justify-center space-y-2"
-            >
-              {openCategory ? (
-                <div className="absolute left-0 top-0 w-full">
-                  <div className="flex w-full flex-col space-y-1">
-                    {openCategory.items.map((rest) => {
-                      const full = `${openCategory.prefix}${rest}`
-                      return (
-                        <Button
-                          key={rest}
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => {
-                            // Types it in for review — the engineer edits and sends.
-                            setInput(full)
-                            setOpenCategory(null)
-                            taRef.current?.focus()
-                          }}
-                          className="w-full justify-start"
-                        >
-                          <span className="whitespace-pre-wrap font-medium text-primary">
-                            {openCategory.prefix}
-                          </span>
-                          <span className="whitespace-pre-wrap text-muted-foreground">{rest}</span>
-                        </Button>
-                      )
-                    })}
-                  </div>
-                </div>
-              ) : (
-                <div className="flex flex-wrap justify-center gap-2">
-                  {QUICK.map((q) => (
-                    <Button
-                      key={q.label}
-                      variant="outline"
-                      size="sm"
-                      onClick={() => setOpenCategory(q)}
-                      className="rounded-full"
-                    >
-                      <q.icon className="size-4" />
-                      {q.label}
-                    </Button>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
         </div>
       </div>
     </div>

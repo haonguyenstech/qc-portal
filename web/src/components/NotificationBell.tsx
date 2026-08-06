@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useLocation, useNavigate } from 'react-router-dom'
 import {
   AlertTriangle,
   Bell,
@@ -14,11 +14,13 @@ import {
 import { cn } from '@/lib/utils'
 import { useNotifications, type NotificationKind } from '@/lib/notifications'
 
-const KIND_STYLES: Record<NotificationKind, { icon: typeof Info; color: string }> = {
-  success: { icon: CheckCircle2, color: 'text-emerald-500' },
-  warning: { icon: AlertTriangle, color: 'text-amber-500' },
-  error: { icon: XCircle, color: 'text-destructive' },
-  info: { icon: Info, color: 'text-sky-500' },
+/** Icon + its tinted chip, per kind — the portal's status palette (emerald ok / amber warning
+ *  / red failed / sky info) in the same icon-chip shape the rest of the app uses. */
+const KIND_STYLES: Record<NotificationKind, { icon: typeof Info; color: string; chip: string }> = {
+  success: { icon: CheckCircle2, color: 'text-emerald-600 dark:text-emerald-400', chip: 'bg-emerald-500/10' },
+  warning: { icon: AlertTriangle, color: 'text-amber-600 dark:text-amber-400', chip: 'bg-amber-500/10' },
+  error: { icon: XCircle, color: 'text-destructive', chip: 'bg-destructive/10' },
+  info: { icon: Info, color: 'text-sky-600 dark:text-sky-400', chip: 'bg-sky-500/10' },
 }
 
 function timeAgo(iso: string): string {
@@ -41,6 +43,7 @@ export default function NotificationBell() {
   const [open, setOpen] = useState(false)
   const rootRef = useRef<HTMLDivElement>(null)
   const navigate = useNavigate()
+  const inChatHeader = useLocation().pathname === '/chat'
 
   // Close on outside click or Escape.
   useEffect(() => {
@@ -59,16 +62,42 @@ export default function NotificationBell() {
     }
   }, [open])
 
+  /**
+   * Which rows were unread when the panel was opened.
+   *
+   * Opening marks everything read (the badge has to clear), which used to wipe the unread
+   * tint at the same instant — so the one thing the panel is opened to find out, "what's
+   * new since I last looked?", was never visible. The ids are snapshotted first and keep
+   * their highlight for as long as the panel stays open.
+   */
+  const [newIds, setNewIds] = useState<Set<string>>(new Set())
+  /** How many rows the panel is currently marking as new (the badge itself is already cleared). */
+  const newCount = notifications.reduce((n, x) => n + (newIds.has(x.id) || !x.read ? 1 : 0), 0)
+
+  // Side effects run in the HANDLER, never inside a setState updater: React runs the updater
+  // during render, so marking everything read from in there updated the notification provider
+  // mid-render ("Cannot update a component while rendering a different component").
   function toggle() {
-    setOpen((v) => {
-      const next = !v
-      if (next && unreadCount > 0) markAllRead() // opening clears the unread badge
-      return next
-    })
+    if (open) {
+      setOpen(false)
+      return
+    }
+    setNewIds(new Set(notifications.filter((n) => !n.read).map((n) => n.id)))
+    if (unreadCount > 0) markAllRead() // opening clears the unread badge
+    setOpen(true)
   }
 
   return (
-    <div ref={rootRef} className="fixed right-6 top-5 z-30">
+    <div
+      ref={rootRef}
+      className={cn(
+        'fixed z-30',
+        // Chat is full-bleed and has its own h-14 header, so the bell has to sit ON that row
+        // rather than float above the transcript: (56 - 36) / 2 = 10px, and right-4 lines it
+        // up with the header's own px-4 controls. Every other page keeps the floating offset.
+        inChatHeader ? 'right-4 top-2.5' : 'right-6 top-5',
+      )}
+    >
       <button
         type="button"
         onClick={toggle}
@@ -87,50 +116,73 @@ export default function NotificationBell() {
       </button>
 
       {open && (
-        <div className="absolute right-0 mt-2 w-96 max-w-[calc(100vw-3rem)] origin-top-right overflow-hidden rounded-xl border border-border bg-popover text-popover-foreground shadow-lg">
-          <div className="flex items-center justify-between border-b border-border px-4 py-2.5">
-            <div className="flex items-center gap-2 text-sm font-semibold">
-              <Bell className="h-4 w-4" />
-              Notifications
+        <div className="absolute right-0 mt-2 w-[24rem] max-w-[calc(100vw-2rem)] origin-top-right overflow-hidden rounded-2xl border border-border/60 bg-popover text-popover-foreground shadow-lg">
+          <div className="flex items-center justify-between gap-2 border-b border-border/60 px-4 py-3">
+            <div className="flex min-w-0 items-center gap-2">
+              <span className="truncate text-sm font-semibold tracking-tight">Notifications</span>
+              {newCount > 0 && (
+                <span className="shrink-0 rounded-full bg-primary/10 px-2 py-0.5 text-[11px] font-semibold text-primary tabular-nums">
+                  {newCount} new
+                </span>
+              )}
             </div>
             {notifications.length > 0 && (
-              <div className="flex items-center gap-1">
-                <button
-                  type="button"
-                  onClick={markAllRead}
-                  title="Mark all as read"
-                  className="flex items-center gap-1 rounded-md px-1.5 py-1 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-                >
-                  <CheckCheck className="h-3.5 w-3.5" />
-                </button>
+              <div className="flex shrink-0 items-center gap-0.5">
+                {newCount > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      markAllRead()
+                      setNewIds(new Set())
+                    }}
+                    title="Mark all as read"
+                    aria-label="Mark all as read"
+                    className="flex size-8 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                  >
+                    <CheckCheck className="size-4" />
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={clearAll}
                   title="Clear all"
-                  className="flex items-center gap-1 rounded-md px-1.5 py-1 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-destructive"
+                  aria-label="Clear all notifications"
+                  className="flex size-8 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
                 >
-                  <Trash2 className="h-3.5 w-3.5" />
+                  <Trash2 className="size-4" />
                 </button>
               </div>
             )}
           </div>
 
           {notifications.length === 0 ? (
-            <div className="flex flex-col items-center gap-2 px-4 py-10 text-center text-sm text-muted-foreground">
-              <Bell className="h-6 w-6 opacity-40" />
-              No notifications yet
+            <div className="flex flex-col items-center gap-3 px-4 py-10 text-center">
+              <span className="flex size-10 items-center justify-center rounded-2xl bg-muted/60 text-muted-foreground">
+                <Bell className="size-4" />
+              </span>
+              <div className="space-y-0.5">
+                <p className="text-sm font-medium">No notifications yet</p>
+                <p className="text-xs text-muted-foreground">
+                  Finished crawls, generations and runs land here.
+                </p>
+              </div>
             </div>
           ) : (
-            <ul className="max-h-[26rem] divide-y divide-border overflow-y-auto">
+            /* overflow-x-hidden is load-bearing: `overflow-y-auto` alone computes overflow-x to
+               `auto` too, so one unbreakable token in a description (an https:// URL — every
+               Auto Agent notice carries one) pushed the min-content width past the panel and the
+               whole list scrolled sideways. The wrap classes below are the other half of it. */
+            <ul className="max-h-[26rem] divide-y divide-border/60 overflow-y-auto overflow-x-hidden overscroll-contain">
               {notifications.map((n) => {
-                const { icon: Icon, color } = KIND_STYLES[n.kind]
+                const { icon: Icon, color, chip } = KIND_STYLES[n.kind]
+                const isNew = newIds.has(n.id) || !n.read
                 return (
                   <li
                     key={n.id}
                     className={cn(
                       'group relative flex gap-3 px-4 py-3 transition-colors',
-                      n.to && 'cursor-pointer hover:bg-muted/60',
-                      !n.read && 'bg-primary/[0.04]',
+                      n.to && 'cursor-pointer hover:bg-muted/50',
+                      isNew && 'bg-primary/[0.035]',
                     )}
                     onClick={() => {
                       if (!n.read) markRead(n.id)
@@ -140,20 +192,45 @@ export default function NotificationBell() {
                       }
                     }}
                   >
-                    {!n.read && (
-                      <span className="absolute left-1.5 top-1/2 h-1.5 w-1.5 -translate-y-1/2 rounded-full bg-primary" />
+                    {/* Unread marks the row from its left edge instead of a floating dot that
+                        used to be centred vertically — i.e. parked at a random height beside a
+                        three-line description. */}
+                    {isNew && (
+                      <span className="absolute inset-y-0 left-0 w-0.5 bg-primary" aria-hidden />
                     )}
-                    <Icon className={cn('mt-0.5 h-4 w-4 shrink-0', color)} />
-                    <div className="min-w-0 flex-1">
-                      <div className="text-sm font-medium leading-snug">{n.title}</div>
-                      {n.description && (
-                        <div className="mt-0.5 text-xs text-muted-foreground">
-                          {n.description}
-                        </div>
+                    <span
+                      className={cn(
+                        'mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-xl',
+                        chip,
                       )}
-                      <div className="mt-1 text-[10px] uppercase tracking-wide text-muted-foreground/70">
-                        {timeAgo(n.createdAt)}
+                    >
+                      <Icon className={cn('size-4', color)} />
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-baseline gap-2">
+                        <span className="min-w-0 flex-1 break-words text-sm font-medium leading-snug">
+                          {n.title}
+                        </span>
+                        {/* Time moved up beside the title: it saves the row a third line, and
+                            "when" belongs with "what", not under the description. */}
+                        <span
+                          title={new Date(n.createdAt).toLocaleString()}
+                          className="shrink-0 text-[11px] tabular-nums text-muted-foreground/80"
+                        >
+                          {timeAgo(n.createdAt)}
+                        </span>
                       </div>
+                      {n.description && (
+                        <p className="mt-0.5 break-words text-xs leading-relaxed text-muted-foreground [overflow-wrap:anywhere]">
+                          {n.description}
+                        </p>
+                      )}
+                      {n.to && (
+                        <span className="mt-1.5 inline-flex items-center gap-1 text-[11px] font-medium text-primary opacity-0 transition-opacity group-hover:opacity-100">
+                          Open
+                          <ChevronRight className="size-3" />
+                        </span>
+                      )}
                     </div>
                     <button
                       type="button"
@@ -162,9 +239,9 @@ export default function NotificationBell() {
                         e.stopPropagation()
                         remove(n.id)
                       }}
-                      className="shrink-0 self-start rounded-md p-1 text-muted-foreground/50 opacity-0 transition-all hover:bg-muted hover:text-foreground group-hover:opacity-100"
+                      className="size-6 shrink-0 self-start rounded-full text-muted-foreground/50 opacity-0 transition-all hover:bg-muted hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
                     >
-                      <X className="h-3.5 w-3.5" />
+                      <X className="mx-auto size-3.5" />
                     </button>
                   </li>
                 )
@@ -178,10 +255,10 @@ export default function NotificationBell() {
               setOpen(false)
               navigate('/notifications')
             }}
-            className="flex w-full items-center justify-center gap-1.5 border-t border-border px-4 py-2.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            className="flex w-full items-center justify-center gap-1.5 border-t border-border/60 px-4 py-3 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
           >
             View all notifications
-            <ChevronRight className="h-3.5 w-3.5" />
+            <ChevronRight className="size-3.5" />
           </button>
         </div>
       )}

@@ -3,6 +3,50 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.11.11 — 2026-08-06
+
+**The Chat page gets a header, a readable conversation list, and a composer that stops moving**
+
+### Added
+
+- **A header above the conversation.** It says which chat is open, whether this one is
+  **Read-only** or has **Full access** to your project, and — while an answer is being written —
+  that it's still answering. Star, Rename, **Export .md** and Delete are right there, so you no
+  longer have to go back to the list to act on the conversation you're reading. Export writes the
+  whole transcript to a Markdown file (who said what, and when), which is what you want when a
+  finding has to be attached to a ticket.
+
+### Changed
+
+- **The conversation list reads like a list of conversations.** Each row now has two lines — the
+  name, and when it was last worked on ("59m ago", "3d ago", then a date) — with the row you're
+  reading marked by a tint and an accent bar. One still being answered says **"Answering…"**
+  instead of showing an unlabelled dot. The `…` menu moved onto the row, so titles use the full
+  width instead of being cut 36px early even when you weren't hovering.
+- **The composer no longer jumps when you send the first message.** It's pinned to the bottom from
+  the moment the page opens; the greeting and quick prompts sit above it. Sending your first
+  question now changes the answer area and nothing else.
+- **The chat page runs edge to edge.** The outer frame and page padding are gone, so the
+  transcript, the list and the composer get the whole window — a real difference on a laptop
+  screen. The seam between the list and the header is now a single continuous line, and the
+  search field, the day headings and the rows all line up on one column.
+- **Shortcuts at the bottom of the list are a row of icons.** Tickets, Knowledge, Run history and
+  Terminal were four full-width links repeating the sidebar directly above **New Chat**; now New
+  Chat is the first thing you see there.
+
+### Fixed
+
+- **The notification panel no longer scrolls sideways.** Any notice carrying a URL (every Auto
+  Agent one does) pushed the list wider than the panel, so reading a message meant scrolling
+  right. Long text now wraps.
+- **"What's new" is actually visible when you open notifications.** Opening the panel clears the
+  unread badge, which also used to wipe the highlight at the same instant — the one thing you
+  opened it to see. Unread rows now keep their mark (and a "N new" count) for as long as the panel
+  is open. Each notice also carries its kind as a coloured icon and its time beside the title,
+  and a notice you can click through to says **Open** on hover.
+- **Clicking into the chat search box no longer lifts it off the page.** It was picking up a focus
+  ring and shadow that made it look like a white pill floating over the list.
+
 ## 0.11.10 — 2026-08-06
 
 **Chat gets a `+` menu, follow-up questions and temporary conversations — and the grounding check finally runs on real-sized tickets**

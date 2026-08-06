@@ -929,10 +929,13 @@ function App() {
       >
         <div
           className={cn(
-            'mx-auto px-4 py-4 sm:px-6 sm:py-6 lg:px-8 lg:py-8',
+            'mx-auto',
             // The Prototype workspace (chat + live preview) and Chat (history rail +
             // transcript) need the full width; every other page stays comfortably capped.
             pathname === '/prototype' || pathname === '/chat' ? 'max-w-none' : 'max-w-6xl',
+            // Chat is full-bleed: its shell has no outer border, so page padding would
+            // just leave a gap around the rail and the transcript.
+            pathname === '/chat' ? '' : 'px-4 py-4 sm:px-6 sm:py-6 lg:px-8 lg:py-8',
           )}
         >
           {!projectsLoading && projects.length === 0 && !isProjectAgnostic(pathname) ? (
