@@ -2991,6 +2991,13 @@ export function getAutoAgentStatus(): Promise<AutoAgentStatus> {
 /** How much a chat turn is allowed to do. See routes/chat.ts `toolArgs`. */
 export type ChatTools = 'read' | 'full'
 
+/**
+ * An action picked from the composer's `+` menu, applied to ONE message: `web` answers from
+ * the live web with its sources, `research` writes a cross-checked report, `diagram` answers
+ * as a Mermaid diagram the page renders. See routes/chat.ts `ACTION_BLOCKS`.
+ */
+export type ChatAction = 'web' | 'research' | 'diagram'
+
 export interface ChatMessage {
   role: 'user' | 'assistant'
   text: string
@@ -3001,6 +3008,20 @@ export interface ChatMessage {
   error?: boolean
   /** Images pasted with this message — file names, shown via `chatImageUrl`. */
   images?: string[]
+  /** Follow-up prompts proposed with this answer, offered as one-click chips. */
+  suggestions?: string[]
+  /** The `+` menu action this message was sent with (badged in the transcript). */
+  action?: ChatAction
+}
+
+/**
+ * One tool call as it happens, streamed live during a turn: the tool's name plus its one
+ * interesting argument (the file read, the pattern searched for, the command run). The
+ * detail is NOT persisted — a saved message keeps `tools` (names only).
+ */
+export interface ChatToolCall {
+  name: string
+  detail?: string
 }
 
 /** A pasted image on its way to the server: base64 bytes, typed by its MIME. */
@@ -3030,6 +3051,16 @@ export interface Chat {
   tools: ChatTools
   /** The Claude CLI session backing the conversation (what makes follow-ups work). */
   sessionId: string | null
+  /** Starred — the rail pins it above the date groups. */
+  pinned?: boolean
+  /**
+   * Temporary — kept in the server's memory only: no transcript file in testing/chats, and
+   * never listed in the history rail. Set when the conversation is created; a follow-up
+   * inherits it (see routes/chat.ts `temp`).
+   */
+  temporary?: boolean
+  /** A reply is being generated right now; the page re-attaches to it (see attachChat). */
+  running?: boolean
   messages: ChatMessage[]
 }
 
@@ -3043,6 +3074,9 @@ export interface ChatSummary {
   tools: ChatTools
   messageCount: number
   preview: string
+  pinned?: boolean
+  /** A reply is in flight for this conversation — the rail marks it. */
+  running?: boolean
 }
 
 /** The project's conversations, newest first. */
@@ -3065,6 +3099,17 @@ export function renameChat(projectId: string, slug: string, name: string): Promi
   })
 }
 
+/**
+ * Star / unstar a conversation. Deliberately does not touch `updatedAt` server-side, so
+ * pinning doesn't also drag the chat into the rail's "Today" group.
+ */
+export function pinChat(projectId: string, slug: string, pinned: boolean): Promise<Chat> {
+  return request(`/api/chat/${encodeURIComponent(slug)}/pin`, {
+    method: 'POST',
+    body: JSON.stringify({ projectId, pinned }),
+  })
+}
+
 export function deleteChat(projectId: string, slug: string): Promise<{ ok: true }> {
   return request(
     `/api/chat/${encodeURIComponent(slug)}?projectId=${encodeURIComponent(projectId)}`,
@@ -3082,51 +3127,29 @@ export function openChatsFolder(projectId: string): Promise<{ ok: boolean; path:
   return request('/api/chat/open', { method: 'POST', body: JSON.stringify({ projectId }) })
 }
 
-/**
- * Send a message and stream the reply (Server-Sent Events).
- *
- * `onStart` fires with the conversation's slug before any text — a brand-new chat is
- * created server-side on the first turn, so the client has to adopt the slug it was
- * given rather than inventing one. `onDelta` fires per token, `onTool` per tool call,
- * `onDone` with the saved conversation. Pass a signal to Stop (it also kills the
- * server-side CLI child). Resolves when the stream ends.
- */
-export async function streamChat(
-  projectId: string,
-  body: {
-    slug?: string
-    prompt: string
-    model: string
-    tools: ChatTools
-    /** Pasted screenshots; the server writes them and tells Claude to Read them. */
-    images?: ChatImageUpload[]
-    /** `@`-tagged tickets / test cases the question is about. */
-    mentions?: ChatMention[]
-  },
-  handlers: {
-    onStart?: (slug: string, name: string) => void
-    onDelta: (text: string) => void
-    onTool?: (name: string) => void
-    onDone: (chat: Chat) => void
-    onError: (message: string) => void
-    onLog?: (level: 'info' | 'success' | 'error', text: string) => void
-  },
-  signal: AbortSignal,
-): Promise<void> {
-  const res = await fetch('/api/chat/stream', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ projectId, ...body }),
-    signal,
-  })
-  if (!res.ok || !res.body) {
-    handlers.onError((await res.text().catch(() => '')) || `${res.status} ${res.statusText}`)
-    return
-  }
-  const reader = res.body.getReader()
+/** What a chat stream reports, whether it was just started or re-attached to. */
+export interface ChatStreamHandlers {
+  onStart?: (slug: string, name: string) => void
+  /**
+   * Re-attach only: the question this in-flight turn is answering. A reloaded page no
+   * longer has the prompt it sent, so the server echoes it back with its images.
+   */
+  onResume?: (info: { prompt: string; at: string; images: string[] }) => void
+  onDelta: (text: string) => void
+  onTool?: (call: ChatToolCall) => void
+  onDone: (chat: Chat) => void
+  /** The turn was stopped; `chat` carries the partial answer when one was saved. */
+  onStopped?: (chat?: Chat) => void
+  onError: (message: string) => void
+  onLog?: (level: 'info' | 'success' | 'error', text: string) => void
+}
+
+/** Turn an SSE body into handler calls. Shared by starting a turn and re-attaching to one. */
+async function consumeChatStream(res: Response, handlers: ChatStreamHandlers): Promise<void> {
+  const reader = res.body!.getReader()
   const decoder = new TextDecoder()
   let buf = ''
-  let settled = false // saw a terminal (done/error) frame
+  let settled = false // saw a terminal (done/stopped/error) frame
   for (;;) {
     const { value, done } = await reader.read()
     if (done) break
@@ -3141,7 +3164,11 @@ export async function streamChat(
         type?: string
         text?: string
         name?: string
+        detail?: string
         slug?: string
+        prompt?: string
+        at?: string
+        images?: string[]
         level?: 'info' | 'success' | 'error'
         chat?: Chat
         error?: string
@@ -3152,19 +3179,103 @@ export async function streamChat(
         continue
       }
       if (msg.type === 'delta') handlers.onDelta(msg.text ?? '')
-      else if (msg.type === 'tool') handlers.onTool?.(msg.name ?? '')
+      else if (msg.type === 'tool') handlers.onTool?.({ name: msg.name ?? '', detail: msg.detail })
       else if (msg.type === 'start' && msg.slug) handlers.onStart?.(msg.slug, msg.name ?? '')
+      else if (msg.type === 'resume')
+        handlers.onResume?.({ prompt: msg.prompt ?? '', at: msg.at ?? '', images: msg.images ?? [] })
       else if (msg.type === 'log') handlers.onLog?.(msg.level ?? 'info', msg.text ?? '')
       else if (msg.type === 'done' && msg.chat) {
         settled = true
         handlers.onDone(msg.chat)
+      } else if (msg.type === 'stopped') {
+        settled = true
+        handlers.onStopped?.(msg.chat)
       } else if (msg.type === 'error') {
         settled = true
         handlers.onError(msg.error ?? 'The message failed')
       }
     }
   }
-  // The stream closed with no done/error frame (server ended early) — don't leave the
+  // The stream closed with no terminal frame (server ended early) — don't leave the
   // caller stuck showing a spinner forever.
   if (!settled) handlers.onError('The answer ended before finishing. Please try again.')
+}
+
+/**
+ * Watch a reply that is ALREADY being generated (`GET /api/chat/:slug/stream`).
+ *
+ * The turn belongs to the conversation, not to the request that started it, so reloading
+ * or leaving the page doesn't stop it — this re-attaches, replays what has been written
+ * so far, then streams the rest. Resolves `false` when nothing was in flight.
+ */
+export async function attachChat(
+  projectId: string,
+  slug: string,
+  handlers: ChatStreamHandlers,
+  signal: AbortSignal,
+): Promise<boolean> {
+  const res = await fetch(
+    `/api/chat/${encodeURIComponent(slug)}/stream?projectId=${encodeURIComponent(projectId)}`,
+    { signal },
+  )
+  if (!res.ok || !res.body) return false // 404 = nothing running, the normal case
+  await consumeChatStream(res, handlers)
+  return true
+}
+
+/**
+ * Cancel a reply in flight. Closing the tab no longer does this — the run outlives the
+ * request — so Stop has to say so explicitly.
+ */
+export function stopChat(projectId: string, slug: string): Promise<{ ok: boolean }> {
+  return request(`/api/chat/${encodeURIComponent(slug)}/stop`, {
+    method: 'POST',
+    body: JSON.stringify({ projectId }),
+  })
+}
+
+/**
+ * Send a message and stream the reply (Server-Sent Events).
+ *
+ * `onStart` fires with the conversation's slug before any text — a brand-new chat is
+ * created server-side on the first turn, so the client has to adopt the slug it was
+ * given rather than inventing one. `onDelta` fires per token, `onTool` per tool call,
+ * `onDone` with the saved conversation. Aborting the signal only stops WATCHING — the
+ * turn keeps running on the server; `stopChat` is what cancels it. Resolves when the
+ * stream ends.
+ */
+export async function streamChat(
+  projectId: string,
+  body: {
+    slug?: string
+    prompt: string
+    model: string
+    tools: ChatTools
+    /**
+     * Start this conversation as a TEMPORARY one — nothing written to testing/chats, nothing
+     * in the history rail. Only read when a NEW conversation is created; a message sent into
+     * an existing `slug` inherits whatever that conversation already is.
+     */
+    temporary?: boolean
+    /** `+` menu action for this message only — web search, deep research, diagram. */
+    action?: ChatAction
+    /** Pasted screenshots; the server writes them and tells Claude to Read them. */
+    images?: ChatImageUpload[]
+    /** `@`-tagged tickets / test cases the question is about. */
+    mentions?: ChatMention[]
+  },
+  handlers: ChatStreamHandlers,
+  signal: AbortSignal,
+): Promise<void> {
+  const res = await fetch('/api/chat/stream', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ projectId, ...body }),
+    signal,
+  })
+  if (!res.ok || !res.body) {
+    handlers.onError((await res.text().catch(() => '')) || `${res.status} ${res.statusText}`)
+    return
+  }
+  await consumeChatStream(res, handlers)
 }

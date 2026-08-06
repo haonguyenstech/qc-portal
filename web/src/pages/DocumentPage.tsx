@@ -12,6 +12,7 @@ import {
   ClipboardList,
   Compass,
   CornerDownRight,
+  Database,
   FileText,
   FolderGit2,
   History,
@@ -19,6 +20,7 @@ import {
   Layers,
   Layout,
   LifeBuoy,
+  MessagesSquare,
   NotebookPen,
   PlayCircle,
   Plug,
@@ -41,7 +43,7 @@ import { cn } from '@/lib/utils'
 
 // Bump this whenever the manual's content changes — shown in the hero so readers know
 // how current the docs are. Use a human-friendly date.
-const LAST_UPDATED = 'July 25, 2026'
+const LAST_UPDATED = 'August 6, 2026'
 
 interface DocSection {
   id: string
@@ -179,16 +181,30 @@ it, streams its progress, and shows the results. You manage the skill files on t
 ### The \`testing/\` folder
 Everything the Portal reads and writes for a project lives under \`<project>/testing/\`:
 
-- \`testing/tickets/<ticket>/\` — crawled ClickUp tickets (description, comments, attachments) and
-  their generated \`testcases/v<N>.md|csv\`.
-- \`testing/test-result/<ticket-slug>/\` — QC run output: \`report.md\`, \`issues.md\`, evidence, screenshots.
-- \`testing/knowledge/*.md\` — reference docs (specs, domain notes).
+- \`testing/tickets/<ticket>/\` — crawled tickets (description, comments, attachments) and their
+  generated \`testcases/v<N>.md|csv\`. A subtask nests under its parent, e.g.
+  \`testing/tickets/ABC-100/ABC-101/\`.
+- \`testing/test-result/<ticket-id>-<slug>/\` — QC run output: \`report.md\`, \`issues.md\`, evidence,
+  screenshots, and the filled-in \`testcases-executed.<ext>\` sheet.
+- \`testing/overview/*.md\` — the **Overview** documents (what the product is), one file per upload.
+- \`testing/knowledge/*.md\` — reference docs (specs, domain notes, plus the AI-written source map,
+  database schema map, and design system).
 - \`testing/memory/*.md\` — durable fact notes (+ \`MEMORY.md\` index).
 - \`testing/templates/*.md\` — test-case + design-check templates.
+- \`testing/environments.md\` — the Accounts sheet (environment URLs + test logins).
+- \`testing/api-tests/\` — saved API requests, flows, and their result history.
+- \`testing/prototypes/*.json\` — prototypes with their full revision history.
+- \`testing/chats/*.json\` — saved Chat conversations (+ \`images/\` for pasted screenshots).
 
 Two more folders sit at the **project root** (not under \`testing/\`): \`design-check/\` holds saved Design
 Check reports, and \`source/\` holds the tagged repos cloned from the **Source Code** page
 (one subfolder per repo, e.g. \`source/backend-repo\`).
+
+### What is deliberately *not* in the project folder
+Long-lived secrets live beside the **Portal's own** database, in its install folder's \`data/\` —
+authenticator (2FA) setup keys, database passwords, API test-account passwords, and source-repo access
+tokens. They are never written into your repo (so they can't be committed) and are never packed into an
+AI prompt.
 `,
   },
   {
@@ -205,15 +221,26 @@ The typical end-to-end flow, in order:
    the Portal can read tickets.
 3. **Connect tools (MCP)** — on the **MCP** page, enable Playwright (to drive a browser), Maestro (for
    mobile-web and native-app testing), and any others (e.g. Figma for Design Check).
-4. **Add project context** — on **Instructions**, write a short \`CLAUDE.md\`, upload **Knowledge**
-   docs, and jot **Memory** facts. This is what makes the AI use your real terms and rules.
-5. **Crawl tickets** — on **Tickets**, pick the tickets you'll work on and crawl them locally.
-6. **Generate test cases** — on **TestCase**, pick crawled tickets and let the AI draft them.
-7. **Run the QC test** — on **Run**, pick the ticket, choose where to test (web, mobile web, or a native
+4. **Add project context** — on **Overview**, upload your product/spec documents; on **Instructions**,
+   write a short \`CLAUDE.md\`, upload **Knowledge** docs, jot **Memory** facts, and fill in the
+   **Accounts** sheet (environment URLs + test logins). This is what makes the AI use your real terms,
+   rules, and credentials.
+5. *(Optional)* **Connect the source code and the database** — on **Source Code** and **Database**, so
+   the AI reasons about real field names, tables, and validation instead of guessing.
+6. **Crawl tickets** — on **Tickets**, pick the tickets you'll work on and crawl them locally.
+7. **Generate test cases** — on **TestCase**, pick crawled tickets and let the AI draft them (attach the
+   specification document if the ticket only links to it).
+8. **Run the QC test** — on **Run**, pick the ticket, choose where to test (web, mobile web, or a native
    app), enter the app URL, and start. Watch it live on **Running**.
-8. **Review** — open the run in **History** to read the report, issues, and screenshots — or
+9. **Review** — open the run in **History** to read the report, issues, and screenshots — or
    **continue the session** in a terminal to keep working.
-9. *(Optional)* **Design Check** — on **Design Check**, compare a ticket's build against its Figma design.
+10. *(Optional)* **Design Check** — compare a ticket's build against its Figma design.
+11. **Anything else — just ask.** **Chat** (under Tools) is a plain conversation with Claude inside your
+    project: "why did run 14 fail?", "are these test cases enough?", paste a screenshot of a broken
+    screen.
+
+> **New to a page?** Most pages have a **Guide tour** button in the bottom-right corner that walks you
+> through it, step by step, highlighting the controls as it goes.
 `,
   },
   {
@@ -225,56 +252,75 @@ The typical end-to-end flow, in order:
 The sidebar is grouped by purpose. Here's what each page does.
 
 ### Project
-- **Overview** — the project's free-text intro (Markdown). Write it inline, or **upload a Word / PDF /
-  Markdown / spreadsheet file** — it's converted to Markdown in your browser and loaded into the editor
-  to review and save as the intro.
+- **Overview** — the project's **overview documents**: what the product IS. Upload **Word / PDF /
+  Excel / CSV / Markdown** files (converted in your browser) and **each file becomes its own document**
+  you can preview, re-review, or delete on its own — ten files show as ten documents, not one blob.
+  Uploading is all it takes for the AI to have them. Each row also offers **AI review & format**, a
+  copy-editor pass that tidies the converted Markdown without adding facts — with an **Undo** right
+  there in the row.
 - **Source Code** — connect the project's Git repos, each with a tag (Backend repo, Frontend repo, …):
   clone GitHub / Bitbucket repos into \`source/\`, sync (re-pull), or disconnect per repo. Access
   tokens are stored locally only — never in git or logs.
+- **Database** — connect the project's databases (MySQL / PostgreSQL / SQL Server / SQLite), each with a
+  tag, so the AI knows your real tables and columns; plus a **query & ask console**. Strictly
+  **read-only** — see the [Database](/document/database) page.
 
 ### Testing
-- **Tickets** — browse a **ClickUp or Jira** workspace/list (source toggle), multi-select tickets, and
-  **crawl** them to disk (optionally with an AI \`summary.md\`). Crawled tickets are highlighted, show
-  their test-case count, and can be deleted.
+- **Tickets** — browse a **ClickUp, Jira, or Azure DevOps** workspace/project/list (a source toggle
+  appears once more than one tracker is connected), multi-select tickets, and **crawl** them to disk
+  (optionally with an AI \`summary.md\`). Tickets group under sticky **status** headers and **subtasks
+  nest under their parent** (picking a subtask auto-selects its parent chain, and it's written to a
+  nested folder). Crawled tickets are highlighted, show their test-case count, and can be deleted;
+  starting another batch while one runs **queues** it.
 - **TestCase** — pick crawled tickets and have the AI **draft manual test cases** (Markdown or CSV),
-  versioned per ticket. Supports a template, reusable rules, and an optional live App URL per ticket.
-  CSV versions can be edited (whole-row), have rows deleted (with Undo), or a version deleted.
+  versioned per ticket. Supports a template, an **attached specification document**, reusable rules, and
+  an optional live App URL per ticket. CSV versions can be edited (whole-row), have rows deleted (with
+  Undo), or a version deleted.
 - **Run** — queue up to **10 tickets** (each its own run, one at a time) with an app URL (a per-ticket
   grid once you queue two or more) and a reachability **Check**; pick the **skill**, the **model**, and —
   for a single ticket — a test-case version to verify (with preview). **Mark bug** runs a ticket with no
-  test cases as a repro. **Web** works today; mobile targets and **Feature** (related-tickets) mode are
-  *Coming soon*.
+  test cases as a repro. Three targets are live — **Web**, **Web on mobile**, and **App on device**
+  (the last two drive a booted device through Maestro, and you can **pick which device**). **Feature**
+  (related-tickets) mode is still *Coming soon*.
 - **Running** — live view of in-flight runs with the streaming 7-phase timeline and log. Each live run
   can **Stop**, a paused one **Resume** or **Discard**; the **"Up next"** queue below offers **Cancel**.
 - **History** — past runs grouped by ticket with the full outcome breakdown (Passed · Failed · Blocked ·
-  Untested · Cancelled) and pass-rate %; filter/search; open one for the report, issues, evidence, the
-  executed test-case sheet, ClickUp issue push, and the **Continue session** terminal.
+  Untested · Cancelled), pass-rate %, and the **surface** each run tested (Web / Web on mobile / App on
+  device); filter/search; open one for the report, issues, evidence, the executed test-case sheet,
+  ClickUp issue push, and the **Continue session** terminal.
+- **Design Check** — pick a crawled ticket + paste its Figma link (plus optional instructions and a
+  checklist); the AI compares the **Figma design against the ticket** (reading the project's source via
+  MCP when connected) and reports findings in five buckets (match / mismatch / concern / not sure /
+  discuss). Pick the model; needs the **Figma and Playwright** MCP tools. Past checks are saved.
+- **API Testing** — send any HTTP request from the portal (paste a **cURL** command, or **scan a page**
+  for the APIs it calls), file requests under **modules**, add pass/fail **assertions**, chain them into
+  a **flow** that runs like a Postman collection, get an automatic **QC & security scan** and an optional
+  **AI check** against plain-language expectations, and keep every result as evidence.
+
+### Configure
+- **Instructions** — the project context hub, in five tabs: edit \`CLAUDE.md\`, manage **Knowledge**
+  docs, write **Memory** notes, keep your **Accounts** (environments, test logins, and **authenticator
+  (2FA) codes**), and see the **AI Brain** map of how it all feeds a run.
+- **Skills** — view/edit the project's \`.claude/skills\` (including \`qc-testing\`); **create** a new
+  skill, **import** skills, **edit** a skill's name/description, **delete** one (type-to-confirm), and
+  set a **default skill** that auto-selects on the Run page. A portal update refreshes an **unedited**
+  copy of a bundled skill automatically and *offers* you the update on one you hand-edited.
+- **MCP** — manage \`.mcp.json\` servers (Playwright, Figma, ClickUp, Jira, Azure DevOps, Maestro) and
+  test their live health.
+- **Templates** — the project's reusable **test-case** and **design-check** templates (with
+  **Reset to default** for the ones the portal ships).
+
+### Tools
+- **Chat** — a plain conversation with Claude inside your project folder: ask anything, paste a
+  screenshot, tag a ticket or its test cases with \`@\`. See the [Chat](/document/chat) page.
 - **Prototype** — describe a screen (or build it straight **from a crawled ticket**) and the AI writes a
   working HTML prototype you can click through on desktop / tablet / phone. Refine it by chatting, or by
   **clicking an element and commenting on it**; every refine is kept as a revision you can compare and
   restore. It answers back with **open questions** for the BA, and turns the agreed screen into **test
   cases**.
-- **Design Check** — pick a crawled ticket + paste its Figma link (plus optional instructions and a
-  checklist); the AI compares the **Figma design against the ticket** (reading the project's source via
-  MCP when connected) and reports findings in five buckets (match / mismatch / concern / not sure /
-  discuss). Pick the model; needs the **Figma and Playwright** MCP tools. Past checks are saved.
-- **API Testing** — send any HTTP request from the portal (paste a **cURL** command to auto-fill it),
-  add pass/fail **assertions**, get an automatic **QC & security scan** and an optional **AI check**
-  against plain-language expectations, and keep every result as evidence.
-
-### Configure
-- **Instructions** — the project context hub, in five tabs: edit \`CLAUDE.md\`, manage **Knowledge**
-  docs, write **Memory** notes, keep your **Accounts** (environments + test logins), and see the
-  **AI Brain** map of how it all feeds a run.
-- **Skills** — view/edit the project's \`.claude/skills\` (including \`qc-testing\`); **create** a new
-  skill, **import** skills, **edit** a skill's name/description, **delete** one (type-to-confirm), and
-  set a **default skill** that auto-selects on the Run page.
-- **MCP** — manage \`.mcp.json\` servers (Playwright, Figma, ClickUp, Maestro) and test their live health.
-- **Templates** — the project's reusable **test-case** and **design-check** templates.
-
-### Tools
-- **Terminal** — a real pseudo-terminal on your machine, opened in the active project's folder
-  (it drops straight into a \`claude\` session).
+- **Terminal** — real shells on your machine, opened in the active project's folder, as a **tab strip**
+  (up to 6 at once) that each drop straight into a \`claude\` session and keep running when you navigate
+  away.
 
 ### System
 - **Settings** — **Projects** (register / edit / pin / remove, **export & import** a project as a
@@ -283,8 +329,17 @@ The sidebar is grouped by purpose. Here's what each page does.
   see the Settings page for details.
 
 > The **sidebar collapses** to icon-only via the toggle at its top, and the choice is remembered across
-> reloads. The footer also links to **Release notes** (changelog + check-for-updates) and this
-> **Documentation**; the **bell** (top-right) opens **Notifications**.
+> reloads. The footer carries the **Auto Agent** status line (see below), then **Release notes**
+> (changelog + check-for-updates) and this **Documentation**; the **bell** (top-right) opens
+> **Notifications**. Most pages also have a **Guide tour** button in the bottom-right that walks you
+> through that page.
+
+### Auto Agent status (sidebar footer)
+Every AI feature here shells out to \`claude\`, and the shared Claude Code credential is distributed by
+the company's **Auto Agent** CLI, which keeps a watcher running to refresh it. When that credential
+lapses or its watcher dies, runs fail with confusing mid-run auth errors — so the footer shows its state
+(**connected · expiring · stalled · expired · logged out · not installed**) and toasts the moment it
+drops, so you find out before a run does.
 `,
   },
   {
@@ -639,6 +694,60 @@ Works account-wide, but a *scoped* token is required — a plain one is rejected
 `,
   },
   {
+    id: 'database',
+    title: 'Database',
+    icon: Database,
+    blurb: 'Connect the project DB — read-only — and ask it questions.',
+    body: `
+The **Database** page (sidebar → Project → Database) connects the project's databases so the AI knows
+your **real tables and columns**, and gives you a console to query them.
+
+### Connecting
+Connect one or several databases, each with a **tag** that says what it is (Backend DB, Analytics DB, …):
+pick the engine — **PostgreSQL, MySQL, SQL Server, or SQLite** — then fill in host, port, database, user,
+and password. **Test connection** verifies it before you save (it reports the server version and table
+count), and **Connect & map schema** then reads the schema.
+
+Per database you can **Edit & reconnect**, **re-map** the schema, or disconnect it.
+
+> ⚠️ **Point it at staging, development, or a read-only replica — never production.** Everything the
+> portal does here is read-only, but a production connection string is not something to keep in a
+> testing tool.
+
+### The schema map (why this makes testing better)
+On connect, the portal reads the schema and saves a compact **schema map** into
+**Instructions → Knowledge** (flagged with the AI badge, like the source map). QC runs and test-case
+generation then get your real table and column names in their context — so a case can say *"the
+\`invoice_status\` column becomes \`SETTLED\`"* instead of inventing a field name.
+
+### Query & ask console
+Two modes, both strictly read-only:
+
+- **Ask AI** — type the question in plain English ("How many users signed up in the last 7 days?").
+  Claude writes a read-only query, runs it, and shows you **both the SQL and the results**, so you can
+  check what it actually asked. ⌘/Ctrl+Enter sends.
+- **SQL** — write and run a single statement yourself.
+
+### Read-only, in layers
+This page runs SQL that an AI wrote and nobody reviewed, so no single check is trusted:
+
+1. **The statement is parsed** — comments are stripped and string contents masked first (nothing can
+   hide in a comment, and an ordinary value like \`status = 'update'\` doesn't false-alarm). One
+   statement only, it must start with \`SELECT\` / \`WITH\` / \`SHOW\` / \`EXPLAIN\`, and no write or DDL
+   keyword may appear in the code.
+2. **The engine enforces it too** — Postgres and MySQL open an explicit \`READ ONLY\` transaction and
+   **refuse to run** if the server won't grant one. SQL Server has no read-only transaction, so the
+   statement is wrapped in a transaction that is **always rolled back** — its DDL is transactional, so
+   even a \`DROP\` that somehow got past step 1 is undone.
+3. **Limits on top** — a row cap, a statement timeout, and the password scrubbed out of every error
+   message.
+
+> The password is used only to read the schema and run these queries. It is stored **outside your
+> project folder**, beside the portal's own database — never in the repo, never in run history, never in
+> a log.
+`,
+  },
+  {
     id: 'qc-runs',
     title: 'Running a QC test',
     icon: PlayCircle,
@@ -660,25 +769,35 @@ a per-ticket grid once you queue two or more), pick a model, and start. Extras o
 - **Mark bug** — a per-ticket toggle for a ticket that has **no test cases**: the run reproduces the
   reported issue and judges Pass/Fail on whether it's fixed, instead of running a test-case sheet.
 - **Where to test** — **Web** (desktop browser via Playwright), **Web on mobile** and **App on device**
-  (both drive a booted device via the **Maestro** MCP server, which the run requires). Advanced
-  **Feature** mode (multiple related tickets as one connected workflow) is **Coming soon**.
+  (both drive a booted device via the **Maestro** MCP server, which the run requires). For
+  **App on device** there's no URL: **name the app already installed on the device** instead (a display
+  name like \`MyApp\`, or a package / bundle id like \`com.example.myapp\`) — the portal launches an
+  installed app, it won't install one for you. Advanced **Feature** mode (multiple related tickets as one
+  connected workflow) is **Coming soon**.
+- **Device picker** (mobile targets only) — with an Android emulator, an iOS simulator and Maestro's
+  Chromium device all up at once, the run used to test whichever one Maestro listed first. Pick the
+  device by its **real name** (\`Pixel 6 API 36\`, not \`emulator-5554\`); the choice is remembered per
+  project, and **Auto** keeps the old behaviour. A remembered device that's no longer booted falls back
+  to Auto and says so rather than failing the run.
 
 When a run needs to sign in, it uses the **environments + test accounts** from **Instructions →
-Accounts** (real URL and credentials) instead of a placeholder.
+Accounts** (real URL and credentials) instead of a placeholder — including a live **authenticator (2FA)
+code** when the account has one registered, so a real 2FA screen doesn't stall the run.
 
 The Portal spawns \`claude\` headless in the project folder with permissions bypassed (so it never
 blocks on a prompt) and runs the \`qc-testing\` skill through its **7 phases**: intake → plan → setup
 → collect → analyze → aggregate → report.
 
 ### Watching it
-**Running** streams live events over WebSocket — the current phase, the AI's narration, each tool
-call (browser clicks, reads, writes), and tool results. When you queued several tickets, an **"Up
-next"** list shows the waiting tickets with their position and a Cancel. A pulsing badge in the sidebar
-shows how many runs are live from any page.
+**Running** streams live events over WebSocket — a labelled **7-step stepper** showing which phase
+you're in (inferred from what the run is actually *doing*, and it only ever moves forward), the AI's
+narration, each tool call (browser clicks, reads, writes), and tool results. When you queued several
+tickets, an **"Up next"** list shows the waiting tickets with their position and a Cancel. A pulsing badge
+in the sidebar shows how many runs are live from any page.
 
 ### Results
 When a run finishes it writes \`report.md\` + \`issues.md\` (and screenshots/evidence) under
-\`testing/test-result/<ticket-slug>/\`. Opening a run shows:
+\`testing/test-result/<ticket-id>-<slug>/\`. Opening a run shows:
 
 - the full rendered **report** and the **issues** list (screenshots are clickable), across **Report**,
   **Screenshots**, **Files**, and **Log** tabs,
@@ -715,13 +834,21 @@ session — so you can ask follow-ups or have it fix something without starting 
     blurb: 'Crawl, generate, version, and ground.',
     body: `
 ### Crawling
-On **Tickets**, choose your ticket source — **ClickUp or Jira** (a toggle at the top; both browse and
-crawl the same way) — select tickets, and crawl. Each one's description, comments, \`ticket.json\`, and
-attachments download into \`testing/tickets/<ticket>/\`. Crawling runs as a **background job** you can
-navigate away from; you'll get a notification when it finishes. Optionally pick a model to also write
-an AI **summary.md** per ticket. You can **bind the project to a specific ClickUp list** ("Use a list")
-so Tickets browses just that list instead of the whole workspace, and **delete** a crawled ticket's
-downloaded files (a warning appears if the folder also holds generated test cases).
+On **Tickets**, choose your ticket source — **ClickUp, Jira, or Azure DevOps** (a toggle appears at the
+top once more than one is connected; all three browse and crawl the same way) — select tickets, and
+crawl. Each one's description, comments, \`ticket.json\`, and attachments download into
+\`testing/tickets/<ticket>/\`. Crawling runs as a **background job** you can navigate away from; you'll
+get a notification when it finishes, and starting another batch while one runs **queues** it. Optionally
+pick a model to also write an AI **summary.md** per ticket. You can **bind the project to a specific
+ClickUp list** ("Use a list") so Tickets browses just that list instead of the whole workspace, and
+**delete** a crawled ticket's downloaded files (a warning appears if the folder also holds generated test
+cases).
+
+**Subtasks nest under their parent.** Tickets group under sticky **status** headers, with subtasks
+expandable beneath their parent via the chevron. Selecting a subtask automatically selects its whole
+parent chain, and on disk it lands in a **nested** folder mirroring the tracker's tree
+(\`testing/tickets/ABC-100/ABC-101/\`). Deleting a parent removes its nested subtask folders too.
+Single crawls and folders that were already flat are unchanged.
 
 ### Generating test cases
 On **TestCase**, pick up to **5 crawled tickets** (fewer is better — each is its own AI run), pick the
@@ -741,14 +868,33 @@ versions (or delete a whole version). For **CSV** versions you can also edit in 
 - **Click the trash icon on a row** to delete that single test case — a confirm dialog guards it, and
   after deleting an **Undo** banner lets you put the row back exactly where it was.
 
+### Attach a specification document
+A ticket often just **links** to its spec (or to one section of it) and carries no acceptance criteria at
+all — generating from the ticket alone then drafts almost nothing. Use the **Specification** upload card
+beside the Template one: **Word (.docx), PDF, Excel, CSV, or Markdown**, converted to Markdown **in your
+browser**, so the file itself never leaves your machine.
+
+The spec is then an **authoritative requirement source on par with the ticket** — a requirement that
+appears only in the spec is in scope — while the **ticket still decides which part** of a (usually much
+larger) spec this run covers. Where the spec and the ticket disagree, the cases follow the ticket and note
+the discrepancy; where the **spec and the code** disagree, the case asserts the spec and says so, since
+that's the bug worth finding.
+
+The spec isn't saved anywhere — it belongs to the run you're configuring. A scanned, image-only PDF
+extracts no text and tells you so instead of silently sending an empty spec.
+
 ### App URLs & test accounts
 If a case needs a login, the AI uses the **environments + test accounts** you saved on the
-**Instructions → Accounts** tab (real URL and credentials), rather than a placeholder.
+**Instructions → Accounts** tab (real URL and credentials), rather than a placeholder. When the account
+has an **authenticator** registered, a case says *"enter the current authenticator code for &lt;account&gt;"*
+instead of a literal six digits, which would be wrong by the time anyone ran it.
 
-### How the AI uses your Knowledge
-Test-case generation **injects the project's Knowledge + Memory directly into the prompt**, so the AI
-uses your real screen/field names, roles, and business rules instead of guessing — while staying
-within the ticket's scope.
+### How the AI uses your project context
+Test-case generation **injects your Overview documents, Knowledge, and Memory directly into the prompt**,
+so the AI uses your real screen/field names, roles, and business rules instead of guessing — while staying
+within the ticket's scope. It also **reads the project's source code** (guided straight to the right files
+by the source map, when a repo is connected), so the cases match the real implementation — true field
+names, validation limits, states, and roles — rather than the ticket's paraphrase of it.
 
 ### Grounding check (anti-hallucination)
 After writing, an **independent, cheap second pass** audits the cases against the ticket **and** your
@@ -756,6 +902,86 @@ project knowledge, and silently rewrites the saved version to drop anything inve
 or acceptance criteria that neither the ticket nor your knowledge supports) — keeping legitimate edge
 and negative coverage. It's best-effort and never blocks generation. Toggle it per project on
 **Settings → AI models**.
+`,
+  },
+  {
+    id: 'chat',
+    title: 'Chat',
+    icon: MessagesSquare,
+    blurb: 'Just ask Claude about your project.',
+    body: `
+Every other AI screen in the Portal is a **form** — pick a ticket, pick a model, press Generate.
+**Chat** (sidebar → Tools) is the one place you can just **ask**: *"why did run 14 fail?"*, *"what does
+this endpoint validate?"*, *"are these test cases enough?"*
+
+Claude answers from **inside your project folder**, so \`CLAUDE.md\`, your Overview documents, Knowledge
+and Memory are already in scope — and a follow-up question understands what "it" refers to, because the
+conversation continues the same Claude session rather than replaying a transcript at it.
+
+### Two answer modes — read-only is the default
+The toggle beside the model picker always says which one you're in:
+
+- **Read-only** *(default)* — Claude can read your repo but **not change it**, and MCP servers aren't
+  loaded, so answers start in about a second. Right for almost every question.
+- **Full tools** — can **write files** and drive the project's MCP servers (a browser, ClickUp) when you
+  want the work done, not just described.
+
+### Paste a screenshot
+QC evidence is usually an image. **Cmd/Ctrl-V** a screenshot into the box, drop an image on it, or use
+the **paperclip** — up to **4 images** per message (png / jpeg / webp / gif, 8 MB). Claude opens each one
+and can actually see it, so *"what's wrong with this screen?"* is a paste and a question instead of a
+paragraph of description. An image on its own is a valid message. Your images are kept with the
+conversation, so reopening it shows what you asked about.
+
+The paperclip also takes a **Word / PDF / Excel / CSV / Markdown** document — it's converted in your
+browser and appended to your question, so the file itself never leaves your machine.
+
+### Tag a ticket with \`@\`
+Type **\`@\`** and pick from your crawled tickets — or **\`@TICKET/testcases\`** for the cases generated
+for it. Use ↑/↓ and Enter (while the menu is open, Enter picks rather than sends). Only the
+**reference** travels: Claude reads the real files on disk, so five tags cost a few lines of prompt
+instead of 200 KB of pasted ticket text. **Deleting the \`@TICKET\` text is how you untag**, and a tag
+whose files are gone says so rather than failing quietly.
+
+### The answer keeps being written even if you leave
+A turn belongs to the **conversation**, not to the browser tab that started it. Reload, navigate away,
+close the tab — the answer keeps being written and is saved when it finishes; coming back re-attaches to
+it mid-sentence. The rail marks a conversation that's still being answered with a pulsing dot.
+
+**Stop** saves whatever was written so far as a partial answer rather than throwing it away. One reply at
+a time per conversation.
+
+### While you wait
+The waiting bubble says what Claude is **doing** — "Reading the project", "Searching the project" — how
+long it's been at it, and lists the calls it has made in order, each with its target
+(*Searched for \`phaseOf\`*, *Read \`ChatPage.tsx\`*, *Ran \`npm run build\`*). A long wait reads as working
+rather than stuck.
+
+### Managing conversations
+- Conversations are **saved per project** under \`testing/chats/\`, named after the first question,
+  searchable, and grouped **Today / Yesterday / 7 Days Ago** in the left rail.
+- **Star** one to pin it to a **Starred** group at the top. Starring doesn't change when the chat was
+  last worked on.
+- **Rename** and **Delete** are proper dialogs that name the conversation being changed.
+- Code in an answer is a real **code block** — coloured for its language, labelled, with a **Copy**
+  button.
+- **Ask next** chips under the newest answer are follow-up questions in your own voice; clicking one
+  sends it. (The quick chips on the empty screen behave differently: they *type* the prompt into the box
+  so you can fill in a real ticket id first.)
+
+### Temporary chat — a conversation that never reaches the project
+A normal transcript is a file in your project and gets committed with everything else. That's right for
+"how does this work?" and wrong for a throwaway question, or one with a customer's data pasted into it.
+A **temporary** conversation lives **only in the server's memory**: no file is written, it never appears
+in the rail's list, and it's dropped when you end it, after about 6 hours idle, or when the server
+restarts. Pasted images are real files (Claude has to open them) and are **deleted with the
+conversation**.
+
+You choose this **when the conversation is created** — the toggle is disabled once it has started, or
+half of it would already be on disk. A temporary chat can't be starred; that would mean the opposite.
+
+> The notice on screen says exactly this much and no more: the **Claude CLI keeps its own session
+> transcript in your home folder**, so "temporary" means "not in your project", not "no trace anywhere".
 `,
   },
   {
@@ -874,8 +1100,18 @@ portal and keep the result as evidence — no external tool needed.
 ### Building & sending a request
 Set the **method**, **URL**, query params, headers, and body — or paste a **cURL** command straight
 from your browser's DevTools (or an app) and the page fills all of that in for you. You can copy the
-request back out **as cURL** at any time. Saved requests live **per project**: they **auto-save on any
-change**, rename with the pencil icon, and ask before deleting.
+request back out **as cURL** at any time. Requests are proxied through the portal's own server, so
+browser CORS rules don't stop you testing \`localhost\` or a protected environment.
+
+Saved requests live **per project**: they **auto-save on any change**, rename with the pencil icon, and
+ask before deleting. They fold under collapsible **module** headers the way Swagger groups endpoints —
+one click files everything loose under the module its URL path implies, and a module can be renamed
+across every request in it.
+
+### Scan a page for its APIs
+Don't know the endpoints yet? **Scan a page** opens a real (logged-in) Chrome at a URL, records the API
+calls the page makes, and offers them for import — each landing under the module its path implies. Faster
+than reading the network tab and retyping.
 
 ### Environments & variables
 Use the **Environment** bar above the URL to define reusable **{{variables}}** — put values like a
@@ -899,7 +1135,45 @@ no active environment yet, one named *Default* is created for you.
 ### Assertions (pass/fail checks)
 Add checks with quick-add presets — **status is 2xx / equals**, **body contains / matches**,
 **JSON path equals / exists**, **header equals / exists**, **response time under N ms** — and after
-every Send each row is coloured green or red with a **pass/total** bar.
+every Send each row is coloured green or red with a **pass/total** bar. A result spells out **the key it
+looked at, the value that came back, and the value it wanted**, so a failing assertion tells you why in
+place. The same engine grades a single Send and a flow step, so a check can never pass in one and fail in
+the other.
+
+### Flows — run a whole scenario, Postman-style
+A real acceptance criterion is usually a **scenario** ("log in → create a claim → verify it's listed"),
+not one request. The **Flows** list under your saved requests is exactly that: put the requests in the
+order they should run, hit **Run flow**, and each step's **captured values feed the next one**.
+
+- Each step reports its **status code, timing, and how many of its checks passed**. A step passes when all
+  its enabled assertions pass — or, with no assertions, on a 2xx.
+- A failure **stops the run** and everything after it is reported as **skipped** (not silently missing) —
+  unless you mark that step **soft**, and it carries on. Captures still apply on a failing step, since a
+  4xx can carry the id the next step needs.
+- Steps reference a saved request **by name, never a copy** — editing the request updates every flow, and
+  renaming it rewrites the flow. A deleted request leaves the step in place, flagged **missing**, and
+  fails it rather than skipping it quietly.
+- Each run is saved as evidence with **verdicts only** — status, timing, check counts, captured variable
+  *names* — and **never response bodies**, so a token in a login response can't end up in your repo.
+
+### Run as — pick the identity, including real 2FA
+Store a test account (**label + username + password**) here, pick it under **Run as**, and write
+\`{{auth.username}}\` / \`{{auth.password}}\` in your login request — the Portal fills them in when it sends.
+Pick an **authenticator** too and \`{{auth.otp}}\` becomes the **live six-digit code** (the same
+authenticators you registered on Instructions → Accounts; the OTP is computed fresh on every send).
+
+Because the *flow* picks the identity, **one login request can be re-run as a different role by changing
+a dropdown** instead of editing the request. A specific account also stays addressable as
+\`{{account.<label>.username}}\`. The report records which account ran.
+
+If your **Instructions → Accounts** sheet already has these logins, the picker offers those rows for
+one-click **import** rather than making you type them again — the password is re-read on the server, so it
+never round-trips through your browser. And a flow whose steps use \`{{auth.…}}\` with nothing picked
+**refuses to start**, instead of sending the literal tokens and getting a 401 that reads like a wrong
+password.
+
+> The password is stored **outside your project** (never committed, never sent to an AI prompt) and is
+> never sent back to the page. Only **labels** are ever written into the flow definition.
 
 ### Automatic QC & security scan
 Every response is graded for common issues — plain HTTP, missing security headers (HSTS, nosniff,
@@ -930,12 +1204,16 @@ five tabs so guidance stays organized instead of crammed into one giant file:
 2. **Knowledge** — upload project docs (**Word, PDF, Markdown/TXT, CSV, Excel**) — one or several at
    once, with per-file conversion progress; they're converted to Markdown **in the browser** and stored
    under \`testing/knowledge/\`. **Preview** or **delete** them here (uploaded docs aren't edited in the
-   UI). Use these for specs, requirements, and domain notes.
+   UI). Use these for standing reference material: specs, requirements, and domain notes. This is also
+   where the AI's own write-ups land — the **source map** per connected repo, the **database schema map**,
+   and the Prototype **design system** — each with an **AI** badge, editable and deletable like any other
+   doc. (Documents describing *what the product is* belong on the **Overview** page instead; both folders
+   reach the AI the same way.)
 3. **Memory** — small notes, one durable fact each (decisions, gotchas, conventions), written directly
    in the portal with a **name**, a one-line **description** (shown in the \`MEMORY.md\` index), and the
    fact. Stored under \`testing/memory/\` with an auto-built \`MEMORY.md\` index. A note's **name is fixed
    once created** (make a new note to rename), and each carries an **AI** or **Manual** badge showing who
-   wrote it.
+   wrote it. The list is **searchable and paged**, since auto-capture keeps adding notes.
 4. **Accounts** — the project's app URLs and **test-account logins** (see below).
 5. **AI Brain** — a visual map of everything Claude knows about the project: how \`CLAUDE.md\`,
    Knowledge, and Memory connect and feed each QC run. Read-only — nothing to edit here.
@@ -972,10 +1250,14 @@ phone** and confirm the key is right.
 > key.
 
 ### How context actually reaches the AI
-- **QC runs** spawn \`claude\` in the project root, so a managed pointer block in \`CLAUDE.md\` directs it
-  to read \`testing/knowledge/*.md\` and \`testing/memory/*.md\`.
-- **Test-case generation** has no project working directory, so the Portal **injects** the Knowledge +
-  Memory straight into the prompt (capped, memory first). Either way, your context gets used.
+- **QC runs, Chat, and Terminal sessions** run \`claude\` **in the project root**, so a managed pointer
+  block in \`CLAUDE.md\` directs it to read \`testing/overview/*.md\`, \`testing/knowledge/*.md\`, and
+  \`testing/memory/*.md\` (plus how to fetch a live 2FA code, when one is registered).
+- **Test-case generation, prototypes, and the grounding check** get the same material **injected straight
+  into the prompt** (capped — Memory first, then Overview, then Knowledge, with the source/schema maps and
+  design system prioritised), so it's used regardless of which files the model happens to open.
+
+Either way, uploading a document or saving a note is all it takes; there's nothing else to wire up.
 
 ### AI auto-capture (knowledge that updates itself)
 After a QC run or a test-case generation, a cheap reflection step can persist durable facts it learned
@@ -1052,7 +1334,13 @@ running \`qc-portal --restart\` in a terminal.
 ### Templates (its own sidebar page)
 The **Templates** page (separate from Settings) manages plain-text files under \`testing/templates/\`:
 - **testcase** — the structure the AI matches when drafting test cases (a per-run upload still overrides it).
+  A **new project starts with the team's common CSV template** already in place.
 - **design-check** — the project's standard Design Check checklist.
+
+**Bundled templates keep themselves current.** When the portal ships a newer default,
+\`qc-portal --update\` refreshes the copy in every project that **hasn't been edited**. A template you
+customised is left exactly as it is (**Reset to default** is there if you want it back), and one you
+deleted on purpose stays deleted.
 `,
   },
   {
@@ -1063,13 +1351,34 @@ The **Templates** page (separate from Settings) manages plain-text files under \
     body: `
 The **Terminal** page is a real pseudo-terminal on the machine running the server, rendered in the
 browser. **Connect** opens your **login shell** with the working directory set to the **active project's
-root** — from there you can run anything, including typing **\`claude\`** to start a session;
-**Disconnect** (or closing the tab) kills the shell. One shell per connection — nothing persists across
-reconnects, and **switching the active project** disconnects the current shell (Connect again to reopen
-in the new folder).
+root**, and drops straight into a \`claude\` session — from there you can run anything. It behaves like a
+native terminal, so interactive TUIs work.
 
-It behaves like a native terminal, so interactive TUIs work. The same engine powers **Continue session**
-on a run's detail page (which instead resumes that run's \`claude\` session directly).
+### Several terminals at once
+The page is a **tab strip**: each tab is its own shell with its own Claude session, so you can leave Claude
+working in one and run git or tests in another. Up to **6** at a time, remembered **per project**, and
+switching tabs is instant (nothing is replayed). The **×** on a tab is what ends its shell.
+
+### Shells outlive the page
+Navigating away, reloading, or a dropped connection only **detaches** — the shell keeps running and you
+**re-attach** to it when you come back, with its recent output replayed. The button reads **Re-attach**
+rather than Connect when a shell is still alive. A session ends only when you press **Disconnect** (or
+close its tab), the shell exits, it sits detached for ~6 hours, or the portal restarts.
+
+**Opened in two windows?** Only one window views a session at a time. The second window is told the
+session is held elsewhere and offers **Take over** instead of quietly stealing it back and forth.
+
+### Slash commands
+The **Slash commands** dialog lists useful Claude commands (\`/help\`, \`/cost\`, \`/status\`, \`/usage\`, and
+more, grouped by purpose). Clicking the command **inserts** it so you can review and press Enter yourself;
+the **▶ Run** button types it **and** sends Enter.
+
+> **Ctrl+C copies when text is selected** and sends SIGINT when nothing is (what Windows Terminal and
+> VS Code do), so selecting Claude's output and hitting Ctrl+C out of habit no longer interrupts a run.
+> Ctrl+V, Ctrl+Shift+C and Ctrl+Insert work as you'd expect.
+
+The same engine powers **Continue session** on a run's detail page, which instead resumes that run's
+\`claude\` session directly — and likewise keeps running if you navigate away.
 `,
   },
   {
@@ -1078,9 +1387,10 @@ on a run's detail page (which instead resumes that run's \`claude\` session dire
     icon: BellRing,
     blurb: 'Long tasks that survive navigation.',
     body: `
-Crawling, test-case generation, Design Check, and source clone/sync all run as **server-side background
-jobs**. That means you can start one and freely navigate away or reload — the job keeps running and the
-page reconnects to its live progress when you return.
+Crawling, test-case generation, Design Check, source clone/sync, database schema mapping, and API page
+scans all run as **server-side background jobs**. That means you can start one and freely navigate away or
+reload — the job keeps running and the page reconnects to its live progress when you return. A **Chat**
+answer behaves the same way (see the Chat page), and a **Terminal** shell keeps running too.
 
 When a job finishes, an always-mounted watcher fires a **toast** and adds an entry to the **bell**
 (top-right) — even if you'd left the page that started it, as long as the portal is still open in a
@@ -1140,8 +1450,29 @@ its folder to match the new name.
 **A QC run won't start / claude not found.** Check **Settings → AI models → AI runtime** for the Claude
 binary status. Set \`QC_CLAUDE_BIN\` to the CLI's full path if it isn't on \`PATH\`.
 
-**The AI uses wrong field/screen names.** Add the real terms as **Knowledge** docs or **Memory** notes
-on the Instructions page — test-case generation injects them into the prompt, and QC runs read them.
+**Runs suddenly fail with an auth error mid-run.** Check the **Auto Agent** status line in the sidebar
+footer — every AI feature here shells out to \`claude\`, so if the shared credential has **expired** or its
+watcher has **stalled**, runs fail with confusing errors. Sign in with Auto Agent again and retry.
+
+**"The AI produced nothing."** This was a real bug with a newer Claude CLI (both result shapes are
+understood now). If you still see it, update the portal (\`qc-portal --update\`) and check the Auto Agent
+status above.
+
+**A mobile run drove the wrong device.** Use the **device picker** on the Run form to name the device
+explicitly instead of leaving it on Auto. If your Android device shows as a raw serial rather than its
+name, \`adb\` wasn't on the PATH of the process that started the portal — start it from a terminal, or add
+Android platform-tools to your PATH.
+
+**The Terminal says a session is open in another window.** Only one browser window views a shell at a
+time. Use **Take over** in the window you want to work in.
+
+**The Database page won't run my statement.** It is read-only by design and refuses anything that isn't a
+single \`SELECT\` / \`WITH\` / \`SHOW\` / \`EXPLAIN\` — and even a statement that got past that is run inside a
+transaction that is never committed. There is no setting to allow writes.
+
+**The AI uses wrong field/screen names.** Upload the spec on **Overview**, add the real terms as
+**Knowledge** docs or **Memory** notes on **Instructions**, and connect the **source code** and
+**database** — test-case generation injects all of it into the prompt, and QC runs read it.
 
 **An MCP tool shows unhealthy.** Open the **MCP** page; the status comes from a live test call. Fix the
 command/args (Playwright profile paths are machine-specific) and re-test.

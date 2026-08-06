@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { memo, useEffect, useState } from 'react'
 import { Check, Copy } from 'lucide-react'
 import { toast } from 'sonner'
 import { cn } from '@/lib/utils'
@@ -17,7 +17,7 @@ import { highlightCode, resolveLanguage } from '@/lib/highlight'
  * lib/highlight.ts), so the block renders readable plain text immediately and gains colour
  * a beat later. It must never be the reason code doesn't appear.
  */
-export function CodeBlock({
+export const CodeBlock = memo(function CodeBlock({
   code,
   language,
   className,
@@ -106,4 +106,4 @@ export function CodeBlock({
       </pre>
     </div>
   )
-}
+})

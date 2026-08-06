@@ -143,6 +143,64 @@ export function runClaude(
 export interface StreamLog {
   level: 'info' | 'success' | 'error'
   text: string
+  /**
+   * Set on a `⚙ <tool>` line only: the tool call in structured form, so a caller can
+   * show WHAT it is working on ("Read · ChatPage.tsx") instead of re-parsing the text.
+   * `text` is deliberately left as the bare `⚙ <name>` every other log consumer already
+   * renders — this rides alongside it.
+   */
+  tool?: { name: string; detail?: string }
+}
+
+/** Max length of the target shown beside a tool name (a whole bash line is unreadable). */
+const TOOL_DETAIL_CHARS = 64
+
+/**
+ * The one interesting argument of a tool call — the file being read, the pattern being
+ * searched for, the command being run. "Reading" for 40 seconds says nothing; "Reading
+ * ChatPage.tsx" is the same wait with the work attached.
+ */
+function toolDetail(name: string, input: unknown): string | undefined {
+  const i = (input ?? {}) as Record<string, unknown>
+  const str = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : undefined)
+  const base = (v: unknown) => {
+    const p = str(v)
+    return p ? p.split(/[\\/]/).filter(Boolean).pop() : undefined
+  }
+  let d: string | undefined
+  switch (name) {
+    case 'Read':
+    case 'NotebookRead':
+    case 'Write':
+    case 'Edit':
+    case 'MultiEdit':
+    case 'NotebookEdit':
+      d = base(i.file_path ?? i.notebook_path)
+      break
+    case 'Grep':
+      d = str(i.pattern)
+      break
+    case 'Glob':
+      d = str(i.pattern)
+      break
+    case 'Bash':
+      d = str(i.description) ?? str(i.command)
+      break
+    case 'WebFetch':
+      d = str(i.url)
+      break
+    case 'WebSearch':
+      d = str(i.query)
+      break
+    case 'Task':
+      d = str(i.description)
+      break
+    default:
+      d = str(i.description) ?? str(i.pattern) ?? base(i.file_path)
+  }
+  if (!d) return undefined
+  d = d.replace(/\s+/g, ' ')
+  return d.length > TOOL_DETAIL_CHARS ? `${d.slice(0, TOOL_DETAIL_CHARS - 1)}…` : d
 }
 
 export interface StreamResult {
@@ -286,7 +344,7 @@ export function runClaudeStream(
         session_id?: string
         result?: string
         is_error?: boolean
-        message?: { content?: { type?: string; text?: string; name?: string }[] }
+        message?: { content?: { type?: string; text?: string; name?: string; input?: unknown }[] }
         event?: { type?: string; delta?: { type?: string; text?: string } }
       }
       try {
@@ -316,7 +374,11 @@ export function runClaudeStream(
                 for (const l of block.text.trim().split('\n')) onLog({ level: 'info', text: l })
               }
             } else if (block.type === 'tool_use' && block.name) {
-              onLog({ level: 'info', text: `⚙ ${block.name}` })
+              onLog({
+                level: 'info',
+                text: `⚙ ${block.name}`,
+                tool: { name: block.name, detail: toolDetail(block.name, block.input) },
+              })
             }
           }
           return

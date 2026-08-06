@@ -60,23 +60,41 @@ function headerCols(line: string): string[] {
 export function extractCsv(raw: string, template: { content?: string } | null): string {
   const s = stripCodeFence(raw)
   const lines = s.split(/\r?\n/)
-  const wanted = headerCols(
-    (template?.content ?? '').split(/\r?\n/).find((l) => l.trim().length > 0) ?? '',
-  )
-  let start = -1
-  if (wanted.length >= 2) {
-    // Match the header by its column names (ignoring trailing empty padding cells), so
-    // a row that reproduces the columns counts even if the trailing commas differ.
-    start = lines.findIndex((l) => {
-      const cols = headerCols(l)
-      return cols.length >= 2 && cols.length === wanted.length && cols.every((c, i) => c === wanted[i])
-    })
-  }
+  let start = templateHeaderIndex(lines, template)
   if (start === -1) {
     // No template header to anchor on — take the first line that looks like CSV data.
     start = lines.findIndex((l) => (l.match(/,/g)?.length ?? 0) >= 2)
   }
   return (start > 0 ? lines.slice(start).join('\n') : s).trim()
+}
+
+/**
+ * Index of the line that reproduces the template's header row (matched by COLUMN NAMES,
+ * ignoring trailing empty padding cells so differing trailing commas still count), or -1.
+ */
+function templateHeaderIndex(lines: string[], template: { content?: string } | null): number {
+  const wanted = headerCols(
+    (template?.content ?? '').split(/\r?\n/).find((l) => l.trim().length > 0) ?? '',
+  )
+  if (wanted.length < 2) return -1
+  return lines.findIndex((l) => {
+    const cols = headerCols(l)
+    return cols.length >= 2 && cols.length === wanted.length && cols.every((c, i) => c === wanted[i])
+  })
+}
+
+/**
+ * True when the output reproduces the CSV template's header row somewhere — i.e. it IS
+ * the CSV we asked for, even if the model prefixed a sentence before it. Verified in a
+ * real run: the model opened with "The CSV is verified valid (76 rows × 12 columns, no
+ * shifted fields). Here is the final output:", which has too few commas to sniff as CSV,
+ * so a perfectly good 76-row CSV was stored as `.md` and no longer opened as a spreadsheet.
+ */
+export function containsTemplateHeader(
+  text: string,
+  template: { content?: string } | null,
+): boolean {
+  return templateHeaderIndex(stripCodeFence(text ?? '').split(/\r?\n/), template) !== -1
 }
 
 /**
@@ -87,6 +105,15 @@ export function extractCsv(raw: string, template: { content?: string } | null): 
  * header, so this has no false positives. Returns the offending rows' IDs (first-column
  * value). Detection only — the original intent can't be reliably recovered once the
  * commas are ambiguous, so the caller warns the engineer rather than silently "repairing".
+ *
+ * This depends on the header carrying NO empty padding columns, which is why CSV
+ * templates are de-padded before the model ever sees them (stripCsvTemplatePadding).
+ * Measured on a spreadsheet-exported template padded to 32 columns for 12 real ones:
+ * the model mirrored the padding at a random width per run, so a run emitting 33 cells
+ * on every row reported all 84 as "shifted" (they were fine), while a genuinely shifted
+ * row hid inside the 20 columns of slack with an empty tail — indistinguishable from
+ * padding. Widening the comparison to ignore trailing empties therefore does NOT help;
+ * removing the padding is what makes this check meaningful in both directions.
  */
 export function findOverflowCsvRows(csv: string): { id: string; fields: number }[] {
   const rows = parseCsvRows(csv)
@@ -488,14 +515,58 @@ Final reminder: ${outputRule}${
   }`
 }
 
-/** Normalize a raw template payload — trim, cap, default name. Empty → null. */
+/** Serialize one CSV row, quoting only the fields that need it. */
+function csvRow(cells: string[]): string {
+  return cells
+    .map((c) => (/[",\n\r]/.test(c) ? `"${c.replace(/"/g, '""')}"` : c))
+    .join(',')
+}
+
+/**
+ * Strip spreadsheet padding from a CSV template: the empty trailing COLUMNS and the
+ * hundreds of empty ROWS that an Excel/Sheets export leaves behind (a real project
+ * template was 12 meaningful columns padded to 32, and 27 sample rows padded to 967).
+ *
+ * This matters because the template IS the format contract: the model mirrors the header
+ * it is shown, so the padding propagated into every generated file as 20 junk columns —
+ * and a ±1 drift in that meaningless padding then tripped findOverflowCsvRows, reporting
+ * 80+ rows as "shifted columns" on files whose real 12 columns were perfectly aligned.
+ * The padding also burned ~30 KB of the template budget on `,,,,,` lines, which is what
+ * pushed the real sample rows towards the truncation cap.
+ *
+ * Conservative by construction: returns the content UNCHANGED unless there is actual
+ * padding to remove, so a well-formed template is byte-identical to before.
+ */
+export function stripCsvTemplatePadding(content: string): string {
+  const rows = parseCsvRows(content)
+  if (rows.length < 1) return content
+  const header = rows[0]
+  let width = header.length
+  while (width > 0 && header[width - 1].trim() === '') width--
+  if (width < 2) return content // not a real CSV header — leave it alone
+  const kept = rows.filter((r) => r.some((c) => c.trim() !== ''))
+  const hasPadCols = width < header.length
+  const hasPadRows = kept.length < rows.length
+  if (!hasPadCols && !hasPadRows) return content
+  // Only drop cells beyond `width` when they are genuinely empty — a row with real
+  // content out there is a shifted row, and silently truncating it would lose data.
+  const trimmable = kept.every((r) => r.slice(width).every((c) => c.trim() === ''))
+  if (!trimmable) return hasPadRows ? kept.map(csvRow).join('\n') : content
+  return kept.map((r) => csvRow(r.slice(0, width))).join('\n')
+}
+
+/** Normalize a raw template payload — de-pad CSV, trim, cap, default name. Empty → null. */
 function normalizeTemplate(
   raw: { name?: string; content?: string } | null | undefined,
 ): { name: string; content: string } | null {
   if (!raw || typeof raw !== 'object') return null
-  const content = typeof raw.content === 'string' ? raw.content : ''
+  let content = typeof raw.content === 'string' ? raw.content : ''
   if (!content.trim()) return null
   const name = typeof raw.name === 'string' && raw.name.trim() ? raw.name.trim() : 'template'
+  // De-pad BEFORE the cap, so the cap is spent on sample rows and not on `,,,,,` filler.
+  if (detectTemplateFormat({ name, content }) === 'csv') {
+    content = stripCsvTemplatePadding(content)
+  }
   return {
     name,
     content:
@@ -714,7 +785,13 @@ export async function generateTestcaseVersion(opts: {
   // for Markdown); trusting the template there would save CSV as a .md file, and the
   // preview would then render it as one collapsed run-on paragraph. Fall back to the
   // intended format only if the output is empty/ambiguous.
-  const outFormat = sniffOutputFormat(testcases) || format
+  // …but a CSV output that merely opens with a stray sentence is still CSV: sniffing only
+  // reads the FIRST line, so a preamble would demote it to Markdown and store a spreadsheet
+  // as `.md`. Reproducing the template's header row settles it before the sniffer guesses.
+  const outFormat =
+    format === 'csv' && containsTemplateHeader(testcases, template)
+      ? 'csv'
+      : sniffOutputFormat(testcases) || format
   if (outFormat !== format) {
     onLog({
       level: 'info',

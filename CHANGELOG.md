@@ -3,6 +3,83 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.11.10 — 2026-08-06
+
+**Chat gets a `+` menu, follow-up questions and temporary conversations — and the grounding check finally runs on real-sized tickets**
+
+### Added
+
+- **A `+` menu in the chat box, for the three questions a project chat can't answer on its own.**
+  **Web search** lets Claude actually search the web and list its sources (without it, it was being
+  *denied* the tool and answering from memory instead — the exact failure the button exists to
+  prevent). **Deep research** is the same tools with a report shape — sub-questions, cross-checked
+  against a second source, then Summary / Findings / Conflicts & gaps / Sources — and twenty minutes
+  to do it in, because five reliably produced half a report. **Create diagram** answers as a picture:
+  a flow, a state machine, a sequence, rendered right in the reply. Each applies to **one message**
+  and clears itself, so the follow-up goes back to reading your project — and the badge stays on the
+  message, so "why does this answer cite the web?" is still answerable a week later.
+- **"Ask next" — the three questions worth asking after an answer.** Chips under the newest reply,
+  written in your voice, and clicking one sends it. They ride along with the answer rather than
+  costing a second round trip, so they appear the moment it finishes instead of making you wait
+  again.
+- **Temporary chat — ask something without it becoming project history.** A normal transcript is a
+  file in your project and gets committed with everything else; that's right for "how does this
+  work?" and wrong for a throwaway question or one with a customer's data pasted into it. A
+  temporary conversation lives only in the server's memory: never written to disk, never in the
+  rail, and dropped when you end it, after six hours idle, or on restart — pasted screenshots
+  deleted with it. You choose it when the conversation starts (not halfway through, or half of it
+  would already be saved). The notice says exactly that and no more: the Claude CLI still keeps its
+  own session transcript in your home folder, and a privacy line that isn't quite true is worse than
+  none.
+- **Star a conversation to pin it to the top.** Starred chats get their own group above Today /
+  Yesterday, and starring doesn't disturb when the chat was last worked on. The star also shows on
+  the row, so it still explains itself when a search has filtered the group header off screen.
+- **The wait tells you what it's actually doing, with the target.** Instead of one unchanging label
+  over a skeleton, a long turn now lists the calls in order — *Searched for `phaseOf`*, *Read
+  `ChatPage.tsx`*, *Ran `npm run build`* — finished ones ticked. A turn that's been grepping for
+  forty seconds reads as working rather than hung.
+- **Rename and delete are proper dialogs.** The browser's built-in prompts can't say *which*
+  conversation you're about to delete, can't be styled, and are suppressed outright in some
+  browsers — which reads as the menu item doing nothing.
+
+### Changed
+
+- **The answer types out instead of arriving in paragraph-sized jumps.** Claude doesn't stream a
+  character at a time — a 12 KB answer landed as 116 chunks — so the text used to lurch forward on
+  about one frame in sixteen. It now catches up smoothly, without ever flashing raw `**markdown**`
+  mid-word, and it's skipped entirely if you've asked your system to reduce motion.
+- **Typing in a long conversation is no longer sluggish.** Every keystroke used to re-render the
+  whole transcript and re-parse every message's markdown: measured at 567 ms per keystroke in a
+  60-message chat, and streaming into that chat left the page at about 12 fps. Both are fixed —
+  keystrokes are back at the measurement floor and streaming runs at ~58 fps.
+- **Each turn is signed and timestamped** — who said it, when (with the date when it isn't today),
+  and which model answered.
+- **The chat manual is written.** Two new pages in the in-app Documentation — **Chat** and
+  **Database**, neither of which was documented at all — plus a pass over the rest of it: the
+  Terminal page still claimed shells didn't survive a reload, the Run page still called the mobile
+  targets "coming soon", and Overview was still described as a single free-text box. API flows,
+  "Run as" accounts, attached specifications, nested subtask folders, Azure DevOps, the Auto Agent
+  status line and the Guide tour buttons are all covered now.
+
+### Fixed
+
+- **The grounding check silently gave up on every real ticket.** The anti-hallucination pass that
+  audits generated test cases had a flat two-minute, 15-cent budget sized for a small artifact. On a
+  real one — a 23 KB ticket, 43 KB of cases, 26 KB of your Knowledge and Memory — it needs about two
+  and a half minutes and runs out of money before it can emit a single corrected row, and both
+  failures surface as "no AI response". So the check never ran for exactly the test cases that most
+  needed checking. Both limits now scale with the size of what's being audited (with a hard ceiling
+  so a runaway audit still can't balloon).
+- **A perfectly good CSV was being saved as Markdown.** If the model introduced its output with a
+  sentence — *"The CSV is verified valid (76 rows × 12 columns). Here is the final output:"* — the
+  file no longer looked like a CSV, so 76 rows of test cases were stored as `.md` and wouldn't open
+  as a spreadsheet. The output is now recognised by your template's own header row.
+- **Test cases stop being reported as "shifted" when they're fine.** A template exported from a
+  spreadsheet often carries empty padding columns — 32 of them for 12 real ones — and the model
+  mirrored that padding at a different width every run, which made the column check flag all 84 rows
+  as broken while a genuinely shifted row could hide in the slack. The padding is now stripped
+  before the model ever sees the template, which makes the check meaningful in both directions.
+
 ## 0.11.9 — 2026-08-05
 
 **A Chat page: ask Claude about your project, paste a screenshot, tag a ticket with `@`**

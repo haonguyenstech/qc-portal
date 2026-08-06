@@ -252,6 +252,108 @@
   animation: qc-dot 1.3s ease-in-out infinite;
 }
 
+/* "This conversation is still being answered" — the dot on a chat rail row. Opacity
+ * only, so a rail full of them costs nothing. */
+@keyframes qc-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.3;
+  }
+}
+.qc-pulse {
+  animation: qc-pulse 1.6s ease-in-out infinite;
+}
+
+/* ---------------------------------------------------------------------------
+ * Chat "thinking" state (ChatPage's ThinkingBubble).
+ *
+ * Three cooperating pieces, all driven by the compositor (transform / opacity /
+ * background-position), so a wait that lasts a minute costs no main-thread work
+ * while the answer streams in behind it.
+ * ------------------------------------------------------------------------- */
+
+/* A light sweeping across the phase label — the "it's alive" signal that carries
+ * the wait, in place of a spinner. */
+@keyframes qc-text-shimmer {
+  0% {
+    background-position: 180% 0;
+  }
+  100% {
+    background-position: -180% 0;
+  }
+}
+.qc-text-shimmer {
+  background-image: linear-gradient(
+    90deg,
+    var(--muted-foreground) 0%,
+    var(--muted-foreground) 38%,
+    var(--foreground) 50%,
+    var(--muted-foreground) 62%,
+    var(--muted-foreground) 100%
+  );
+  background-size: 300% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+  animation: qc-text-shimmer 2.6s linear infinite;
+}
+
+/* A gradient arc orbiting the phase icon. Drawn as a masked ring so it sits ON
+ * the chip's border rather than adding a second one. */
+@keyframes qc-orbit {
+  to {
+    transform: rotate(1turn);
+  }
+}
+.qc-orbit::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1.5px;
+  background: conic-gradient(
+    from 0turn,
+    transparent 0deg 190deg,
+    color-mix(in oklch, var(--foreground) 55%, transparent) 320deg,
+    transparent 360deg
+  );
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  mask-composite: exclude;
+  animation: qc-orbit 1.5s linear infinite;
+}
+
+/* Skeleton line with a sweep tinted by the FOREGROUND, not white: the shared
+ * .qc-shimmer sweep is white-on-white in light mode, i.e. invisible. */
+@keyframes qc-skeleton {
+  0% {
+    background-position: 160% 0;
+  }
+  100% {
+    background-position: -160% 0;
+  }
+}
+.qc-skeleton {
+  background-color: color-mix(in oklch, var(--foreground) 8%, transparent);
+  background-image: linear-gradient(
+    90deg,
+    transparent 0%,
+    color-mix(in oklch, var(--foreground) 10%, transparent) 50%,
+    transparent 100%
+  );
+  background-size: 260% 100%;
+  background-repeat: no-repeat;
+  animation: qc-skeleton 1.9s ease-in-out infinite;
+}
+
 /* Moving light sweep for loading skeletons (Prototype builder, etc.). */
 @keyframes qc-shimmer {
   100% {
@@ -304,6 +406,18 @@
     scroll-behavior: auto;
   }
   .qc-shimmer::after {
+    animation: none;
+  }
+  /* Static, still legible: the label falls back to a flat muted colour rather
+     than a frozen gradient, and the ring/skeleton simply stop. */
+  .qc-text-shimmer {
+    animation: none;
+    background-image: none;
+    color: var(--muted-foreground);
+  }
+  .qc-orbit::before,
+  .qc-skeleton,
+  .qc-pulse {
     animation: none;
   }
   *,

@@ -872,9 +872,35 @@ does this endpoint validate?").
   The prompt goes over **stdin**, so the variadic `--allowedTools` can't swallow it.
 - **Storage** is `<root>/testing/chats/<slug>.json` (mirrors `routes/prototype.ts`, no DB). A new
   conversation is named after its first question. Routes: `GET /api/chat`, `POST /stream` (SSE:
-  `start` / `delta` / `tool` / `log` / `done` / `error`), `GET /:slug`, `POST /:slug/rename`,
+  `start` / `resume` / `delta` / `tool` / `log` / `done` / `stopped` / `error`), `GET /:slug`,
+  `GET /:slug/stream`, `POST /:slug/stop`, `POST /:slug/rename`, `POST /:slug/pin`,
   `DELETE /:slug`, `POST /open`, `GET /images/:name` — **the fixed paths must stay above
   `GET /:slug`**.
+- **A turn belongs to the CONVERSATION, not to the request that started it (`LiveTurn`).** Reload,
+  navigate away, close the tab — the answer keeps being written and is saved when it finishes;
+  coming back re-attaches to it mid-sentence. Before this, `res.on('close')` aborted the CLI child,
+  and since the transcript is only written when a turn ENDS, the question and the half-written
+  answer both vanished — verified: reloading six seconds into a visible answer left no conversation
+  on disk at all. Load-bearing pieces:
+  - `live: Map<root::slug, LiveTurn>` holds the abort controller, the **buffered answer**, the tool
+    calls and the set of viewers. In memory on purpose, like `crawlJobs` / `testcaseJobs`.
+  - The chat file is written **when the turn starts**, not only when it ends — a brand-new
+    conversation had no file to re-open, so its first question was the easiest one to lose.
+  - `GET /:slug/stream` catches a late viewer up in one shot (`start`, a `resume` frame carrying the
+    question + its images, the whole answer so far as ONE delta, then each tool call) and streams the
+    rest. The client finds it through `running` on `GET /:slug` and on the rail summaries; the rail
+    marks such a row with a pulsing dot and polls **only while something is running**.
+  - **Stop is now a request** (`POST /:slug/stop`), because aborting the fetch no longer cancels
+    anything. It saves the buffered partial as a failed turn — the old code tried to save `r.text`,
+    which is only set from the CLI's final `result` event and is therefore always EMPTY on a kill,
+    so Stop silently discarded the answer too.
+  - One reply at a time per conversation (409): a second concurrent turn would `--resume` the same
+    CLI session and interleave two answers into one transcript.
+  - `ChatWorkspace` derives the open slug — nothing picked yet (i.e. a fresh mount after a reload)
+    falls back to whichever conversation is still being answered, so the page lands back on it
+    instead of the new-chat screen. `onResume` then **pins** that choice with `setPicked`, or the
+    page would snap away the instant the turn finished. Derived, not assigned in an effect: this
+    page bans setState-in-effect.
 - **Pasted screenshots** — QC evidence is usually an image, so Cmd/Ctrl-V (and drop, and the
   paperclip) attaches one to the message. The CLI takes a prompt, **not image bytes**, so the path is:
   the browser sends base64 → `saveImages` writes the file under `testing/chats/images/` (name generated
@@ -917,14 +943,146 @@ does this endpoint validate?").
   (`[&_p]:max-w-[85ch]`, likewise `li`/`blockquote`) while code blocks and tables deliberately do NOT
   (they want every pixel), and `ThinkingBubble`'s skeleton uses **rem widths** because a % width has
   nothing to resolve against inside a fit-content box.
-- **The waiting state is a `ThinkingBubble`, not a spinner** — three drifting dots (`.qc-dot`),
-  what the turn is DOING (`phaseLabel` names it after the latest tool: "Reading the project",
-  "Searching the project", …), an elapsed reading once past 3s, and shimmer skeleton lines standing
-  in for the answer. It replaced a `Loader2` + "Thinking…" line that sat under a SECOND spinner the
-  tool trail drew — two spinners in an empty bubble. Once text starts arriving the indicator stays
-  **mounted** (keyed, `compact`, moved below the answer) so its timer doesn't restart mid-answer, and
-  elapsed is measured against a start TIMESTAMP rather than counted in ticks — a backgrounded tab has
-  its timers throttled and a counter read 10s for a 35s wait.
+- **The answer TYPES OUT — `useSmoothReveal`, and the transcript rows are `memo`ised.** Two separate
+  fixes, both measured, both load-bearing:
+  - The CLI does not stream a character at a time: a 12.7 KB answer arrived as **116 frames of ~110
+    characters**, so painting each frame as it lands advanced the text on only **6% of frames** in
+    paragraph-sized jumps (max 225 chars). `useSmoothReveal` drains the received text at a rate
+    proportional to the backlog (~12 frames to catch up): **61% of frames advance, median 8 chars,
+    worst jump 29** — with zero added long tasks. It can't lag into the next turn, `prefers-reduced-
+    motion` skips it, and `safeRevealPoint` walks the cursor past markdown punctuation so a reveal
+    never rests between the stars of `**bold**` and flashes raw syntax. The caret is a `▊` CHARACTER
+    appended to the text, not a sibling element — markdown renders blocks, so a `<span>` would sit on
+    its own line instead of at the end of the last one. While streaming, the scroll is pinned per
+    frame (not per delta), or the newest line drifts under the fold between deltas.
+  - `Turn` and `CodeBlock` are `memo`ised because `input` lives on the component that renders the
+    list: every keystroke re-rendered the whole transcript and re-parsed every message's markdown.
+    Measured before: **33 ms per keystroke empty, 100 ms with one long answer, 567 ms in a
+    60-message chat**, and streaming into that chat blocked the main thread for **18.0 s of 22.6 s**
+    (~12 fps). After: **33 ms flat** (the two-frame measurement floor) and **287 ms of 20.5 s**
+    (~58 fps). Don't remove the memo.
+- **The waiting state is a `ThinkingBubble`, not a spinner** — what the turn is DOING, shown three
+  ways at once: a **phase icon** (`phaseOf` maps the latest tool to a label + lucide icon —
+  "Reading the project", "Searching the project", …; `compact` with no tool yet reads "Writing the
+  answer") inside a chip wearing a rotating gradient arc (`.qc-orbit`), the label under a sweeping
+  highlight (`.qc-text-shimmer`), an elapsed pill once past 3s, and skeleton lines standing in for
+  the answer. It replaced a `Loader2` + "Thinking…" line that sat under a SECOND spinner the tool
+  trail drew — two spinners in an empty bubble — and then the plain three-dot version of that.
+  All three animations run on `transform`/`background-position` only, so a minute-long wait costs
+  no main-thread work while the answer streams behind it. Details that are load-bearing:
+  - The skeleton uses **`.qc-skeleton`**, whose sweep is tinted with the FOREGROUND — the shared
+    `.qc-shimmer` sweeps **white**, which is invisible on a light surface. Verified in both themes.
+  - Widths are **rem, not %** (see the width bullet: the bubble is fit-content, where a % width has
+    nothing to resolve against).
+  - Under `prefers-reduced-motion` the label falls back to a **flat muted colour** — a frozen
+    gradient over `color: transparent` is how that effect disappears entirely.
+  - Once text starts arriving the indicator stays **mounted** (keyed, `compact`, moved below the
+    answer) so its timer doesn't restart mid-answer, and elapsed is measured against a start
+    TIMESTAMP rather than counted in ticks — a backgrounded tab has its timers throttled and a
+    counter read 10s for a 35s wait.
+- **The wait lists what it DID — `ActivitySteps`, with each call's target.** A long turn is long
+  because the model is grepping and reading; one unchanging phase label above a skeleton reads as
+  hung. Under the header the bubble now shows the calls in order — `Searched for **phaseOf**`,
+  `Ran **npm run build**`, `Read **ChatPage.tsx**` — finished ones ticked, the newest wearing its
+  phase icon. Load-bearing pieces:
+  - **The target comes from the tool's INPUT, and only the server can see it.** `claudeExec.ts`
+    `toolDetail()` picks the one interesting argument per tool (`file_path` → basename, Grep/Glob
+    `pattern`, Bash `description ?? command`, WebFetch `url`, …), truncates it, and hangs it on the
+    `StreamLog` as `tool: {name, detail}`. The log's `text` stays the bare `⚙ <name>` every other
+    log consumer already renders — don't fold the detail into it. `routes/chat.ts` reads `log.tool`
+    instead of re-parsing that text, and streams `{type:'tool', name, detail}`.
+  - **`detail` is streamed, never persisted.** A saved `ChatMessage.tools` stays names-only (a Bash
+    command line is exactly the kind of thing that shouldn't be written into the project repo), so
+    a reopened transcript draws the plain `ToolTrail` chips. That trail is therefore hidden while
+    streaming — otherwise the same calls appear twice, once with targets and once without.
+  - Consecutive calls with the **same name AND target** collapse to `×N` (`stepsFrom`); different
+    targets stay separate rows, since the target is the whole point. Only the last
+    `MAX_VISIBLE_STEPS` show, above a `+N earlier steps` line.
+- **The composer's `+` menu — per-MESSAGE actions** (`ComposerPlusMenu`, `CHAT_ACTIONS`,
+  `ChatAction` = `web | research | diagram`; server side: `ACTION_BLOCKS`, `toolArgs(tools, action)`,
+  `timeoutFor(tools, action)`). The paperclip moved in here ("Add photos & files"); the other three
+  rows change how ONE turn runs and are cleared on send, so the follow-up after a web answer goes
+  back to reading the project. What each needs is genuinely different, which is why it isn't a
+  setting: **Web search** adds `WebSearch WebFetch` to the read-only allow-list (without that the
+  model is DENIED the tool and answers from memory — the exact failure the action exists to prevent)
+  and demands a Sources list; **Deep research** is the same tools with a report-shaped prompt
+  (sub-questions → search → cross-check against a second source → Summary/Findings/Conflicts &
+  gaps/Sources) and a 20-minute budget, because five minutes reliably produces half a report;
+  **Create diagram** asks for one ```mermaid fence, rendered by `MermaidDiagram` (the same renderer
+  `/diagrams` uses) via `mdComponents(renderDiagrams)` — **not while streaming**, since half a
+  diagram is invalid Mermaid and the bubble would sit under a parse error for the whole turn.
+  - **There is no image GENERATION**, and the menu must not pretend otherwise: the CLI has no image
+    model, so the reference's "Create image" became "Create diagram" — the visual this tool can
+    actually make, and the one QC work asks for (a flow, a state machine, a sequence).
+  - The panel is **portaled into the composer WELL**, because the input card around the button row is
+    `overflow-hidden` and a menu opening upward from inside it is sliced down to its last row
+    (verified on screen — same trap the `@` menu documents). Click-outside therefore tests the
+    trigger **and** the portaled panel, or a click on a menu row closes the menu on `mousedown` and
+    unmounts the row before its `click` fires.
+  - The action is **stored on the user message** (`ChatMessage.action`) and badged in the transcript,
+    because "why does this answer cite the web?" has to be answerable a week later.
+- **Temporary chat — a conversation that never reaches the project.** A normal chat's transcript is
+  `testing/chats/<slug>.json` and gets committed with everything else; that's right for "how does
+  this work?" and wrong for a throwaway question or one with a customer's data pasted into it. A
+  temporary conversation therefore lives ONLY in the server's `temp` registry (in memory, like
+  `crawlJobs` / `testcaseJobs`): no file, never in `listChats` (which reads the folder), dropped on
+  end / `TEMP_TTL_MS` idle (6 h) / restart. Load-bearing details:
+  - **`loadChat` / `saveChat` are the only accessors**, which is why every other feature keeps
+    working for a temporary chat (multi-turn `--resume`, `GET /:slug/stream` re-attach, Stop,
+    `@`-mentions — they all key on the slug). Never call `writeChat` from a route again, and
+    `uniqueSlug` checks the registry as well as the folder or a new chat would resolve to the
+    in-memory one.
+  - **`temporary` is decided when the conversation is CREATED** and inherited by every later turn
+    (`POST /stream` only reads the flag for a new chat). The UI mirrors that: the composer toggle is
+    disabled once a chat exists, or half a "temporary" conversation would be on disk. `POST
+    /:slug/pin` **refuses** — starring means "keep this", the opposite of the point.
+  - **Deleting a chat aborts a turn in flight and marks it `discarded`**, so the turn's own save path
+    (`persist()`) doesn't write the transcript back a moment after it was deleted.
+  - **Pasted images are still real files** — the CLI Reads them — so the registry tracks the ones it
+    wrote and `discardTemp` deletes them with the conversation. `TemporaryNotice` says exactly that
+    much and no more: it does NOT claim there's no trace anywhere, because the Claude CLI keeps its
+    own session transcript in the user's home folder. A privacy line that isn't exactly true is worse
+    than none.
+  - The client remembers only the **slug**, in `sessionStorage` (`qc.chatTemp.<projectId>`), because
+    the rail can't point back at a chat it never lists — that's what lets a reload mid-answer
+    re-attach. A slug the server has since dropped 404s, which the page treats as "no conversation"
+    (`openSlug`, `retry: false`) instead of a dead transcript. Every way OUT of a temporary chat (End
+    chat, New Chat, opening a saved one) goes through `forgetTemporary`, which DELETEs it server-side
+    — otherwise it would sit in memory, screenshots and all, unreachable by any UI.
+- **Star a conversation to pin it** — `POST /:slug/pin` sets `pinned` on the chat file; `listChats`
+  sorts pinned first, then newest, and the rail renders them as a **"Starred" group above the date
+  groups**. Two deliberate details: pinning does **NOT** touch `updatedAt` (that field orders the
+  date groups, so starring would otherwise yank the chat into "Today" and rewrite when it was last
+  worked on), and the star also draws **on the row**, because a search filters the group header off
+  screen and "why is this one first?" needs an answer there.
+- **Rename and delete are dialogs, not `window.prompt`/`confirm`** (`RenameChatDialog` /
+  `DeleteChatDialog`). The native ones can't be styled, can't show *which* conversation is being
+  renamed, and are suppressed outright in some browsers — which reads as "the menu item does
+  nothing". Rename is keyed on its target so the field seeds without setState-in-effect, Enter
+  saves, and Save is disabled while unchanged; delete names the conversation and says the transcript
+  file goes with it.
+- **"Ask next" — follow-up chips under the newest answer** (`FollowUps`), the Prototype page's
+  `<!-- SUGGESTIONS: … -->` idea applied to a conversation. The model appends the marker to its own
+  reply (`SUGGEST_BLOCK` in routes/chat.ts, up to 3 short prompts in the ENGINEER's voice), so they
+  cost one line of output — **not a second AI call**, which would double the turns and make the user
+  wait again after the answer already finished. `splitSuggestions` strips the marker before saving
+  and stores the list on the assistant message; the marker is removed **no matter what**, so a parse
+  failure means "no chips", never a raw HTML comment in the transcript. Three things hold it up:
+  - The client also strips it **while streaming** (`stripSuggestMarker`) — the deltas carrying it
+    reach the browser before the server ever saves, and the half-written `<!--` tail arrives frames
+    ahead of the rest, so an unterminated comment is cut too. Verified per-frame over a whole turn:
+    the marker is never on screen.
+  - The strip renders **outside `Turn`**, keyed off `chat.messages` (not the `?? []` fallback, whose
+    identity changes every render). Hanging it on the last message would give that memoised row a
+    prop that changes as the conversation moves — see Turn's note. Measured: typing stays at the
+    33 ms two-frame floor with chips on screen.
+  - **Newest answer only**, and a click **sends** — unlike the empty-state quick prompts (which are
+    half-written and need a real ticket id typed in), a follow-up is a complete question.
+- **Each turn is signed — `RowAvatar` + `RowName`** — the assistant's mark is the portal's solid
+  chip (`bg-foreground text-background` + Sparkles) on the left with **"AI Assistant"** over the
+  bubble; the user gets a quiet outlined chip on the right under **"Me"**. The avatar is
+  `aria-hidden` **because** the name beside it is real text — labelling both makes a screen reader
+  announce every speaker twice. The avatar has no top margin so it lines up with the name line.
 - **Every message carries its time** (`MessageTime`) — time of day, plus the date when it isn't today,
   full stamp in the `title`. The user's shows under the bubble; the assistant's sits in the footer
   beside Copy with the model that answered. The in-flight turn stamps `pending.at` at send, so the

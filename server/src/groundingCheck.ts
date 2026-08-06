@@ -16,8 +16,38 @@ import { CRAWL_SUMMARY_MODELS, parseClaudeJsonResult, runClaude } from './claude
 
 const MAX_SOURCE_CHARS = 40_000 // ticket / evidence fed in as the ground truth
 const MAX_OUTPUT_CHARS = 60_000 // the artifact being audited (test cases / report)
-const BUDGET_USD = '0.15' // a cheap audit — small cap so it never balloons
-const TIMEOUT_MS = 120_000
+// The audit has to READ the whole artifact and, when it corrects something, WRITE the
+// whole thing back — so both the time and the money it needs scale with the prompt, not
+// with a constant. The original flat 120 s / $0.15 were sized for a small artifact and
+// silently failed on every real ticket: measured on a 23 KB ticket + 43 KB of cases +
+// 26 KB of Knowledge/Memory, a run needs ~150 s and reports `error_max_budget_usd` at
+// $0.18 before it can emit a single corrected row. Both surfaced as "no AI response",
+// so the anti-hallucination pass never ran for exactly the artifacts that need it most.
+const TIMEOUT_BASE_MS = 120_000
+const TIMEOUT_PER_KB_MS = 1_500 // ≈ 90 s more for a 60 KB prompt
+const TIMEOUT_MAX_MS = 420_000
+// Sizing note: a measured full audit of a 93 KB prompt that rewrites all 44 KB of cases
+// costs ~$0.16, and the recorded history of this check ranges $0.14–$0.33 — but the spend
+// is spiky (a $0.52 cap still aborted one real run mid-rewrite). These are CAPS, not
+// spend: they only have to sit far enough above the typical cost that a normal audit can
+// always finish, because an audit that aborts is worth nothing at all.
+const BUDGET_BASE_USD = 0.15 // still a cheap audit for a small artifact
+const BUDGET_PER_KB_USD = 0.008
+const BUDGET_MAX_USD = 1.2 // hard ceiling — a runaway audit can never balloon past this
+
+/** Wall-clock allowance for one audit, scaled to the prompt it has to read + rewrite. */
+function timeoutForPrompt(prompt: string): number {
+  return Math.min(TIMEOUT_MAX_MS, TIMEOUT_BASE_MS + Math.ceil(prompt.length / 1024) * TIMEOUT_PER_KB_MS)
+}
+
+/** Spend cap for one audit, scaled the same way. Returned as the CLI's string arg. */
+function budgetForPrompt(prompt: string): string {
+  const usd = Math.min(
+    BUDGET_MAX_USD,
+    BUDGET_BASE_USD + Math.ceil(prompt.length / 1024) * BUDGET_PER_KB_USD,
+  )
+  return usd.toFixed(2)
+}
 const SENTINEL = 'GROUNDED_OK' // the model emits this verbatim when nothing needs fixing
 // Reject a rewrite that lost more than half the original — a sign the model
 // truncated or collapsed the document rather than making targeted corrections.
@@ -54,19 +84,41 @@ function firstLine(s: string): string {
   return (i === -1 ? s : s.slice(0, i)).trim()
 }
 
+/**
+ * Drop any prose the model emitted before the CSV's header row, matched against the
+ * header of the document being audited. Returns the text unchanged when the header is
+ * already first (the normal case) or can't be found (so the caller's guard still rejects).
+ */
+function dropPreambleBeforeHeader(text: string, header: string): string {
+  const want = header.trim().toLowerCase()
+  if (!want) return text
+  const lines = text.split(/\r?\n/)
+  if ((lines[0] ?? '').trim().toLowerCase() === want) return text
+  const at = lines.findIndex((l) => l.trim().toLowerCase() === want)
+  return at > 0 ? lines.slice(at).join('\n').trim() : text
+}
+
 /** The model emits GROUNDED_OK (alone) when the artifact is already grounded. */
 function isSentinel(s: string): boolean {
   const t = s.trim()
   return t.length <= 40 && /grounded_ok/i.test(t)
 }
 
-/** Run one buffered grounding pass; returns the model's raw text, or null on failure. */
+/** Why an audit produced nothing — reported in the run log so a silent skip is diagnosable. */
+type GroundingFailure = 'timed out' | 'budget exceeded' | 'no AI response'
+
+/**
+ * Run one buffered grounding pass. Returns the model's raw text, or null with the reason
+ * it failed — a timeout, the spend cap, and a genuine empty answer each call for a
+ * different fix, and lumping all three under "no AI response" is what hid the fact that
+ * this check was never running at all.
+ */
 async function runGrounding(opts: {
   rootPath: string
   prompt: string
   model?: string
   usageSource: string
-}): Promise<string | null> {
+}): Promise<{ text: string | null; failure: GroundingFailure | null }> {
   const model = normalizeModel(opts.model)
   const result = await runClaude(
     [
@@ -77,17 +129,24 @@ async function runGrounding(opts: {
       'json',
       '--no-session-persistence',
       '--max-budget-usd',
-      BUDGET_USD,
+      budgetForPrompt(opts.prompt),
     ],
-    TIMEOUT_MS,
+    timeoutForPrompt(opts.prompt),
     // Prompt embeds the full ticket + generated cases/report — pass it over stdin so a
     // long document can't overflow the OS command-line limit (Windows ENAMETOOLONG).
     { cwd: opts.rootPath, usageSource: opts.usageSource, model, input: opts.prompt },
   )
-  if (result.timedOut) return null
-  const { text, isError } = parseClaudeJsonResult(result.stdout || result.stderr)
-  if (result.code !== 0 || isError || !text) return null
-  return text
+  if (result.timedOut) return { text: null, failure: 'timed out' }
+  const raw = result.stdout || result.stderr
+  const { text, isError } = parseClaudeJsonResult(raw)
+  if (result.code !== 0 || isError || !text) {
+    // The CLI reports the spend cap as a result subtype, not on stderr.
+    const failure: GroundingFailure = /error_max_budget_usd/.test(raw)
+      ? 'budget exceeded'
+      : 'no AI response'
+    return { text: null, failure }
+  }
+  return { text, failure: null }
 }
 
 function testcasesPrompt(
@@ -207,9 +266,9 @@ export async function groundTestcases(opts: {
     return { changed: false, corrected: null, skipped: 'too large to check' }
   }
 
-  let raw: string | null
+  let ran: { text: string | null; failure: GroundingFailure | null }
   try {
-    raw = await runGrounding({
+    ran = await runGrounding({
       rootPath: opts.rootPath,
       model: opts.model,
       usageSource: 'grounding-testcases',
@@ -225,10 +284,18 @@ export async function groundTestcases(opts: {
   } catch {
     return { changed: false, corrected: null, skipped: 'check failed' }
   }
-  if (raw == null) return { changed: false, corrected: null, skipped: 'no AI response' }
+  const raw = ran.text
+  if (raw == null) {
+    return { changed: false, corrected: null, skipped: ran.failure ?? 'no AI response' }
+  }
   if (isSentinel(raw)) return { changed: false, corrected: null }
 
-  const corrected = stripFence(raw)
+  let corrected = stripFence(raw)
+  // Despite "output ONLY the CSV", the auditor sometimes opens with a sentence ("Here is
+  // the corrected CSV:"). That line then reads as the header row, so the header guard
+  // below rejects an otherwise-good correction and the audit silently does nothing.
+  // Re-anchor on the original's header instead — a no-op when there is no preamble.
+  if (opts.format === 'csv') corrected = dropPreambleBeforeHeader(corrected, firstLine(output))
   if (!corrected) return { changed: false, corrected: null, skipped: 'empty result' }
   if (corrected.length < output.length * MIN_KEEP_RATIO) {
     return { changed: false, corrected: null, skipped: 'result looked truncated' }
@@ -261,9 +328,9 @@ export async function groundReport(opts: {
     return { changed: false, corrected: null, skipped: 'too large to check' }
   }
 
-  let raw: string | null
+  let ran: { text: string | null; failure: GroundingFailure | null }
   try {
-    raw = await runGrounding({
+    ran = await runGrounding({
       rootPath: opts.rootPath,
       model: opts.model,
       usageSource: 'grounding-report',
@@ -272,7 +339,10 @@ export async function groundReport(opts: {
   } catch {
     return { changed: false, corrected: null, skipped: 'check failed' }
   }
-  if (raw == null) return { changed: false, corrected: null, skipped: 'no AI response' }
+  const raw = ran.text
+  if (raw == null) {
+    return { changed: false, corrected: null, skipped: ran.failure ?? 'no AI response' }
+  }
   if (isSentinel(raw)) return { changed: false, corrected: null }
 
   const corrected = stripFence(raw)
