@@ -354,6 +354,103 @@
   animation: qc-skeleton 1.9s ease-in-out infinite;
 }
 
+/* ---------------------------------------------------------------------------
+ * Chat hero orb (ChatPage HeroOrb) — the reference ships this as a 150 KB Lottie
+ * (their artwork); here the same READING is built from the SVG we already draw:
+ * the liquid inside drifts, the light bands rock, the sphere breathes, sparkles
+ * twinkle. Everything is transform/opacity only — no layout, no paint of the
+ * page — so a minute on the empty screen costs nothing while an answer streams.
+ * ------------------------------------------------------------------------- */
+
+/* The whole sphere: a slow float + the faintest breath of scale. */
+@keyframes qc-orb-float {
+  0%,
+  100% {
+    transform: translateY(0) scale(1);
+  }
+  50% {
+    transform: translateY(-6px) scale(1.015);
+  }
+}
+.qc-orb-float {
+  animation: qc-orb-float 9s ease-in-out infinite;
+  will-change: transform;
+}
+
+/* The two colour lobes, drifting on their own long loops and in opposite
+ * directions — that mismatch is what stops it reading as one moving image. */
+@keyframes qc-orb-lobe-a {
+  0%,
+  100% {
+    transform: translate(0, 0) scale(1);
+  }
+  33% {
+    transform: translate(7px, 5px) scale(1.05);
+  }
+  66% {
+    transform: translate(-4px, 8px) scale(0.97);
+  }
+}
+@keyframes qc-orb-lobe-b {
+  0%,
+  100% {
+    transform: translate(0, 0) scale(1);
+  }
+  33% {
+    transform: translate(-8px, -6px) scale(1.06);
+  }
+  66% {
+    transform: translate(5px, -3px) scale(0.96);
+  }
+}
+.qc-orb-lobe-a,
+.qc-orb-lobe-b {
+  /* fill-box: scale has to grow from the lobe's own centre, not the SVG origin. */
+  transform-box: fill-box;
+  transform-origin: center;
+}
+.qc-orb-lobe-a {
+  animation: qc-orb-lobe-a 17s ease-in-out infinite;
+}
+.qc-orb-lobe-b {
+  animation: qc-orb-lobe-b 21s ease-in-out infinite;
+}
+
+/* The light bands rock a few degrees instead of spinning: they're wide ellipses,
+ * and a full rotation reads as a wheel turning rather than liquid moving. */
+@keyframes qc-orb-swirl {
+  0%,
+  100% {
+    transform: rotate(-5deg);
+  }
+  50% {
+    transform: rotate(5deg);
+  }
+}
+.qc-orb-swirl {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: qc-orb-swirl 14s ease-in-out infinite;
+}
+
+/* Sparkles suspended in the glass. */
+@keyframes qc-orb-spark {
+  0%,
+  100% {
+    opacity: 0.25;
+    transform: scale(0.7);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.25);
+  }
+}
+.qc-orb-spark {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: qc-orb-spark 3.6s ease-in-out infinite;
+}
+
 /* Moving light sweep for loading skeletons (Prototype builder, etc.). */
 @keyframes qc-shimmer {
   100% {
@@ -417,7 +514,13 @@
   }
   .qc-orbit::before,
   .qc-skeleton,
-  .qc-pulse {
+  .qc-pulse,
+  /* The orb keeps its full artwork, it just stops moving. */
+  .qc-orb-float,
+  .qc-orb-lobe-a,
+  .qc-orb-lobe-b,
+  .qc-orb-swirl,
+  .qc-orb-spark {
     animation: none;
   }
   *,

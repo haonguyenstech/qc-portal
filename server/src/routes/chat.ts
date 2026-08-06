@@ -185,11 +185,19 @@ const MAX_MESSAGES = 200
 const MAX_TEXT = 60_000 // one answer; guards a runaway response from bloating the file
 const MAX_TOOLS_PER_TURN = 40
 /** Read-only questions are quick; a full-tools turn may drive a browser or write files. */
-const CHAT_TIMEOUT = 300_000
-const CHAT_TIMEOUT_FULL = 900_000
+const CHAT_TIMEOUT = 900_000
+const CHAT_TIMEOUT_FULL = 1_800_000
 /** A web answer waits on someone else's servers; a research report waits on several. */
-const CHAT_TIMEOUT_WEB = 600_000
-const CHAT_TIMEOUT_RESEARCH = 1_200_000
+const CHAT_TIMEOUT_WEB = 900_000
+const CHAT_TIMEOUT_RESEARCH = 2_400_000
+/**
+ * The clock that normally ends a turn: no output of ANY kind for this long. A question
+ * about a big repo legitimately spends ten minutes grepping, reading and spawning
+ * sub-agents — cutting that off by wall clock threw away every one of those calls and
+ * left one red line (verified on screen). Silence is what actually means "stuck", so the
+ * budgets above are now only the ceiling.
+ */
+const CHAT_IDLE_TIMEOUT = 180_000
 const MAX_SUGGESTIONS = 3
 const MAX_SUGGESTION_CHARS = 70
 
@@ -471,9 +479,10 @@ function toolArgs(tools: ChatTools, action: ChatAction | null): string[] {
 }
 
 /**
- * How long the turn may take. The action matters more than the tool mode here: a research
- * report is a dozen network round trips plus the writing, and cutting it off at the ordinary
- * five minutes would reliably produce half a report.
+ * The CEILING for a turn — `CHAT_IDLE_TIMEOUT` is what normally ends a stuck one. The
+ * action matters more than the tool mode here: a research report is a dozen network round
+ * trips plus the writing, and cutting it off at the ordinary budget would reliably produce
+ * half a report.
  */
 function timeoutFor(tools: ChatTools, action: ChatAction | null): number {
   const byTools = tools === 'full' ? CHAT_TIMEOUT_FULL : CHAT_TIMEOUT
@@ -965,6 +974,7 @@ chatRouter.post('/stream', async (req, res) => {
         onSession: (id) => {
           sessionId = id
         },
+        idleTimeoutMs: CHAT_IDLE_TIMEOUT,
       },
     )
   }
@@ -999,9 +1009,15 @@ chatRouter.post('/stream', async (req, res) => {
   // "Nothing but the suggestions marker" is an empty answer, not a one-line one.
   if (!splitSuggestions(text).text.trim()) {
     const why = r.timedOut
-      ? 'Claude took too long to answer. Try a narrower question, or switch to a faster model.'
+      ? `Claude was cut off after ${Math.round(timeoutFor(tools, action) / 60_000)} minutes. ` +
+        'Ask a narrower question, or switch to a faster model.'
       : 'Claude returned nothing. Check that Auto Agent is connected on the sidebar.'
-    appendTurn(why, true)
+    // Same reason the Stop path reads the buffer: `r.text` only exists once the CLI's
+    // final `result` event lands, so a killed turn has none — while `turn.answer` holds
+    // everything already streamed. Half an answer plus a note beats ten minutes of work
+    // replaced by one red line.
+    const partial = splitSuggestions(turn.answer.trim()).text.trim()
+    appendTurn(partial ? `${partial}\n\n---\n\n*${why}*` : why, true)
     persist()
     finish(turn, { type: 'error', error: why, chat })
     return

@@ -794,6 +794,9 @@ not just a mock-up generator — these things make it that:
    coverage). Requires a linked ticket, because versions are written under
    `testing/tickets/<folder>/testcases/`. It auto-reads the saved `testing/templates/testcase.md`
    (`readTestcaseTemplate`, mirroring verifyDesign's `readChecklist`) so output matches the team format.
+   **The route and `generateTestcasesFromPrototype` stay; the page's "Test cases" button and its
+   dialog are gone** — drafting cases belongs on `/testcases`, where the template, rules, model and
+   ticket selection all live, and a second half-featured entry point on this page only split that.
 
 5. **The project design system (`designSystem.ts`).** The product's visual language is extracted
    ONCE — palette, type scale, spacing/radii, component shapes, layout shell, and the wording
@@ -896,6 +899,17 @@ does this endpoint validate?").
     so Stop silently discarded the answer too.
   - One reply at a time per conversation (409): a second concurrent turn would `--resume` the same
     CLI session and interleave two answers into one transcript.
+  - **A turn ends on SILENCE, not on the clock** (`CHAT_IDLE_TIMEOUT`, via `runClaudeStream`'s
+    `idleTimeoutMs`). A question about a real repo legitimately spends ten-plus minutes grepping,
+    reading and spawning sub-agents; the old fixed wall-clock budget killed exactly that turn and
+    replaced every one of those calls with "Claude took too long to answer" (seen on screen after a
+    trail of ~18 tool chips). Now the kill timer is **reset by any output** from the CLI and
+    `timeoutFor` is only the ceiling. `idleTimeoutMs` is opt-in per caller — omit it and
+    `runClaudeStream` keeps the single fixed deadline every other caller relies on.
+  - **A cut-off turn saves its partial answer**, for the same reason Stop does: `r.text` only exists
+    once the CLI's final `result` event lands, so a killed turn has none while `turn.answer` holds
+    everything already streamed. The transcript gets that text plus an italic note saying it was cut
+    off — never the note alone.
   - `ChatWorkspace` derives the open slug — nothing picked yet (i.e. a fresh mount after a reload)
     falls back to whichever conversation is still being answered, so the page lands back on it
     instead of the new-chat screen. `onResume` then **pins** that choice with `setPicked`, or the
@@ -921,7 +935,13 @@ does this endpoint validate?").
   the prompt (the file never reaches the server) or stages an image (see above — that one does), the
   mic slot became the tools toggle, and the hero
   orb is layered SVG gradients standing in for the reference's Lottie (150 KB of generated paths, and
-  their artwork). `ChatWorkspace` is mounted `key={projectId}` so switching project resets cleanly
+  their artwork) — **animated** by the `qc-orb-*` keyframes in `index.css` so it MOVES like the
+  reference does: the two colour lobes drift on mismatched long loops, the light bands rock ±5°, the
+  sphere floats/breathes, sparkles twinkle off-phase. Each drifting layer is wrapped in its own `<g>`
+  because a CSS `transform` REPLACES an element's `transform=` attribute (which would flatten the
+  bands' rotations), scaling layers need `transform-box: fill-box`, and every animation is
+  transform/opacity only + disabled under `prefers-reduced-motion` (the artwork stays, it just stops).
+  `ChatWorkspace` is mounted `key={projectId}` so switching project resets cleanly
   **without setState-in-effect**.
 - **`@` tags a ticket or its test cases** — "are these cases enough?" only means something next to
   a ticket, and the alternative is pasting a folder path or hoping the model greps for the right one.
@@ -1007,7 +1027,7 @@ does this endpoint validate?").
   model is DENIED the tool and answers from memory — the exact failure the action exists to prevent)
   and demands a Sources list; **Deep research** is the same tools with a report-shaped prompt
   (sub-questions → search → cross-check against a second source → Summary/Findings/Conflicts &
-  gaps/Sources) and a 20-minute budget, because five minutes reliably produces half a report;
+  gaps/Sources) and the longest budget, because a short one reliably produces half a report;
   **Create diagram** asks for one ```mermaid fence, rendered by `MermaidDiagram` (the same renderer
   `/diagrams` uses) via `mdComponents(renderDiagrams)` — **not while streaming**, since half a
   diagram is invalid Mermaid and the bubble would sit under a parse error for the whole turn.

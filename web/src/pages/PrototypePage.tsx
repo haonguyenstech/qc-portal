@@ -67,7 +67,6 @@ import {
   dismissPrototypeQuestion,
   duplicatePrototype,
   generateDesignSystem,
-  generateTestcasesFromPrototype,
   getDesignSystem,
   getPrototype,
   getPrototypeVersion,
@@ -1297,9 +1296,9 @@ function LogPanel({
 /**
  * Pick an already-crawled ticket to build the prototype FROM. Keyed on the ticket's
  * on-disk FOLDER (`c.name`, possibly nested PARENT/CHILD) rather than its display id,
- * because that folder is what the server reads the ticket from and where test-case
- * versions are written. Reuses the shared crawled-ticket tree so it nests and groups
- * exactly like every other crawled-ticket selector in the portal.
+ * because that folder is what the server reads the ticket from. Reuses the shared
+ * crawled-ticket tree so it nests and groups exactly like every other crawled-ticket
+ * selector in the portal.
  */
 function TicketLinkDialog({
   open,
@@ -1650,149 +1649,6 @@ function CompareDialog({
             {pane(rightQ)}
           </div>
         </div>
-      </DialogContent>
-    </Dialog>
-  )
-}
-
-// ---------------------------------------------------------------- test cases
-
-/**
- * Draft manual test cases from the prototype. The prototype's markup carries the real
- * labels, fields, constraints and states, so the cases come out executable instead of
- * paraphrasing the ticket — and they save as a new version under the LINKED ticket, which
- * is why a ticket link is required here.
- */
-function TestcasesDialog({
-  open,
-  onOpenChange,
-  projectId,
-  slug,
-  ticketId,
-  ticketFolder,
-  model,
-}: {
-  open: boolean
-  onOpenChange: (v: boolean) => void
-  projectId: string
-  slug: string
-  ticketId: string | null
-  ticketFolder: string | null
-  model: string
-}) {
-  const queryClient = useQueryClient()
-  const [instructions, setInstructions] = useState('')
-  const [result, setResult] = useState<{ savedTo: string; version: number; count: number } | null>(
-    null,
-  )
-
-  const mut = useMutation({
-    mutationFn: () => generateTestcasesFromPrototype(projectId, slug, { model, instructions }),
-    onSuccess: (r) => {
-      setResult({
-        savedTo: r.savedTo,
-        version: r.version,
-        // Rough case count for the confirmation line — rows/headings in the output.
-        count: r.testcases.split('\n').filter((l) => /^\s*\|?\s*(TC|No)[-\s]?\d/i.test(l)).length,
-      })
-      queryClient.invalidateQueries({ queryKey: ['crawled-tickets', projectId] })
-      queryClient.invalidateQueries({ queryKey: ['crawled', projectId] })
-      queryClient.invalidateQueries({ queryKey: ['testcase-versions', projectId] })
-      toast.success(`Test cases saved as v${r.version}`)
-    },
-    onError: (e) =>
-      toast.error('Could not generate test cases', {
-        description: e instanceof Error ? e.message : 'Unknown error',
-      }),
-  })
-
-  return (
-    <Dialog
-      open={open}
-      onOpenChange={(v) => {
-        if (!v && mut.isPending) return // a generation is in flight — don't drop it silently
-        if (!v) {
-          setResult(null)
-          setInstructions('')
-        }
-        onOpenChange(v)
-      }}
-    >
-      <DialogContent className="rounded-3xl sm:max-w-lg">
-        <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
-            <ClipboardCheck className="size-4" />
-            Test cases from this prototype
-          </DialogTitle>
-          <DialogDescription>
-            {ticketFolder ? (
-              <>
-                Claude reads the prototype’s markup for the real field names, labels, constraints and
-                states, keeps the scope from{' '}
-                <span className="font-mono font-medium text-foreground">
-                  {ticketId ?? ticketFolder}
-                </span>
-                , and saves a new test-case version under that ticket.
-              </>
-            ) : (
-              'Link this prototype to a crawled ticket first — test-case versions are stored under the ticket, and the ticket defines the acceptance scope.'
-            )}
-          </DialogDescription>
-        </DialogHeader>
-
-        {ticketFolder && !result && (
-          <div className="space-y-1.5">
-            <label className="text-xs font-medium text-muted-foreground">
-              Extra instructions (optional)
-            </label>
-            <Textarea
-              value={instructions}
-              onChange={(e) => setInstructions(e.target.value)}
-              disabled={mut.isPending}
-              rows={3}
-              placeholder="e.g. focus on validation and permissions; skip visual styling cases"
-              className="resize-y rounded-xl text-sm"
-            />
-          </div>
-        )}
-
-        {result && (
-          <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-3 text-sm dark:border-emerald-900 dark:bg-emerald-950">
-            <p className="flex items-center gap-1.5 font-medium text-emerald-800 dark:text-emerald-300">
-              <Check className="size-4" />
-              Saved as v{result.version}
-              {result.count > 0 && ` · ~${result.count} cases`}
-            </p>
-            <p className="mt-1 break-all font-mono text-[11px] text-emerald-700/80 dark:text-emerald-400/80">
-              {result.savedTo}
-            </p>
-          </div>
-        )}
-
-        <DialogFooter>
-          <Button
-            variant="ghost"
-            onClick={() => onOpenChange(false)}
-            disabled={mut.isPending}
-            className="rounded-full"
-          >
-            {result ? 'Done' : 'Cancel'}
-          </Button>
-          {ticketFolder && !result && (
-            <Button
-              onClick={() => mut.mutate()}
-              disabled={mut.isPending}
-              className="gap-1.5 rounded-full active:scale-[0.98]"
-            >
-              {mut.isPending ? (
-                <Loader2 className="size-4 animate-spin" />
-              ) : (
-                <ClipboardCheck className="size-4" />
-              )}
-              {mut.isPending ? 'Writing cases…' : 'Generate test cases'}
-            </Button>
-          )}
-        </DialogFooter>
       </DialogContent>
     </Dialog>
   )
@@ -2158,7 +2014,6 @@ function PrototypePage({ projectId }: { projectId: string }) {
   const [pendingMatchApp, setPendingMatchApp] = useState<boolean | undefined>(undefined)
   const [ticketPickerOpen, setTicketPickerOpen] = useState(false)
   const [compareOpen, setCompareOpen] = useState(false)
-  const [testcasesOpen, setTestcasesOpen] = useState(false)
   const [designSystemOpen, setDesignSystemOpen] = useState(false)
   // Comment mode: click an element in the preview, say what should change there. Pins are
   // client-side until applied — sending them is what turns them into one refine.
@@ -2559,27 +2414,9 @@ function PrototypePage({ projectId }: { projectId: string }) {
             </p>
           </div>
         </div>
-        <div data-tour="model" className="flex shrink-0 items-center gap-2">
-          {/* The QC payoff: turn the agreed screen into executable coverage. */}
-          <Tip
-            label={
-              !selected
-                ? 'Build a prototype first'
-                : ticketFolder
-                  ? 'Draft manual test cases from this prototype — its real labels, fields and states, scoped by the linked ticket'
-                  : 'Link a ticket first — test-case versions are stored under the ticket'
-            }
-          >
-            <Button
-              variant="outline"
-              onClick={() => setTestcasesOpen(true)}
-              disabled={!selected || busy}
-              className="h-8 gap-1.5 rounded-full text-xs active:scale-[0.98]"
-            >
-              <ClipboardCheck className="size-3.5" />
-              Test cases
-            </Button>
-          </Tip>
+        {/* pe-12: this page is max-w-none, so the header reaches the window edge — where the
+            fixed notification bell sits and would clip the last control. */}
+        <div data-tour="model" className="flex shrink-0 items-center gap-2 lg:pe-12">
           {modelPicker}
           <OpenFolderButton open={() => openPrototypesFolder(projectId)} label="Prototypes" />
         </div>
@@ -3138,18 +2975,6 @@ function PrototypePage({ projectId }: { projectId: string }) {
           projectId={projectId}
           slug={selected}
           versions={versions}
-        />
-      )}
-
-      {selected && (
-        <TestcasesDialog
-          open={testcasesOpen}
-          onOpenChange={setTestcasesOpen}
-          projectId={projectId}
-          slug={selected}
-          ticketId={ticketId}
-          ticketFolder={ticketFolder}
-          model={model}
         />
       )}
 

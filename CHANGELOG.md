@@ -3,6 +3,34 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.11.12 — 2026-08-06
+
+**Chat stops giving up on long questions, and the hero orb comes alive**
+
+### Fixed
+
+- **A long answer is no longer thrown away with "Claude took too long to answer."** Asking a real
+  question about a real repo — one that has Claude searching, reading files and spawning
+  sub-agents for ten minutes — used to hit a fixed time budget and get killed mid-work, leaving a
+  row of tool chips above a single red line and nothing else. A chat turn now ends only when
+  Claude has gone **completely quiet for three minutes**; as long as it is still doing something,
+  it keeps going. The overall ceiling was raised too (15 minutes for a read-only question, 30 with
+  full access, 40 for Deep research), so it is now the last resort rather than the usual outcome.
+- **If a turn is cut off, you keep what was already written.** The answer produced up to that
+  point is saved to the conversation with a note underneath saying it was cut off — instead of the
+  whole thing being replaced by the error, which is what happened before.
+
+### Changed
+
+- **The orb on the Chat welcome screen moves.** The two colour lobes drift, the light bands rock,
+  the sphere breathes and the sparkles twinkle out of step with each other. It respects your
+  system's "reduce motion" setting — the artwork stays, it simply stops moving.
+- **The Prototype page's "Test cases" button is gone.** Drafting test cases belongs on the
+  **Test cases** page, where the template, your rules, the model and the ticket picker all live; a
+  second, half-featured button on the Prototype page only split the same job across two places.
+  Nothing about the prototypes themselves changed.
+- **The Prototype page's toolbar no longer runs under the notification bell** on wide screens.
+
 ## 0.11.11 — 2026-08-06
 
 **The Chat page gets a header, a readable conversation list, and a composer that stops moving**

@@ -1052,7 +1052,9 @@ function HeroOrb() {
     // Mirrors the reference's `mask-b-from-100%`: the sphere fades out toward the
     // greeting instead of ending on a hard line.
     <div className="mx-auto -mt-4 hidden w-72 [mask-image:linear-gradient(to_bottom,#000_74%,transparent_100%)] md:block">
-      <svg viewBox="0 0 288 288" className="w-full" aria-hidden="true">
+      {/* The reference's hero is a Lottie; this is the same reading done with the SVG we
+          already draw — see the qc-orb-* keyframes in index.css for what moves and why. */}
+      <svg viewBox="0 0 288 288" className="qc-orb-float w-full" aria-hidden="true">
         <defs>
           <radialGradient id="orb-base" cx="45%" cy="40%" r="62%">
             <stop offset="0%" stopColor="#ffffff" />
@@ -1116,30 +1118,61 @@ function HeroOrb() {
               overlap is what reads as liquid swirling inside the glass rather than a
               plain gradient. Order matters: bands must land ON TOP of the lobes. */}
           <g filter="url(#orb-soft)">
-            <circle cx="144" cy="146" r="84" fill="url(#orb-violet)" />
-            <circle cx="144" cy="146" r="84" fill="url(#orb-peach)" />
+            {/* Each drifting layer is WRAPPED in its own <g>: a CSS transform on an element
+                that already carries a `transform=` attribute replaces it, which would flatten
+                the bands' rotations. */}
+            <g className="qc-orb-lobe-a">
+              <circle cx="144" cy="146" r="84" fill="url(#orb-violet)" />
+            </g>
+            <g className="qc-orb-lobe-b">
+              <circle cx="144" cy="146" r="84" fill="url(#orb-peach)" />
+            </g>
             <circle cx="144" cy="146" r="84" fill="url(#orb-pale)" />
             <circle cx="144" cy="146" r="84" fill="url(#orb-crescent)" />
-            {/* Violet comma curling from the left wall along the top. */}
-            <ellipse cx="130" cy="98" rx="62" ry="26" fill="url(#orb-swirl)" transform="rotate(-16 130 98)" />
-            {/* The pale band cutting diagonally across the middle, which carves the
-                violet above it into that comma and separates it from the peach. */}
-            <ellipse cx="150" cy="152" rx="94" ry="27" fill="url(#orb-sweep)" transform="rotate(-22 150 152)" />
-            {/* The second, lower band curving along the bottom-left inner wall. */}
-            <ellipse cx="128" cy="206" rx="80" ry="22" fill="url(#orb-sweep)" transform="rotate(-13 128 206)" />
-            {/* Pale crescent hugging the left wall, so the violet reads as floating
-                INSIDE the glass instead of being painted onto the rim. */}
-            <ellipse cx="74" cy="158" rx="17" ry="56" fill="url(#orb-sweep)" transform="rotate(9 74 158)" />
+            <g className="qc-orb-swirl">
+              {/* Violet comma curling from the left wall along the top. */}
+              <ellipse cx="130" cy="98" rx="62" ry="26" fill="url(#orb-swirl)" transform="rotate(-16 130 98)" />
+              {/* The pale band cutting diagonally across the middle, which carves the
+                  violet above it into that comma and separates it from the peach. */}
+              <ellipse cx="150" cy="152" rx="94" ry="27" fill="url(#orb-sweep)" transform="rotate(-22 150 152)" />
+              {/* The second, lower band curving along the bottom-left inner wall. */}
+              <ellipse cx="128" cy="206" rx="80" ry="22" fill="url(#orb-sweep)" transform="rotate(-13 128 206)" />
+              {/* Pale crescent hugging the left wall, so the violet reads as floating
+                  INSIDE the glass instead of being painted onto the rim. */}
+              <ellipse cx="74" cy="158" rx="17" ry="56" fill="url(#orb-sweep)" transform="rotate(9 74 158)" />
+            </g>
           </g>
         </g>
 
         {/* Glass rim — brightest top-left and bottom-right, nearly gone in between. */}
         <circle cx="144" cy="146" r="83.4" fill="none" stroke="url(#orb-rim)" strokeWidth="1.4" />
 
-        <circle cx="151" cy="119" r="1.5" fill="#fcd34d" />
-        <circle cx="167" cy="171" r="1.5" fill="#fcd34d" />
-        <circle cx="136" cy="153" r="1" fill="#e879f9" />
-        <circle cx="159" cy="147" r="0.9" fill="#d8b4fe" />
+        {/* Sparkles, each on its own phase — in step they'd blink like an indicator. */}
+        <circle className="qc-orb-spark" cx="151" cy="119" r="1.5" fill="#fcd34d" />
+        <circle
+          className="qc-orb-spark"
+          style={{ animationDelay: '1.1s' }}
+          cx="167"
+          cy="171"
+          r="1.5"
+          fill="#fcd34d"
+        />
+        <circle
+          className="qc-orb-spark"
+          style={{ animationDelay: '2.3s' }}
+          cx="136"
+          cy="153"
+          r="1"
+          fill="#e879f9"
+        />
+        <circle
+          className="qc-orb-spark"
+          style={{ animationDelay: '0.6s' }}
+          cx="159"
+          cy="147"
+          r="0.9"
+          fill="#d8b4fe"
+        />
       </svg>
     </div>
   )

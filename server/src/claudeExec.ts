@@ -245,6 +245,12 @@ export function runClaudeStream(
     // that wants a MULTI-TURN conversation stores it and passes `--resume <id>` on the
     // next run — otherwise every turn starts from an empty context (see routes/chat.ts).
     onSession?: (sessionId: string) => void
+    // Kill the child after this long with NO output at all, and treat `timeoutMs` as an
+    // absolute ceiling instead of the only clock. A turn that is still grepping, reading
+    // and writing text is making progress — the wall-clock cap exists for a HUNG child,
+    // not a thorough one, and killing a working turn throws the whole answer away.
+    // Omit it and the behaviour is exactly as before: one fixed timer.
+    idleTimeoutMs?: number
   },
 ): Promise<StreamResult> {
   return new Promise((resolve) => {
@@ -266,9 +272,11 @@ export function runClaudeStream(
       windowsHide: true, // no cmd window flash on Windows
     })
     writeStdin(child, opts?.input)
-    const timer = setTimeout(() => {
+    const idleMs = opts?.idleTimeoutMs && opts.idleTimeoutMs > 0 ? opts.idleTimeoutMs : 0
+    function onTimeout(): void {
       if (settled) return
       settled = true
+      clearTimers()
       opts?.signal?.removeEventListener('abort', onAbort)
       try {
         child.kill()
@@ -276,13 +284,28 @@ export function runClaudeStream(
         /* already closed */
       }
       resolve({ text: resultText, isError, code: null, timedOut: true, aborted: false })
-    }, timeoutMs)
+    }
+    // With an idle timeout, `timer` is the silence clock (reset by touch() on every byte)
+    // and `hardTimer` is the absolute ceiling. Without one, `timer` alone is the old fixed
+    // deadline and hardTimer never exists.
+    let timer = setTimeout(onTimeout, idleMs || timeoutMs)
+    const hardTimer = idleMs ? setTimeout(onTimeout, timeoutMs) : null
+    function clearTimers(): void {
+      clearTimeout(timer)
+      if (hardTimer) clearTimeout(hardTimer)
+    }
+    /** The child said something — it isn't hung. Restart the silence clock. */
+    function touch(): void {
+      if (!idleMs || settled) return
+      clearTimeout(timer)
+      timer = setTimeout(onTimeout, idleMs)
+    }
 
     // Kill the child as soon as the caller cancels (pause/cancel of a job).
     function onAbort(): void {
       if (settled) return
       settled = true
-      clearTimeout(timer)
+      clearTimers()
       try {
         child.kill()
       } catch {
@@ -297,6 +320,7 @@ export function runClaudeStream(
 
     child.stdout?.setEncoding('utf8')
     child.stdout?.on('data', (chunk: string) => {
+      touch()
       stdoutBuf += chunk
       let nl: number
       while ((nl = stdoutBuf.indexOf('\n')) !== -1) {
@@ -307,13 +331,14 @@ export function runClaudeStream(
     })
     child.stderr?.setEncoding('utf8')
     child.stderr?.on('data', (chunk: string) => {
+      touch()
       const text = String(chunk).trim()
       if (text) onLog({ level: 'error', text: text.slice(0, 300) })
     })
     child.on('error', (err) => {
       if (settled) return
       settled = true
-      clearTimeout(timer)
+      clearTimers()
       opts?.signal?.removeEventListener('abort', onAbort)
       onLog({ level: 'error', text: err.message })
       resolve({ text: resultText, isError: true, code: null, timedOut: false, aborted: false })
@@ -321,7 +346,7 @@ export function runClaudeStream(
     child.on('close', (code) => {
       if (settled) return
       settled = true
-      clearTimeout(timer)
+      clearTimers()
       opts?.signal?.removeEventListener('abort', onAbort)
       if (stdoutBuf.trim()) handleLine(stdoutBuf.trim())
       if (opts?.usageSource && usage) {
