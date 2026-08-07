@@ -14,6 +14,7 @@ import {
   CornerDownRight,
   Database,
   FileText,
+  FlaskConical,
   FolderGit2,
   History,
   KeyRound,
@@ -1379,6 +1380,48 @@ the **▶ Run** button types it **and** sends Enter.
 
 The same engine powers **Continue session** on a run's detail page, which instead resumes that run's
 \`claude\` session directly — and likewise keeps running if you navigate away.
+`,
+  },
+  {
+    id: 'ai-labs',
+    title: 'QC AI Labs',
+    icon: FlaskConical,
+    blurb: 'A curated shelf of AI tools for QC.',
+    body: `
+**QC AI Labs** (Tools → **QC AI Labs**) is a reading page, not a project tool: a curated shelf of the AI
+products worth a QC engineer's time, with what each one is actually *for*, where it pays off, and where
+it doesn't. It is deliberately **short** — only what we'd actually recommend today:
+
+- **Claude Code** — the agent this portal runs on.
+- **AI Form Filler** — our own Chrome extension: one click fills every field on the page with
+  realistic, coherent data (and it drives shadcn/Radix selects and date pickers, which browser
+  autofill can't).
+
+It opens **full screen** — no sidebar, no project switcher, its own dark look — because it isn't about
+your project at all. The **←** in its top-left corner brings you back to the portal.
+
+Nothing here touches your project. It runs no AI, reads no files and sends nothing anywhere — opening
+the page costs nothing.
+
+### What's on a card
+- **QC fit** — a score out of 100. It is **our opinion**, not a benchmark, and the card says so
+  next to the number.
+- **Category**, **pricing** shape, and an **In portal** badge on what this portal already runs on /
+  **Built in-house** on what we wrote ourselves — either way, nothing to buy before you try it.
+
+### Click a card for the full guide
+Each tool has its own page (**Install & guide**) with what it is, what a QC team uses it for, **what
+you need before you start**, then numbered **Install** and **How to use it** steps. Every command has a
+**copy** button — the commands were run on a real machine, not copied off a marketing page.
+
+It's a normal page, not a pop-up, so you can leave it open beside a terminal, bookmark it, or send the
+link to a teammate.
+
+Each page also ends with what the tool is **strong at** and what to **watch out for**. That last part is
+the reason the shelf exists — it's the half a vendor's own page leaves out.
+
+There is no search, filter or sort here on purpose: the shelf is two cards long. Those controls come
+back if it ever grows enough to need them.
 `,
   },
   {

@@ -245,6 +245,10 @@ export function runClaudeStream(
     // that wants a MULTI-TURN conversation stores it and passes `--resume <id>` on the
     // next run — otherwise every turn starts from an empty context (see routes/chat.ts).
     onSession?: (sessionId: string) => void
+    // The model the CLI actually resolved, from the same `init` event. A caller that runs
+    // WITHOUT `--model` (to inherit the user's own default, as chat does for Terminal
+    // parity) has no other way to record which model answered.
+    onModel?: (model: string) => void
     // Kill the child after this long with NO output at all, and treat `timeoutMs` as an
     // absolute ceiling instead of the only clock. A turn that is still grepping, reading
     // and writing text is making progress — the wall-clock cap exists for a HUNG child,
@@ -256,6 +260,8 @@ export function runClaudeStream(
   return new Promise((resolve) => {
     let settled = false
     let resultText = ''
+    /** Any text delta has been forwarded — drives the block separator (see stream_event). */
+    let sawText = false
     let isError = false
     let stdoutBuf = ''
     let usage: { costUsd: number; inputTokens: number; outputTokens: number } | null = null
@@ -370,7 +376,11 @@ export function runClaudeStream(
         result?: string
         is_error?: boolean
         message?: { content?: { type?: string; text?: string; name?: string; input?: unknown }[] }
-        event?: { type?: string; delta?: { type?: string; text?: string } }
+        event?: {
+          type?: string
+          delta?: { type?: string; text?: string }
+          content_block?: { type?: string }
+        }
       }
       try {
         msg = JSON.parse(line)
@@ -381,7 +391,15 @@ export function runClaudeStream(
         case 'stream_event': {
           // Partial streaming (--include-partial-messages): forward text deltas live.
           const ev = msg.event
+          if (ev?.type === 'content_block_start' && ev.content_block?.type === 'text') {
+            // A turn that stops to run a tool resumes in a NEW text block, and the deltas
+            // carry no separator — so "…listing the folders.Now I'll read package.json"
+            // is what the reader gets. Paragraph-break each block after the first.
+            if (sawText) opts?.onDelta?.('\n\n')
+            return
+          }
           if (ev?.type === 'content_block_delta' && ev.delta?.type === 'text_delta' && ev.delta.text) {
+            sawText = true
             opts?.onDelta?.(ev.delta.text)
           }
           return
@@ -389,6 +407,7 @@ export function runClaudeStream(
         case 'system':
           if (msg.subtype === 'init') {
             if (msg.session_id) opts?.onSession?.(msg.session_id)
+            if (msg.model) opts?.onModel?.(msg.model)
             onLog({ level: 'info', text: `Claude session started — model ${msg.model ?? 'default'}` })
           }
           return

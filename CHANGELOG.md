@@ -3,6 +3,63 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.11.13 — 2026-08-07
+
+**Chat answers as well as the Terminal does, and you can walk away from one while it's still writing**
+
+### Fixed
+
+- **Chat used to answer worse than the Terminal page on the very same question — it doesn't any
+  more.** Asked "how does the database page run a query?", the Terminal cited a real file and line;
+  Chat gave a generic paragraph. Three causes, all measured, all now fixed. Chat was pinned to
+  Claude Sonnet while the Terminal quietly used your own configured default (Opus) — so the model
+  picker gained **"Same as Terminal"**, which passes no model at all and inherits whatever the
+  Terminal would use, and it is the new default. Chat also ran with fewer permissions and skipped
+  the project's MCP servers; it now runs **Full tools** by default, exactly what the Terminal
+  launches with. The named models and the faster read-only mode are both still there when you want
+  a cheaper turn — they're just no longer what you get without asking.
+- **Up to 60% of a long answer vanished the moment the turn finished.** The text streamed onto the
+  screen correctly, then the finished version was re-read from the saved transcript — and only the
+  *last* paragraph had been saved. On a three-step answer, 266 characters were shown and 106 kept.
+  The more tool steps an answer took, the more of it was lost, so it hit the thorough answers
+  hardest. The whole answer is now saved, and separate paragraphs no longer run together as
+  "…the folders.Now I'll read package.json".
+- **A very long question is now refused with a sentence instead of being silently cut in half.**
+  Pasting a big requirement over the limit used to have its tail dropped without a word, and the
+  answer came back confidently addressing only the first half. You now get a message saying how big
+  it was and what the limit is — and **your text stays in the box** instead of disappearing.
+- **A follow-up question after a long gap no longer gets answered against nothing.** When the
+  underlying session had expired, Chat started fresh and answered "does that apply to the other
+  endpoint too?" with no idea what "that" was. It now replays a short summary of the conversation,
+  tells Claude it *is* only a summary, and says so on screen.
+- **Read-only mode is described honestly.** It was labelled as if it sandboxed the project; it does
+  not — it's a **speed** choice (answers start in about a second instead of twenty) and Claude can
+  still run commands. The tooltip and the mode's name now say that.
+
+### Added
+
+- **Switch conversations while an answer is still being written.** Starting a new chat or opening
+  another one used to do nothing at all until the current answer finished — sometimes minutes of
+  being stuck on one conversation. Now you can leave: the answer **keeps being written**, the
+  conversation stays marked **"Answering…"** in the history list, and coming back picks it up
+  mid-sentence — or shows the finished answer if it landed while you were away. You can also ask a
+  question in a different conversation at the same time. **Stop** is still how you actually cancel.
+- **The answer now finishes before the follow-up chips do.** Chat writes its "Ask next" suggestions
+  after the answer, in a part you never see — so for a second or two the reply looked stuck: the
+  text had stopped, but the cursor kept blinking and the timer kept counting. The reply now settles
+  as **done** the moment the answer itself is complete — Copy appears, the waiting indicator goes —
+  and a small separate placeholder shows that the suggestions are still coming.
+
+### Changed
+
+- **Conversation titles in the history list start with a capital letter.** A new chat is named after
+  your first question, typed the way people type, so the list read as a column of lowercase
+  fragments. Only the first letter is raised — file names and code in a title are left alone — and
+  the saved name is untouched.
+- **QC AI Labs** — a curated shelf of AI tools worth a QC engineer's time, with an install and usage
+  guide for each. It opens full screen with its own look, and is reachable at **/ai-labs** (it is
+  not in the sidebar yet).
+
 ## 0.11.12 — 2026-08-06
 
 **Chat stops giving up on long questions, and the hero orb comes alive**

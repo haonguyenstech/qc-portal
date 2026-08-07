@@ -65,6 +65,8 @@ import TestCasePage from '@/pages/TestCasePage'
 import ApiTestingPage from '@/pages/ApiTestingPage'
 import PrototypePage from '@/pages/PrototypePage'
 import ChatPage from '@/pages/ChatPage'
+import AiLabsPage from '@/pages/AiLabsPage'
+import AiLabDetailPage from '@/pages/AiLabDetailPage'
 import McpPage from '@/pages/McpPage'
 import ProjectsPage from '@/pages/ProjectsPage'
 import ProjectSettingsPage from '@/pages/ProjectSettingsPage'
@@ -156,6 +158,10 @@ const navGroups: { label: string; items: NavItemDef[] }[] = [
       { to: '/chat', label: 'Chat', icon: MessagesSquare, end: false },
       { to: '/prototype', label: 'Prototype', icon: Layout, end: false },
       { to: '/terminal', label: 'Terminal', icon: TerminalSquare, end: false },
+      // A reading page, not a project tool — it's here because Tools is where an engineer
+      // looks when asking "what else can I use?".
+      // Temporarily hidden from the sidebar; the /ai-labs routes still work by URL.
+      // { to: '/ai-labs', label: 'QC AI Labs', icon: FlaskConical, end: false },
     ],
   },
   {
@@ -827,7 +833,11 @@ function NoProjectsScreen() {
   )
 }
 
-function App() {
+/**
+ * The portal shell — sidebar, bell, page padding, and every page that lives inside it.
+ * Split out from `App` so a route can opt OUT of the chrome entirely (see below).
+ */
+function AppShell() {
   const { activeProjectId, projects, isLoading: projectsLoading } = useProjects()
   const { pathname } = useLocation()
   const [collapsed, setCollapsed] = useSidebarCollapsed()
@@ -843,11 +853,6 @@ function App() {
 
   return (
     <div className="min-h-svh text-foreground">
-      <TestCaseJobWatcher />
-      <CrawlJobWatcher />
-      <VerifyJobWatcher />
-      <SourceJobWatcher />
-      <DatabaseJobWatcher />
       <NotificationBell />
       <aside
         className={cn(
@@ -974,6 +979,35 @@ function App() {
         </div>
       </main>
     </div>
+  )
+}
+
+/**
+ * Top level. Two shapes of page live here:
+ *
+ * - **`/ai-labs` renders bare** — no sidebar, no bell, no page padding. It is its own
+ *   surface with its own (always dark) theme, and the portal's chrome around it would
+ *   read as a QC Portal page rather than the thing it is.
+ * - **everything else** goes through `AppShell`.
+ *
+ * The background-job watchers are mounted HERE, above both, because they must keep
+ * polling and announcing on any route — a crawl finishing while you're reading AI Labs
+ * still has to notify. They render nothing, so they cost the bare page nothing.
+ */
+function App() {
+  return (
+    <>
+      <TestCaseJobWatcher />
+      <CrawlJobWatcher />
+      <VerifyJobWatcher />
+      <SourceJobWatcher />
+      <DatabaseJobWatcher />
+      <Routes>
+        <Route path="/ai-labs" element={<AiLabsPage />} />
+        <Route path="/ai-labs/:id" element={<AiLabDetailPage />} />
+        <Route path="*" element={<AppShell />} />
+      </Routes>
+    </>
   )
 }
 

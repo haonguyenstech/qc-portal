@@ -178,14 +178,34 @@ const MD_COMPONENTS = mdComponents(true)
 const MD_COMPONENTS_STREAMING = mdComponents(false)
 
 const MODELS = [
+  // `default` sends no --model, so the CLI uses the same model an interactive `claude`
+  // does in the Terminal page. That parity is the point — pinning Sonnet here answered
+  // measurably shallower than the Terminal on the same repo question.
+  { value: 'default', label: 'Same as Terminal' },
   { value: 'haiku', label: 'Claude Haiku' },
   { value: 'sonnet', label: 'Claude Sonnet' },
   { value: 'opus', label: 'Claude Opus' },
 ]
 
-const MODEL_KEY = 'qc.chatModel'
-const TOOLS_KEY = 'qc.chatTools'
-const MAX_PROMPT = 12_000
+// v2: the defaults changed to Terminal parity (model `default`, full tools). A stored
+// `sonnet` / `read` from the old keys would silently keep every existing user on the weaker
+// setup, which is the whole thing being fixed — so the keys are versioned rather than read.
+/**
+ * The footer records the model that ANSWERED, which since the `default` option is a real
+ * CLI id (`claude-opus-5[1m]`, `claude-haiku-4-5-20251001`) rather than the short alias it
+ * used to be. Show the readable middle; the full id stays in the `title`.
+ */
+function shortModel(model: string): string {
+  const m = /^claude-([a-z]+)-?([\d.]+)?/.exec(model)
+  if (!m) return model
+  const name = m[1].charAt(0).toUpperCase() + m[1].slice(1)
+  return m[2] ? `Claude ${name} ${m[2]}` : `Claude ${name}`
+}
+
+const MODEL_KEY = 'qc.chatModel.v2'
+const TOOLS_KEY = 'qc.chatTools.v2'
+/** Mirrors the server's cap (routes/chat.ts). Over it the server 413s rather than truncating. */
+const MAX_PROMPT = 48_000
 
 /**
  * Pasted screenshots. A QC engineer's evidence is almost always an image — a broken
@@ -584,6 +604,20 @@ function railTime(iso: string): string {
   return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
 }
 
+/**
+ * A conversation's name as the history rail shows it.
+ *
+ * A new chat is named after its first question, and a question is typed the way people
+ * type — "how does the crawl work?" — so the rail read as a column of lowercase fragments.
+ * Only the FIRST character is raised: CSS `capitalize` would title-case every word (and
+ * mangle `ticket.json` → `Ticket.json`), and `::first-letter` doesn't apply to the inline
+ * span it renders in. A name the engineer renamed by hand starting lowercase on purpose is
+ * the acceptable cost — this is display only, the stored `name` is untouched.
+ */
+function railTitle(name: string): string {
+  return name.charAt(0).toUpperCase() + name.slice(1)
+}
+
 // ------------------------------------------------------------------ history rail
 
 /**
@@ -941,7 +975,7 @@ function ChatRail({
                                 active && 'font-medium',
                               )}
                             >
-                              {c.name}
+                              {railTitle(c.name)}
                             </span>
                           </div>
                           <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[11px] text-muted-foreground">
@@ -1591,6 +1625,22 @@ function stripSuggestMarker(text: string): string {
 }
 
 /**
+ * The model has started writing the SUGGESTIONS marker — i.e. THE ANSWER IS FINISHED and
+ * everything still arriving is a line the reader will never see.
+ *
+ * Without this the turn looked like it was still thinking after it had visibly stopped:
+ * the caret blinked and the waiting indicator kept counting while the only thing streaming
+ * was a stripped HTML comment. The answer settles as soon as this flips, and the wait for
+ * the follow-up chips gets its own small indicator instead of holding the whole reply open.
+ *
+ * Detected as "stripping removed something" rather than by searching for `<!--`, so it
+ * stays in step with `stripSuggestMarker` — including its half-written `<!--` tail case.
+ */
+function suggestMarkerStarted(raw: string): boolean {
+  return stripSuggestMarker(raw).length < raw.trimEnd().length
+}
+
+/**
  * The model's proposed next messages, offered as one-click chips under the newest answer —
  * the Prototype page's "Make it better" row, for a conversation.
  *
@@ -1633,6 +1683,31 @@ const FollowUps = memo(function FollowUps({
   )
 })
 
+/**
+ * The gap between "the answer finished" and "the chips arrived" — the tail of the turn
+ * where the model is writing the SUGGESTIONS marker and nothing visible is happening.
+ *
+ * It deliberately mirrors `FollowUps`' own row (same `px-1`, same "Ask next" label slot,
+ * two chip-shaped placeholders) so the real chips replace it in place instead of the
+ * layout jumping when they land. Skeleton, not a spinner: it says WHAT is coming.
+ */
+function SuggestingChips() {
+  return (
+    <div className="flex w-full flex-wrap items-center gap-2 px-1" aria-hidden>
+      <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+        <Sparkles className="size-3.5" />
+        Ask next
+      </span>
+      {['w-40', 'w-28'].map((w) => (
+        <span
+          key={w}
+          className={cn('qc-skeleton h-7 rounded-full border border-border/60 bg-card', w)}
+        />
+      ))}
+    </div>
+  )
+}
+
 function AssistantRow({
   text,
   tools,
@@ -1655,7 +1730,14 @@ function AssistantRow({
   // While streaming, what's on screen trails the received text by a few frames on purpose
   // (see useSmoothReveal). A saved message renders whole — and was already stripped of the
   // suggestions marker server-side, so it costs nothing there.
-  const visible = useSmoothReveal(streaming ? stripSuggestMarker(text) : text, !!streaming)
+  const body = streaming ? stripSuggestMarker(text) : text
+  const visible = useSmoothReveal(body, !!streaming)
+  // The TURN is still open (the server hasn't sent `done`), but the ANSWER is over: the
+  // marker has started and the reveal has caught up to the last visible character. From
+  // here the row renders exactly like a finished one — no caret, no waiting indicator,
+  // Copy available — and only the small chip below says the chips are still coming.
+  const answerSettled = !!streaming && suggestMarkerStarted(text) && visible.length >= body.length
+  const live = !!streaming && !answerSettled
   return (
     <div className="group flex justify-start gap-3">
       <RowAvatar who="assistant" />
@@ -1672,7 +1754,7 @@ function AssistantRow({
           >
             {/* Not while streaming: the waiting indicator below already lists the same
                 calls, with their targets and in the order they ran. */}
-            {!streaming && <ToolTrail tools={tools ?? []} />}
+            {!live && <ToolTrail tools={tools ?? []} />}
             {/* Keyed, and the indicator stays MOUNTED once text starts arriving — it just
                 goes compact and moves below the answer. Remounting it there would restart
                 its elapsed timer from zero mid-answer. */}
@@ -1683,24 +1765,29 @@ function AssistantRow({
                     own line under the answer instead of at the end of the last one. */}
                 <ReactMarkdown
                   remarkPlugins={[remarkGfm]}
-                  components={streaming ? MD_COMPONENTS_STREAMING : MD_COMPONENTS}
+                  components={live ? MD_COMPONENTS_STREAMING : MD_COMPONENTS}
                 >
-                  {streaming ? `${visible}▊` : visible}
+                  {live ? `${visible}▊` : visible}
                 </ReactMarkdown>
               </div>
             )}
-            {(streaming || !visible) && (
+            {(live || !visible) && (
               <ThinkingBubble key="waiting" calls={calls ?? []} compact={!!visible} startedAt={at} />
             )}
           </div>
-          {!streaming && text && (
+          {/* The answer is done; only the follow-up chips are outstanding. Its own quiet
+              line, in the slot the chips will take, so the reply itself reads as finished. */}
+          {answerSettled && <SuggestingChips />}
+          {!live && body && (
             <div className="flex items-center gap-0 text-muted-foreground opacity-100 transition-opacity duration-150">
               <Tooltip>
                 <TooltipTrigger asChild>
                   <button
                     type="button"
                     onClick={() =>
-                      void copyText(text).then((ok) =>
+                      // `body`, not `text`: while the marker is still streaming the raw
+                      // text carries a comment the reader never saw and must not copy.
+                      void copyText(body).then((ok) =>
                         ok ? toast.success('Answer copied') : toast.error('Could not copy'),
                       )
                     }
@@ -1715,7 +1802,9 @@ function AssistantRow({
               {model && (
                 <>
                   <span className="px-1.5 text-[11px] text-muted-foreground">•</span>
-                  <span className="text-[11px] text-muted-foreground">{model}</span>
+                  <span className="text-[11px] text-muted-foreground" title={model}>
+                    {shortModel(model)}
+                  </span>
                 </>
               )}
             </div>
@@ -1802,7 +1891,11 @@ function ChatHeader({
   return (
     <div className="flex h-14 shrink-0 items-center gap-3 border-b px-4 pe-14">
       <div className="flex min-w-0 flex-1 items-center gap-2">
-        <span className="truncate text-sm font-medium">{name ?? 'New chat'}</span>
+        {/* Same treatment as the rail row, or the conversation you just clicked would be
+            titled two different ways on the same screen. Rename still seeds the RAW name. */}
+        <span className="truncate text-sm font-medium">
+          {name ? railTitle(name) : 'New chat'}
+        </span>
         {temporary && (
           <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-violet-500/30 bg-violet-500/10 px-2 py-0.5 text-[11px] text-violet-600 dark:text-violet-400">
             <MessageSquareDashed className="size-3" />
@@ -1820,8 +1913,8 @@ function ChatHeader({
       <span
         title={
           tools === 'full'
-            ? 'This conversation can write files and use the project’s MCP servers'
-            : 'Read-only tools — the project can’t be modified'
+            ? 'Matches the Terminal page — the CLI’s own model, full permissions, this project’s MCP servers'
+            : 'Fast mode — file tools only and no MCP, so answers start quickly but Claude explores less'
         }
         className={cn(
           'inline-flex shrink-0 items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px]',
@@ -1831,7 +1924,7 @@ function ChatHeader({
         )}
       >
         <ShieldCheck className="size-3" />
-        {tools === 'full' ? 'Full access' : 'Read-only'}
+        {tools === 'full' ? 'Full access' : 'Fast mode'}
       </span>
 
       {live && (
@@ -1910,9 +2003,9 @@ function ChatWorkspace({
    */
   const [temporary, setTemporary] = useState(!!restoredTemp)
   const [input, setInput] = useState('')
-  const [model, setModel] = useState<string>(() => localStorage.getItem(MODEL_KEY) || 'sonnet')
+  const [model, setModel] = useState<string>(() => localStorage.getItem(MODEL_KEY) || 'default')
   const [tools, setTools] = useState<ChatTools>(() =>
-    localStorage.getItem(TOOLS_KEY) === 'full' ? 'full' : 'read',
+    localStorage.getItem(TOOLS_KEY) === 'read' ? 'read' : 'full',
   )
   /** Files attached to the NEXT message — converted to markdown here in the browser. */
   const [attached, setAttached] = useState<{ name: string; markdown: string }[]>([])
@@ -2278,6 +2371,11 @@ function ChatWorkspace({
             // Remember it for THIS TAB only, and only while it's temporary — it's the one
             // conversation the rail can't point back at after a reload.
             if (!openSlug && temporary) rememberTemp(s)
+            // Tell the rail NOW that this conversation exists and is answering. Without it
+            // a brand-new chat has no row to switch back to, and the rail's poll — which
+            // only runs while something is `running` — never starts, so the "Answering…"
+            // dot would never clear on its own either.
+            void queryClient.invalidateQueries({ queryKey: ['chats', projectId] })
           },
           onDelta: (t) => setPending((p) => (p ? { ...p, answer: p.answer + t } : p)),
           onTool: (call) => setPending((p) => (p ? { ...p, tools: [...p.tools, call] } : p)),
@@ -2296,6 +2394,11 @@ function ChatWorkspace({
           onError: (message) => {
             setPending(null)
             toast.error('The message failed', { description: message })
+            // A refused message (413 oversize, 409 already answering) never reached the
+            // transcript, so clearing the composer would simply lose what was typed — and
+            // the longer the message, the more likely it was refused. Put it back, unless
+            // the user has already started typing something else.
+            setInput((cur) => (cur.trim() ? cur : base))
             void queryClient.invalidateQueries({ queryKey: ['chat', projectId, targetSlug] })
             void queryClient.invalidateQueries({ queryKey: ['chats', projectId] })
           },
@@ -2331,6 +2434,28 @@ function ChatWorkspace({
       queryClient,
     ],
   )
+
+  /**
+   * Stop WATCHING the reply in flight — without cancelling it.
+   *
+   * This is what makes "switch away and come back" work. The turn is registered
+   * server-side precisely so it outlives the request that started it, so leaving a
+   * conversation must abort only the LOCAL subscription: the answer keeps being written,
+   * the rail keeps the row marked "Answering…", and reopening it re-attaches through
+   * `GET /:slug/stream` mid-sentence (or finds it finished). `pending` belongs to the
+   * conversation being left, so it goes with it — otherwise the next screen would open
+   * showing someone else's question.
+   *
+   * Cancelling for real is `stop` below; the difference is whether the server is told.
+   */
+  const detach = useCallback(() => {
+    abortRef.current?.abort()
+    abortRef.current = null
+    // Release the re-attach guard too, or coming back to this conversation would find
+    // its key still marked as watched and never subscribe again.
+    attachedRef.current = null
+    setPending(null)
+  }, [])
 
   /**
    * Cancel the reply in flight.
@@ -2538,7 +2663,9 @@ function ChatWorkspace({
         chats={chats}
         activeSlug={openSlug}
         onSelect={(s) => {
-          if (streaming) return
+          if (s === openSlug) return
+          // A reply in flight is left RUNNING, not cancelled — see `detach`.
+          detach()
           // Opening a saved conversation ends the temporary one (it can't be reached again)
           // and leaves temporary MODE — otherwise the next New Chat would quietly be
           // temporary too.
@@ -2548,11 +2675,11 @@ function ChatWorkspace({
           setAtBottom(true)
         }}
         onNew={() => {
-          if (streaming) return
+          detach()
           startNew(false)
         }}
         onNewTemporary={() => {
-          if (streaming) return
+          detach()
           startNew(true)
         }}
         onPin={(s, pinned) => pin.mutate({ slug: s, pinned })}
@@ -2820,7 +2947,7 @@ function ChatWorkspace({
                 </span>
               </span>
               <span>•</span>
-              <span>{tools === 'full' ? 'Full tools' : 'Read-only'}</span>
+              <span>{tools === 'full' ? 'Full tools' : 'Fast mode'}</span>
               {isTemporary && (
                 <>
                   <span>•</span>
@@ -3065,7 +3192,7 @@ function ChatWorkspace({
                         variant="outline"
                         size="icon"
                         onClick={() => setTools(tools === 'read' ? 'full' : 'read')}
-                        aria-label={tools === 'full' ? 'Full tools' : 'Read-only'}
+                        aria-label={tools === 'full' ? 'Full tools' : 'Fast mode'}
                         className={cn(
                           'size-9 rounded-full',
                           tools === 'full' &&
@@ -3081,8 +3208,8 @@ function ChatWorkspace({
                     </TooltipTrigger>
                     <TooltipContent className="max-w-xs">
                       {tools === 'full'
-                        ? 'Full tools — Claude can edit files and use this project’s MCP servers. Slower to start. Click for read-only.'
-                        : 'Read-only — Claude can read the repo but not change it, and MCP servers are skipped so answers start fast. Click for full tools.'}
+                        ? 'Full tools — the same setup the Terminal page runs: full permissions and this project’s MCP servers. Most accurate, ~20s slower to start. Click for fast mode.'
+                        : 'Fast mode — file tools only, MCP servers skipped, so answers start in about a second. Claude explores less, so expect shallower answers. Click for full tools.'}
                     </TooltipContent>
                   </Tooltip>
 

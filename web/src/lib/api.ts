@@ -2757,6 +2757,22 @@ export interface PrototypeStyleSettings {
   accent: string
 }
 
+/**
+ * The message for a streaming route that refused the request outright (chat's 413 for an
+ * oversize message, 409 for a second concurrent turn, …). Those answer with `{error}` JSON,
+ * so handing the body straight to the UI would show the user braces and quotes.
+ */
+async function streamErrorText(res: Response): Promise<string> {
+  const raw = await res.text().catch(() => '')
+  try {
+    const parsed = JSON.parse(raw) as { error?: string }
+    if (parsed?.error) return parsed.error
+  } catch {
+    /* not JSON — fall through to the raw body */
+  }
+  return raw || `${res.status} ${res.statusText}`
+}
+
 export async function streamPrototype(
   projectId: string,
   body: {
@@ -2794,7 +2810,7 @@ export async function streamPrototype(
     signal,
   })
   if (!res.ok || !res.body) {
-    handlers.onError((await res.text().catch(() => '')) || `${res.status} ${res.statusText}`)
+    handlers.onError(await streamErrorText(res))
     return
   }
   const reader = res.body.getReader()
@@ -3274,7 +3290,7 @@ export async function streamChat(
     signal,
   })
   if (!res.ok || !res.body) {
-    handlers.onError((await res.text().catch(() => '')) || `${res.status} ${res.statusText}`)
+    handlers.onError(await streamErrorText(res))
     return
   }
   await consumeChatStream(res, handlers)

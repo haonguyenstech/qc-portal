@@ -180,13 +180,26 @@ function sweepTemp(): void {
 }
 
 const SLUG_RE = /^[\w-]{1,60}$/
-const MAX_PROMPT = 12_000
+/**
+ * A question. The Terminal page has no such cap, and this one used to CUT the prompt
+ * silently at 12 KB (`.slice()`), so a long pasted requirement lost its tail and the
+ * answer was judged wrong for a reason nobody could see. Raised to 48 KB, and anything
+ * over it is now a 413 rather than a quiet truncation — see the `/stream` handler.
+ */
+const MAX_PROMPT = 48_000
 const MAX_MESSAGES = 200
-const MAX_TEXT = 60_000 // one answer; guards a runaway response from bloating the file
-const MAX_TOOLS_PER_TURN = 40
+/** One answer. Terminal parity: an opus turn that reads a lot writes a lot. */
+const MAX_TEXT = 200_000
+const MAX_TOOLS_PER_TURN = 200
 /** Read-only questions are quick; a full-tools turn may drive a browser or write files. */
 const CHAT_TIMEOUT = 900_000
-const CHAT_TIMEOUT_FULL = 1_800_000
+/**
+ * The full-tools ceiling. 30 minutes was below what the Terminal page routinely spends on
+ * a real repo question now that chat runs the same model with the same permissions and the
+ * project's MCP servers — and hitting a ceiling throws the whole turn away. `CHAT_IDLE_TIMEOUT`
+ * is the clock that should end a stuck turn; this is only the backstop.
+ */
+const CHAT_TIMEOUT_FULL = 5_400_000
 /** A web answer waits on someone else's servers; a research report waits on several. */
 const CHAT_TIMEOUT_WEB = 900_000
 const CHAT_TIMEOUT_RESEARCH = 2_400_000
@@ -196,8 +209,13 @@ const CHAT_TIMEOUT_RESEARCH = 2_400_000
  * sub-agents — cutting that off by wall clock threw away every one of those calls and
  * left one red line (verified on screen). Silence is what actually means "stuck", so the
  * budgets above are now only the ceiling.
+ *
+ * 10 minutes, not 3: silence is not the same as hung once a turn has full tools. One
+ * `npm run build`, one long test run, one Task sub-agent working through a big file — each
+ * is a single tool call that prints nothing until it finishes, and the Terminal page never
+ * kills those. A genuinely stuck child still dies, just later.
  */
-const CHAT_IDLE_TIMEOUT = 180_000
+const CHAT_IDLE_TIMEOUT = 600_000
 const MAX_SUGGESTIONS = 3
 const MAX_SUGGESTION_CHARS = 70
 
@@ -395,12 +413,54 @@ function nameFromPrompt(prompt: string): string {
   return line.length > 48 ? `${line.slice(0, 48).trimEnd()}…` : line
 }
 
+/**
+ * `default` — do NOT pass `--model` at all, so the CLI picks the same model an
+ * interactive `claude` in the Terminal page would (the user's own configured default,
+ * currently Opus). This is the only value that gives TERMINAL PARITY: pinning `sonnet`
+ * here was measurably weaker than the Terminal on the same question — same flags, same
+ * repo, but fewer tool calls and no file:line citations. The named models stay available
+ * for someone who deliberately wants a cheaper/faster turn.
+ */
+const CHAT_MODELS = new Set(['default', ...CRAWL_SUMMARY_MODELS])
+
 function pickModel(v: unknown, fallback: string): string {
-  return typeof v === 'string' && CRAWL_SUMMARY_MODELS.has(v) ? v : fallback
+  return typeof v === 'string' && CHAT_MODELS.has(v) ? v : fallback
 }
 
 function pickTools(v: unknown, fallback: ChatTools): ChatTools {
   return v === 'read' || v === 'full' ? v : fallback
+}
+
+/** How much of a lapsed conversation to replay, and how much of any one message. */
+const RECAP_TURNS = 8
+const RECAP_MSG_CHARS = 2_000
+
+/**
+ * A compact replay of the conversation so far, used ONLY when `--resume` finds no session.
+ *
+ * Multi-turn normally rides on the CLI's own session (see the module header) and this is
+ * deliberately not a substitute for it — it has none of the files the model already read.
+ * It exists so that the one case where the session is gone doesn't answer a follow-up
+ * ("does that apply to the other endpoint too?") against an empty context and produce a
+ * confidently wrong answer with nothing on screen explaining why.
+ */
+function recapBlock(messages: ChatMessage[]): string {
+  const recent = messages.slice(-RECAP_TURNS * 2)
+  if (!recent.length) return ''
+  const lines = recent.map((m) => {
+    const who = m.role === 'user' ? 'QC engineer' : 'You'
+    const body = m.text.trim().slice(0, RECAP_MSG_CHARS)
+    const clipped = m.text.trim().length > RECAP_MSG_CHARS ? ' …[clipped]' : ''
+    return `${who}: ${body}${clipped}`
+  })
+  return (
+    `--- EARLIER IN THIS CONVERSATION ---\n` +
+    `Your previous session ended, so this is a summary rather than the real transcript — you ` +
+    `no longer have the files you read then. Use it to understand what the question below ` +
+    `refers to, then verify anything you rely on by reading the project again.\n\n` +
+    `${lines.join('\n\n')}\n` +
+    `--- END OF SUMMARY ---\n\n`
+  )
 }
 
 function pickAction(v: unknown): ChatAction | null {
@@ -459,11 +519,18 @@ const ACTION_BLOCKS: Record<ChatAction, string> = {
 /**
  * Which tools this turn may use.
  *
- * `read` — the default, and what "ask a question about my project" needs: Claude can
- * Grep/Glob/Read the repo but cannot change it, and `--strict-mcp-config` skips loading
- * the project's MCP servers so the answer starts in a second rather than ~20.
- * `full` — bypassPermissions, so the turn can actually DO the thing (write a file, drive
- * the Playwright browser via .mcp.json). The UI makes this an explicit, labeled choice.
+ * `full` — THE DEFAULT, and the reason chat now answers like the Terminal page:
+ * `--permission-mode bypassPermissions` is exactly what `claude
+ * --dangerously-skip-permissions` (TerminalPage's launch line) runs under, and dropping
+ * `--strict-mcp-config` lets the project's MCP servers load, so a question about a
+ * ClickUp ticket or the live app can actually be answered instead of guessed at.
+ *
+ * `read` — the cheap, safe turn, kept as an explicit choice: Grep/Glob/Read only, no MCP,
+ * so the answer starts in about a second rather than ~20. Note what it is NOT: on the
+ * current CLI `--allowedTools` is a permission ALLOW-LIST, not a tool filter — with
+ * `permissions.defaultMode: "auto"` in the user's settings the model still reaches Bash
+ * and Write (verified: a `read` conversation on disk has `Write` in its tool trail). So
+ * this mode is a speed/cost choice, and must not be described as a sandbox.
  *
  * Both flags are variadic; the prompt is delivered over STDIN (never as a trailing
  * positional), so a tool name can't swallow it.
@@ -797,9 +864,19 @@ chatRouter.post('/stream', async (req, res) => {
   // doesn't inherit the `project` narrowing from the guard above.
   const root = project.rootPath
   const b = (req.body ?? {}) as Record<string, unknown>
-  const typed = typeof b.prompt === 'string' ? b.prompt.trim().slice(0, MAX_PROMPT) : ''
+  const typed = typeof b.prompt === 'string' ? b.prompt.trim() : ''
   const hasImages = Array.isArray(b.images) && b.images.length > 0
   if (!typed && !hasImages) return res.status(400).json({ error: 'prompt is required' })
+  // REFUSE rather than truncate. A silently cut question is answered confidently against
+  // half the requirement, and nothing on screen says why — the same reasoning docReview.ts
+  // uses for its 413.
+  if (typed.length > MAX_PROMPT) {
+    return res.status(413).json({
+      error:
+        `That message is ${Math.round(typed.length / 1000)} KB — the limit is ` +
+        `${Math.round(MAX_PROMPT / 1000)} KB. Attach it as a file with the paperclip, or split it.`,
+    })
+  }
   const slug = typeof b.slug === 'string' ? b.slug : ''
   const existing = slug ? loadChat(root, slug) : null
   if (slug && !existing) return res.status(404).json({ error: 'chat not found' })
@@ -827,8 +904,11 @@ chatRouter.post('/stream', async (req, res) => {
     (action ? ACTION_BLOCKS[action] : '') +
     SUGGEST_BLOCK
 
-  const model = pickModel(b.model, existing?.model || 'sonnet')
-  const tools = pickTools(b.tools, existing?.tools || 'read')
+  // Defaults are TERMINAL PARITY: the CLI's own model, and the same permission mode an
+  // interactive `claude --dangerously-skip-permissions` runs under (which also loads the
+  // project's MCP servers). Both are still a visible per-conversation choice in the UI.
+  const model = pickModel(b.model, existing?.model || 'default')
+  const tools = pickTools(b.tools, existing?.tools || 'full')
   const now = new Date().toISOString()
 
   const chat: Chat = existing ?? {
@@ -915,6 +995,8 @@ chatRouter.post('/stream', async (req, res) => {
 
   const usedTools: string[] = []
   let sessionId: string | null = null
+  /** What the CLI actually ran (see onModel) — the transcript records this, not 'default'. */
+  let resolvedModel: string | null = null
 
   /** Save the transcript — unless the conversation was deleted while the turn ran. */
   const persist = () => {
@@ -926,7 +1008,7 @@ chatRouter.post('/stream', async (req, res) => {
    * outright — and silently losing the user's question to a stale id would be the worst
    * outcome, so we retry once as a fresh session (context is gone, the answer isn't).
    */
-  async function runTurn(resume: string | null) {
+  async function runTurn(resume: string | null, recap = '') {
     const args = [
       '-p',
       '--output-format',
@@ -935,8 +1017,9 @@ chatRouter.post('/stream', async (req, res) => {
       '--include-partial-messages',
       ...(resume ? ['--resume', resume] : []),
       ...toolArgs(tools, action),
-      '--model',
-      model,
+      // `default` means "whatever an interactive `claude` would use" — omitting the flag
+      // is the only way to get that, since the CLI's default is the user's own setting.
+      ...(model === 'default' ? [] : ['--model', model]),
     ]
     return runClaudeStream(
       args,
@@ -960,7 +1043,7 @@ chatRouter.post('/stream', async (req, res) => {
       {
         usageSource: 'chat',
         model,
-        input: promptForClaude, // over stdin — a long question must not hit the argv cap
+        input: recap + promptForClaude, // over stdin — a long question must not hit the argv cap
         cwd: root, // the project's CLAUDE.md / Knowledge / Memory are in scope
         signal: ac.signal,
         onDelta: (text) => {
@@ -974,19 +1057,31 @@ chatRouter.post('/stream', async (req, res) => {
         onSession: (id) => {
           sessionId = id
         },
+        onModel: (m) => {
+          resolvedModel = m
+        },
         idleTimeoutMs: CHAT_IDLE_TIMEOUT,
       },
     )
   }
 
   let r = await runTurn(chat.sessionId)
-  if (!ac.signal.aborted && chat.sessionId && r.isError && !r.text) {
-    send({ type: 'log', level: 'info', text: 'Previous session unavailable — starting a fresh one.' })
+  if (!ac.signal.aborted && chat.sessionId && r.isError && !r.text && !turn.answer) {
+    // The CLI no longer has that session. Retrying fresh keeps the question — but a fresh
+    // session has NO context, so "does that also apply to the other endpoint?" gets answered
+    // against nothing and reads as the model losing the plot. Replay a capped recap of the
+    // conversation so the follow-up still means what it meant, and SAY so on screen: an
+    // answer built from a summary rather than the real session is worth knowing about.
+    send({
+      type: 'log',
+      level: 'info',
+      text: 'Previous session expired — replaying this conversation as a summary and answering fresh.',
+    })
     chat.sessionId = null
     usedTools.length = 0
     turn.calls.length = 0
     turn.answer = ''
-    r = await runTurn(null)
+    r = await runTurn(null, recapBlock(chat.messages))
   }
 
   if (ac.signal.aborted) {
@@ -998,14 +1093,30 @@ chatRouter.post('/stream', async (req, res) => {
     // nothing at all (verified — the conversation didn't even exist afterwards).
     const partial = (turn.answer || r.text).trim()
     if (partial) {
-      appendTurn(partial, true)
+      // Stopping AFTER the answer finished is not a failed turn. Once the model starts the
+      // SUGGESTIONS marker it has said everything the reader will see (which is exactly
+      // when the UI settles the bubble and offers Copy), so a Stop during that tail must
+      // not tint a complete, correct answer red — only the chips are lost.
+      appendTurn(partial, !partial.includes('<!--'))
       persist()
     }
     finish(turn, { type: 'stopped', chat: partial ? chat : undefined })
     return
   }
 
-  const text = r.text.trim()
+  // THE ANSWER IS THE BUFFER, not `r.text`.
+  //
+  // `r.text` is the CLI's final `result` field, which holds only the LAST assistant text
+  // block — not everything the model said. Measured on a 3-step turn: the browser was
+  // streamed 266 characters across 3 blocks, `result` carried the last 106, and since the
+  // client drops its streamed copy on `done` and re-renders from the saved transcript,
+  // 60% of a correct answer disappeared from the screen the moment the turn finished.
+  // The more tool steps a turn takes, the more it loses — i.e. exactly the thorough
+  // answers this page exists for. `turn.answer` is every delta, in order.
+  //
+  // Fall back to `r.text` only when nothing streamed (a caller without partial messages,
+  // or a turn whose text arrived some other way).
+  const text = (turn.answer.trim() || r.text.trim())
   // "Nothing but the suggestions marker" is an empty answer, not a one-line one.
   if (!splitSuggestions(text).text.trim()) {
     const why = r.timedOut
@@ -1046,7 +1157,9 @@ chatRouter.post('/stream', async (req, res) => {
         text: body.slice(0, MAX_TEXT),
         at,
         tools: usedTools.length ? [...usedTools] : undefined,
-        model,
+        // What ANSWERED, not what was asked for: with model 'default' the choice is
+        // "whatever the CLI uses", so only the init event knows which model that was.
+        model: resolvedModel ?? model,
         error: failed || undefined,
         suggestions: !failed && suggestions.length ? suggestions : undefined,
       },

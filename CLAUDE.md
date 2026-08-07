@@ -188,7 +188,10 @@ server/src/
                     knowledge, memory, diagrams, prototype, chat, version
 
 web/src/
-  App.tsx           sidebar nav + React Router routes + ProjectSwitcher + always-mounted
+  App.tsx           two branches: `/ai-labs` renders BARE (no shell — see "QC AI Labs"),
+                    everything else goes through AppShell. The job watchers sit in App,
+                    above both, so jobs still announce on the bare page.
+                    AppShell = sidebar nav + routes + ProjectSwitcher + always-mounted
                     NotificationBell + TestCaseJobWatcher + CrawlJobWatcher; the sidebar
                     footer (VersionFooter) carries AutoAgentStatusIndicator ABOVE the
                     Release notes card — keep it in BOTH the collapsed and expanded
@@ -200,6 +203,8 @@ web/src/
                     RunDetailPage, SkillsPage, McpPage, NotificationsPage, TerminalPage (at /terminal),
                     PrototypePage (at /prototype — see "Prototype page" below),
                     ChatPage (at /chat — see "Chat page" below),
+                    AiLabsPage + AiLabDetailPage (at /ai-labs and /ai-labs/:id —
+                    see "QC AI Labs" below),
                     InstructionsPage (at /instructions — CLAUDE.md + Knowledge + Memory hub),
                     ReleaseNotesPage
                     (at /releases — renders CHANGELOG.md + check-for-updates),
@@ -868,11 +873,53 @@ does this endpoint validate?").
   understands "it"** — don't replace it with prompt-stuffing. A `--resume` whose session the CLI no
   longer has fails outright, so the route **retries once as a fresh session** rather than losing the
   question. A session id is only adopted once a turn actually produced text.
-- **Two tool modes** (`toolArgs`): `read` (default) = `--allowedTools Read Grep Glob
-  --strict-mcp-config` — answers start in ~1s and the repo can't be modified; `full` =
-  `--permission-mode bypassPermissions` — can write files and use the project's MCP servers. The
-  composer's toggle (the reference's mic slot) makes this explicit; never make `full` the default.
+- **The defaults are TERMINAL PARITY, and that was a correction.** Chat used to pin `sonnet` and
+  `--allowedTools Read Grep Glob --strict-mcp-config`, and answered visibly worse than the Terminal
+  page on the same question — the complaint that drove this. Three measured causes, all now fixed:
+  - **Model.** `/terminal` runs a bare interactive `claude`, so it gets the CLI's own default
+    (`claude-opus-5[1m]` on this machine); chat pinned `sonnet`. Same flags, same repo question:
+    sonnet made 1 tool call and answered generically, opus made 2 and cited `dbQuery.ts:121`.
+    So `model` gained the value **`default`, which omits `--model` entirely** — the only way to
+    inherit whatever the user configured — and it is the new default. The named models stay for a
+    deliberately cheaper turn. The transcript records what ANSWERED (`onModel` on `runClaudeStream`,
+    from the `init` event), never the literal string `default`.
+  - **Tools.** `full` (`--permission-mode bypassPermissions`) is now the default, because it is
+    exactly what `claude --dangerously-skip-permissions` — TerminalPage's launch line — runs under,
+    and it drops `--strict-mcp-config` so the project's MCP servers load. `read` survives as an
+    explicit "fast mode" (~1s to first token instead of ~20).
+    **`read` is a speed choice, NOT a sandbox** — don't describe it as one. On the current CLI
+    `--allowedTools` is a permission allow-list, not a tool filter: the `init` event still lists
+    `Bash`/`Write`/`Task`, and with `permissions.defaultMode: "auto"` in the user's settings they
+    execute. Verified twice — a headless `read`-mode run ran `git log` via Bash, and a stored
+    `read` conversation has `Write` in its tool trail.
+  - localStorage keys are **versioned** (`qc.chatModel.v2` / `qc.chatTools.v2`): reading the old
+    keys would have left every existing user on the setup being fixed.
   The prompt goes over **stdin**, so the variadic `--allowedTools` can't swallow it.
+- **The saved answer is `turn.answer` (the delta buffer), NOT `r.text`.** `r.text` is the CLI's
+  final `result` field, which carries only the **last** assistant text block — everything the model
+  said before each tool call is missing from it. Measured on a 3-step turn: 266 characters streamed
+  across 3 blocks, `result` held the last 106; since the client drops its streamed copy on `done`
+  and re-renders from the transcript, 60% of a correct answer vanished from the screen the moment
+  the turn finished — worse the more tool steps a turn took, i.e. exactly the thorough answers.
+  `r.text` is now only the fallback for when nothing streamed. Related: `runClaudeStream` emits a
+  `\n\n` on each `content_block_start` after the first, because deltas from separate blocks carry
+  no separator and otherwise run together as "…the folders.Now I'll read package.json".
+- **The hard caps were sized for the old weak turn, and now match Terminal parity.** An opus
+  turn with MCP loaded reads more, runs more tools and writes more than a pinned-sonnet one, so
+  `MAX_TEXT` (60 KB → 200 KB), `MAX_TOOLS_PER_TURN` (40 → 200) and `CHAT_TIMEOUT_FULL`
+  (30 min → 90 min) would each have started clipping a good answer. `MAX_PROMPT` went 12 KB → 48 KB
+  **and stopped truncating**: an oversize message is a **413** now, because `.slice()` answered
+  half a pasted requirement with full confidence and nothing on screen said why (same reasoning as
+  `docReview.ts`). `streamErrorText` in `lib/api.ts` unwraps the `{error}` JSON so the toast shows
+  the sentence rather than braces, and the composer **puts the refused text back** — the longer the
+  message, the likelier it was refused, and clearing it would just lose it.
+- **A lapsed `--resume` replays a summary rather than starting blind** (`recapBlock`). The retry
+  already existed, but a fresh session has no context, so a follow-up ("does that apply to the
+  other endpoint too?") was answered against nothing — confidently, and indistinguishably from a
+  good answer. It now prepends a capped recap (last `RECAP_TURNS` turns, `RECAP_MSG_CHARS` each)
+  that tells the model it is a summary and to re-read the project before relying on it, and the
+  `log` frame says so on screen. It is NOT a substitute for the session (none of the files read
+  then are in it) — don't grow it into one.
 - **Storage** is `<root>/testing/chats/<slug>.json` (mirrors `routes/prototype.ts`, no DB). A new
   conversation is named after its first question. Routes: `GET /api/chat`, `POST /stream` (SSE:
   `start` / `resume` / `delta` / `tool` / `log` / `done` / `stopped` / `error`), `GET /:slug`,
@@ -893,6 +940,21 @@ does this endpoint validate?").
     question + its images, the whole answer so far as ONE delta, then each tool call) and streams the
     rest. The client finds it through `running` on `GET /:slug` and on the rail summaries; the rail
     marks such a row with a pulsing dot and polls **only while something is running**.
+  - **Switching conversations mid-answer is allowed, and leaves the turn RUNNING** (`detach`, the
+    client-side counterpart of Stop). The rail's New Chat / New temporary / row-click used to
+    `if (streaming) return` — with the whole point of `LiveTurn` sitting unused behind it, so a
+    long answer pinned the engineer to one conversation for minutes. `detach` aborts only the LOCAL
+    subscription and drops `pending` (which belongs to the conversation being left); the server is
+    NOT told, so the row keeps its "Answering…" dot and reopening it re-attaches through
+    `GET /:slug/stream` mid-sentence, or finds the finished answer. **Whether the server is told is
+    the only difference between `detach` and `stop`** — don't collapse them. Two things it needs:
+    `attachedRef` must be cleared too (or coming back finds the key still marked watched and never
+    re-subscribes), and `onStart` invalidates `['chats']` so a brand-new conversation has a rail row
+    to switch back to and the rail's running-only poll actually starts. No duplicate question on
+    return: the transcript file holds no user message until the turn ENDS (`appendTurn`), so the
+    `resume` frame is the only copy. Verified on screen — switch away at 3 s, rail says "Answering…",
+    reopen at 15 s and the caret is back typing; and a turn that finishes while away shows its whole
+    saved answer + follow-up chips on return.
   - **Stop is now a request** (`POST /:slug/stop`), because aborting the fetch no longer cancels
     anything. It saves the buffered partial as a failed turn — the old code tried to save `r.text`,
     which is only set from the CLI's final `result` event and is therefore always EMPTY on a kill,
@@ -1092,6 +1154,19 @@ does this endpoint validate?").
     reach the browser before the server ever saves, and the half-written `<!--` tail arrives frames
     ahead of the rest, so an unterminated comment is cut too. Verified per-frame over a whole turn:
     the marker is never on screen.
+  - **The ANSWER settles before the TURN does** (`suggestMarkerStarted` → `answerSettled` in
+    `AssistantRow`). Because the marker is stripped, the tail of every turn used to look hung: the
+    text stopped growing while the caret blinked and the waiting indicator kept counting, for the
+    seconds it took to write a line nobody sees. So the moment stripping starts removing something
+    AND the reveal has caught up, the row renders as finished — no caret, no `ThinkingBubble`,
+    `ToolTrail` and Copy back — and a separate `SuggestingChips` skeleton appears in the slot
+    `FollowUps` will fill (same row markup, so the real chips replace it without the layout
+    jumping). Measured on screen: caret+indicator at 0.8s → settled with Copy at 2.9s → real chips
+    at 4.4s, and the raw marker never rendered once.
+    Two things follow from it: Copy copies `body` (the stripped text), not `text`, which still holds
+    the comment at that moment; and a **Stop pressed during that tail saves a NORMAL turn, not a
+    failed one** (`routes/chat.ts` checks the buffer for `<!--`) — the answer was complete, only the
+    chips were lost, and tinting it red would call a correct answer a failure.
   - The strip renders **outside `Turn`**, keyed off `chat.messages` (not the `?? []` fallback, whose
     identity changes every render). Hanging it on the last message would give that memoised row a
     prop that changes as the conversation moves — see Turn's note. Measured: typing stays at the
@@ -1122,6 +1197,59 @@ does this endpoint validate?").
   jump. Typing-not-sending is the point: "the newest crawled ticket" usually wants a real ticket id
   first. The reference dead-ends once a category is open (no way back to pick another), so Escape and
   an outside click also restore the chips — no extra control on screen.
+
+## QC AI Labs (curated shelf of AI tools)
+
+**`/ai-labs` (`AiLabsPage.tsx`, "QC AI Labs" under the sidebar's Tools group)** — the one **reading**
+page in the portal: which AI products are worth a QC engineer's time, what each is for, and where it
+doesn't pay off. No server route, no query, no project scope — it renders a constant.
+
+- **Two routes, both bare:** `/ai-labs` (`AiLabsPage`, the shelf) and **`/ai-labs/:id`
+  (`AiLabDetailPage`, one tool)**. A card is a LINK, not a dialog — the detail page carries the
+  **install and usage guide**, and a guide with commands in it is something people leave open beside
+  a terminal, bookmark, and send to a teammate, none of which a modal can do. An unknown `:id`
+  renders a "not on the shelf" card rather than throwing; the URL is hand-editable.
+  Shared data lives in **`lib/ai-labs.ts`** (types + `CATALOG` + `findTool`), the dark surface and
+  the small shared pieces in **`components/ai-labs-ui.tsx`** (`LabShell` also owns `document.title`).
+- **`install` / `usage` are the reason the detail page exists** — a recommendation nobody can act on
+  is a link dump. Every command in them was RUN on a machine before it was written down (the
+  `@anthropic-ai/claude-code` + `@saigontechnology/auto-agent` pair, `auto-agent-ai login`, the
+  unpacked-extension steps). Keep it that way, keep one idea per step, and keep the vendor link
+  visible so a drifted command has somewhere to go. Step bodies take `` `code` `` and `**bold**`
+  through a 10-line `renderInline` — don't pull in react-markdown for two paragraphs.
+- **It renders OUTSIDE the shell.** `App.tsx` is a two-branch router — `/ai-labs` → the page bare,
+  `*` → `AppShell` (sidebar, bell, page padding, every other route). The page is its own destination
+  and the portal's chrome around it filed it as just another settings screen. The **job watchers sit
+  in `App`**, above both branches, so a crawl or test-case job finishing still notifies while you're
+  reading here — they render nothing, so the bare page pays nothing for them. The only tie back is one
+  ← in its header (detail → shelf, shelf → portal): a destination with no way out is a trap.
+- **It carries its own always-dark theme, in literal colours, on purpose.** Semantic tokens would make
+  it follow the portal's light/dark setting, and the page is deliberately not a portal surface. This
+  is the ONE place ignoring the token system is correct — don't "fix" it back to
+  `bg-card`/`text-muted-foreground`, and don't copy its palette into a page inside the shell.
+- **It is PLAIN, and that was a correction.** The first version had drifting aurora, an animated
+  gradient headline, cursor-tracked spotlights, glowing card edges, a stats row and a fit dial; over a
+  shelf of two entries that read as decoration around very little ("xến xúa" was the verdict), so all
+  of it came out — along with the search box, category rail, sort control and shortlist, which were
+  machinery for a catalog that doesn't exist yet. What's left is the writing on a quiet dark surface.
+  If something here seems to need an animation to hold attention, the fix is better copy.
+- `ui/dialog.tsx` gained an **`overlayClassName`** prop for this page (the default 50% black scrim
+  doesn't sit far enough back from a dark surface). Additive — every existing dialog is unchanged.
+- **`CATALOG` is a hand-written constant, on purpose.** There is no vendor feed to fetch, and a
+  curated shelf is only worth reading *because* a human picked the entries. Adding a tool = one
+  object (pitch, category, fit, flags, `what`, `useCases`, `strengths`, `limits`, url). Keep
+  `useCases` job-shaped ("reproduce a bug report step by step"), not feature-shaped — the jobs are
+  what make it a shelf rather than a link dump.
+- **It holds exactly two entries** — Claude Code and **AI Form Filler** (our own Chrome MV3
+  extension, `builtHere: true`, repo `haonguyenstech/ai-form-filler`) — because the shelf is a
+  recommendation, not an inventory. Grow it past a handful and search/filter/sort earn their way
+  back; until then don't add controls for two cards.
+- **The fit score is an OPINION and the page says so** — it renders as `QC fit 96/100 · our take`,
+  and the footer repeats it. It used to be a gradient ring; a dial implies an instrument took a
+  reading. Don't dress it up as data (no benchmark framing, no decimals, no leaderboard).
+- **`limits` ("Watch out for") is not a disclaimer** — it's the half a vendor's own page omits, and
+  the reason a reader trusts the shelf. Every entry has at least two.
+- `inPortal` flags what this portal already runs on; `builtHere` flags what we wrote ourselves.
 
 ## Terminal page (device shell)
 
