@@ -476,5 +476,54 @@ export function parseClaudeJsonResult(raw: string): { text: string; isError: boo
   return { text: (msg.result ?? '').trim(), isError: !!msg.is_error }
 }
 
+/**
+ * Salvage what the model actually SAID from a `--output-format json` transcript, and
+ * why the CLI called it a failure.
+ *
+ * A run can end `is_error` with `result: null` while a perfectly good answer sits in
+ * the assistant turn that preceded it — a budget cap is the common way (`subtype:
+ * error_max_budget_usd` fires AFTER the turn completes, so the work is done and paid
+ * for, then discarded). Verified on the Database page: the model returned a valid
+ * SELECT and the caller reported "the AI could not generate a query".
+ *
+ * `reason` is the CLI's own sentence (its `errors[]`, else the subtype), so a caller
+ * can tell the user what went wrong instead of guessing. Additive — this reads the
+ * same transcript parseClaudeJsonResult does and changes nothing for its callers.
+ */
+export function salvageClaudeJson(raw: string): { text: string; reason: string } {
+  interface Block {
+    type?: string
+    text?: string
+  }
+  interface Msg {
+    type?: string
+    subtype?: string
+    errors?: unknown
+    message?: { content?: Block[] }
+  }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw.trim())
+  } catch {
+    return { text: '', reason: '' }
+  }
+  const msgs: Msg[] = Array.isArray(parsed) ? (parsed as Msg[]) : [parsed as Msg]
+
+  const last = [...msgs].reverse().find((m) => m?.type === 'result')
+  const errs = Array.isArray(last?.errors) ? last.errors.filter((e) => typeof e === 'string') : []
+  const reason = (errs[0] as string | undefined) ?? last?.subtype ?? ''
+
+  // Newest assistant turn wins — that's the model's final word before the CLI gave up.
+  const text = [...msgs]
+    .reverse()
+    .filter((m) => m?.type === 'assistant')
+    .flatMap((m) => m.message?.content ?? [])
+    .filter((b) => b?.type === 'text' && typeof b.text === 'string')
+    .map((b) => (b.text as string).trim())
+    .find((t) => t.length > 0)
+
+  return { text: text ?? '', reason: reason === 'success' ? '' : reason }
+}
+
 /** Claude model aliases the portal exposes for crawl summaries. */
 export const CRAWL_SUMMARY_MODELS = new Set(['haiku', 'sonnet', 'opus'])

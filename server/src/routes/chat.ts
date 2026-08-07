@@ -1,7 +1,9 @@
 import { Router } from 'express'
 import fs from 'node:fs'
 import path from 'node:path'
-import { testingDirFor, ticketsDirFor } from '../config.js'
+import { PORT, testingDirFor, ticketsDirFor } from '../config.js'
+import { getDatabaseRow } from '../db.js'
+import { dbMapDocName } from '../dbMap.js'
 import { resolveProject } from '../projectScope.js'
 import { revealFolderNative } from '../folderPicker.js'
 import { runClaudeStream, CRAWL_SUMMARY_MODELS } from '../claudeExec.js'
@@ -602,11 +604,13 @@ function saveImages(root: string, raw: unknown): { file: string; abs: string }[]
  * of prompt rather than 200 KB of ticket text.
  */
 interface Mention {
-  kind: 'ticket' | 'testcase'
+  kind: 'ticket' | 'testcase' | 'database'
   /** Folder under testing/tickets/ — possibly nested (PARENT/CHILD), as the UI reports it. */
-  folder: string
+  folder?: string
   /** For a testcase mention: which version, or null/absent for the newest. */
   version?: number | null
+  /** For a database mention: the connected database's id (checked against the project). */
+  databaseId?: string
 }
 
 const MAX_MENTIONS = 8
@@ -646,8 +650,53 @@ function ticketLabel(dir: string, folder: string): string {
  * silently rather than sent as a path that doesn't exist — a hallucinated Read failure mid
  * answer is worse than the tag simply not appearing.
  */
+/**
+ * What the model is told when a connected database is tagged with `@`.
+ *
+ * Two halves, because "ask about the database" is two different questions. STRUCTURE
+ * ("what columns does Appointments have?") is answered from the `db-map-<tag>.md`
+ * knowledge doc the connect/sync already writes — a local file Read, no database
+ * traffic. DATA ("how many are still pending?") needs the real rows, so the model is
+ * given the portal's own query endpoint.
+ *
+ * That endpoint is `/api/database/query`, deliberately the SAME one the Database page
+ * uses: it goes through `runReadQuery`, so every layer of the read-only protection
+ * applies to a query the chat model wrote exactly as it does to a hand-typed one.
+ * There is no second path to a driver, and this must not become one — a write comes
+ * back refused rather than run. Mirrors `totpPromptHint`'s curl-the-portal shape.
+ */
+function databaseMentionLine(
+  root: string,
+  projectId: string,
+  row: { id: string; tag: string; kind: string; dbName: string; tableCount: number },
+): string | null {
+  const doc = path.join(testingDirFor(root), 'knowledge', `${dbMapDocName(row.tag)}.md`)
+  const parts = [
+    `- DATABASE ${row.tag} — ${row.kind}, database \`${row.dbName}\`` +
+      (row.tableCount ? `, ${row.tableCount} tables.` : '.'),
+  ]
+  if (fs.existsSync(doc)) {
+    parts.push(`  Its full table/column map is at ${doc} — Read that FIRST for real names.`)
+  }
+  parts.push(
+    `  To read actual DATA, run one read-only SELECT at a time via the portal:`,
+    `    curl -s -X POST "http://127.0.0.1:${PORT}/api/database/query?projectId=${projectId}" \\`,
+    `      -H 'content-type: application/json' \\`,
+    `      --data-binary '{"databaseId":"${row.id}","sql":"SELECT ..."}'`,
+    `  It answers {"ok":true,"result":{"columns":[…],"rows":[…]}} or {"ok":false,"error":…}.`,
+    `  SELECT/WITH/SHOW/EXPLAIN only — the endpoint REFUSES anything that writes, and you`,
+    `  must not try to work around that or reach the database any other way. Cap your rows`,
+    `  (TOP/LIMIT). Report what the query returned; never present an invented number as data.`,
+  )
+  // Structure-only is still worth tagging (the model can answer schema questions from
+  // the doc), but with neither the doc nor a usable id there is nothing to resolve to.
+  if (!fs.existsSync(doc) && !row.id) return null
+  return parts.join('\n')
+}
+
 function resolveMentions(
   root: string,
+  projectId: string,
   raw: unknown,
 ): { block: string; resolved: { kind: string; label: string }[] } {
   if (!Array.isArray(raw) || !raw.length) return { block: '', resolved: [] }
@@ -656,6 +705,23 @@ function resolveMentions(
   const seen = new Set<string>()
   for (const item of raw.slice(0, MAX_MENTIONS)) {
     const m = (item ?? {}) as Partial<Mention>
+
+    if (m.kind === 'database') {
+      if (typeof m.databaseId !== 'string') continue
+      const key = `database:${m.databaseId}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      // Ownership is re-checked here, not trusted from the client: a chat is scoped to
+      // one project and must not be able to name another project's database by id.
+      const row = getDatabaseRow(m.databaseId)
+      if (!row || row.projectId !== projectId) continue
+      const line = databaseMentionLine(root, projectId, row)
+      if (!line) continue
+      lines.push(line)
+      resolved.push({ kind: 'database', label: row.tag })
+      continue
+    }
+
     if (m.kind !== 'ticket' && m.kind !== 'testcase') continue
     if (typeof m.folder !== 'string') continue
     const key = `${m.kind}:${m.folder}:${m.version ?? 'latest'}`
@@ -697,8 +763,9 @@ function resolveMentions(
   return {
     block:
       `\n\n--- TAGGED WITH @ IN THIS MESSAGE ---\n` +
-      `The user tagged these project artifacts; they are what the question is about. Read them ` +
-      `with the Read tool BEFORE answering, and don't guess at their contents:\n${lines.join('\n')}\n`,
+      `The user tagged these project artifacts; they are what the question is about. Go to them ` +
+      `BEFORE answering — Read every file listed, and follow the instructions given for a tagged ` +
+      `database — and don't guess at their contents:\n${lines.join('\n')}\n`,
     resolved,
   }
 }
@@ -893,7 +960,7 @@ chatRouter.post('/stream', async (req, res) => {
   // An image on its own is a legitimate message ("what's wrong with this?"), so give it a
   // prompt rather than rejecting it — with nothing said, describing it is the useful reply.
   const prompt = typed || 'Take a look at the attached screenshot.'
-  const mentions = resolveMentions(root, b.mentions)
+  const mentions = resolveMentions(root, project.id, b.mentions)
   // The `+` menu action applies to THIS message only (see ChatAction): it changes the
   // instructions, the allowed tools and the time budget, and nothing about the conversation.
   const action = pickAction(b.action)

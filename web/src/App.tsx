@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
+import type { ReactNode, RefObject } from 'react'
 import { NavLink, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { toast } from 'sonner'
@@ -26,12 +27,15 @@ import {
   RefreshCw,
   ScanSearch,
   ScrollText,
+  Search,
   Settings,
   TerminalSquare,
   MessagesSquare,
+  NotebookPen,
   Ticket,
   Upload,
   Wrench,
+  X,
   Zap,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -49,6 +53,7 @@ import { checkForUpdate, getVersion, triggerUpdate } from '@/lib/api'
 import { listRuns } from '@/lib/api'
 import { useProjects } from '@/lib/project-context'
 import NotificationBell from '@/components/NotificationBell'
+import ThemeToggle from '@/components/ThemeToggle'
 import { AutoAgentStatusIndicator } from '@/components/AutoAgentStatus'
 import TestCaseJobWatcher from '@/components/TestCaseJobWatcher'
 import CrawlJobWatcher from '@/components/CrawlJobWatcher'
@@ -78,36 +83,66 @@ import DiagramsPage from '@/pages/DiagramsPage'
 import VerifyDesignPage from '@/pages/VerifyDesignPage'
 import TerminalPage from '@/pages/TerminalPage'
 import NotificationsPage from '@/pages/NotificationsPage'
+import NotesPage from '@/pages/NotesPage'
 import ReleaseNotesPage from '@/pages/ReleaseNotesPage'
 import DocumentPage from '@/pages/DocumentPage'
 
-/** Custom app mark: a "Q" ring + tail (quality control) framing a bold checkmark.
- *  Strokes use currentColor so it inherits the badge's text color. */
+/**
+ * The seal the mark is built from — a 10-lobe scalloped disc, the shape of a
+ * certification stamp. Baked as literal coordinates rather than computed at render:
+ * it never changes, and `web/public/favicon.svg` has to carry the identical numbers.
+ * Regenerate both together (cx/cy 16, R 12.7, lobe depth 2.6, 10 lobes).
+ */
+const SEAL_PATH =
+  'M16.00 3.30L19.12 6.39L23.46 5.73L24.17 10.06L28.08 12.08L26.10 16.00L28.08 19.92' +
+  'L24.17 21.94L23.46 26.27L19.12 25.61L16.00 28.70L12.88 25.61L8.54 26.27L7.83 21.94' +
+  'L3.92 19.92L5.90 16.00L3.92 12.08L7.83 10.06L8.54 5.73L12.88 6.39Z'
+
+/** The check, cut OUT of the seal rather than drawn on top of it. */
+const SEAL_CHECK = 'M10.4 16.4l3.9 3.9 7.5-8.6'
+
+/**
+ * The app mark: a quality seal with the check cut out of it — the sign-off this
+ * portal exists to produce.
+ *
+ * It is a SOLID with negative space, not an outline. Earlier versions were
+ * lucide-weight line drawings (a lens, a clipboard), and a line icon reads as one
+ * item borrowed from an icon set rather than as a logo — the app's own design
+ * language says as much ("icon badges are high-contrast solids, not gradient
+ * chips"). A solid also survives downscaling: at 16px there are no hairlines to
+ * dissolve, just a silhouette and one hole.
+ *
+ * The check is knocked out through a `<mask>`, so the mark is a single colour and
+ * the cut shows whatever is behind it — the brand chip's gradient in the sidebar,
+ * the browser chrome in a tab. The mask id comes from `useId` because two of these
+ * can legitimately mount at once and duplicate ids would cross-wire the masks.
+ *
+ * Geometry is shared with `web/public/favicon.svg`. Change one, change the other.
+ */
 function AppLogo({ className }: { className?: string }) {
+  const maskId = `qc-logo-${useId()}`
   return (
-    <svg
-      viewBox="0 0 32 32"
-      fill="none"
-      className={className}
-      aria-hidden="true"
-      focusable="false"
-    >
-      {/* Q ring + tail, dimmed so the check reads first */}
-      <circle cx="14.5" cy="14.5" r="8.4" stroke="currentColor" strokeWidth="2.3" strokeOpacity="0.5" />
+    <svg viewBox="0 0 32 32" className={className} aria-hidden="true" focusable="false">
+      <mask id={maskId}>
+        <rect width="32" height="32" fill="#fff" />
+        <path
+          d={SEAL_CHECK}
+          stroke="#000"
+          strokeWidth="3.4"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          fill="none"
+        />
+      </mask>
+      {/* The seal is stroked as well as filled, with a round linejoin — that is what
+          rounds the scallops. A bare polygon gives hard points and reads as a star. */}
       <path
-        d="M19 19l5.6 5.6"
+        d={SEAL_PATH}
+        fill="currentColor"
         stroke="currentColor"
-        strokeWidth="2.6"
-        strokeLinecap="round"
-        strokeOpacity="0.5"
-      />
-      {/* bold check on top */}
-      <path
-        d="M10.8 14.8l3 3 6-6.7"
-        stroke="currentColor"
-        strokeWidth="2.7"
-        strokeLinecap="round"
+        strokeWidth="3.4"
         strokeLinejoin="round"
+        mask={`url(#${maskId})`}
       />
     </svg>
   )
@@ -158,6 +193,7 @@ const navGroups: { label: string; items: NavItemDef[] }[] = [
       { to: '/chat', label: 'Chat', icon: MessagesSquare, end: false },
       { to: '/prototype', label: 'Prototype', icon: Layout, end: false },
       { to: '/terminal', label: 'Terminal', icon: TerminalSquare, end: false },
+      { to: '/notes', label: 'Note', icon: NotebookPen, end: false },
       // A reading page, not a project tool — it's here because Tools is where an engineer
       // looks when asking "what else can I use?".
       // Temporarily hidden from the sidebar; the /ai-labs routes still work by URL.
@@ -215,10 +251,13 @@ function NavItem({
   item,
   collapsed,
   liveCount,
+  caption,
 }: {
   item: NavItemDef
   collapsed: boolean
   liveCount: number
+  /** Group name, shown under the label when the flat filtered list is rendered. */
+  caption?: string
 }) {
   const { to, label, icon: Icon, end } = item
   const showRunning = to === '/running' && liveCount > 0
@@ -228,18 +267,28 @@ function NavItem({
   // whose Radix Slot stringifies a function className. A plain string is Slot-safe.
   const isActive = end ? pathname === to : pathname === to || pathname.startsWith(`${to}/`)
 
+  // Scroll the active row into view when the nav is taller than the pane — landing
+  // on a route from a page link or a reload shouldn't leave its row off screen.
+  // Keyed on `isActive` so it fires on activation only, not on every re-render
+  // (the nav re-renders on each keystroke in the filter).
+  const linkRef = useRef<HTMLAnchorElement>(null)
+  useEffect(() => {
+    if (isActive) linkRef.current?.scrollIntoView({ block: 'nearest' })
+  }, [isActive])
+
   const link = (
     <NavLink
       to={to}
       end={end}
+      ref={linkRef}
       className={cn(
         'group relative flex items-center text-sm font-medium transition-all duration-200 active:scale-[0.98]',
-        collapsed ? 'h-10 w-10 justify-center rounded-xl' : 'gap-3 rounded-lg px-3 py-2',
+        collapsed ? 'h-10 w-10 justify-center rounded-xl' : 'gap-3 rounded-xl px-3 py-1.5',
         isActive
           ? collapsed
-            ? 'bg-primary/12 text-primary ring-1 ring-inset ring-primary/25'
-            : 'bg-gradient-to-r from-primary/15 to-primary/5 text-primary shadow-sm'
-          : 'text-muted-foreground hover:bg-muted hover:text-foreground',
+            ? 'bg-primary/10 text-primary ring-1 ring-inset ring-primary/25'
+            : 'bg-primary/10 text-primary'
+          : 'text-muted-foreground hover:bg-muted/70 hover:text-foreground',
       )}
     >
       {!collapsed && (
@@ -256,7 +305,17 @@ function NavItem({
           isActive && 'scale-110',
         )}
       />
-      {!collapsed && label}
+      {!collapsed &&
+        (caption ? (
+          <span className="min-w-0 flex-1 leading-tight">
+            <span className="block truncate">{label}</span>
+            <span className="block truncate text-[10px] font-normal text-muted-foreground/70">
+              {caption}
+            </span>
+          </span>
+        ) : (
+          label
+        ))}
       {!collapsed && showRunning && <RunningBadge count={liveCount} active={isActive} />}
       {collapsed && showRunning && (
         <span className="absolute right-1 top-1 flex size-2">
@@ -281,6 +340,111 @@ function NavItem({
         )}
       </TooltipContent>
     </Tooltip>
+  )
+}
+
+/** True on a Mac, so shortcut hints read ⌘ rather than Ctrl. */
+const IS_MAC =
+  typeof navigator !== 'undefined' && /mac|iphone|ipad/i.test(navigator.platform || navigator.userAgent)
+const MOD_KEY = IS_MAC ? '⌘' : 'Ctrl'
+
+/** Small keycap used in tooltips and the filter's placeholder hint. */
+function Kbd({ children }: { children: ReactNode }) {
+  return (
+    <kbd className="rounded-md border border-border/60 bg-muted px-1 py-0.5 font-mono text-[10px] font-medium text-muted-foreground">
+      {children}
+    </kbd>
+  )
+}
+
+/**
+ * Fade masks for a scrollable pane. The sidebar's nav is taller than the viewport
+ * on a laptop screen (18 links across 5 groups), and with a hard edge there is
+ * nothing on screen saying more links exist below — so the fade only appears on
+ * the side that actually has content past the edge.
+ */
+function useScrollFade<T extends HTMLElement>() {
+  const ref = useRef<T>(null)
+  const [fade, setFade] = useState({ top: false, bottom: false })
+  const update = useCallback(() => {
+    const el = ref.current
+    if (!el) return
+    const top = el.scrollTop > 4
+    const bottom = el.scrollTop + el.clientHeight < el.scrollHeight - 4
+    setFade((f) => (f.top === top && f.bottom === bottom ? f : { top, bottom }))
+  }, [])
+  useEffect(() => {
+    const el = ref.current
+    if (!el) return
+    update()
+    el.addEventListener('scroll', update, { passive: true })
+    const ro = new ResizeObserver(update)
+    ro.observe(el)
+    if (el.firstElementChild) ro.observe(el.firstElementChild)
+    return () => {
+      el.removeEventListener('scroll', update)
+      ro.disconnect()
+    }
+  }, [update])
+  return { ref, fade, update }
+}
+
+/**
+ * Type-to-filter over the nav. 18 links across 5 groups is more than a glance
+ * resolves, and every one of them is a fixed destination — so the fastest path
+ * to a page is naming it. Focused with {MOD}K from anywhere in the shell.
+ */
+function NavFilter({
+  value,
+  onChange,
+  inputRef,
+  onSubmit,
+}: {
+  value: string
+  onChange: (v: string) => void
+  inputRef: RefObject<HTMLInputElement | null>
+  onSubmit: () => void
+}) {
+  return (
+    <div className="relative mx-3 mb-2 shrink-0">
+      <Search className="pointer-events-none absolute left-3 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground/70" />
+      <input
+        ref={inputRef}
+        type="text"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Escape') {
+            e.preventDefault()
+            if (value) onChange('')
+            else inputRef.current?.blur()
+          } else if (e.key === 'Enter') {
+            e.preventDefault()
+            onSubmit()
+          }
+        }}
+        placeholder="Search pages…"
+        aria-label="Search pages"
+        className="h-9 w-full rounded-xl border border-sidebar-border/70 bg-muted/50 pl-8 pr-12 text-sm text-foreground outline-none transition-colors placeholder:text-muted-foreground/70 hover:border-border focus:border-border focus:bg-muted"
+      />
+      {value ? (
+        <button
+          type="button"
+          onClick={() => {
+            onChange('')
+            inputRef.current?.focus()
+          }}
+          aria-label="Clear search"
+          className="absolute right-1.5 top-1/2 flex size-6 -translate-y-1/2 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+        >
+          <X className="size-3.5" />
+        </button>
+      ) : (
+        <span className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2">
+          <Kbd>{MOD_KEY}K</Kbd>
+        </span>
+      )}
+    </div>
   )
 }
 
@@ -768,12 +932,34 @@ function SidebarToggle({ collapsed, onToggle }: { collapsed: boolean; onToggle: 
       <Icon className="size-4" />
     </button>
   )
-  if (!collapsed) return button
   return (
     <Tooltip>
       <TooltipTrigger asChild>{button}</TooltipTrigger>
-      <TooltipContent side="right" className="font-medium">
-        Expand sidebar
+      <TooltipContent side="right" className="flex items-center gap-1.5 font-medium">
+        {collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+        <Kbd>{MOD_KEY}B</Kbd>
+      </TooltipContent>
+    </Tooltip>
+  )
+}
+
+/** Collapsed-sidebar stand-in for the filter: expands the rail and focuses it. */
+function CollapsedSearchButton({ onClick }: { onClick: () => void }) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          type="button"
+          onClick={onClick}
+          aria-label="Search pages"
+          className="flex size-10 shrink-0 items-center justify-center rounded-xl border border-sidebar-border/70 bg-muted/50 text-muted-foreground transition-all duration-200 hover:-translate-y-0.5 hover:border-border hover:bg-muted hover:text-foreground active:scale-95"
+        >
+          <Search className="size-4" />
+        </button>
+      </TooltipTrigger>
+      <TooltipContent side="right" className="flex items-center gap-1.5 font-medium">
+        Search pages
+        <Kbd>{MOD_KEY}K</Kbd>
       </TooltipContent>
     </Tooltip>
   )
@@ -840,7 +1026,11 @@ function NoProjectsScreen() {
 function AppShell() {
   const { activeProjectId, projects, isLoading: projectsLoading } = useProjects()
   const { pathname } = useLocation()
+  const navigate = useNavigate()
   const [collapsed, setCollapsed] = useSidebarCollapsed()
+  const [query, setQuery] = useState('')
+  const filterRef = useRef<HTMLInputElement>(null)
+  const { ref: navRef, fade, update: updateFade } = useScrollFade<HTMLElement>()
   const { data: runs } = useQuery({
     queryKey: ['runs', activeProjectId],
     queryFn: () => listRuns(activeProjectId!),
@@ -851,9 +1041,57 @@ function AppShell() {
     (r) => r.status === 'running' || r.status === 'queued',
   ).length
 
+  // Flat match list for the filter. Matching on the group name too means "testing"
+  // finds the whole Testing group, which is how people actually remember a page.
+  const q = query.trim().toLowerCase()
+  const matches = useMemo(() => {
+    if (!q) return []
+    return navGroups.flatMap((g) =>
+      g.items
+        .filter((i) => i.label.toLowerCase().includes(q) || g.label.toLowerCase().includes(q))
+        .map((i) => ({ item: i, group: g.label })),
+    )
+  }, [q])
+
+  /** Focus the filter, expanding the rail first when it's collapsed. */
+  const focusFilter = useCallback(() => {
+    setCollapsed(false)
+    // The input only exists in the expanded rail, so wait a frame after expanding.
+    requestAnimationFrame(() => filterRef.current?.focus())
+  }, [setCollapsed])
+
+  // Shell-wide shortcuts: {MOD}K jumps to the page filter, {MOD}B collapses the rail.
+  // Skipped while typing in a field so they can't hijack a page's own input.
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (!(e.metaKey || e.ctrlKey) || e.altKey) return
+      const key = e.key.toLowerCase()
+      if (key !== 'k' && key !== 'b') return
+      const el = e.target as HTMLElement | null
+      const typing =
+        !!el &&
+        (el.tagName === 'INPUT' ||
+          el.tagName === 'TEXTAREA' ||
+          el.tagName === 'SELECT' ||
+          el.isContentEditable)
+      if (typing && el !== filterRef.current) return
+      e.preventDefault()
+      if (key === 'k') focusFilter()
+      else setCollapsed((c) => !c)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [focusFilter, setCollapsed])
+
+  // The nav's content height changes with the filter, so re-measure the fades.
+  useEffect(() => {
+    updateFade()
+  }, [q, collapsed, updateFade])
+
   return (
     <div className="min-h-svh text-foreground">
       <NotificationBell />
+      <ThemeToggle />
       <aside
         className={cn(
           'fixed inset-y-0 left-0 z-20 hidden flex-col border-r border-sidebar-border bg-sidebar/80 backdrop-blur-xl transition-[width] duration-200 ease-out lg:flex',
@@ -898,30 +1136,88 @@ function AppShell() {
 
         <ProjectSwitcher collapsed={collapsed} onExpand={() => setCollapsed(false)} />
 
-        <nav
-          className={cn(
-            'flex min-h-0 flex-1 flex-col overflow-y-auto py-3',
-            collapsed ? 'items-center gap-3 px-2' : 'gap-5 px-3',
-          )}
-        >
-          {navGroups.map((group, gi) => (
-            <div
-              key={group.label}
-              className={cn('flex flex-col', collapsed ? 'items-center gap-1.5' : 'gap-0.5')}
-            >
-              {collapsed
-                ? gi > 0 && <span className="mb-1.5 h-px w-6 rounded-full bg-sidebar-border/70" />
-                : (
-                  <div className="px-3 pb-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/55">
-                    {group.label}
-                  </div>
-                )}
-              {group.items.map((item) => (
-                <NavItem key={item.to} item={item} collapsed={collapsed} liveCount={liveCount} />
-              ))}
-            </div>
-          ))}
-        </nav>
+        {collapsed ? (
+          <div className="mb-1 flex shrink-0 justify-center px-2">
+            <CollapsedSearchButton onClick={focusFilter} />
+          </div>
+        ) : (
+          <NavFilter
+            value={query}
+            onChange={setQuery}
+            inputRef={filterRef}
+            onSubmit={() => {
+              const first = matches[0]
+              if (!first) return
+              navigate(first.item.to)
+              setQuery('')
+              filterRef.current?.blur()
+            }}
+          />
+        )}
+
+        {/* The fades are siblings of the scroll pane, not children — inside it they
+            would scroll away with the content instead of pinning to the edges. */}
+        <div className="relative flex min-h-0 flex-1 flex-col">
+          <nav
+            ref={navRef}
+            className={cn(
+              'flex min-h-0 flex-1 flex-col overflow-y-auto py-3',
+              collapsed ? 'items-center gap-3 px-2' : 'gap-4 px-3',
+            )}
+          >
+            {q ? (
+              matches.length === 0 ? (
+                <p className="px-3 py-6 text-center text-xs text-muted-foreground">
+                  No page matches “{query.trim()}”.
+                </p>
+              ) : (
+                <div className="flex flex-col gap-0.5">
+                  {matches.map(({ item, group }) => (
+                    <NavItem
+                      key={item.to}
+                      item={item}
+                      collapsed={false}
+                      liveCount={liveCount}
+                      caption={group}
+                    />
+                  ))}
+                </div>
+              )
+            ) : (
+              navGroups.map((group, gi) => (
+                <div
+                  key={group.label}
+                  className={cn('flex flex-col', collapsed ? 'items-center gap-1.5' : 'gap-0.5')}
+                >
+                  {collapsed ? (
+                    gi > 0 && <span className="mb-1.5 h-px w-6 rounded-full bg-sidebar-border/70" />
+                  ) : (
+                    <div className="px-3 pb-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/55">
+                      {group.label}
+                    </div>
+                  )}
+                  {group.items.map((item) => (
+                    <NavItem key={item.to} item={item} collapsed={collapsed} liveCount={liveCount} />
+                  ))}
+                </div>
+              ))
+            )}
+          </nav>
+          <span
+            aria-hidden
+            className={cn(
+              'pointer-events-none absolute inset-x-0 top-0 h-6 bg-gradient-to-b from-sidebar to-transparent transition-opacity duration-200',
+              fade.top ? 'opacity-100' : 'opacity-0',
+            )}
+          />
+          <span
+            aria-hidden
+            className={cn(
+              'pointer-events-none absolute inset-x-0 bottom-0 h-6 bg-gradient-to-t from-sidebar to-transparent transition-opacity duration-200',
+              fade.bottom ? 'opacity-100' : 'opacity-0',
+            )}
+          />
+        </div>
 
         <VersionFooter collapsed={collapsed} />
       </aside>
@@ -937,7 +1233,7 @@ function AppShell() {
             'mx-auto',
             // The Prototype workspace (chat + live preview) and Chat (history rail +
             // transcript) need the full width; every other page stays comfortably capped.
-            pathname === '/prototype' || pathname === '/chat' ? 'max-w-none' : 'max-w-6xl',
+            pathname === '/prototype' || pathname === '/chat' || pathname === '/notes' ? 'max-w-none' : 'max-w-6xl',
             // Chat is full-bleed: its shell has no outer border, so page padding would
             // just leave a gap around the rail and the transcript.
             pathname === '/chat' ? '' : 'px-4 py-4 sm:px-6 sm:py-6 lg:px-8 lg:py-8',
@@ -962,7 +1258,8 @@ function AppShell() {
             <Route path="/api-testing" element={<ApiTestingPage />} />
             <Route path="/chat" element={<ChatPage />} />
             <Route path="/prototype" element={<PrototypePage />} />
-            <Route path="/terminal" element={<TerminalPage />} />
+             <Route path="/terminal" element={<TerminalPage />} />
+             <Route path="/notes" element={<NotesPage />} />
             <Route path="/skills" element={<SkillsPage />} />
             <Route path="/mcp" element={<McpPage />} />
             <Route path="/notifications" element={<NotificationsPage />} />

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
@@ -10,11 +10,16 @@ import {
   Database,
   Eye,
   EyeOff,
+  Download,
+  Eraser,
   FileText,
+  History,
   KeyRound,
   Link2,
   Loader2,
   Lock,
+  PanelLeftClose,
+  PanelLeftOpen,
   Pencil,
   Play,
   Plus,
@@ -22,6 +27,7 @@ import {
   RefreshCw,
   Send,
   Server,
+  ShieldAlert,
   Sparkles,
   SquareTerminal,
   Table2,
@@ -58,17 +64,22 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
+import { SchemaBrowser, SqlEditor } from '@/components/SqlEditor'
+import type { SchemaTable } from '@/lib/sql-complete'
 import {
   askDatabase,
   connectDatabase,
   disconnectDatabase,
   getDatabaseCredential,
+  getDatabaseHealth,
   getDatabaseJob,
+  getDatabaseSchema,
   getDatabases,
   runDatabaseQuery,
   syncDatabase,
   testDatabaseConnection,
   type DatabaseConn,
+  type DbBlocked,
   type DbKind,
   type DbKindInfo,
   type DbLogLine,
@@ -80,6 +91,8 @@ import { useProjects } from '@/lib/project-context'
 // reconnects to the still-running server-side job. The global DatabaseJobWatcher
 // clears this key once the job finishes — this page only writes & reads it.
 const ACTIVE_JOB_PREFIX = 'qc.databaseJob.'
+/** Which connected database the query console is pointed at, per project. */
+const QUERY_DB_PREFIX = 'qc.databaseQueryTarget.'
 function loadActiveJobId(projectId: string | null): string | null {
   if (!projectId) return null
   try {
@@ -206,9 +219,77 @@ function Stat({
   )
 }
 
+/**
+ * Live reachability for one database.
+ *
+ * This used to be the literal text "connected" on every card, which made it the one
+ * badge on the page that could not be believed: a stopped server, a dropped SSH
+ * tunnel, or a rotated password all still read green. It now reflects an actual
+ * `SELECT 1` (GET /api/database/health).
+ *
+ * Three states, because "we don't know yet" is not the same as "it's up" — the first
+ * check takes a moment and showing green during it would recreate the original bug in
+ * miniature. A failure keeps the reason in `title`, since "unreachable" and
+ * "unreachable because the password was rotated" call for different fixes.
+ */
+function HealthBadge({ projectId, databaseId }: { projectId: string; databaseId: string }) {
+  const { data, error, isPending, isFetching } = useQuery({
+    queryKey: ['database-health', projectId, databaseId],
+    queryFn: () => getDatabaseHealth(projectId, databaseId),
+    // Cheap (one `SELECT 1`), but not free — a background re-check every 30s is enough
+    // to notice a tunnel dropping without hammering the server.
+    refetchInterval: 30_000,
+    staleTime: 15_000,
+    // One retry, because the portal's own dev server restarting is a normal event and
+    // a single failed request should not pin a badge for the next 30 seconds.
+    retry: 1,
+  })
+
+  if (isPending) {
+    return (
+      <span className="inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
+        <Loader2 className="h-3 w-3 animate-spin" /> checking…
+      </span>
+    )
+  }
+  // "We couldn't ASK" is not "it's DOWN". Collapsing the two was wrong in the exact way
+  // the old hard-coded badge was wrong, only inverted: the portal restarting made a
+  // perfectly healthy database show red. Verified — the endpoint answered ok while the
+  // card read "unreachable", because the request that failed was the page's own.
+  if (error) {
+    return (
+      <span
+        title={`Could not check this database: ${error instanceof Error ? error.message : 'request failed'}`}
+        className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-500/15 dark:text-amber-400"
+      >
+        <AlertTriangle className="h-3 w-3" /> status unknown
+      </span>
+    )
+  }
+  if (!data.ok) {
+    return (
+      <span
+        title={data.error ? `Cannot reach this database: ${data.error}` : 'Cannot reach this database'}
+        className="inline-flex items-center gap-1 rounded-full bg-red-50 px-2 py-0.5 text-[10px] font-medium text-red-700 dark:bg-red-500/15 dark:text-red-400"
+      >
+        <Unlink className="h-3 w-3" /> unreachable
+      </span>
+    )
+  }
+  return (
+    <span
+      title={`Reachable — responded in ${data.ms} ms`}
+      className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-400"
+    >
+      <Link2 className={cn('h-3 w-3', isFetching && 'animate-pulse')} /> connected
+    </span>
+  )
+}
+
 /** Status card for one connected database. */
 function ConnectedCard({
   conn,
+  projectId,
   kinds,
   onSync,
   syncing,
@@ -218,6 +299,7 @@ function ConnectedCard({
   busy,
 }: {
   conn: DatabaseConn
+  projectId: string
   kinds: DbKindInfo[]
   onSync: () => void
   syncing: boolean
@@ -243,9 +325,7 @@ function ConnectedCard({
               <span className="text-sm font-semibold tracking-tight">
                 {kindLabel(kinds, conn.kind)}
               </span>
-              <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-400">
-                <Link2 className="h-3 w-3" /> connected
-              </span>
+              <HealthBadge projectId={projectId} databaseId={conn.id} />
               {conn.hasPassword && (
                 <span className="inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
                   <Lock className="h-3 w-3" /> password saved
@@ -702,13 +782,54 @@ function ResultsTable({ result }: { result: DbQueryResult }) {
           </TableBody>
         </Table>
       </div>
-      <p className="text-[11px] text-muted-foreground">
-        {result.truncated
-          ? `Showing the first ${result.rows.length} rows (result was capped).`
-          : `${result.rowCount} row${result.rowCount === 1 ? '' : 's'}.`}
-      </p>
+      <div className="flex flex-wrap items-center gap-2">
+        <p className="text-[11px] text-muted-foreground">
+          {result.truncated
+            ? `Showing the first ${result.rows.length} rows (result was capped).`
+            : `${result.rowCount} row${result.rowCount === 1 ? '' : 's'}.`}
+        </p>
+        <div className="ml-auto flex items-center gap-2">
+          <ToolbarButton
+            onClick={() => {
+              void navigator.clipboard
+                .writeText(toCsv(result))
+                .then(() => toast.success('Results copied as CSV'))
+            }}
+            icon={Clipboard}
+            label="Copy CSV"
+          />
+          <ToolbarButton onClick={() => downloadCsv(result)} icon={Download} label="Download CSV" />
+        </div>
+      </div>
     </div>
   )
+}
+
+/**
+ * RFC-4180 CSV: quote every field and double the inner quotes. Always quoting is the
+ * safe choice — a value containing a comma, a newline or a quote is exactly the kind
+ * of real data (an address, a note, a JSON blob) that silently corrupts a hand-rolled
+ * export, and a spreadsheet reads fully-quoted fields identically.
+ */
+function toCsv(result: DbQueryResult): string {
+  const cell = (v: unknown) => `"${String(v ?? '').replace(/"/g, '""')}"`
+  return [
+    result.columns.map(cell).join(','),
+    ...result.rows.map((r) => r.map(cell).join(',')),
+  ].join('\r\n')
+}
+
+function downloadCsv(result: DbQueryResult): void {
+  // Leading BOM so Excel opens it as UTF-8 — without it, accented and Vietnamese
+  // names come out as mojibake. Escaped, not literal: an invisible character in the
+  // source is unreadable and lint rejects it.
+  const blob = new Blob([`\uFEFF${toCsv(result)}`], { type: 'text/csv;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `query-results-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.csv`
+  a.click()
+  URL.revokeObjectURL(url)
 }
 
 /** Read-only SQL block with a copy button (shows the AI-generated query). */
@@ -734,6 +855,375 @@ function SqlBlock({ sql }: { sql: string }) {
 }
 
 /**
+ * Copy for each way the read-only guard can refuse, keyed by `blocked.kind`.
+ *
+ * A refused write is NOT an error the engineer can retry their way out of, so it gets
+ * a dialog rather than the inline red strip every other failure uses: it has to be
+ * impossible to mistake for "the connection dropped, try again". The wording says what
+ * was detected, that nothing was sent, and where to go instead — a block with no
+ * alternative just reads as the tool being broken.
+ */
+const BLOCKED_COPY: Record<
+  DbBlocked['kind'],
+  { title: string; body: string; alt?: string }
+> = {
+  'write-keyword': {
+    title: 'This query would modify data',
+    body: 'The Database page is read-only by design — it runs SQL that nobody has reviewed, against a live database. The statement was not sent.',
+    alt: 'Need to write? Use the Terminal page, where you are driving the client yourself.',
+  },
+  'not-select': {
+    title: 'Only read-only queries can run here',
+    body: 'A statement here has to start with SELECT, WITH, SHOW or EXPLAIN. The statement was not sent.',
+    alt: 'Need to write? Use the Terminal page, where you are driving the client yourself.',
+  },
+  'write-intent': {
+    title: 'That asks to change the database',
+    body: 'The AI on this page only ever writes read-only SELECTs, so it did not draft that statement and nothing was sent.',
+    alt: 'Need to write? Use the Terminal page, where you are driving the client yourself.',
+  },
+  'multi-statement': {
+    title: 'One statement at a time',
+    body: 'Several statements were found. Only a single statement is allowed, so that a read-only SELECT cannot carry a second, hidden one. Nothing was sent.',
+  },
+  lock: {
+    title: 'Locking clauses are not allowed',
+    body: 'FOR UPDATE and FOR SHARE take write locks on rows in a live database. Nothing was sent.',
+  },
+  empty: { title: 'Nothing to run', body: 'Type a query first.' },
+}
+
+/**
+ * The "this would modify data" stop. Confirming does NOT run anything — there is no
+ * write path on this page to confirm INTO — so the only actions are acknowledging it
+ * and, when the AI offered one, running a SELECT that shows the rows the refused
+ * change would have hit. That preview is the useful half of the request: you usually
+ * want to see those rows before touching them anyway.
+ */
+function WriteBlockedDialog({
+  blocked,
+  attempted,
+  databaseLabel,
+  onClose,
+  onUsePreview,
+}: {
+  blocked: DbBlocked | null
+  attempted?: string | null
+  databaseLabel: string
+  onClose: () => void
+  onUsePreview: (sql: string) => void
+}) {
+  const copy = blocked ? BLOCKED_COPY[blocked.kind] : null
+  return (
+    <Dialog open={!!blocked} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="max-w-lg rounded-3xl">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2 text-base">
+            <span className="flex size-8 shrink-0 items-center justify-center rounded-2xl bg-amber-500/15 text-amber-600 dark:text-amber-400">
+              <ShieldAlert className="size-4" />
+            </span>
+            {copy?.title ?? 'Query blocked'}
+          </DialogTitle>
+          <DialogDescription className="pt-1 text-left">{copy?.body}</DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-3">
+          {blocked?.keyword && (
+            <div className="flex items-center gap-2 text-xs">
+              <span className="text-muted-foreground">Detected</span>
+              <code className="rounded-lg bg-destructive/10 px-2 py-0.5 font-mono font-semibold text-destructive">
+                {blocked.keyword}
+              </code>
+            </div>
+          )}
+
+          <div className="rounded-2xl border border-border/60 bg-muted/50 px-3 py-2 text-xs text-muted-foreground">
+            Nothing ran against <span className="font-medium text-foreground">{databaseLabel}</span>.
+          </div>
+
+          {attempted && (
+            <div className="space-y-1.5">
+              <div className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                What was blocked
+              </div>
+              <pre className="max-h-32 overflow-auto rounded-2xl border border-border/60 bg-muted/50 p-3 font-mono text-xs">
+                {attempted}
+              </pre>
+            </div>
+          )}
+
+          {blocked?.preview && (
+            <div className="space-y-1.5">
+              <div className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                You can look at those rows instead
+              </div>
+              <pre className="max-h-32 overflow-auto rounded-2xl border border-border/60 bg-muted/50 p-3 font-mono text-xs">
+                {blocked.preview}
+              </pre>
+            </div>
+          )}
+
+          {copy?.alt && <p className="text-xs text-muted-foreground">{copy.alt}</p>}
+        </div>
+
+        <div className="flex justify-end gap-2 pt-1">
+          {blocked?.preview && (
+            <Button
+              variant="outline"
+              className="rounded-full active:scale-[0.98]"
+              onClick={() => onUsePreview(blocked.preview!)}
+            >
+              <Eye className="size-4" />
+              Show those rows
+            </Button>
+          )}
+          <Button className="rounded-full active:scale-[0.98]" onClick={onClose}>
+            Got it
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+/** Recent queries, per project AND database — history from another DB is noise here. */
+const SQL_HISTORY_PREFIX = 'qc.databaseSqlHistory.'
+const MAX_HISTORY = 25
+
+function loadHistory(projectId: string, databaseId: string): string[] {
+  try {
+    const raw = localStorage.getItem(`${SQL_HISTORY_PREFIX}${projectId}.${databaseId}`)
+    const parsed: unknown = raw ? JSON.parse(raw) : []
+    return Array.isArray(parsed) ? parsed.filter((s): s is string => typeof s === 'string') : []
+  } catch {
+    return [] // a corrupt entry must never take the editor down with it
+  }
+}
+
+function saveHistory(projectId: string, databaseId: string, list: string[]): void {
+  try {
+    localStorage.setItem(`${SQL_HISTORY_PREFIX}${projectId}.${databaseId}`, JSON.stringify(list))
+  } catch {
+    /* quota — history is a convenience, not state the editor depends on */
+  }
+}
+
+/** `SELECT TOP 100 * FROM x` on SQL Server, `… LIMIT 100` everywhere else. */
+function previewSql(kind: DbKind, table: string): string {
+  return kind === 'sqlserver'
+    ? `SELECT TOP 100 * FROM ${table}`
+    : `SELECT * FROM ${table} LIMIT 100`
+}
+
+/**
+ * The SQL editor half of the console: schema browser + editor + toolbar.
+ *
+ * The schema is fetched once per database per session (`staleTime: Infinity`) and is
+ * what both the completion menu and the browser read. It is deliberately NOT required:
+ * a schema that fails to load costs suggestions, never the ability to run a query —
+ * so every consumer below treats `tables` as possibly empty rather than gating on it.
+ */
+function SqlWorkbench({
+  projectId,
+  database,
+  sql,
+  onSqlChange,
+  onRun,
+  running,
+  disabled,
+}: {
+  projectId: string
+  database: DatabaseConn
+  sql: string
+  onSqlChange: (next: string) => void
+  onRun: () => void
+  running: boolean
+  disabled: boolean
+}) {
+  const [showSchema, setShowSchema] = useState(true)
+  const [historyOpen, setHistoryOpen] = useState(false)
+  const [history, setHistory] = useState<string[]>(() => loadHistory(projectId, database.id))
+
+  // Re-read when the target database changes, without an effect: history belongs to
+  // the pair, and the pair is derivable during render.
+  const [seenDb, setSeenDb] = useState(database.id)
+  if (seenDb !== database.id) {
+    setSeenDb(database.id)
+    setHistory(loadHistory(projectId, database.id))
+    setHistoryOpen(false)
+  }
+
+  const {
+    data: schema,
+    isLoading: schemaLoading,
+    error: schemaError,
+    refetch: refetchSchema,
+    isFetching: schemaFetching,
+  } = useQuery({
+    queryKey: ['database-schema', projectId, database.id],
+    queryFn: () => getDatabaseSchema(projectId, database.id),
+    staleTime: Infinity, // one introspection per session; "Refresh" is explicit
+    retry: false,
+  })
+  const tables: SchemaTable[] = useMemo(() => schema?.tables ?? [], [schema])
+
+  const remember = (q: string) => {
+    const trimmed = q.trim()
+    if (!trimmed) return
+    // Most-recent-first, no duplicates — re-running a query should move it up the
+    // list, not add a second copy of it.
+    const next = [trimmed, ...history.filter((h) => h !== trimmed)].slice(0, MAX_HISTORY)
+    setHistory(next)
+    saveHistory(projectId, database.id, next)
+  }
+
+  const runNow = () => {
+    if (disabled || running || !sql.trim()) return
+    remember(sql)
+    onRun()
+  }
+
+  const runTable = (t: SchemaTable) => {
+    const q = previewSql(database.kind, t.name)
+    onSqlChange(q)
+    remember(q)
+    // Let the new SQL land in the parent's state before the parent reads it to run.
+    requestAnimationFrame(onRun)
+  }
+
+  /** Insert at the caret if the editor has focus, else append — never overwrite. */
+  const insertAtCaret = (text: string) => {
+    const ta = document.querySelector<HTMLTextAreaElement>('textarea[aria-label="SQL query"]')
+    if (!ta || document.activeElement !== ta) {
+      onSqlChange(sql ? `${sql}${sql.endsWith(' ') ? '' : ' '}${text}` : text)
+      return
+    }
+    const at = ta.selectionStart
+    onSqlChange(sql.slice(0, at) + text + sql.slice(ta.selectionEnd))
+    requestAnimationFrame(() => {
+      ta.focus()
+      ta.setSelectionRange(at + text.length, at + text.length)
+    })
+  }
+
+  return (
+    <div className="space-y-2">
+      <div className="flex flex-col gap-2 lg:flex-row lg:items-start">
+        {showSchema && (
+          // A DEFINITE height, not `h-auto`: the panel's inner list is `overflow-auto`,
+          // which only scrolls against a bounded parent. With auto height it grew to
+          // fit all 158 tables and pushed the toolbar and results off the page.
+          <div className="h-64 w-full shrink-0 lg:h-80 lg:w-64">
+            <SchemaBrowser
+              tables={tables}
+              onInsert={insertAtCaret}
+              onSelectTable={runTable}
+              loading={schemaLoading}
+              error={schemaError ? (schemaError as Error).message : null}
+            />
+          </div>
+        )}
+        <div className="min-w-0 flex-1">
+          <SqlEditor
+            value={sql}
+            onChange={onSqlChange}
+            onRun={runNow}
+            tables={tables}
+            disabled={disabled}
+            placeholder={previewSql(database.kind, tables[0]?.name ?? 'your_table')}
+          />
+        </div>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2">
+        <Button
+          onClick={runNow}
+          disabled={disabled || running || !sql.trim()}
+          className="gap-1.5 rounded-full active:scale-[0.98]"
+        >
+          {running ? <Loader2 className="size-4 animate-spin" /> : <Play className="size-4" />}
+          {running ? 'Running…' : 'Run query'}
+        </Button>
+
+        <ToolbarButton
+          onClick={() => setShowSchema((v) => !v)}
+          icon={showSchema ? PanelLeftClose : PanelLeftOpen}
+          label={showSchema ? 'Hide schema' : 'Schema'}
+        />
+        <div className="relative">
+          <ToolbarButton
+            onClick={() => setHistoryOpen((v) => !v)}
+            icon={History}
+            label={`History${history.length ? ` (${history.length})` : ''}`}
+            disabled={history.length === 0}
+          />
+          {historyOpen && history.length > 0 && (
+            <>
+              {/* Click-anywhere-else closes it. Behind the panel, so a pick still lands. */}
+              <div className="fixed inset-0 z-20" onClick={() => setHistoryOpen(false)} />
+              <div className="absolute bottom-full left-0 z-30 mb-1 max-h-72 w-[min(34rem,80vw)] overflow-auto rounded-2xl border border-border/60 bg-popover p-1 shadow-lg">
+                {history.map((h, i) => (
+                  <button
+                    key={i}
+                    type="button"
+                    onClick={() => {
+                      onSqlChange(h)
+                      setHistoryOpen(false)
+                    }}
+                    className="block w-full truncate rounded-xl px-2 py-1.5 text-left font-mono text-[11px] transition-colors hover:bg-accent"
+                    title={h}
+                  >
+                    {h.replace(/\s+/g, ' ')}
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
+        <ToolbarButton
+          onClick={() => refetchSchema()}
+          icon={RefreshCw}
+          label={schemaFetching ? 'Reading…' : 'Refresh schema'}
+          disabled={schemaFetching}
+        />
+        <ToolbarButton onClick={() => onSqlChange('')} icon={Eraser} label="Clear" disabled={!sql} />
+
+        <span className="text-[11px] text-muted-foreground">
+          {tables.length > 0
+            ? `${tables.length} tables · ⌘/Ctrl+Enter to run · ⌃Space for suggestions`
+            : 'A single read-only statement. ⌘/Ctrl+Enter to run.'}
+        </span>
+      </div>
+    </div>
+  )
+}
+
+/** Quiet pill button for the editor toolbar — secondary to the solid Run button. */
+function ToolbarButton({
+  onClick,
+  icon: Icon,
+  label,
+  disabled,
+}: {
+  onClick: () => void
+  icon: typeof Play
+  label: string
+  disabled?: boolean
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className="inline-flex items-center gap-1.5 rounded-full border border-border/60 px-2.5 py-1.5 text-xs font-medium text-muted-foreground transition-all duration-200 hover:border-border hover:text-foreground active:scale-[0.98] disabled:pointer-events-none disabled:opacity-40"
+    >
+      <Icon className="size-3.5" />
+      {label}
+    </button>
+  )
+}
+
+/**
  * The "query & ask" console below the connections: an AI chat that turns a question
  * into a read-only query, and a manual SQL editor. All execution is read-only server-side.
  */
@@ -747,12 +1237,25 @@ function QueryConsole({
   disabled: boolean
 }) {
   const [mode, setMode] = useState<'ask' | 'sql'>('ask')
-  const [databaseId, setDatabaseId] = useState(databases[0]?.id ?? '')
+  // Remembered per project: with more than one database connected, a reload silently
+  // reset this to the first one — so the next question ran against a different
+  // database than the one on screen a moment ago, and nothing said it had moved.
+  const [databaseId, setDatabaseId] = useState(
+    () => localStorage.getItem(QUERY_DB_PREFIX + projectId) ?? databases[0]?.id ?? '',
+  )
+  const pickDatabase = (id: string) => {
+    setDatabaseId(id)
+    localStorage.setItem(QUERY_DB_PREFIX + projectId, id)
+  }
   const [question, setQuestion] = useState('')
   const [sql, setSql] = useState('')
   const [ranSql, setRanSql] = useState<string | null>(null)
   const [result, setResult] = useState<DbQueryResult | null>(null)
   const [error, setError] = useState<string | null>(null)
+  // A refusal by the read-only guard is held separately from `error`: it opens a
+  // dialog instead of the inline strip, so it can't read as a transient failure.
+  const [blocked, setBlocked] = useState<DbBlocked | null>(null)
+  const [blockedSql, setBlockedSql] = useState<string | null>(null)
 
   // Keep a valid selection as connections change.
   const selected = databases.find((d) => d.id === databaseId) ?? databases[0]
@@ -760,31 +1263,46 @@ function QueryConsole({
     if (!databases.some((d) => d.id === databaseId) && databases[0]) setDatabaseId(databases[0].id)
   }, [databases, databaseId])
 
+  const clearOutput = () => {
+    setError(null)
+    setBlocked(null)
+    setBlockedSql(null)
+    setResult(null)
+    setRanSql(null)
+  }
+
   const ask = useMutation({
     mutationFn: () => askDatabase(projectId, selected!.id, question.trim()),
-    onMutate: () => {
-      setError(null)
-      setResult(null)
-      setRanSql(null)
-    },
+    onMutate: clearOutput,
     onSuccess: (res) => {
-      setRanSql(res.sql ?? null)
-      if (res.ok && res.result) setResult(res.result)
-      else setError(res.error ?? 'The AI could not answer that question.')
+      if (res.ok && res.result) {
+        setRanSql(res.sql ?? null)
+        setResult(res.result)
+      } else if (res.blocked) {
+        // The SQL is echoed only when the model actually wrote one; a refused
+        // QUESTION has none, and showing an empty "what was blocked" box would
+        // suggest something was drafted and sent.
+        setBlockedSql(res.sql ?? null)
+        setBlocked(res.blocked)
+      } else {
+        setRanSql(res.sql ?? null)
+        setError(res.error ?? 'The AI could not answer that question.')
+      }
     },
     onError: (e) => setError(e instanceof Error ? e.message : 'Request failed'),
   })
 
   const run = useMutation({
-    mutationFn: () => runDatabaseQuery(projectId, selected!.id, sql),
-    onMutate: () => {
-      setError(null)
-      setResult(null)
-      setRanSql(null)
-    },
+    // Takes an override so the preview SELECT can be run in the same tick it is put
+    // into the editor — reading `sql` state there would still hold the old value.
+    mutationFn: (override?: string) => runDatabaseQuery(projectId, selected!.id, override ?? sql),
+    onMutate: clearOutput,
     onSuccess: (res) => {
       if (res.ok && res.result) setResult(res.result)
-      else setError(res.error ?? 'Query failed.')
+      else if (res.blocked) {
+        setBlockedSql(sql)
+        setBlocked(res.blocked)
+      } else setError(res.error ?? 'Query failed.')
     },
     onError: (e) => setError(e instanceof Error ? e.message : 'Request failed'),
   })
@@ -807,7 +1325,7 @@ function QueryConsole({
           </div>
           {databases.length > 1 && (
             <div className="ml-auto min-w-[12rem]">
-              <Select value={selected.id} onValueChange={setDatabaseId}>
+              <Select value={selected.id} onValueChange={pickDatabase}>
                 <SelectTrigger className="h-9 rounded-full">
                   <SelectValue />
                 </SelectTrigger>
@@ -877,34 +1395,15 @@ function QueryConsole({
             </div>
           </div>
         ) : (
-          <div className="space-y-2">
-            <Textarea
-              value={sql}
-              onChange={(e) => setSql(e.target.value)}
-              placeholder={`SELECT * FROM users LIMIT 20;`}
-              rows={4}
-              className="resize-y rounded-2xl font-mono text-xs"
-              spellCheck={false}
-              onKeyDown={(e) => {
-                if ((e.metaKey || e.ctrlKey) && e.key === 'Enter' && sql.trim() && !disabled && !busy) {
-                  run.mutate()
-                }
-              }}
-            />
-            <div className="flex items-center gap-2">
-              <Button
-                onClick={() => run.mutate()}
-                disabled={disabled || busy || !sql.trim()}
-                className="gap-1.5 rounded-full active:scale-[0.98]"
-              >
-                {run.isPending ? <Loader2 className="size-4 animate-spin" /> : <Play className="size-4" />}
-                {run.isPending ? 'Running…' : 'Run query'}
-              </Button>
-              <span className="text-[11px] text-muted-foreground">
-                A single read-only statement. ⌘/Ctrl+Enter to run.
-              </span>
-            </div>
-          </div>
+          <SqlWorkbench
+            projectId={projectId}
+            database={selected}
+            sql={sql}
+            onSqlChange={setSql}
+            onRun={() => run.mutate(undefined)}
+            running={run.isPending}
+            disabled={disabled || busy}
+          />
         )}
 
         {ranSql && mode === 'ask' && (
@@ -924,6 +1423,19 @@ function QueryConsole({
         )}
 
         {result && <ResultsTable result={result} />}
+
+        <WriteBlockedDialog
+          blocked={blocked}
+          attempted={blockedSql}
+          databaseLabel={`${selected.tag} · ${selected.database}`}
+          onClose={() => setBlocked(null)}
+          onUsePreview={(previewSql) => {
+            setBlocked(null)
+            setSql(previewSql)
+            setMode('sql')
+            run.mutate(previewSql)
+          }}
+        />
       </CardContent>
     </Card>
   )
@@ -1093,8 +1605,11 @@ export default function DatabasePage() {
           </span>
           <span className="ml-auto flex items-center gap-1.5 rounded-full border border-border/60 bg-muted/50 px-3 py-1.5 text-xs text-muted-foreground">
             <Database className="h-3.5 w-3.5 text-primary/70" />
+            {/* A COUNT, not a claim about reachability — that's each card's live badge
+                to make. This header said "2 connected" while one of the two servers
+                was switched off. */}
             {connected
-              ? `${databases.length} connected`
+              ? `${databases.length} ${databases.length === 1 ? 'database' : 'databases'}`
               : 'none connected'}
           </span>
         </div>
@@ -1104,6 +1619,7 @@ export default function DatabasePage() {
         <ConnectedCard
           key={conn.id}
           conn={conn}
+          projectId={activeProjectId as string}
           kinds={kinds}
           onSync={() => sync.mutate(conn.id)}
           syncing={(running || sync.isPending) && syncingId === conn.id}

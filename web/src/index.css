@@ -132,6 +132,61 @@
   html {
     scroll-behavior: smooth;
   }
+
+  /* ---- Scrollbars -------------------------------------------------------
+     The platform default is a chunky opaque bar on an opaque track. In the
+     sidebar it landed on top of the rail's own border and read as a second
+     divider; in a card it cuts a grey stripe down the edge.
+
+     The thumb is tinted with `currentColor`, NOT a token, and that is the
+     load-bearing part: the same rule then works on every surface without a
+     per-surface override. A dark log panel (`JobLogPanel`, zinc-950) has light
+     text, so it gets a light thumb; the always-dark QC AI Labs page — which
+     renders OUTSIDE the app shell in literal colours and only sets
+     `[color-scheme:dark]` — gets one too, instead of the light-token bar that
+     would give the page away. Hard-coded token colours would be wrong in all
+     three places.
+
+     Firefox takes `scrollbar-width`/`scrollbar-color` (which is why `*` is the
+     selector — neither property inherits). WebKit takes the pseudo-elements,
+     where the visible thumb is narrowed by a transparent border plus
+     `background-clip: content-box`, giving it breathing room from the edge
+     without a track. */
+  /* The color-mix rules are guarded by an @supports WE write, not the one Tailwind
+     generates. Tailwind's auto-fallback for a color-mix value is a bare
+     `currentColor` — a fully opaque thumb, i.e. a solid black bar in the light
+     theme — and being generated from the color-mix declaration it always sorts
+     after any fallback written above it. Putting the modern value inside our own
+     block leaves the quiet token value as the one pre-color-mix browsers land on. */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--muted-foreground) transparent;
+  }
+  @supports (color: color-mix(in oklab, red, red)) {
+    * {
+      scrollbar-color: color-mix(in oklab, currentColor 22%, transparent) transparent;
+    }
+  }
+  ::-webkit-scrollbar {
+    width: 11px;
+    height: 11px;
+  }
+  ::-webkit-scrollbar-track,
+  ::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background-color: color-mix(in oklab, currentColor 22%, transparent);
+    background-clip: content-box;
+    border: 3px solid transparent;
+    border-radius: 9999px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background-color: color-mix(in oklab, currentColor 40%, transparent);
+  }
+  ::-webkit-scrollbar-thumb:active {
+    background-color: color-mix(in oklab, currentColor 55%, transparent);
+  }
   /* Tailwind v4 resets buttons to the default cursor — restore pointer for
      all interactive controls (buttons, links acting as buttons, selects). */
   button:not(:disabled),
@@ -451,6 +506,22 @@
   animation: qc-orb-spark 3.6s ease-in-out infinite;
 }
 
+/* Blinking caret for the Chat page's typewriter greeting. `steps(1, end)` so it snaps
+   on/off like a terminal cursor instead of fading — a fading caret reads as a glow. */
+@keyframes qc-caret {
+  0%,
+  49% {
+    opacity: 1;
+  }
+  50%,
+  99% {
+    opacity: 0;
+  }
+}
+.qc-caret {
+  animation: qc-caret 1.05s steps(1, end) infinite;
+}
+
 /* Moving light sweep for loading skeletons (Prototype builder, etc.). */
 @keyframes qc-shimmer {
   100% {
@@ -512,6 +583,7 @@
     background-image: none;
     color: var(--muted-foreground);
   }
+  .qc-caret,
   .qc-orbit::before,
   .qc-skeleton,
   .qc-pulse,
@@ -601,4 +673,132 @@
 }
 .hljs-strong {
   font-weight: 600;
+}
+
+/* ---------------------------------------------------------------------------
+ * Rich-text notes (components/NoteEditor.tsx + NotesPage note cards).
+ *
+ * ONE shared typography for the editor surface (`.note-editor .tiptap`) and the
+ * rendered card body (`.note-body`), so what you type is what the card shows.
+ * Code blocks inside the editor are highlighted by lowlight, which emits the
+ * same `.hljs-<token>` spans as CodeBlock.tsx — the palette above applies.
+ * ------------------------------------------------------------------------- */
+.note-editor .tiptap,
+.note-body {
+  font-size: 15px;
+  line-height: 1.6;
+}
+.note-editor .tiptap {
+  outline: none;
+  color: var(--foreground);
+}
+.note-body {
+  color: var(--muted-foreground);
+}
+/* Block spacing. The class is DOUBLED to out-specify the per-element `margin: 0` resets
+ * below: `.note-body p` (0,1,1) was beating a plain `.note-body > * + *` (0,1,0), so every
+ * paragraph after the first got margin-top 0 and a multi-paragraph body rendered as one
+ * undifferentiated 24px line rhythm — measured 0px between consecutive <p> in the note
+ * reader, while a <ul> (which has no reset rule) correctly got 11.25px. Same for headings.
+ * `.tiptap.tiptap` does the same for the editor, which had the identical bug. */
+.note-editor .tiptap.tiptap > * + *,
+.note-body.note-body > * + * {
+  margin-top: 0.75em;
+}
+.note-editor .tiptap p,
+.note-body p {
+  margin: 0;
+}
+.note-editor .tiptap h1,
+.note-body h1 {
+  font-size: 1.375rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.25;
+  margin: 0;
+}
+.note-editor .tiptap h2,
+.note-body h2 {
+  font-size: 1.15rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.3;
+  margin: 0;
+}
+.note-editor .tiptap h3,
+.note-body h3 {
+  font-size: 1rem;
+  font-weight: 600;
+  letter-spacing: -0.005em;
+  line-height: 1.35;
+  margin: 0;
+}
+.note-editor .tiptap ul,
+.note-body ul {
+  list-style: disc;
+  padding-left: 1.25rem;
+}
+.note-editor .tiptap ol,
+.note-body ol {
+  list-style: decimal;
+  padding-left: 1.25rem;
+}
+.note-editor .tiptap li,
+.note-body li {
+  margin-top: 0.25em;
+}
+.note-editor .tiptap li p,
+.note-body li p {
+  margin: 0;
+}
+.note-editor .tiptap blockquote,
+.note-body blockquote {
+  border-left: 3px solid var(--border);
+  padding-left: 0.875rem;
+  color: var(--muted-foreground);
+}
+.note-editor .tiptap a,
+.note-body a {
+  color: var(--primary);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.note-editor .tiptap code,
+.note-body code {
+  border-radius: 6px;
+  background: var(--muted);
+  padding: 0.1em 0.35em;
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+}
+.note-editor .tiptap pre,
+.note-body pre {
+  overflow-x: auto;
+  border-radius: 10px;
+  background: #18181b; /* zinc-900 — matches CodeBlock.tsx's zinc-950 surface */
+  padding: 0.875rem 1rem;
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  line-height: 1.55;
+}
+.note-editor .tiptap pre code,
+.note-body pre code {
+  background: transparent;
+  padding: 0;
+  border-radius: 0;
+  font-size: inherit;
+  color: inherit;
+}
+.note-editor .tiptap hr,
+.note-body hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 1.25em 0;
+}
+.note-editor .tiptap .is-editor-empty:first-child::before {
+  content: attr(data-placeholder);
+  float: left;
+  height: 0;
+  pointer-events: none;
+  color: var(--muted-foreground);
 }

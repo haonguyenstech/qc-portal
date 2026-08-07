@@ -17,7 +17,23 @@ import {
 } from '../dbConnect.js'
 import { getDbJob, hasRunningDbJob, listDbJobs, startDbJob } from '../dbJobs.js'
 import { deleteDbMap } from '../dbMap.js'
-import { questionToSql, runReadQuery } from '../dbQuery.js'
+import { pingDatabase, questionToSql, ReadOnlyViolation, runReadQuery } from '../dbQuery.js'
+
+/**
+ * Shape a thrown error for /query and /ask.
+ *
+ * A refusal by the read-only guard is not the same event as "the database timed out",
+ * and the page can only draw it differently if it can TELL them apart — so a
+ * ReadOnlyViolation also travels as a `blocked` object. Everything else stays exactly
+ * the bare `error` string it has always been.
+ */
+function failure(err: unknown, fallback: string): { error: string; blocked?: unknown } {
+  const error = (err as Error)?.message || fallback
+  if (err instanceof ReadOnlyViolation) {
+    return { error, blocked: { kind: err.kind, keyword: err.keyword, preview: err.preview } }
+  }
+  return { error }
+}
 import { CRAWL_SUMMARY_MODELS } from '../claudeExec.js'
 
 // A project can connect several databases, each with a tag ("Backend DB", …).
@@ -81,6 +97,59 @@ databaseRouter.get('/credential', (req, res) => {
   const cred = getDbCredential(row.id)
   if (!cred?.password) return res.status(404).json({ error: 'no password is stored' })
   res.json({ password: cred.password })
+})
+
+/**
+ * GET /api/database/health?databaseId= — is this database reachable right now?
+ *
+ * Answers the question the card's badge asks. Before this the badge was a literal, so
+ * a stopped server, a closed SSH tunnel or a rotated password all still read
+ * "connected" — the one state the engineer needs to be able to trust at a glance.
+ * Always 200: "unreachable" is an answer, not a request failure.
+ */
+databaseRouter.get('/health', async (req, res) => {
+  const project = resolveProject(req)
+  if (!project) return res.status(400).json({ error: 'project not found' })
+  const databaseId = typeof req.query.databaseId === 'string' ? req.query.databaseId : ''
+  const row = getDatabaseRow(databaseId)
+  if (!row || row.projectId !== project.id) return res.status(404).json({ error: 'database not found' })
+  res.json(await pingDatabase(toConfig(row), getDbCredential(row.id)))
+})
+
+/**
+ * GET /api/database/schema?databaseId= — tables + columns for the SQL editor's
+ * autocomplete and schema browser.
+ *
+ * Read live rather than from a stored copy: the schema is only snapshotted into the
+ * Knowledge map at connect/sync time, and suggesting a column that was dropped last
+ * week is worse than a one-second wait. The client caches it for the session and has
+ * an explicit refresh. Column names only — no data ever leaves the database here.
+ */
+databaseRouter.get('/schema', async (req, res) => {
+  const project = resolveProject(req)
+  if (!project) return res.status(400).json({ error: 'project not found' })
+  const databaseId = typeof req.query.databaseId === 'string' ? req.query.databaseId : ''
+  const row = getDatabaseRow(databaseId)
+  if (!row || row.projectId !== project.id) return res.status(404).json({ error: 'database not found' })
+  try {
+    const schema = await inspectDatabase(toConfig(row), getDbCredential(row.id))
+    res.json({
+      tables: schema.tables.map((t) => ({
+        name: t.name,
+        kind: t.kind,
+        columns: t.columns.map((c) => ({
+          name: c.name,
+          type: c.type,
+          key: c.key,
+          nullable: c.nullable,
+        })),
+      })),
+      foreignKeys: schema.foreignKeys,
+    })
+  } catch (err) {
+    // Never fatal: the editor still runs SQL without suggestions.
+    res.status(502).json({ error: (err as Error).message || 'could not read the schema' })
+  }
 })
 
 /**
@@ -220,7 +289,7 @@ databaseRouter.post('/query', async (req, res) => {
     const result = await runReadQuery(toConfig(row), getDbCredential(row.id), sql)
     res.json({ ok: true, result })
   } catch (err) {
-    res.json({ ok: false, error: (err as Error).message || 'query failed' })
+    res.json({ ok: false, ...failure(err, 'query failed') })
   }
 })
 
@@ -242,15 +311,16 @@ databaseRouter.post('/ask', async (req, res) => {
   const config = toConfig(row)
   const cred = getDbCredential(row.id)
   try {
-    const { sql } = await questionToSql({ config, cred, question, model, cwd: project.rootPath })
+    // No cwd: writing SQL from a schema needs no project files (see questionToSql).
+    const { sql } = await questionToSql({ config, cred, question, model })
     try {
       const result = await runReadQuery(config, cred, sql)
       res.json({ ok: true, sql, result })
     } catch (qerr) {
-      res.json({ ok: false, sql, error: (qerr as Error).message || 'the generated query failed to run' })
+      res.json({ ok: false, sql, ...failure(qerr, 'the generated query failed to run') })
     }
   } catch (err) {
-    res.json({ ok: false, error: (err as Error).message || 'could not answer that question' })
+    res.json({ ok: false, ...failure(err, 'could not answer that question') })
   }
 })
 

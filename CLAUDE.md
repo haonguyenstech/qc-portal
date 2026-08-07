@@ -184,8 +184,13 @@ server/src/
   groundingCheck.ts independent post-write audit (anti-hallucination): groundTestcases (cases vs
                     ticket) + groundReport (report verdicts vs documented evidence); auto-revises
                     in place. Cheap (haiku), best-effort, never throws — see section below
+  notesStore.ts     storage primitives for the /notes workspace — ONE JSON document per
+                    project at testing/notes/notes.json (notes + labels), written through a
+                    temp file + rename so a crash can't leave a half-written file; caps
+                    (500 notes / 200-char title / 100 KB body) and a normalize() that
+                    tolerates anything malformed rather than throwing the page away
   routes/           projects, qc, files, skills, mcp, clickup, source, ai, templates,
-                    knowledge, memory, diagrams, prototype, chat, version
+                    knowledge, memory, notes, database, diagrams, prototype, chat, version
 
 web/src/
   App.tsx           two branches: `/ai-labs` renders BARE (no shell — see "QC AI Labs"),
@@ -203,6 +208,8 @@ web/src/
                     RunDetailPage, SkillsPage, McpPage, NotificationsPage, TerminalPage (at /terminal),
                     PrototypePage (at /prototype — see "Prototype page" below),
                     ChatPage (at /chat — see "Chat page" below),
+                    DatabasePage (at /database — see "Database page" below),
+                    NotesPage (at /notes — see "Notes page" below),
                     AiLabsPage + AiLabDetailPage (at /ai-labs and /ai-labs/:id —
                     see "QC AI Labs" below),
                     InstructionsPage (at /instructions — CLAUDE.md + Knowledge + Memory hub),
@@ -224,6 +231,9 @@ web/src/
                     CodeBlock (a fenced code block in rendered markdown: language label,
                     copy button, syntax colours via lib/highlight.ts),
                     OpenFolderButton (reveals a project folder in the OS file explorer),
+                    ThemeToggle (light/dark, fixed top-right beside NotificationBell),
+                    SqlEditor (the /database SQL editor — see that section),
+                    NoteEditor (lazy TipTap rich-text editor for /notes),
                     dialogs (RunPresetsDialog, ManageHintsDialog, TicketPicker, …)
   lib/
     api.ts          typed fetch wrapper — ALL backend calls live here
@@ -245,6 +255,13 @@ web/src/
                     underscores humanized). Shared by the MCP page's functional-test dialog
                     and the Run form's device picker so a device reads the SAME in both.
                     See "Picking the device a mobile run drives" below.
+    sql-complete.ts schema-aware SQL completion for SqlEditor — pure functions
+                    (text + caret + live schema in, a ranked suggestion list out), so the
+                    component above it only handles keys and painting
+    theme.ts        useTheme()/applyTheme()/resolveTheme() — light|dark in localStorage
+                    (`qc.theme`); the pre-paint boot script in web/index.html reads the SAME
+                    key, so keep both in step or the app flashes the wrong theme
+    noteHtml.ts     LOOKS_LIKE_HTML — tells a rich-text note body from a legacy plain one
     utils.ts        cn() (clsx + tailwind-merge)
     useRunStream.ts WebSocket hook for live run events
 ```
@@ -1005,6 +1022,15 @@ does this endpoint validate?").
   transform/opacity only + disabled under `prefers-reduced-motion` (the artwork stays, it just stops).
   `ChatWorkspace` is mounted `key={projectId}` so switching project resets cleanly
   **without setState-in-effect**.
+- **The greeting's second line types itself and cycles** (`GREETING_PHRASES`, `useTypewriter`,
+  `GreetingHeadline`) — the empty state's job is to say what this page can be asked, and the quick
+  chips only cover four categories, so the headline names a few more where the eye already is. It
+  is a chain of `setTimeout`s, not a rAF loop (~18 ticks a second, so a per-frame loop would decide
+  to do nothing on 59 of 60 frames), it starts with the FIRST phrase already complete (typing in
+  from nothing on mount reads as the page still loading), and it lives in its own component so a
+  tick re-renders the heading alone rather than the composer and the chips with it. `aria-label`
+  carries the settled sentence; `prefers-reduced-motion` gets the static headline and no caret
+  (`.qc-caret` in index.css, `steps(1, end)` so it snaps like a terminal cursor).
 - **`@` tags a ticket or its test cases** — "are these cases enough?" only means something next to
   a ticket, and the alternative is pasting a folder path or hoping the model greps for the right one.
   Typing `@` in the composer opens a picker over `GET /api/clickup/crawled` (fetched only once `@` is
@@ -1018,6 +1044,33 @@ does this endpoint validate?").
   mentions to those whose token is still in the text. An unresolvable tag (renamed folder, deleted
   cases) is dropped and reported in a `log` frame — a silent drop reads as the model ignoring the tag.
   Folder guarding is **per path segment**, since a subtask folder legitimately contains `/`.
+  - **`@db/<tag>` tags a connected DATABASE**, which is two questions, not one: STRUCTURE is
+    answered by Reading the `testing/knowledge/db-map-<tag>.md` doc connect/sync already writes,
+    and DATA by curling the portal's **own** `POST /api/database/query` (`databaseMentionLine`,
+    mirroring `totpPromptHint`'s shape). That endpoint is deliberately the same one `/database`
+    uses, so a query the chat model wrote hits every layer of the read-only guard — **never give
+    chat a second path to a driver**; a write comes back refused. Verified: real counts off the
+    live DB matched a direct query, and "delete the soft-deleted rows" was declined outright.
+    The mention carries the database **id**, and `resolveMentions` re-checks `row.projectId`
+    against the chat's project — a chat must not reach another project's database by id
+    (verified: dropped, and reported in a `log` frame rather than silently ignored).
+    Database rows are built and budgeted **separately from the ticket rows** in
+    `mentionOptions`: a project has one or two databases against hundreds of tickets, so one
+    shared 8-row list would push the database off the menu permanently.
+  - **A picked tag renders as a CHIP, painted behind the textarea** (`ComposerPaint` +
+    `paintSegments`) — a `<textarea>` can't hold an element, so a tag used to read as plain
+    text with a spellcheck squiggle through it, indistinguishable from typing. Same overlay
+    `SqlEditor` uses: the paint layer draws the text, the textarea above is `text-transparent`
+    with a visible caret and a translucent selection. **The token stays in the text**, so
+    deleting it is still how you untag — a chip list beside the box would need its own remove
+    control and a second source of truth. Three things are load-bearing: the chip is
+    **layout-neutral** (padding cancelled by equal negative margin, font untouched — any metric
+    change slides the painted glyphs off the real ones and the caret drifts along the line;
+    verified by identical `scrollHeight`), scroll is mirrored with a **`transform`** not
+    `scrollTop` (the paint layer has no scrollbar, so an assigned scrollTop is clamped — the
+    same trap SqlEditor documents), and longest-token-first matching keeps `@X/testcases` from
+    being chipped as `@X` plus loose text. `spellCheck` is off because a squiggle would draw
+    across a chip with no readable word under it.
 - **Width: the column grows past the reference's `max-w-4xl`** (`xl:max-w-5xl 2xl:max-w-[88rem]`) —
   4xl on a 1440px+ screen left the answer in a ribbon between empty gutters. Three pieces make that
   work together, so don't change one alone: the assistant bubble is **`w-fit`** (a one-line answer
@@ -1197,6 +1250,99 @@ does this endpoint validate?").
   jump. Typing-not-sending is the point: "the newest crawled ticket" usually wants a real ticket id
   first. The reference dead-ends once a category is open (no way back to pick another), so Escape and
   an outside click also restore the chips — no extra control on screen.
+
+## Database page (read-only SQL console + Ask AI)
+
+**`/database` (`DatabasePage.tsx`, `routes/database.ts`, `dbConnect.ts` + `dbQuery.ts`)** — connect a
+project's databases (Postgres / MySQL / SQL Server), browse the schema, run SELECTs, or ask a question
+in English. **Everything about it is read-only** — see "The Database page must never be able to write"
+under Critical constraints; that section is the contract, this one is the page.
+
+- **The connected badge is a live `SELECT 1`** (`pingDatabase` → `GET /api/database/health`, per card).
+  It used to be the literal word "connected" on every registered row, so a stopped server, a closed
+  SSH tunnel and a rotated password all still read green — the one badge on the page that has to be
+  believable. Three states, because "checking" is not "up": showing green while the first probe is in
+  flight recreates the original bug in miniature. The failure keeps its reason in `title`.
+- **`new mssql.ConnectionPool(...)`, NEVER `mssql.connect(...)`** — in `dbQuery.ts` *and*
+  `dbConnect.ts`. The global helper honours its config only on the FIRST call and hands every later
+  concurrent caller that first pool, which a project with two SQL Server databases reaches just by
+  touching both at once. Verified: pinging two databases concurrently made the one on port 1434 report
+  a connect failure for 1433. The dangerous case is the one that doesn't error — a query meant for
+  database B answered from database A, on a page whose entire purpose is "what's in the data?".
+  `pool.close()` had the same shape of bug (it closed the shared global pool mid-query elsewhere).
+- **The SQL editor is a `<textarea>` with three agreeing layers** (`SqlEditor.tsx`): gutter | coloured
+  `<pre>` (aria-hidden) | transparent-text textarea with the real caret. A code-editor dependency is
+  ~200 KB for one panel, and the repo already owns both halves (`lib/highlight.ts`, and the keyboard-
+  menu pattern from the chat composer's `@` picker); the textarea keeps native undo, IME and
+  accessibility. The layers share font, size, line-height, padding and `whitespace-pre`, and scroll is
+  mirrored — any metric change slides the painted glyphs off the real ones. **No wrapping**, or the
+  gutter can't line up (one logical line becomes N visual rows). The chat composer's `ComposerPaint`
+  is the same overlay trick; both document the `transform`-not-`scrollTop` trap.
+- **Completion comes from the LIVE schema** (`GET /api/database/schema`, cached per database per
+  session with an explicit refresh), because nobody remembers whether the column is `CreatedAt`,
+  `CreatedAtUtc` or `created_at`. `lib/sql-complete.ts` is pure functions so it can be exercised
+  without mounting an editor. A schema that fails to load costs suggestions, **never** the ability to
+  run a query — treat `tables` as possibly empty rather than gating on it. Column names only; no data
+  leaves the database on that route.
+- **A refusal is a dialog, not the inline red strip** — `ReadOnlyViolation` carries a `blocked`
+  `{kind, keyword?, preview?}` to the client so `WriteBlockedDialog` can say what was detected and
+  that nothing was sent. **Confirming runs nothing**; the only real action is running the AI's SELECT
+  preview of the rows the refused change would have hit.
+- **Ask AI runs in a NEUTRAL cwd with the tools taken away.** Generating SQL is schema + question in,
+  one SELECT out — it needs no project files, and running it in the project folder loaded that
+  project's CLAUDE.md, memory and skills into every question ($0.63 vs $0.36 on the same question).
+  `NO_TOOLS` is named in `--disallowedTools` for the same reason the Prototype builder does it: the
+  page's premise is that the AI can't write anything, and it was being handed Bash/Write/Edit in the
+  repo. The budget is **sized from the prompt** (`budgetForPrompt`) because the schema IS the prompt
+  and grows with the database — a 158-table SQL Server came to 78 KB, and the old flat $0.25 cap fires
+  AFTER the turn, so a correct query was written, paid for and then thrown away as
+  `error_max_budget_usd`. `salvageClaudeJson` (claudeExec.ts) recovers exactly that answer.
+- **Result export is fully-quoted RFC-4180 CSV** (`toCsv`) — always quoting is what keeps an address,
+  a note or a JSON blob from silently corrupting the file. SQL history is per project **and** per
+  database (`qc.databaseSqlHistory.*`, 25 entries); history from another DB is noise.
+
+## Notes page (a scratchpad that lives with the project)
+
+**`/notes` (`NotesPage.tsx`, `NoteEditor.tsx`, `routes/notes.ts`, `notesStore.ts`)** — Keep-style
+cards for the things that aren't Knowledge or Memory: a checklist for today, a scratch reproduction,
+a reminder before the next release. Knowledge/Memory are read by every AI run and are worth writing
+carefully; **notes are not injected into any prompt**, which is exactly why the page can be casual.
+
+- **One JSON document per project** at `testing/notes/notes.json` (notes + labels), written temp-file
+  + rename so a crash can't leave a half-written file. `normalize()` tolerates anything malformed
+  rather than throwing the page away, and the caps (500 notes / 200-char title / 100 KB body) are
+  enforced in the store, not the UI. Routes: `GET /api/notes`, `POST /`, `PATCH /:id`, `DELETE /:id`,
+  plus `POST`/`PATCH`/`DELETE /labels…` and `DELETE /trash` — which **must stay above `DELETE /:id`**,
+  or a trash-empty is read as deleting a note with the id `trash`.
+- **Archive and trash are flags, not deletions** (`archived` / `trashed`), so the sidebar's Archive
+  and Trash views are filters over one list and a restore is a `PATCH`. Emptying the trash is the
+  only destructive action, and it's behind a confirm dialog.
+- **The editor is TipTap, lazily imported** — it plus lowlight is heavy and only the note dialog
+  needs it, so `NoteEditor` is a `lazy()` behind a `Suspense`. Bodies are HTML; `lib/noteHtml.ts`
+  `LOOKS_LIKE_HTML` tells a rich-text body from a legacy plain-text one so old notes keep rendering.
+- **Editor and card share ONE typography block** in `index.css` (`.note-editor .tiptap` + `.note-body`),
+  so what you type is what the card shows. The block-spacing selectors are deliberately **doubled**
+  (`.note-body.note-body > * + *`) to out-specify the per-element `margin: 0` resets beneath them —
+  a plain `>` selector lost on specificity and every paragraph after the first rendered with no gap
+  (measured 0px between consecutive `<p>`, while `<ul>`, which has no reset, correctly got 11.25px).
+
+## Shell chrome — theme, page search, and the app mark
+
+- **Light/dark is a real toggle** (`components/ThemeToggle.tsx` + `lib/theme.ts`), stored in
+  localStorage as `qc.theme` and falling back to the OS setting until the engineer picks one. The
+  class goes on `<html>` (Tailwind v4's dark variant is `.dark *`) and is applied by an **inline boot
+  script in `web/index.html` before first paint** — without it the app renders light and snaps to dark
+  a frame later. That script and `theme.ts` read the same key: change one, change the other. The hook
+  seeds its state by reading the class off the DOM, so mounting can't flash the wrong theme.
+- **The sidebar has a type-to-filter** (`NavFilter`, ⌘/Ctrl+K; ⌘/Ctrl+B collapses the rail) matching
+  on the page label **and** its group name, so "testing" finds the whole Testing group. Both shortcuts
+  are skipped while typing in a field so they can't hijack a page's own input, and Enter opens the
+  first match. Collapsed, the input is replaced by a button that expands the rail and focuses it.
+- **`AppLogo` is a solid with negative space** — a scalloped certification seal with the check knocked
+  out through a `<mask>`, not a lucide-weight line drawing (a line icon reads as one item borrowed
+  from an icon set, and hairlines dissolve at 16px). The mask id comes from `useId` because two can
+  legitimately mount at once. **Its geometry is duplicated in `web/public/favicon.svg`** (plus the PNG
+  fallback and the apple-touch icon) — change one, change all of them.
 
 ## QC AI Labs (curated shelf of AI tools)
 
@@ -1401,6 +1547,17 @@ holds the actionable recipe; `web/src/pages/McpPage.tsx` is the canonical implem
   layer 1 is undone; (3) row cap + statement timeout + password scrubbed from errors. Both the
   SQL editor and Ask AI funnel through `runReadQuery`, which re-validates — never add a path
   that reaches a driver without it.
+  **A refusal is a `ReadOnlyViolation`, not a bare Error**, so `/query` and `/ask` can answer
+  with a `blocked: {kind, keyword?, preview?}` alongside `error` and `DatabasePage` can draw
+  `WriteBlockedDialog` instead of the inline red strip every other failure uses — "this would
+  modify data" must not read as "the connection dropped, try again". A statement STARTING with
+  a write verb reports `write-keyword` with that verb named, not the generic `not-select`.
+  Ask AI refuses at the QUESTION (`write-intent`): the prompt's `REFUSE_WRITE:` / `PREVIEW:`
+  protocol makes the model decline to draft the write and instead offer a SELECT showing the
+  rows it would have hit — that preview goes through `assertReadOnly` like anything else and is
+  offered to the user, never auto-run. **Confirming the dialog runs nothing**: there is no write
+  path to confirm into, and adding one would undo the whole section above. A question *about*
+  changed data ("how many were deleted last week?") is a normal SELECT — verified not to trip it.
 - **Headless runs use `--permission-mode bypassPermissions`** so they never block on a prompt; the
   `qc-testing` skill itself forbids final mutating actions on shared environments. Don't weaken that.
 - **Cross-platform (Win + Mac).** Use `cross-spawn`, `path.join`; never string-concat paths into a

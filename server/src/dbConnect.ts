@@ -295,7 +295,12 @@ async function inspectPostgres(config: DbConfig, cred?: DbCredential): Promise<D
 
 async function inspectSqlServer(config: DbConfig, cred?: DbCredential): Promise<DbSchema> {
   const mssql = (await import('mssql')).default
-  const pool = await mssql.connect({
+  // `new ConnectionPool`, NEVER the global `mssql.connect()`: that helper honours the
+  // config only on its FIRST call and hands every later concurrent caller the first
+  // pool, so introspecting two SQL Server databases at once would read one of them
+  // twice — and write the WRONG schema into the other's Knowledge map. See the long
+  // note in dbQuery.ts, where the same bug was observed and reproduced.
+  const pool = new mssql.ConnectionPool({
     server: config.host,
     port: config.port || 1433,
     user: config.username,
@@ -304,6 +309,7 @@ async function inspectSqlServer(config: DbConfig, cred?: DbCredential): Promise<
     connectionTimeout: CONNECT_TIMEOUT_MS,
     options: { encrypt: config.ssl, trustServerCertificate: true },
   })
+  await pool.connect()
   try {
     const ver = await pool.request().query('SELECT @@VERSION AS v')
     const serverVersion = str(ver.recordset[0]?.v).split('\n')[0] || 'SQL Server'

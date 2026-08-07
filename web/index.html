@@ -2,7 +2,12 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
+    <!-- SVG first (it carries the light/dark flip); the PNG is the fallback for
+         browsers that don't take an SVG icon, and apple-touch-icon is what iOS /
+         "add to dock" uses. All three are the same mark as <AppLogo> in App.tsx. -->
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="alternate icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>QC Portal — Acceptance testing</title>
     <meta
@@ -15,6 +20,19 @@
       href="https://fonts.googleapis.com/css2?family=Google+Sans+Code:ital,wght@0,300..800;1,300..800&family=Google+Sans+Flex:opsz,slnt,wdth,wght,ROND@8..144,-10..0,25..150,300..700,0..100&display=swap"
       rel="stylesheet"
     />
+    <!-- Apply the stored theme BEFORE first paint, or the app renders light and snaps to
+         dark a frame later. Keep the key in step with web/src/lib/theme.ts. -->
+    <script>
+      ;(function () {
+        try {
+          var t = localStorage.getItem('qc.theme')
+          if (t !== 'light' && t !== 'dark')
+            t = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+          document.documentElement.classList.toggle('dark', t === 'dark')
+          document.documentElement.style.colorScheme = t
+        } catch (e) {}
+      })()
+    </script>
   </head>
   <body>
     <div id="root"></div>

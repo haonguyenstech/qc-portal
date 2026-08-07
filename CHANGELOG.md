@@ -3,6 +3,67 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.11.14 — 2026-08-07
+
+**A real SQL console on the Database page, a Notes scratchpad, dark mode, and a sidebar you can search**
+
+### Added
+
+- **The Database page now has a proper SQL editor.** Line numbers, syntax colours, and — the part
+  that saves the round trips — **completion from your database's own schema**: start typing a table
+  or column and the real names are offered, so you no longer have to remember whether it's
+  `CreatedAt`, `CreatedAtUtc` or `created_at`. There's a schema browser beside it (click a table to
+  preview its first 100 rows), ⌘/Ctrl+Enter to run, a per-database history of your recent queries,
+  and **Download CSV** for a result — properly quoted, so an address or a note with a comma in it
+  doesn't corrupt the file.
+- **A Notes page** (Tools → Note). Keep-style cards for the things that aren't project Knowledge or
+  Memory: a checklist for today, a scratch reproduction, a reminder before the next release. Rich
+  text (headings, lists, links, quotes, code blocks), colour labels you can rename, search, archive,
+  and a trash you can restore from. Notes are saved with the project under `testing/notes/` and are
+  **not** fed to the AI — that's the point of having somewhere casual to write.
+- **Dark mode.** A sun/moon toggle at the top right, remembered per browser and starting from your
+  OS setting. It's applied before the first paint, so opening the portal in dark mode no longer
+  flashes white for a frame.
+- **Search the sidebar with ⌘K (Ctrl+K).** Eighteen pages across five groups is more than a glance
+  resolves, so type part of a page name — or a group name like "testing" — and hit Enter to go
+  there. ⌘B (Ctrl+B) collapses and expands the rail, the active page scrolls itself into view, and
+  the nav fades at whichever edge still has links past it.
+- **Tag a connected database in Chat with `@db/<tag>`.** The answer comes from your real data: the
+  model reads the database's saved table map for structure, and runs read-only SELECTs through the
+  portal for the numbers. It goes through exactly the same protection the Database page uses, so a
+  question that would change data comes back refused, and a chat can't reach another project's
+  database.
+- **Tagged tickets now look tagged.** An `@`-mention in the chat composer renders as a chip instead
+  of plain underlined text — deleting the chip is still just deleting the text.
+- **The chat greeting types itself out** and cycles through a few of the things you can ask, so the
+  empty page suggests more than the four quick-prompt categories below it.
+- **A new app icon**, in the browser tab and on the sidebar: a certification seal with a check cut
+  out of it, with a proper PNG fallback and an iOS/dock icon.
+
+### Fixed
+
+- **A "connected" database badge now means the database actually answers.** It used to be a fixed
+  label on every registered database, so a stopped server, a closed SSH tunnel or a rotated password
+  all still read green. Each card now runs a real check and shows checking / connected /
+  unreachable — with the reason on hover when it fails.
+- **Two SQL Server databases could answer each other's questions.** With more than one SQL Server
+  connection in a project, a query meant for one could be run against the other and come back
+  looking perfectly normal — the worst possible failure on a page whose entire job is telling you
+  what's in the data. Each connection now gets its own pool. (Confirmed first as a stranger error:
+  a database on port 1434 reporting a connection failure for port 1433.)
+- **"The AI could not generate a query" on a large database.** On a 158-table database the schema
+  alone made the question expensive enough to hit a fixed spending cap — which is checked *after*
+  the work is done, so a perfectly good query was written and then thrown away. The budget now
+  scales with the size of the schema, and an answer that arrives alongside such a failure is used
+  rather than discarded. Asking a question also no longer loads the project's instructions and
+  skills it doesn't need, which made it ~40% cheaper and more focused, and the AI writing that
+  query can no longer touch files in your repo at all.
+- **A refused query no longer looks like a broken connection.** Typing a `DELETE` — or asking the AI
+  to remove something — now stops with a clear dialog naming what it found and saying nothing was
+  sent, instead of one red line that reads like "try again". When the AI declines a change it offers
+  a SELECT showing the rows that change *would* have hit, which you can run; confirming the dialog
+  never writes anything, because there is no write path here to confirm into.
+
 ## 0.11.13 — 2026-08-07
 
 **Chat answers as well as the Terminal does, and you can walk away from one while it's still writing**

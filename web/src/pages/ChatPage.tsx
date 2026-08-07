@@ -7,7 +7,7 @@ import type {
 } from 'react'
 import { createPortal } from 'react-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { NavLink } from 'react-router-dom'
+import { NavLink, useNavigate } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
 import type { Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -21,6 +21,7 @@ import {
   ClipboardList,
   Compass,
   Copy,
+  Database,
   Download,
   FileSearch,
   FileText,
@@ -31,6 +32,7 @@ import {
   Loader2,
   MessageSquareDashed,
   MoreHorizontal,
+  NotebookPen,
   Paperclip,
   PenLine,
   Plus,
@@ -75,8 +77,10 @@ import { convertFileToMarkdown, KNOWLEDGE_ACCEPT, MAX_FILE_BYTES } from '@/lib/d
 import { useProjects } from '@/lib/project-context'
 import {
   chatImageUrl,
+  createWorkspaceNote,
   deleteChat,
   getChat,
+  getDatabases,
   listChats,
   listCrawledTickets,
   pinChat,
@@ -92,6 +96,7 @@ import {
   type ChatSummary,
   type ChatToolCall,
   type ChatTools,
+  type DatabaseConn,
 } from '@/lib/api'
 
 /**
@@ -233,8 +238,11 @@ const MAX_IMAGE_BYTES = 8 * 1024 * 1024
  */
 interface StagedMention {
   token: string
-  kind: 'ticket' | 'testcase'
-  folder: string
+  kind: 'ticket' | 'testcase' | 'database'
+  /** Tickets/test cases only — the folder under testing/tickets/. */
+  folder?: string
+  /** Databases only — the connected database's id (re-checked against the project). */
+  databaseId?: string
 }
 
 /** One row of the `@` menu. */
@@ -256,15 +264,48 @@ function activeMention(text: string, caret: number): { start: number; query: str
   return { start: caret - m[1].length - 1, query: m[1] }
 }
 
-/** Turn `@`-able artifacts into menu rows, filtered by what's been typed. */
-function mentionOptions(tickets: CrawledTicket[], query: string): MentionOption[] {
+/**
+ * `@db/<tag>` — the token for a connected database. Spaces would end the `@…` token, so
+ * the tag is slugged; it still has to READ as the tag ("Mezher Dev DB" → `@db/mezher-dev-db`).
+ */
+function dbToken(tag: string): string {
+  const slug = tag.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
+  return `@db/${slug || 'database'}`
+}
+
+/**
+ * Turn `@`-able artifacts into menu rows, filtered by what's been typed.
+ *
+ * Databases come FIRST and are counted separately from the ticket budget: a project has
+ * one or two of them against hundreds of tickets, so sharing one 8-row list would push
+ * the database off the menu permanently — it would exist and be unreachable.
+ */
+function mentionOptions(
+  tickets: CrawledTicket[],
+  databases: DatabaseConn[],
+  query: string,
+): MentionOption[] {
   const q = query.trim().toLowerCase()
   const out: MentionOption[] = []
+  for (const d of databases) {
+    const token = dbToken(d.tag)
+    // Matched on the token AND the human names, so "@mez", "@db", and the database's
+    // own name all find it.
+    if (q && !`${token} ${d.tag} ${d.database} ${d.kind}`.toLowerCase().includes(q)) continue
+    out.push({
+      token,
+      kind: 'database',
+      databaseId: d.id,
+      label: token.slice(1),
+      detail: `${d.tag} · ${d.database}${d.tableCount ? ` · ${d.tableCount} tables` : ''}`,
+    })
+  }
+  const ticketRows: MentionOption[] = []
   for (const t of tickets) {
     const id = t.displayId?.trim() || t.name.split('/').pop() || t.name
     const haystack = `${id} ${t.title ?? ''} ${t.name}`.toLowerCase()
     if (q && !haystack.includes(q)) continue
-    out.push({
+    ticketRows.push({
       token: `@${id}`,
       kind: 'ticket',
       folder: t.name,
@@ -272,7 +313,7 @@ function mentionOptions(tickets: CrawledTicket[], query: string): MentionOption[
       detail: t.title?.trim() || t.name,
     })
     if (t.testcaseVersions > 0) {
-      out.push({
+      ticketRows.push({
         token: `@${id}/testcases`,
         kind: 'testcase',
         folder: t.name,
@@ -280,10 +321,85 @@ function mentionOptions(tickets: CrawledTicket[], query: string): MentionOption[
         detail: `Latest of ${t.testcaseVersions} test-case version${t.testcaseVersions === 1 ? '' : 's'}`,
       })
     }
-    if (out.length >= MAX_MENTION_ROWS * 2) break
+    if (ticketRows.length >= MAX_MENTION_ROWS * 2) break
   }
-  return out.slice(0, MAX_MENTION_ROWS)
+  return [...out, ...ticketRows].slice(0, MAX_MENTION_ROWS + out.length)
 }
+
+/**
+ * Split the composer text around the staged `@` tokens, so each can be painted as a chip.
+ *
+ * Longest token first: `@ABC-123/testcases` must win over `@ABC-123`, which is a prefix of
+ * it — the other order would chip the ticket id and leave `/testcases` as loose text.
+ */
+function paintSegments(text: string, tokens: string[]): { text: string; tag: boolean }[] {
+  if (!tokens.length) return [{ text, tag: false }]
+  const alt = [...new Set(tokens)]
+    .sort((a, b) => b.length - a.length)
+    .map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .join('|')
+  const out: { text: string; tag: boolean }[] = []
+  let last = 0
+  for (const m of text.matchAll(new RegExp(`(?:${alt})`, 'g'))) {
+    const i = m.index ?? 0
+    if (i > last) out.push({ text: text.slice(last, i), tag: false })
+    out.push({ text: m[0], tag: true })
+    last = i + m[0].length
+  }
+  if (last < text.length) out.push({ text: text.slice(last), tag: false })
+  return out
+}
+
+/**
+ * The chips behind the composer.
+ *
+ * A `<textarea>` cannot contain an element, so a tagged `@db/mezher-dev-db` rendered as
+ * plain text (complete with a spellcheck squiggle) — indistinguishable from something the
+ * engineer typed by hand. The fix is the overlay `SqlEditor` already uses: this layer
+ * paints the text, the textarea above it is transparent except for its caret. **The token
+ * therefore stays in the text**, which is what keeps deleting it the way to untag (see
+ * StagedMention) — a chip list beside the box would have needed its own remove affordance
+ * and a second source of truth.
+ *
+ * The chip is layout-NEUTRAL and must stay that way: padding is cancelled by an equal
+ * negative margin, and the font is untouched (no weight or tracking change). Anything that
+ * alters the text's metrics moves the painted glyphs off the real ones, and the caret
+ * drifts further from the text with every character on the line.
+ */
+const ComposerPaint = memo(function ComposerPaint({
+  text,
+  tokens,
+  paintRef,
+}: {
+  text: string
+  tokens: string[]
+  paintRef: React.RefObject<HTMLDivElement | null>
+}) {
+  const segments = useMemo(() => paintSegments(text, tokens), [text, tokens])
+  return (
+    <div aria-hidden className="pointer-events-none absolute inset-0 overflow-hidden">
+      <div
+        ref={paintRef}
+        className="whitespace-pre-wrap break-words p-4 text-sm text-foreground"
+      >
+        {segments.map((s, i) =>
+          s.tag ? (
+            <span
+              key={i}
+              className="mx-[-3px] rounded-md bg-sky-500/15 px-[3px] text-sky-700 dark:text-sky-300"
+            >
+              {s.text}
+            </span>
+          ) : (
+            <span key={i}>{s.text}</span>
+          ),
+        )}
+        {/* Forces a final line box so a trailing newline scrolls like it does in the textarea. */}
+        {'​'}
+      </div>
+    </div>
+  )
+})
 
 /** An image staged for the next message: a data URL to preview, base64 bytes to send. */
 interface StagedImage {
@@ -570,6 +686,94 @@ function greeting(): string {
   if (h < 12) return 'Good Morning'
   if (h < 18) return 'Good Afternoon'
   return 'Good Evening'
+}
+
+/**
+ * The greeting's second line types itself out and swaps every few seconds.
+ *
+ * It isn't decoration: the empty state's job is to say what this page can be asked, and the
+ * quick chips below only cover four categories. Cycling the headline names a few more kinds
+ * of question in the place the eye already is. Keep them short — the line re-centres as the
+ * text grows, and a long phrase would wrap and shove the chips down mid-animation.
+ */
+const GREETING_PHRASES = [
+  'Assist You Today?',
+  'Help With Your Tickets?',
+  'Speed Up Your Testing?',
+  'Explain This Project?',
+  'Review Your Test Cases?',
+]
+
+const TYPE_MS = 55 // per character while writing
+const ERASE_MS = 28 // faster going back — re-reading the same word is dead time
+const HOLD_MS = 2200 // the phrase sits still long enough to actually be read
+const BLANK_MS = 350 // a beat on the empty line before the next one starts
+
+/**
+ * One character per tick, driven by a chain of `setTimeout`s rather than a `requestAnimation
+ * Frame` loop (`useSmoothReveal`'s shape): this advances ~18 times a second at most, so a
+ * per-frame loop would spend 59 of every 60 frames deciding to do nothing.
+ *
+ * It starts on the FIRST phrase fully written, so the very first paint is the finished
+ * sentence and the animation begins by erasing it — a headline that types in from nothing on
+ * mount reads as the page still loading.
+ */
+function useTypewriter(phrases: string[]): { text: string; caret: boolean } {
+  const [reduced] = useState(
+    () => !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches,
+  )
+  const [i, setI] = useState(0)
+  const [len, setLen] = useState(phrases[0].length)
+  const [erasing, setErasing] = useState(false)
+
+  useEffect(() => {
+    if (reduced) return
+    const word = phrases[i % phrases.length]
+    const atEnd = !erasing && len >= word.length
+    const atStart = erasing && len <= 0
+    const delay = atEnd ? HOLD_MS : atStart ? BLANK_MS : erasing ? ERASE_MS : TYPE_MS
+    const id = setTimeout(() => {
+      if (atEnd) setErasing(true)
+      else if (atStart) {
+        setErasing(false)
+        setI((v) => (v + 1) % phrases.length)
+      } else setLen((l) => l + (erasing ? -1 : 1))
+    }, delay)
+    return () => clearTimeout(id)
+  }, [phrases, i, len, erasing, reduced])
+
+  // Someone who asked for less motion gets the headline, not the typing.
+  if (reduced) return { text: phrases[0], caret: false }
+  return { text: phrases[i % phrases.length].slice(0, Math.max(0, len)), caret: true }
+}
+
+/**
+ * Its own component so the typewriter's ~18 ticks a second re-render this heading ALONE —
+ * hanging the hook on the page would re-render the composer and the quick prompts with it.
+ * `aria-label` carries the settled sentence, so a screen reader reads it once instead of
+ * announcing a half-typed word.
+ */
+function GreetingHeadline({ projectName }: { projectName?: string | null }) {
+  const { text, caret } = useTypewriter(GREETING_PHRASES)
+  return (
+    <h1
+      aria-label={`${greeting()}${projectName ? `, ${projectName}` : ''}. How can I ${GREETING_PHRASES[0]}`}
+      className="text-center text-2xl font-medium leading-normal lg:text-4xl"
+    >
+      <span aria-hidden>
+        {greeting()}
+        {projectName ? `, ${projectName}` : ''} <br /> How Can I{' '}
+        <span className="bg-gradient-to-r from-purple-400 to-indigo-300 bg-clip-text text-transparent">
+          {text}
+        </span>
+        {caret && (
+          <span className="qc-caret ms-0.5 text-indigo-300/80" aria-hidden>
+            ▍
+          </span>
+        )}
+      </span>
+    </h1>
+  )
 }
 
 /** Today / Yesterday / 7 Days Ago / Older — the reference's history grouping. */
@@ -1708,6 +1912,210 @@ function SuggestingChips() {
   )
 }
 
+/** A note's title from the question that produced the answer — first line, one sentence-ish. */
+function noteTitleFrom(question: string | undefined, answer: string): string {
+  const source = (question ?? '').trim() || answer.trim()
+  const firstLine = source
+    .split('\n')
+    .map((line) => line.replace(/^#+\s*/, '').trim())
+    .find((line) => line.length > 0)
+  if (!firstLine) return 'Chat answer'
+  return firstLine.length > 80 ? `${firstLine.slice(0, 79).trimEnd()}…` : firstLine
+}
+
+/**
+ * Save this answer to `/notes` — the one action an answer worth keeping needs that Copy can't
+ * do (a copied answer lives in a clipboard nobody can search a week later). It writes a
+ * workspace note through the SAME `POST /api/notes` the Notes page uses, so a note created
+ * here is an ordinary note: labelable, editable, trashable there. The question rides along as
+ * the title (and a quoted first line), because an answer with no question above it is a
+ * paragraph nobody can place.
+ */
+function SaveToNoteButton({
+  answer,
+  question,
+  projectId,
+}: {
+  answer: string
+  question?: string
+  projectId: string
+}) {
+  const navigate = useNavigate()
+  const queryClient = useQueryClient()
+  const [saved, setSaved] = useState(false)
+  const save = useMutation({
+    mutationFn: () =>
+      createWorkspaceNote(
+        {
+          title: noteTitleFrom(question, answer),
+          body: question?.trim() ? `> ${question.trim().replace(/\n/g, '\n> ')}\n\n${answer}` : answer,
+        },
+        projectId,
+      ),
+    onSuccess: () => {
+      setSaved(true)
+      queryClient.invalidateQueries({ queryKey: ['workspace-notes', projectId] })
+      toast.success('Saved to Notes', {
+        action: { label: 'Open Notes', onClick: () => navigate('/notes') },
+      })
+    },
+    onError: (err: unknown) =>
+      toast.error(err instanceof Error ? err.message : 'Could not save the note'),
+  })
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          type="button"
+          disabled={save.isPending}
+          onClick={() => save.mutate()}
+          className="flex size-9 items-center justify-center rounded-full transition-colors hover:bg-accent hover:text-accent-foreground disabled:opacity-60"
+        >
+          {save.isPending ? (
+            <Loader2 className="size-4 animate-spin" />
+          ) : saved ? (
+            <Check className="size-4 text-emerald-500" />
+          ) : (
+            <NotebookPen className="size-4" />
+          )}
+        </button>
+      </TooltipTrigger>
+      <TooltipContent>{saved ? 'Saved to Notes' : 'Save this answer to Notes'}</TooltipContent>
+    </Tooltip>
+  )
+}
+
+/** A highlighted passage and where to float the button. Viewport coordinates, because the
+ *  bubble is `position: fixed` — the transcript scroller is not a usable offset parent. */
+interface SelectionAnchor {
+  text: string
+  /** Vertical middle of the selection's last line. */
+  top: number
+  /** Where the selection ENDS — the bubble sits just past it, where the cursor was released. */
+  left: number
+}
+
+/**
+ * The passage currently highlighted inside an ANSWER, or null.
+ *
+ * Reads on pointer/key RELEASE rather than on `selectionchange`: the latter fires on every
+ * character as a drag grows, so the bubble would chase the cursor across the paragraph instead
+ * of appearing once, where the drag ended.
+ */
+function useAnswerSelection(scrollerRef: React.RefObject<HTMLDivElement | null>) {
+  const [anchor, setAnchor] = useState<SelectionAnchor | null>(null)
+  // The bubble itself, so a click on it isn't read as "clicked away".
+  const bubbleRef = useRef<HTMLDivElement | null>(null)
+  useEffect(() => {
+    const read = () => {
+      const sel = window.getSelection()
+      const scroller = scrollerRef.current
+      if (!sel || sel.isCollapsed || sel.rangeCount === 0 || !scroller) return setAnchor(null)
+      const text = sel.toString().trim()
+      if (!text) return setAnchor(null)
+      const range = sel.getRangeAt(0)
+      const host = range.commonAncestorContainer
+      const el = host.nodeType === Node.ELEMENT_NODE ? (host as Element) : host.parentElement
+      if (!el || !scroller.contains(el) || !el.closest('[data-answer]')) return setAnchor(null)
+      // The LAST client rect, not the bounding box: over several lines the bounding box's
+      // right edge is the widest line's, which can be nowhere near where the drag stopped.
+      const rects = range.getClientRects()
+      const rect = rects[rects.length - 1] ?? range.getBoundingClientRect()
+      if (!rect || (rect.width === 0 && rect.height === 0)) return setAnchor(null)
+      setAnchor({ text, top: rect.top + rect.height / 2, left: rect.right })
+    }
+    // A tick late on purpose — on `mouseup` the selection isn't final yet.
+    const onRelease = () => window.setTimeout(read, 0)
+    const onDown = (e: MouseEvent) => {
+      if (bubbleRef.current?.contains(e.target as Node)) return
+      setAnchor(null)
+    }
+    document.addEventListener('mouseup', onRelease)
+    document.addEventListener('keyup', onRelease)
+    document.addEventListener('mousedown', onDown)
+    // Re-anchor rather than hide: the selection stays highlighted while the transcript scrolls
+    // (which it does on its own while an answer streams), and a button that vanishes then reads
+    // as broken. Capture, because the scroller's own scroll event doesn't reach document.
+    document.addEventListener('scroll', read, true)
+    window.addEventListener('resize', read)
+    return () => {
+      document.removeEventListener('mouseup', onRelease)
+      document.removeEventListener('keyup', onRelease)
+      document.removeEventListener('mousedown', onDown)
+      document.removeEventListener('scroll', read, true)
+      window.removeEventListener('resize', read)
+    }
+  }, [scrollerRef])
+  return { anchor, setAnchor, bubbleRef }
+}
+
+/**
+ * Highlight a passage in an answer and save just that — floated beside the selection.
+ *
+ * The footer button saves the WHOLE answer, which is the wrong unit most of the time: the part
+ * worth keeping is usually one paragraph, one command, one field list out of a long reply, and
+ * the alternative is saving the lot and editing it down on `/notes`.
+ */
+function SelectionNoteBubble({
+  scrollerRef,
+  projectId,
+}: {
+  scrollerRef: React.RefObject<HTMLDivElement | null>
+  projectId: string
+}) {
+  const { anchor, setAnchor, bubbleRef } = useAnswerSelection(scrollerRef)
+  const queryClient = useQueryClient()
+  const save = useMutation({
+    mutationFn: (text: string) =>
+      createWorkspaceNote({ title: noteTitleFrom(undefined, text), body: text }, projectId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['workspace-notes', projectId] })
+      toast.success('Selection saved to Notes')
+      // Drop the highlight with the bubble: leaving it up over text that's already saved
+      // invites a second identical note.
+      window.getSelection()?.removeAllRanges()
+      setAnchor(null)
+    },
+    onError: (err: unknown) =>
+      toast.error(err instanceof Error ? err.message : 'Could not save the note'),
+  })
+  if (!anchor) return null
+  // Clamped so a selection ending at the right edge of the window doesn't push the bubble
+  // off screen (and widen the document doing it).
+  const left = Math.min(anchor.left + 8, window.innerWidth - 44)
+  return createPortal(
+    <div
+      ref={bubbleRef}
+      // The selection must survive the click: a mousedown anywhere collapses it, and the
+      // handler reads `anchor.text` — but the browser would also have cleared the highlight
+      // under the user before the toast lands.
+      onMouseDown={(e) => e.preventDefault()}
+      style={{ top: anchor.top, left }}
+      className="fixed z-50 -translate-y-1/2"
+    >
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            type="button"
+            disabled={save.isPending}
+            onClick={() => save.mutate(anchor.text)}
+            aria-label="Save the selected text to Notes"
+            className="flex size-8 items-center justify-center rounded-full border border-border/60 bg-popover text-muted-foreground shadow-sm transition-colors hover:border-border hover:text-foreground disabled:opacity-60"
+          >
+            {save.isPending ? (
+              <Loader2 className="size-4 animate-spin" />
+            ) : (
+              <NotebookPen className="size-4" />
+            )}
+          </button>
+        </TooltipTrigger>
+        <TooltipContent side="top">Save selection to Notes</TooltipContent>
+      </Tooltip>
+    </div>,
+    document.body,
+  )
+}
+
 function AssistantRow({
   text,
   tools,
@@ -1716,6 +2124,8 @@ function AssistantRow({
   failed,
   at,
   model,
+  question,
+  projectId,
 }: {
   text: string
   /** A saved turn's tool names — the trail above the answer. */
@@ -1726,6 +2136,10 @@ function AssistantRow({
   failed?: boolean
   at?: string
   model?: string
+  /** The question this answer replied to — titles the note the save button writes. */
+  question?: string
+  /** Omitted while the project is unknown; without it there's nowhere to save a note. */
+  projectId?: string
 }) {
   // While streaming, what's on screen trails the received text by a few frames on purpose
   // (see useSmoothReveal). A saved message renders whole — and was already stripped of the
@@ -1759,7 +2173,9 @@ function AssistantRow({
                 goes compact and moves below the answer. Remounting it there would restart
                 its elapsed timer from zero mid-answer. */}
             {visible && (
-              <div key="answer" className={MD_CLASS}>
+              /* `data-answer` is what `useAnswerSelection` matches on: highlighting your own
+                 question, a tool chip or the composer has nothing to save to a note. */
+              <div key="answer" data-answer className={MD_CLASS}>
                 {/* The caret is a CHARACTER appended to the text, not an element beside the
                     markdown: markdown renders blocks, so a sibling <span> would sit on its
                     own line under the answer instead of at the end of the last one. */}
@@ -1798,6 +2214,11 @@ function AssistantRow({
                 </TooltipTrigger>
                 <TooltipContent>Copy this answer</TooltipContent>
               </Tooltip>
+              {/* Same `body` as Copy, for the same reason: the raw text may still carry the
+                  suggestions marker, which must never land in a saved note. */}
+              {projectId && !failed && (
+                <SaveToNoteButton answer={body} question={question} projectId={projectId} />
+              )}
               <MessageTime at={at} />
               {model && (
                 <>
@@ -1824,11 +2245,28 @@ function AssistantRow({
  * and **567 ms** in a 60-message conversation, i.e. typing became unusable in exactly the
  * conversations worth keeping. A saved message never changes, so it re-renders for nothing.
  */
-const Turn = memo(function Turn({ m, projectId }: { m: ChatMessage; projectId: string }) {
+const Turn = memo(function Turn({
+  m,
+  projectId,
+  question,
+}: {
+  m: ChatMessage
+  projectId: string
+  /** The user message above this one — a plain string, so the memo still holds. */
+  question?: string
+}) {
   return m.role === 'user' ? (
     <UserRow text={m.text} images={m.images} projectId={projectId} at={m.at} action={m.action} />
   ) : (
-    <AssistantRow text={m.text} tools={m.tools} failed={m.error} at={m.at} model={m.model} />
+    <AssistantRow
+      text={m.text}
+      tools={m.tools}
+      failed={m.error}
+      at={m.at}
+      model={m.model}
+      question={question}
+      projectId={projectId}
+    />
   )
 })
 
@@ -2048,6 +2486,7 @@ function ChatWorkspace({
   const abortRef = useRef<AbortController | null>(null)
   const logRef = useRef<HTMLDivElement | null>(null)
   const taRef = useRef<HTMLTextAreaElement | null>(null)
+  const paintRef = useRef<HTMLDivElement | null>(null)
   const quickRef = useRef<HTMLDivElement | null>(null)
   // The file picker moved into the `+` menu, so it's opened programmatically now rather than
   // by a <label> wrapping the input.
@@ -2214,9 +2653,16 @@ function ChatWorkspace({
     enabled: !!projectId && mention !== null,
     staleTime: 60_000,
   })
+  // Connected databases, on the same "only once `@` is typed" terms.
+  const { data: dbInfo } = useQuery({
+    queryKey: ['databases', projectId],
+    queryFn: () => getDatabases(projectId),
+    enabled: !!projectId && mention !== null,
+    staleTime: 60_000,
+  })
   const mentionRows = useMemo(
-    () => (mention ? mentionOptions(crawled ?? [], mention.query) : []),
-    [crawled, mention],
+    () => (mention ? mentionOptions(crawled ?? [], dbInfo?.databases ?? [], mention.query) : []),
+    [crawled, dbInfo, mention],
   )
 
   const messages = chat?.messages ?? []
@@ -2271,6 +2717,23 @@ function ChatWorkspace({
     setMentionIndex(0)
   }, [])
 
+  /**
+   * Keep the painted layer aligned when the textarea scrolls its own content.
+   *
+   * A `transform`, not `scrollTop`: the paint layer has no scrollbar of its own, so its
+   * scrollable height doesn't match and an assigned scrollTop is silently clamped — which
+   * is how the chips end up sitting a line above the text they belong to.
+   */
+  const syncPaintScroll = useCallback(() => {
+    const ta = taRef.current
+    if (ta && paintRef.current) {
+      paintRef.current.style.transform = `translate(${-ta.scrollLeft}px, ${-ta.scrollTop}px)`
+    }
+  }, [])
+
+  /** The staged tokens ComposerPaint chips — identity kept stable so its memo holds. */
+  const mentionTokens = useMemo(() => mentions.map((m) => m.token), [mentions])
+
   /** Replace the typed `@…` with the picked artifact's token and stage the reference. */
   const pickMention = useCallback(
     (opt: MentionOption) => {
@@ -2284,7 +2747,15 @@ function ChatWorkspace({
       setMentions((prev) =>
         prev.some((m) => m.token === opt.token)
           ? prev
-          : [...prev, { token: opt.token, kind: opt.kind, folder: opt.folder }],
+          : [
+              ...prev,
+              {
+                token: opt.token,
+                kind: opt.kind,
+                folder: opt.folder,
+                databaseId: opt.databaseId,
+              },
+            ],
       )
       setMention(null)
       // Put the caret after the token so typing continues where it looks like it should.
@@ -2326,7 +2797,7 @@ function ChatWorkspace({
       // engineer can't see but the model still reads would be a lie about what was asked.
       const tags: ChatMention[] = mentions
         .filter((m) => base.includes(m.token))
-        .map((m) => ({ kind: m.kind, folder: m.folder }))
+        .map((m) => ({ kind: m.kind, folder: m.folder, databaseId: m.databaseId }))
       const sendingAction = action
       setInput('')
       setAttached([])
@@ -2763,13 +3234,7 @@ function ChatWorkspace({
               <div className="flex flex-1 flex-col items-center justify-center">
                 <div className="mb-10">
                   <HeroOrb />
-                  <h1 className="text-center text-2xl font-medium leading-normal lg:text-4xl">
-                    {greeting()}
-                    {projectName ? `, ${projectName}` : ''} <br /> How Can I{' '}
-                    <span className="bg-gradient-to-r from-purple-400 to-indigo-300 bg-clip-text text-transparent">
-                      Assist You Today?
-                    </span>
-                  </h1>
+                  <GreetingHeadline projectName={projectName} />
                 </div>
 
                 {/**
@@ -2833,7 +3298,12 @@ function ChatWorkspace({
             )}
 
             {messages.map((m, i) => (
-              <Turn key={`${m.at}-${i}`} m={m} projectId={projectId} />
+              <Turn
+                key={`${m.at}-${i}`}
+                m={m}
+                projectId={projectId}
+                question={messages[i - 1]?.role === 'user' ? messages[i - 1]?.text : undefined}
+              />
             ))}
             {pending && (
               <>
@@ -2850,6 +3320,8 @@ function ChatWorkspace({
                   calls={pending.tools}
                   streaming
                   at={pending.at}
+                  question={pending.prompt}
+                  projectId={projectId}
                 />
               </>
             )}
@@ -2858,6 +3330,10 @@ function ChatWorkspace({
             {followUps.length > 0 && <FollowUps items={followUps} onPick={send} />}
             <div className="h-px w-full shrink-0 scroll-mt-4" aria-hidden />
           </div>
+
+          {/* Highlight a passage in any answer above and this floats in beside it. Portaled to
+              the body, so the scroller's `overflow-y-auto` can't clip it. */}
+          <SelectionNoteBubble scrollerRef={logRef} projectId={projectId} />
 
           {/* Jump back to the newest message — only once you've scrolled away from it. */}
           <div className="absolute bottom-28 right-6 z-10">
@@ -2912,7 +3388,9 @@ function ChatWorkspace({
                             i === mentionIndex ? 'bg-accent' : 'hover:bg-accent/60',
                           )}
                         >
-                          {opt.kind === 'ticket' ? (
+                          {opt.kind === 'database' ? (
+                            <Database className="size-4 shrink-0 text-sky-500" />
+                          ) : opt.kind === 'ticket' ? (
                             <Ticket className="size-4 shrink-0 text-muted-foreground" />
                           ) : (
                             <ClipboardList className="size-4 shrink-0 text-violet-500" />
@@ -2930,9 +3408,9 @@ function ChatWorkspace({
                 ) : (
                   <p className="px-3 py-2.5 text-xs text-muted-foreground">
                     {crawledFetching
-                      ? 'Looking for crawled tickets…'
-                      : (crawled?.length ?? 0) === 0
-                        ? 'No crawled tickets yet — crawl one on the Tickets page to tag it.'
+                      ? 'Looking for tickets and databases…'
+                      : (crawled?.length ?? 0) === 0 && (dbInfo?.databases.length ?? 0) === 0
+                        ? 'Nothing to tag yet — crawl a ticket on the Tickets page, or connect a database on the Database page.'
                         : `Nothing matches “${mention.query}”.`}
                   </p>
                 )}
@@ -2958,7 +3436,7 @@ function ChatWorkspace({
               )}
               <span>•</span>
               <span>
-                <code className="font-mono text-foreground">@</code> to tag a ticket
+                <code className="font-mono text-foreground">@</code> to tag a ticket or database
               </span>
               <span>•</span>
               <span>
@@ -3042,12 +3520,20 @@ function ChatWorkspace({
                 </div>
               )}
 
+              <div className="relative">
+              <ComposerPaint text={input} tokens={mentionTokens} paintRef={paintRef} />
               <textarea
                 ref={taRef}
                 value={input}
+                onScroll={syncPaintScroll}
+                // Off because the text under a chip is transparent, so a spellcheck
+                // squiggle would draw across the chip with no word visible under it — and
+                // a message full of ticket ids and table names is mostly false positives.
+                spellCheck={false}
                 onChange={(e) => {
                   setInput(e.target.value.slice(0, MAX_PROMPT))
                   syncMention(e.target)
+                  syncPaintScroll()
                 }}
                 // Clicking/arrowing into an existing `@…` should reopen the menu, so the
                 // caret is re-read on selection changes too, not just on edits.
@@ -3090,8 +3576,12 @@ function ChatWorkspace({
                     ? actionMeta(action).placeholder
                     : 'Ask me anything... (paste a screenshot to attach it)'
                 }
-                className="max-h-48 min-h-[52px] w-full resize-none border-none bg-transparent p-4 text-sm shadow-none outline-none placeholder:text-muted-foreground"
+                // text-transparent: the glyphs come from ComposerPaint underneath. The
+                // caret and a translucent selection are what's left visible here, so the
+                // painted text still reads through a selection.
+                className="relative max-h-48 min-h-[52px] w-full resize-none border-none bg-transparent p-4 text-sm text-transparent caret-foreground shadow-none outline-none selection:bg-primary/25 placeholder:text-muted-foreground"
               />
+              </div>
 
               <div className="flex items-center justify-between gap-2 p-3">
                 <div className="flex items-center gap-2">

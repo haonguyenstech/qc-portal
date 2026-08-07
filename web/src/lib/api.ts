@@ -8,6 +8,9 @@ import type {
   SkillFile,
   SkillSummary,
 } from './types'
+import type { SchemaTable } from './sql-complete'
+
+export type { SchemaTable }
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, {
@@ -1084,12 +1087,51 @@ export interface DbQueryResult {
   truncated: boolean
 }
 
+/**
+ * Is a registered database reachable right now? Drives the card's status badge, which
+ * would otherwise say "connected" for a server that is switched off.
+ */
+export function getDatabaseHealth(
+  projectId: string,
+  databaseId: string,
+): Promise<{ ok: boolean; error?: string; ms: number }> {
+  return request(
+    `/api/database/health?projectId=${encodeURIComponent(projectId)}&databaseId=${encodeURIComponent(databaseId)}`,
+  )
+}
+
+/**
+ * Tables + columns of a connected database — powers the SQL editor's completion and
+ * schema browser. Read live, so it reflects the database rather than the last sync.
+ */
+export function getDatabaseSchema(
+  projectId: string,
+  databaseId: string,
+): Promise<{ tables: SchemaTable[] }> {
+  return request(
+    `/api/database/schema?projectId=${encodeURIComponent(projectId)}&databaseId=${encodeURIComponent(databaseId)}`,
+  )
+}
+
+/**
+ * Why the read-only guard refused a statement. Present INSTEAD of a plain error when
+ * the page must say "this would modify data" rather than "the query failed" — the two
+ * need different words and a different fix, so they must stay distinguishable here.
+ */
+export interface DbBlocked {
+  kind: 'empty' | 'multi-statement' | 'not-select' | 'write-keyword' | 'lock' | 'write-intent'
+  /** The offending keyword when one was matched, e.g. `DELETE`. */
+  keyword?: string
+  /** A read-only SELECT showing the rows the refused change would have hit (Ask AI). */
+  preview?: string
+}
+
 /** Run a READ-ONLY SQL query against a connected database. Resolves even on failure. */
 export function runDatabaseQuery(
   projectId: string,
   databaseId: string,
   sql: string,
-): Promise<{ ok: boolean; result?: DbQueryResult; error?: string }> {
+): Promise<{ ok: boolean; result?: DbQueryResult; error?: string; blocked?: DbBlocked }> {
   return request(`/api/database/query?projectId=${encodeURIComponent(projectId)}`, {
     method: 'POST',
     body: JSON.stringify({ databaseId, sql }),
@@ -1105,7 +1147,13 @@ export function askDatabase(
   databaseId: string,
   question: string,
   model?: string,
-): Promise<{ ok: boolean; sql?: string; result?: DbQueryResult; error?: string }> {
+): Promise<{
+  ok: boolean
+  sql?: string
+  result?: DbQueryResult
+  error?: string
+  blocked?: DbBlocked
+}> {
   return request(`/api/database/ask?projectId=${encodeURIComponent(projectId)}`, {
     method: 'POST',
     body: JSON.stringify({ databaseId, question, model }),
@@ -1524,6 +1572,51 @@ export function openMemoryFolder(projectId: string): Promise<{ ok: true; path: s
   return request(`/api/memory/open?projectId=${encodeURIComponent(projectId)}`, {
     method: 'POST',
   })
+}
+
+// ---- Workspace notes (testing/notes/notes.json) ----
+
+export interface WorkspaceNote {
+  id: string
+  title: string
+  body: string
+  labels: string[]
+  archived: boolean
+  trashed: boolean
+  createdAt: string
+  updatedAt: string
+}
+
+export function listWorkspaceNotes(projectId: string): Promise<{ labels: string[]; notes: WorkspaceNote[] }> {
+  return request(`/api/notes?projectId=${encodeURIComponent(projectId)}`)
+}
+
+export function createWorkspaceNote(input: { title: string; body: string; label?: string }, projectId: string): Promise<{ note: WorkspaceNote }> {
+  return request(`/api/notes?projectId=${encodeURIComponent(projectId)}`, { method: 'POST', body: JSON.stringify(input) })
+}
+
+export function updateWorkspaceNote(id: string, patch: Partial<Pick<WorkspaceNote, 'title' | 'body' | 'labels' | 'archived' | 'trashed'>>, projectId: string): Promise<{ note: WorkspaceNote }> {
+  return request(`/api/notes/${encodeURIComponent(id)}?projectId=${encodeURIComponent(projectId)}`, { method: 'PATCH', body: JSON.stringify(patch) })
+}
+
+export function deleteWorkspaceNote(id: string, projectId: string): Promise<{ ok: true }> {
+  return request(`/api/notes/${encodeURIComponent(id)}?projectId=${encodeURIComponent(projectId)}`, { method: 'DELETE' })
+}
+
+export function emptyWorkspaceTrash(projectId: string): Promise<{ ok: true; removed: number }> {
+  return request(`/api/notes/trash?projectId=${encodeURIComponent(projectId)}`, { method: 'DELETE' })
+}
+
+export function addWorkspaceLabel(name: string, projectId: string): Promise<{ label: string }> {
+  return request(`/api/notes/labels?projectId=${encodeURIComponent(projectId)}`, { method: 'POST', body: JSON.stringify({ name }) })
+}
+
+export function deleteWorkspaceLabel(name: string, projectId: string): Promise<{ ok: true }> {
+  return request(`/api/notes/labels/${encodeURIComponent(name)}?projectId=${encodeURIComponent(projectId)}`, { method: 'DELETE' })
+}
+
+export function renameWorkspaceLabel(oldName: string, newName: string, projectId: string): Promise<{ ok: true }> {
+  return request(`/api/notes/labels/${encodeURIComponent(oldName)}?projectId=${encodeURIComponent(projectId)}`, { method: 'PATCH', body: JSON.stringify({ name: newName }) })
 }
 
 // ---- Test cases ----
@@ -3051,11 +3144,13 @@ export interface ChatImageUpload {
  * resolves it to files and tells Claude to Read them (see routes/chat.ts `resolveMentions`).
  */
 export interface ChatMention {
-  kind: 'ticket' | 'testcase'
+  kind: 'ticket' | 'testcase' | 'database'
   /** Crawled-ticket folder under testing/tickets/ (nested PARENT/CHILD for a subtask). */
-  folder: string
+  folder?: string
   /** Test-case version, or omitted for the newest. */
   version?: number
+  /** Connected database id — the server re-checks it belongs to this project. */
+  databaseId?: string
 }
 
 export interface Chat {
