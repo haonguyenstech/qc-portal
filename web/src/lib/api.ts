@@ -3,6 +3,7 @@ import type {
   ClaudeStatus,
   McpServer,
   Project,
+  QcBrowserStatus,
   RunDetail,
   RunSummary,
   SkillFile,
@@ -92,6 +93,11 @@ export function updateProject(
     autoLearnModel?: string
     /** Skill auto-selected on the Launch QC Run page ('' clears the default). */
     defaultSkill?: string
+    /**
+     * Drive the portal-owned QC browser over CDP instead of letting Playwright MCP
+     * launch (and, on Stop, close) its own. Rewrites the project's .mcp.json.
+     */
+    persistentBrowser?: boolean
   },
 ): Promise<Project> {
   return request(`/api/projects/${encodeURIComponent(id)}`, {
@@ -207,6 +213,8 @@ export function createRun(body: {
   testTarget?: 'web' | 'web-mobile' | 'app-mobile'
   /** Mobile targets: the Maestro device_id to drive; omitted = let the run pick. */
   deviceId?: string
+  /** 'flow' = an E2E flow, which has no ticket — `ticketId` is only the report slug. */
+  kind?: 'ticket' | 'flow'
 }): Promise<{ runId: string } & RunSummary> {
   return request('/api/qc/run', { method: 'POST', body: JSON.stringify(body) })
 }
@@ -344,6 +352,28 @@ export function uploadSkill(
     method: 'POST',
     body: JSON.stringify({ name, files, projectId }),
   })
+}
+
+// ---- QC browser (the portal-owned window Playwright MCP attaches to) ----
+
+export function qcBrowserStatus(): Promise<QcBrowserStatus> {
+  return request('/api/browser/status')
+}
+
+export function startQcBrowser(channel?: 'msedge' | 'chrome'): Promise<QcBrowserStatus> {
+  return request('/api/browser/start', {
+    method: 'POST',
+    body: JSON.stringify({ channel }),
+  })
+}
+
+/** Make the QC browser window full screen (CDP — `--start-maximized` is a no-op on macOS). */
+export function maximizeQcBrowser(): Promise<QcBrowserStatus> {
+  return request('/api/browser/maximize', { method: 'POST' })
+}
+
+export function stopQcBrowser(): Promise<QcBrowserStatus> {
+  return request('/api/browser/stop', { method: 'POST' })
 }
 
 // ---- AI runtime ----
@@ -663,12 +693,50 @@ export function clickupSubtasks(parent: string, projectId?: string): Promise<Cli
   )
 }
 
+/** What filing a bug under a parent ticket inherits from it (assignees, tags, priority). */
+export interface ClickupFilingContext {
+  id: string
+  displayId: string
+  name: string
+  url: string
+  listId: string
+  listName: string
+  assignees: { id: number; username: string }[]
+  tags: string[]
+  priority: { id: number; label: string } | null
+}
+
+/** What was actually applied to a filed bug — reported back so the panel can say so. */
+export interface AppliedIssueFields {
+  assignees: string[]
+  priority: string | null
+  prioritySource: 'severity' | 'parent' | null
+  screenshots: number
+  screenshotsFailed: number
+  commented: boolean
+}
+
+export function clickupIssueFilingContext(
+  parent: string,
+  projectId?: string,
+): Promise<ClickupFilingContext> {
+  return request(
+    `/api/clickup/issues/filing-context?parent=${encodeURIComponent(parent)}${pid(projectId)}`,
+  )
+}
+
 export function createClickupIssueSubtasks(body: {
   parentTask: string
-  issues: { title: string; description: string; screenshots?: string[] }[]
+  issues: {
+    title: string
+    description: string
+    /** Sets the bug's ClickUp priority; falls back to the parent's when absent. */
+    severity?: string | null
+    screenshots?: string[]
+  }[]
   projectId?: string
   slug?: string | null
-}): Promise<{ created: ClickupTask[] }> {
+}): Promise<{ created: (ClickupTask & { applied?: AppliedIssueFields })[] }> {
   const qs = body.projectId ? `?projectId=${encodeURIComponent(body.projectId)}` : ''
   return request(`/api/clickup/issues/subtasks${qs}`, {
     method: 'POST',

@@ -6,6 +6,7 @@ import {
   clickupConfigured,
   createIssueSubtask,
   getDocs,
+  getIssueFilingContext,
   getLists,
   getListTasks,
   getSpaces,
@@ -27,7 +28,12 @@ export const clickupRouter = Router()
 const MAX_CRAWL_JOB_TICKETS = 50
 const parseTicketKind = (v: unknown) => (v === 'feature' || v === 'bug' ? v : null)
 
-type IssuePayload = { title: string; description?: string; screenshots?: unknown }
+type IssuePayload = {
+  title: string
+  description?: string
+  severity?: unknown
+  screenshots?: unknown
+}
 
 const IMAGE_CONTENT_TYPE: Record<string, string> = {
   '.png': 'image/png',
@@ -155,6 +161,23 @@ clickupRouter.get('/subtasks', async (req, res) => {
   }
 })
 
+/**
+ * What filing a bug under this parent will inherit (assignees, tags, its own priority).
+ * Read-only, and the Issues panel shows it BEFORE the engineer files — an automation
+ * that fills fields in silently is one nobody trusts, and a parent with no assignee
+ * (common) needs to say so up front rather than produce unassigned bugs.
+ */
+clickupRouter.get('/issues/filing-context', async (req, res) => {
+  if (!clickupConfigured()) return res.status(400).json({ error: 'ClickUp is not configured' })
+  const parent = typeof req.query.parent === 'string' ? req.query.parent.trim() : ''
+  if (!parent) return res.status(400).json({ error: 'parent is required' })
+  try {
+    res.json(await getIssueFilingContext(parent))
+  } catch (err) {
+    fail(res, err)
+  }
+})
+
 clickupRouter.post('/issues/subtasks', async (req, res) => {
   if (!clickupConfigured()) return res.status(400).json({ error: 'ClickUp is not configured' })
 
@@ -175,6 +198,11 @@ clickupRouter.post('/issues/subtasks', async (req, res) => {
         typeof issue.description === 'string' && issue.description.trim()
           ? issue.description.trim().slice(0, 6000)
           : issue.title.trim(),
+      // The issue's own severity word, which becomes the bug's ClickUp priority.
+      severity:
+        typeof issue.severity === 'string' && issue.severity.trim()
+          ? issue.severity.trim().slice(0, 40)
+          : null,
       screenshots: Array.isArray(issue.screenshots)
         ? issue.screenshots
             .filter((s): s is string => typeof s === 'string' && s.trim().length > 0)
@@ -188,20 +216,29 @@ clickupRouter.post('/issues/subtasks', async (req, res) => {
   if (!issues.length) return res.status(400).json({ error: 'issues is required' })
 
   try {
+    // ONE parent lookup for the whole batch: the assignees / tags / priority we inherit
+    // can't change between issues, and re-fetching per issue cost N extra API calls.
+    const context = await getIssueFilingContext(parentTask)
     const created = []
     for (const issue of issues) {
       const task = await createIssueSubtask({
         parentTask,
+        context,
         name: issue.title,
         description: issue.description,
+        severity: issue.severity,
       })
       // Best-effort: attach the QC screenshots so the image shows on the ClickUp
       // card instead of a dead local path. Never fail the subtask over an upload.
       const uploaded: { title: string; url: string }[] = []
+      let failed = 0
       if (project && slug && issue.screenshots.length) {
         for (const rel of issue.screenshots) {
           const abs = resolveRunScreenshot(project.rootPath, slug, rel)
-          if (!abs) continue
+          if (!abs) {
+            failed++
+            continue
+          }
           try {
             const bytes = fs.readFileSync(abs)
             const ext = path.extname(abs).toLowerCase()
@@ -212,8 +249,10 @@ clickupRouter.post('/issues/subtasks', async (req, res) => {
               IMAGE_CONTENT_TYPE[ext] ?? 'application/octet-stream',
             )
             if (att.url) uploaded.push({ title: att.title, url: att.url })
+            else failed++
           } catch {
             /* best-effort — keep the subtask even if an attachment fails */
+            failed++
           }
         }
       }
@@ -226,12 +265,17 @@ clickupRouter.post('/issues/subtasks', async (req, res) => {
             `🔍 **QC evidence** — ${uploaded.length} screenshot${uploaded.length === 1 ? '' : 's'} from the automated run:`,
             '',
             ...uploaded.map((a) => `![${a.title}](${a.url})`),
+            '',
+            `_Filed from the QC Portal${issue.severity ? ` · severity **${issue.severity}**` : ''}._`,
           ].join('\n')
           await postTaskComment(task.id, body)
+          task.applied.commented = true
         } catch {
           /* best-effort — keep the subtask even if the comment fails */
         }
       }
+      task.applied.screenshots = uploaded.length
+      task.applied.screenshotsFailed = failed
       created.push(task)
     }
     res.status(201).json({ created })

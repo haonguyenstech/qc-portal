@@ -19,6 +19,7 @@ import {
   testingDirFor,
 } from '../config.js'
 import { pickFolderNative } from '../folderPicker.js'
+import { repairProjectMcpConfig } from './mcp.js'
 import { recordSkillInstall } from '../skillSync.js'
 import { recordTemplateInstall } from '../templateSync.js'
 import { listTestcaseJobs } from '../testcaseJobs.js'
@@ -577,6 +578,7 @@ projectsRouter.put('/:id', (req, res) => {
     groundingCheck,
     groundingCheckModel,
     autoLearn,
+    persistentBrowser,
     autoLearnModel,
     defaultSkill,
   } = req.body ?? {}
@@ -589,6 +591,7 @@ projectsRouter.put('/:id', (req, res) => {
     groundingCheck?: boolean
     groundingCheckModel?: string
     autoLearn?: boolean
+    persistentBrowser?: boolean
     autoLearnModel?: string
     defaultSkill?: string
   } = {}
@@ -601,6 +604,7 @@ projectsRouter.put('/:id', (req, res) => {
     partial.groundingCheckModel = groundingCheckModel
   }
   if (typeof autoLearn === 'boolean') partial.autoLearn = autoLearn
+  if (typeof persistentBrowser === 'boolean') partial.persistentBrowser = persistentBrowser
   if (typeof autoLearnModel === 'string' && KNOWN_MODELS.has(autoLearnModel)) {
     partial.autoLearnModel = autoLearnModel
   }
@@ -654,6 +658,12 @@ projectsRouter.put('/:id', (req, res) => {
 
   updateProject(req.params.id, partial)
   const updated = getProject(req.params.id)!
+  // Attaching to (or detaching from) the QC browser is a change to the project's
+  // .mcp.json — the Playwright entry gains/loses --cdp-endpoint. Do it here rather
+  // than waiting for the next boot, or the toggle wouldn't take effect until restart.
+  if (typeof partial.persistentBrowser === 'boolean') {
+    repairProjectMcpConfig(updated.rootPath, updated.persistentBrowser)
+  }
   return res.json({ ...updated, ...rootInfo(updated.rootPath) })
 })
 

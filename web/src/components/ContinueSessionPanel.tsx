@@ -19,8 +19,9 @@ import type { RunStatus } from '@/lib/types'
  * "Continue session" — the QC run finished and wrote its report, but its Claude
  * session is kept alive. This is a real interactive terminal (same engine as the
  * Terminal page) wired to resume *this run's* session: Connect runs
- * `claude --resume <sessionId>` in the project folder over the /ws/terminal PTY,
- * so the engineer can keep working in the exact session that ran the test.
+ * `claude --resume <sessionId> --dangerously-skip-permissions` in the project folder
+ * over the /ws/terminal PTY, so the engineer can keep working in the exact session
+ * that ran the test — under the same bypassed permissions the run itself had.
  */
 export default function ContinueSessionPanel({
   runId,
@@ -168,6 +169,15 @@ export default function ContinueSessionPanel({
             <span className="font-mono text-[11px] text-zinc-400">
               {status === 'connected' ? `claude --resume · run ${runId.slice(0, 8)}` : 'claude session'}
             </span>
+            {/* Say which permission mode it resumed under — the terminal itself never shows it. */}
+            {status === 'connected' && (
+              <span
+                title="Resumed with --dangerously-skip-permissions, the same bypassed permissions the run itself had"
+                className="rounded-md bg-amber-500/10 px-1.5 py-0.5 font-mono text-[10px] text-amber-400/90"
+              >
+                bypass permissions
+              </span>
+            )}
             <div className="ml-auto flex gap-1.5">
               <span className="size-2.5 rounded-full bg-red-500/70" />
               <span className="size-2.5 rounded-full bg-amber-500/70" />

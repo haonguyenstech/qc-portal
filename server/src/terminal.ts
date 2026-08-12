@@ -62,11 +62,20 @@ function resolveShell(): { file: string; args: string[] } {
 
 // Interactive `claude --resume <id>`, so .cmd resolves and stays interactive on
 // Windows; spawned directly elsewhere. The user drives it like a real terminal.
+//
+// `--dangerously-skip-permissions` (the interactive equivalent of the headless
+// `--permission-mode bypassPermissions`) is the DEFAULT here for continuity: the
+// run being resumed was itself spawned with bypassPermissions, so without it the
+// same conversation suddenly starts prompting for tools it was already using —
+// and the Terminal page launches with this flag too, so this matches it. It also
+// keeps a resumed session from stalling on an approval prompt the engineer has
+// to notice, which is the failure mode this whole panel exists to avoid.
 function resolveClaudeResume(sessionId: string): { file: string; args: string[] } {
+  const args = ['--resume', sessionId, '--dangerously-skip-permissions']
   if (process.platform === 'win32') {
-    return { file: process.env.ComSpec || 'cmd.exe', args: ['/c', CLAUDE_BIN, '--resume', sessionId] }
+    return { file: process.env.ComSpec || 'cmd.exe', args: ['/c', CLAUDE_BIN, ...args] }
   }
-  return { file: CLAUDE_BIN, args: ['--resume', sessionId] }
+  return { file: CLAUDE_BIN, args }
 }
 
 function projectRoot(projectId: string): string | undefined {

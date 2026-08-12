@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useState } from 'react'
 
 // A saved run configuration ("template") — apply it to fill the form in one click.
-// For a simple preset the ticket id is intentionally excluded (it changes every
-// run). An advanced/feature preset additionally remembers the run mode, model,
-// the ticket SET and the ordered workflow, so the whole feature can be re-run.
+// A single-ticket preset intentionally excludes the ticket id (it changes every
+// run). An E2E-flow preset additionally remembers the run mode, model, the flow's
+// NAME and its ordered steps, so the whole flow can be re-run.
 export interface RunPreset {
   id: string
   name: string
@@ -12,8 +12,20 @@ export interface RunPreset {
   instructions: string
   mode?: 'simple' | 'advanced'
   model?: string
-  tickets?: string[] // advanced only — first is the lead ticket
-  workflowSteps?: string[] // advanced only — ordered acceptance path
+  /**
+   * The E2E flow's own title. The run files its report under this name's slug,
+   * so a template that restored the steps but not the name used to hand every
+   * loaded flow back the default "E2E flow" — and with it the same report slug.
+   */
+  flowName?: string
+  tickets?: string[] // legacy — feature presets saved before flows dropped tickets
+  workflowSteps?: string[] // advanced only — the ordered flow, one line per step
+  /**
+   * Each step's KIND, positionally alongside `workflowSteps`. The run contract is
+   * lines only, so without this a loaded flow came back as six identical "Custom
+   * step" cards — same run, but not the picture that was saved.
+   */
+  workflowKinds?: string[]
 }
 
 const STORAGE_KEY = 'qc.runPresets'
@@ -42,8 +54,10 @@ function isPreset(v: unknown): v is RunPreset {
     // optional fields — present on advanced/feature presets, absent on older ones
     (p.mode === undefined || p.mode === 'simple' || p.mode === 'advanced') &&
     (p.model === undefined || typeof p.model === 'string') &&
+    (p.flowName === undefined || typeof p.flowName === 'string') &&
     (p.tickets === undefined || isStringArray(p.tickets)) &&
-    (p.workflowSteps === undefined || isStringArray(p.workflowSteps))
+    (p.workflowSteps === undefined || isStringArray(p.workflowSteps)) &&
+    (p.workflowKinds === undefined || isStringArray(p.workflowKinds))
   )
 }
 

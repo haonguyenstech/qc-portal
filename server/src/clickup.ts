@@ -296,6 +296,110 @@ export interface CreateSubtaskInput {
   parentTask: string
   name: string
   description: string
+  /** The issue's own severity word ("high", "blocker", …) — sets the bug's priority. */
+  severity?: string | null
+  /** Pre-fetched parent context, so filing N issues costs ONE parent lookup, not N. */
+  context?: IssueFilingContext
+}
+
+/**
+ * What the portal inherits from the parent ticket when filing a bug under it. Fetched
+ * ONCE per filing batch (the parent doesn't change between issues) and also served to
+ * the UI, so the engineer can see who the bug will land on BEFORE pressing the button —
+ * "it fills this in automatically" is only trustworthy if it shows what it will fill in.
+ */
+export interface IssueFilingContext {
+  id: string
+  displayId: string
+  name: string
+  url: string
+  listId: string
+  listName: string
+  /** ClickUp create takes user IDs; the usernames are for display only. */
+  assignees: { id: number; username: string }[]
+  /** Tag NAMES, which is what create expects (they must already exist in the space). */
+  tags: string[]
+  /** The parent's own priority, used when an issue has no severity of its own. */
+  priority: { id: number; label: string } | null
+}
+
+/** ClickUp priority ids. 1 = Urgent … 4 = Low; there is no 0/none on create. */
+const PRIORITY_LABEL: Record<number, string> = {
+  1: 'Urgent',
+  2: 'High',
+  3: 'Normal',
+  4: 'Low',
+}
+
+/**
+ * Map a QC severity word onto a ClickUp priority. A bug's OWN severity is the better
+ * signal than the parent ticket's priority — a High-severity defect under a feature
+ * ticket with no priority set (the common case; verified on a real ticket) would
+ * otherwise be filed with no priority at all, which is what the QC had to fix by hand.
+ * The parent's priority stays as the fallback for an issue with no severity recorded.
+ */
+export function severityPriority(severity?: string | null): { id: number; label: string } | null {
+  const s = (severity ?? '').trim().toLowerCase()
+  if (!s) return null
+  let id: number | null = null
+  if (/blocker|critical|urgent|showstopper/.test(s)) id = 1
+  else if (/high|major|severe/.test(s)) id = 2
+  else if (/medium|moderate|normal/.test(s)) id = 3
+  else if (/low|minor|trivial|cosmetic|nit/.test(s)) id = 4
+  return id ? { id, label: PRIORITY_LABEL[id] } : null
+}
+
+/** Fields actually applied to a created bug, so the UI can report the truth. */
+export interface AppliedIssueFields {
+  assignees: string[]
+  priority: string | null
+  /** Where the priority came from — the issue's severity, or the parent ticket. */
+  prioritySource: 'severity' | 'parent' | null
+  /** Screenshots uploaded to the card, and how many could not be attached. */
+  screenshots: number
+  screenshotsFailed: number
+  /** Whether the evidence comment was posted on the card. */
+  commented: boolean
+}
+
+/**
+ * Read the parent ticket once and keep only what filing a bug under it needs.
+ * Accepts a ClickUp URL or a bare id.
+ */
+export async function getIssueFilingContext(parentTask: string): Promise<IssueFilingContext> {
+  const parentId = extractClickupTaskId(parentTask)
+  if (!parentId) {
+    throw Object.assign(new Error('A ClickUp parent ticket URL or id is required'), { status: 400 })
+  }
+  const parent = await cuFetch(`/task/${encodeURIComponent(parentId)}`)
+  const listId = String(parent?.list?.id ?? '')
+  if (!listId) {
+    throw Object.assign(new Error('Could not resolve the parent task list in ClickUp'), {
+      status: 502,
+    })
+  }
+  const priorityId = parent?.priority?.id != null ? Number(parent.priority.id) : NaN
+  const customId = parent?.custom_id ? String(parent.custom_id) : null
+  return {
+    id: parentId,
+    displayId: customId ?? parentId,
+    name: String(parent?.name ?? ''),
+    url: String(parent?.url ?? ''),
+    listId,
+    listName: String(parent?.list?.name ?? ''),
+    assignees: Array.isArray(parent?.assignees)
+      ? parent.assignees
+          .map((a: any) => ({ id: Number(a?.id), username: String(a?.username ?? a?.email ?? a?.id ?? '') }))
+          .filter((a: { id: number }) => Number.isFinite(a.id))
+      : [],
+    tags: Array.isArray(parent?.tags)
+      ? parent.tags.map((t: any) => String(t?.name ?? '')).filter(Boolean)
+      : [],
+    priority:
+      Number.isFinite(priorityId) && priorityId >= 1 && priorityId <= 4
+        ? { id: priorityId, label: String(parent?.priority?.priority ?? PRIORITY_LABEL[priorityId]) }
+        : null,
+  }
 }
 
 export function extractClickupTaskId(input: string): string {
@@ -337,44 +441,34 @@ export function normalizeIssueMarkdown(md: string): string {
   return out.join('\n')
 }
 
-export async function createIssueSubtask(input: CreateSubtaskInput): Promise<CreatedClickupTask> {
-  const parentId = extractClickupTaskId(input.parentTask)
-  if (!parentId) {
-    throw Object.assign(new Error('A ClickUp parent ticket URL or id is required'), { status: 400 })
-  }
+export async function createIssueSubtask(
+  input: CreateSubtaskInput,
+): Promise<CreatedClickupTask & { applied: AppliedIssueFields }> {
   const name = input.name.trim().slice(0, 255)
   if (!name) throw Object.assign(new Error('Issue title is required'), { status: 400 })
 
-  const parent = await cuFetch(`/task/${encodeURIComponent(parentId)}`)
-  const listId = String(parent?.list?.id ?? '')
-  if (!listId) {
-    throw Object.assign(new Error('Could not resolve the parent task list in ClickUp'), { status: 502 })
-  }
+  const context = input.context ?? (await getIssueFilingContext(input.parentTask))
 
-  // Inherit the parent ticket's assignees, tags, and priority so the logged bug lands
-  // on the right person with the right context — the QC engineer would otherwise have
-  // to set these by hand. All three come straight off the parent task we just fetched:
-  //   - assignees: ClickUp create expects an array of user IDs (parent.assignees[].id)
-  //   - tags:      an array of tag NAMES that exist in the space (parent.tags[].name)
-  //   - priority:  an integer 1-4 (Urgent…Low); parent.priority.id is that value
-  const assignees: number[] = Array.isArray(parent?.assignees)
-    ? parent.assignees.map((a: any) => Number(a?.id)).filter((n: number) => Number.isFinite(n))
-    : []
-  const tags: string[] = Array.isArray(parent?.tags)
-    ? parent.tags.map((t: any) => String(t?.name ?? '')).filter(Boolean)
-    : []
-  const priority = parent?.priority?.id != null ? Number(parent.priority.id) : NaN
+  // Inherit the parent ticket's assignees and tags so the logged bug lands on the right
+  // person with the right context — the QC engineer would otherwise set these by hand:
+  //   - assignees: ClickUp create expects an array of user IDs
+  //   - tags:      an array of tag NAMES that exist in the space
+  //   - priority:  an integer 1-4 (Urgent…Low) — from the ISSUE's severity first, since
+  //                a feature ticket usually carries no priority of its own
+  const assignees = context.assignees.map((a) => a.id)
+  const fromSeverity = severityPriority(input.severity)
+  const priority = fromSeverity ?? context.priority
 
   // Send markdown_content (NOT description): ClickUp renders markdown_content as rich
   // text (bold labels, numbered/bulleted lists) but shows description as literal plain
   // text — which is why the raw `**...**` and run-on layout appeared before.
-  const created = await cuPost(`/list/${encodeURIComponent(listId)}/task`, {
+  const created = await cuPost(`/list/${encodeURIComponent(context.listId)}/task`, {
     name,
     markdown_content: normalizeIssueMarkdown(input.description).slice(0, 6000),
-    parent: parentId,
+    parent: context.id,
     ...(assignees.length ? { assignees } : {}),
-    ...(tags.length ? { tags } : {}),
-    ...(Number.isFinite(priority) && priority >= 1 && priority <= 4 ? { priority } : {}),
+    ...(context.tags.length ? { tags: context.tags } : {}),
+    ...(priority ? { priority: priority.id } : {}),
   })
 
   return {
@@ -383,7 +477,21 @@ export async function createIssueSubtask(input: CreateSubtaskInput): Promise<Cre
     displayId: created.custom_id ? String(created.custom_id) : String(created.id),
     name: String(created.name ?? name),
     url: String(created.url ?? ''),
-    parent: parentId,
+    parent: context.id,
+    applied: {
+      // Report what ClickUp actually stored, not what we asked for — a user who isn't a
+      // member of the list is silently dropped, and the panel must not claim otherwise.
+      assignees: Array.isArray(created.assignees)
+        ? created.assignees.map((a: any) => String(a?.username ?? a?.email ?? a?.id ?? ''))
+        : [],
+      priority: created.priority?.priority
+        ? String(created.priority.priority)
+        : (priority?.label ?? null),
+      prioritySource: fromSeverity ? 'severity' : context.priority ? 'parent' : null,
+      screenshots: 0,
+      screenshotsFailed: 0,
+      commented: false,
+    },
   }
 }
 

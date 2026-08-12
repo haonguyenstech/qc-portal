@@ -36,6 +36,44 @@ function androidSdkDirs(): string[] {
   return roots.flatMap((root) => [path.join(root, 'platform-tools'), path.join(root, 'emulator')])
 }
 
+/**
+ * Third-party Android emulators (MuMu, LDPlayer, BlueStacks, Nox) each ship their
+ * OWN `adb` and are frequently the only Android tooling on a QC machine — the
+ * engineer never installed Android Studio, so `androidSdkDirs()` finds nothing and
+ * every device reads as a bare `127.0.0.1:7555` in the device pickers because
+ * nothing can be asked for its name.
+ *
+ * Appended LAST (see spawnEnv), so a real platform-tools adb always wins — these
+ * bundled copies are often an old adb version, and an old client kills a newer
+ * running adb server.
+ */
+function bundledEmulatorDirs(): string[] {
+  if (process.platform !== 'win32') return []
+  const dirs: string[] = []
+  for (const base of [process.env['ProgramFiles'], process.env['ProgramFiles(x86)']]) {
+    if (!base) continue
+    for (const p of [
+      ['Netease', 'MuMuPlayer-12.0', 'shell'],
+      ['Netease', 'MuMuPlayerGlobal-12.0', 'shell'],
+      ['Netease', 'MuMu', 'emulator', 'nemu', 'vmonitor', 'bin'],
+      ['BlueStacks_nxt'],
+      ['BlueStacks'],
+      ['Nox', 'bin'],
+    ]) {
+      dirs.push(path.join(base, ...p))
+    }
+  }
+  // LDPlayer installs to a drive root by default rather than Program Files.
+  const systemDrive = process.env.SystemDrive ?? 'C:'
+  for (const p of [
+    ['LDPlayer', 'LDPlayer9'],
+    ['LDPlayer', 'LDPlayer64'],
+  ]) {
+    dirs.push(path.join(`${systemDrive}\\`, ...p))
+  }
+  return dirs
+}
+
 /** Well-known per-user tool dirs that are frequently missing from a stale PATH. */
 function extraToolDirs(): string[] {
   const home = os.homedir()
@@ -44,6 +82,7 @@ function extraToolDirs(): string[] {
     path.join(home, '.cargo', 'bin'), // rustup/cargo installs (older uv installers)
     path.join(home, '.maestro', 'bin'), // Maestro's curl installer (all platforms)
     ...androidSdkDirs(),
+    ...bundledEmulatorDirs(),
   ]
   if (process.platform === 'win32') {
     // winget puts shims for its packages (incl. astral-sh.uv) here.

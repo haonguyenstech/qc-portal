@@ -96,3 +96,42 @@ export async function readSkillDrop(entries: FsEntry[]): Promise<SkillDrop> {
   }
   return { name: root.name, files }
 }
+
+/**
+ * Turn the FileList of a `<input type="file" webkitdirectory>` into the same
+ * payload `readSkillDrop` produces. This is the BROWSE path, and it runs
+ * entirely in the browser on purpose: the server-side native folder dialog
+ * (folderPicker.ts) can only draw a window when the portal was started from
+ * the user's own interactive desktop session, so on a portal launched over
+ * SSH / a scheduled task / WMI it never appears and the request just pends.
+ * A directory input has no such dependency and works the same on Win + Mac.
+ *
+ * Every entry carries `webkitRelativePath` = "<folder>/<...>/<file>", so the
+ * first segment is the skill name and the rest is the path inside it.
+ */
+export async function readSkillFileList(list: FileList | null): Promise<SkillDrop> {
+  const picked = Array.from(list ?? [])
+  if (picked.length === 0) throw new Error('No folder was selected.')
+
+  const rootNames = new Set<string>()
+  const files: DroppedFile[] = []
+  for (const file of picked) {
+    const rel = (file as File & { webkitRelativePath?: string }).webkitRelativePath
+    if (!rel) throw new Error('Your browser did not report the folder structure.')
+    const segments = rel.replace(/\\/g, '/').split('/').filter(Boolean)
+    if (segments.length < 2) continue // a loose file with no folder above it
+    rootNames.add(segments[0])
+    // macOS/Windows sprinkle these into folders; they are never part of a skill.
+    const base = segments[segments.length - 1]
+    if (base === '.DS_Store' || base === 'Thumbs.db') continue
+    files.push({ path: segments.slice(1).join('/'), content: await fileToBase64(file) })
+  }
+
+  if (rootNames.size === 0) throw new Error('Select a skill folder, not loose files.')
+  if (rootNames.size > 1) throw new Error('Select a single skill folder.')
+  if (files.length === 0) throw new Error('That folder is empty.')
+  if (!files.some((f) => f.path === 'SKILL.md')) {
+    throw new Error('That folder has no SKILL.md at its root — it is not a skill.')
+  }
+  return { name: [...rootNames][0], files }
+}

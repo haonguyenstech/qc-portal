@@ -2,6 +2,7 @@ import { useEffect } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { getSourceJob } from '@/lib/api'
+import { ACTIVE_JOB_PREFIX, loadActiveJobIds, removeActiveJobId } from '@/lib/activeSourceJobs'
 import type { Project } from '@/lib/types'
 import { useNotifications } from '@/lib/notifications'
 
@@ -11,9 +12,11 @@ import { useNotifications } from '@/lib/notifications'
 // mid-clone. Mirrors CrawlJobWatcher.
 //
 // Active jobs are discovered from the per-project keys SourceCodePage writes:
-//   qc.sourceJob.<projectId> = <jobId>
+//   qc.sourceJob.<projectId> = ["<jobId>", …]
+// A project's repos sync concurrently, so each key holds a LIST and a finished job
+// is dropped on its own — clearing the whole key would stop watching the siblings
+// still running.
 
-const ACTIVE_JOB_PREFIX = 'qc.sourceJob.'
 const POLL_MS = 2000
 
 // Module-level so it survives remounts (incl. StrictMode's dev double-mount) — a
@@ -31,21 +34,13 @@ function listWatchedJobs(): WatchedJob[] {
     for (let i = 0; i < localStorage.length; i++) {
       const key = localStorage.key(i)
       if (!key || !key.startsWith(ACTIVE_JOB_PREFIX)) continue
-      const jobId = localStorage.getItem(key)
-      if (jobId) out.push({ projectId: key.slice(ACTIVE_JOB_PREFIX.length), jobId })
+      const projectId = key.slice(ACTIVE_JOB_PREFIX.length)
+      for (const jobId of loadActiveJobIds(projectId)) out.push({ projectId, jobId })
     }
   } catch {
     /* storage unavailable */
   }
   return out
-}
-
-function clearWatched(projectId: string): void {
-  try {
-    localStorage.removeItem(ACTIVE_JOB_PREFIX + projectId)
-  } catch {
-    /* ignore */
-  }
 }
 
 export default function SourceJobWatcher() {
@@ -68,13 +63,13 @@ export default function SourceJobWatcher() {
         job = (await getSourceJob(w.jobId, w.projectId)).job
       } catch {
         handled.add(w.jobId)
-        clearWatched(w.projectId)
+        removeActiveJobId(w.projectId, w.jobId)
         return
       }
       if (cancelled || job.status === 'running' || handled.has(job.id)) return
 
       handled.add(job.id)
-      clearWatched(w.projectId)
+      removeActiveJobId(w.projectId, job.id)
 
       // The connection (or its status) changed — refresh the source view + project list.
       queryClient.invalidateQueries({ queryKey: ['source', w.projectId] })

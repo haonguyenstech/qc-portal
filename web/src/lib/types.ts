@@ -1,8 +1,10 @@
 export type RunStatus = 'queued' | 'running' | 'paused' | 'passed' | 'failed' | 'error' | 'canceled'
-export interface Project { id: string; name: string; rootPath: string; isDefault: boolean; pinned?: boolean; createdAt: string; description?: string; diagram?: string; exists?: boolean; hasSkills?: boolean; hasMcp?: boolean; hasClaudeMd?: boolean; sourceRepoUrl?: string; sourceProvider?: string; sourceBranch?: string; sourcePath?: string; sourceLastSync?: string; sourceLastCommit?: string; groundingCheck?: boolean; groundingCheckModel?: string; autoLearn?: boolean; autoLearnModel?: string; defaultSkill?: string }
+export interface Project { id: string; name: string; rootPath: string; isDefault: boolean; pinned?: boolean; createdAt: string; description?: string; diagram?: string; exists?: boolean; hasSkills?: boolean; hasMcp?: boolean; hasClaudeMd?: boolean; sourceRepoUrl?: string; sourceProvider?: string; sourceBranch?: string; sourcePath?: string; sourceLastSync?: string; sourceLastCommit?: string; groundingCheck?: boolean; groundingCheckModel?: string; autoLearn?: boolean; autoLearnModel?: string; defaultSkill?: string; persistentBrowser?: boolean }
 /** Where a run drove the product under test (desktop browser / device browser / native app). */
 export type TestTarget = 'web' | 'web-mobile' | 'app-mobile'
-export interface RunSummary { id: string; projectId: string; projectName: string | null; ticketId: string; appUrl: string; testTarget: TestTarget; slug: string | null; status: RunStatus; passCount: number; failCount: number; blockedCount: number; untestedCount: number; cancelledCount: number; totalAcs: number; createdAt: string; finishedAt: string | null }
+/** What a run tested: one ticket's acceptance criteria, or an end-to-end flow (no ticket — `ticketId` is the flow name's slug). */
+export type RunKind = 'ticket' | 'flow'
+export interface RunSummary { id: string; projectId: string; projectName: string | null; ticketId: string; appUrl: string; testTarget: TestTarget; kind?: RunKind; slug: string | null; outDirToken?: string | null; status: RunStatus; passCount: number; failCount: number; blockedCount: number; untestedCount: number; cancelledCount: number; totalAcs: number; createdAt: string; finishedAt: string | null }
 export type Phase = 'intake'|'plan'|'setup'|'collect'|'analyze'|'aggregate'|'report'|'unknown'
 export interface LogEvent { ts: string; kind: 'text'|'tool'|'tool_result'|'phase'|'system'|'error'|'done'; phase?: Phase; text: string; tool?: string }
 export interface RunDetail extends RunSummary { reportMd: string | null; issuesMd: string | null; screenshots: string[]; logTail: LogEvent[]; hasSession?: boolean }
@@ -34,4 +36,23 @@ export interface ClaudeModelTestResult {
   durationMs: number
   costUsd: number | null
   detail: string
+}
+
+/**
+ * The QC browser — the portal-owned browser window Playwright MCP attaches to over
+ * CDP. It stays open when a turn is stopped, which is the whole point: a stdio MCP's
+ * browser dies with the `claude` process that spawned it.
+ */
+export interface QcBrowserStatus {
+  running: boolean
+  endpoint: string
+  version?: string
+  /** True when this portal process launched it, so Stop can close it. */
+  startedHere: boolean
+  pid?: number
+  profileDir: string
+  /** Channels actually installed on the server machine. */
+  available: ('msedge' | 'chrome')[]
+  /** Present on a failed start. */
+  error?: string
 }

@@ -35,10 +35,14 @@ export interface Project {
   autoLearn: boolean // auto-capture durable facts into memory/knowledge after runs
   autoLearnModel: string // model alias for that reflection
   defaultSkill: string // skill auto-selected on the Launch QC Run page ('' = no default)
+  persistentBrowser: boolean // drive the portal-owned QC browser over CDP (survives Stop)
 }
 
 /** Where a run drives the product under test. */
 export type TestTarget = 'web' | 'web-mobile' | 'app-mobile'
+
+/** What a run tests: one ticket's acceptance criteria, or an end-to-end flow. */
+export type RunKind = 'ticket' | 'flow'
 
 export interface RunSummary {
   id: string
@@ -49,7 +53,24 @@ export interface RunSummary {
   // Which surface this run tested, so History can label it. Runs recorded before
   // this was persisted fall back to a best guess (see db.rowToSummary).
   testTarget: TestTarget
+  /**
+   * What this run WAS: a single-ticket acceptance test, or an E2E flow — which
+   * has no ticket, and whose `ticketId` is the flow name's slug. Without it the
+   * two are indistinguishable on Running/History, where a flow's slug sits in
+   * the ticket column looking like a ticket id. Rows written before this read
+   * as 'ticket'.
+   */
+  kind: RunKind
   slug: string | null // testing/<slug> folder name once known
+  /**
+   * The unique token the portal required at the END of this run's output folder
+   * name, so the folder belongs to THIS run and nothing else. Two runs of the same
+   * ticket (the classic case: one on web, then one on a device) used to agree on a
+   * model-invented folder name and the second silently overwrote the first's
+   * report, issues and screenshots. NULL = a row from before this landed, which
+   * still resolves its folder by ticket prefix.
+   */
+  outDirToken: string | null
   status: RunStatus
   passCount: number
   failCount: number
@@ -110,6 +131,11 @@ export interface CreateRunBody {
   // run must drive, picked in the Run form when several devices are booted. Omitted =
   // let the run pick whatever `list_devices` reports first, the previous behavior.
   deviceId?: string
+  // 'flow' = an E2E flow: there is NO ticket, and `ticketId` is only the flow
+  // name's slug (the run files its report under it). Sent by the client rather
+  // than inferred, so the prompt never sends the model looking for a ticket
+  // folder that doesn't exist. Omitted = 'ticket', the previous behavior.
+  kind?: RunKind
   // Advanced mode: a single run that covers a connected feature spanning several
   // tickets. `ticketId` is the lead ticket; `relatedTickets` are the rest, and
   // `workflowSteps` is the ordered end-to-end flow Claude should exercise.

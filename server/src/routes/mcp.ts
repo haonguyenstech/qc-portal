@@ -22,6 +22,7 @@ import { resolveProjectJiraCreds, verifyToken as verifyJira, withJiraCreds } fro
 import { runMcpCapabilityTest } from '../mcpCapabilityTest.js'
 import { maestroEnvFor, probeMaestro, type MaestroPreflight } from '../maestro.js'
 import { agentProfileDir, isForeignProfileDir } from '../browserProfile.js'
+import { cdpEndpoint, writePlaywrightMcpConfig } from '../qcBrowser.js'
 import type { McpServer } from '../types.js'
 import { spawnEnv } from '../toolPath.js'
 
@@ -333,8 +334,99 @@ const RETIRED_SERVERS = ['mobile-mcp', 'appium-mcp']
  * A profile the engineer pointed somewhere else INSIDE their own home is theirs to
  * keep — only a path outside it (`isForeignProfileDir`) is rewritten.
  */
+/** Drop `--flag` (and its value, when it takes one) from an args list, in place. */
+function dropArg(args: string[], flag: string, hasValue: boolean): boolean {
+  const i = args.indexOf(flag)
+  if (i === -1) return false
+  const value = args[i + 1]
+  const take = hasValue && typeof value === 'string' && !value.startsWith('--') ? 2 : 1
+  args.splice(i, take)
+  return true
+}
+
+/** Ensure `--flag <value>` is present exactly once with this value, in place. */
+function setArg(args: string[], flag: string, value: string): boolean {
+  const i = args.indexOf(flag)
+  if (i === -1) {
+    args.push(flag, value)
+    return true
+  }
+  const current = args[i + 1]
+  if (current === value) return false
+  if (typeof current !== 'string' || current.startsWith('--')) {
+    args.splice(i + 1, 0, value)
+  } else {
+    args[i + 1] = value
+  }
+  return true
+}
+
+/**
+ * Point a Playwright entry at the portal-owned QC browser (`--cdp-endpoint`) instead
+ * of letting it launch its own, or back again. Mutating `entry` in place; returns true
+ * when something changed. See `qcBrowser.ts` for WHY the attached mode exists — in
+ * short, a browser the MCP launched dies with the `claude` process that spawned the
+ * MCP, so pressing Stop closed the browser instead of pausing.
+ *
+ * Which flags come off in attached mode is the load-bearing part:
+ *  - `--viewport-size` MUST go. It emulates a fixed viewport over the real window, so
+ *    leaving it would keep the page rendering at 1280x720 inside a maximized browser —
+ *    i.e. the full-screen complaint would survive the fix.
+ *  - `--user-data-dir` and `--browser` belong to whoever LAUNCHES the browser; with a
+ *    CDP endpoint they describe a browser this MCP isn't starting, so they only
+ *    mislead the next person reading the file.
+ *  - `--headless` is meaningless against an already-open window, and a QC engineer
+ *    watching a flow wants to see it.
+ */
+function applyPlaywrightAttachMode(entry: McpEntry, attach: boolean): boolean {
+  if (!Array.isArray(entry.args)) return false
+  const args = [...entry.args]
+  let changed = false
+
+  if (attach) {
+    changed = dropArg(args, '--viewport-size', true) || changed
+    changed = dropArg(args, '--user-data-dir', true) || changed
+    changed = dropArg(args, '--browser', true) || changed
+    changed = dropArg(args, '--headless', false) || changed
+    changed = setArg(args, '--cdp-endpoint', cdpEndpoint()) || changed
+  } else {
+    changed = dropArg(args, '--cdp-endpoint', true) || changed
+  }
+
+  if (changed) entry.args = args
+  return changed
+}
+
+/**
+ * Self-launch mode only: make the browser the MCP opens itself maximized, via the
+ * `--config` file written by `writePlaywrightMcpConfig` (a browser launch argument
+ * has no CLI flag), and take the fixed `--viewport-size` off so the page fills that
+ * window. Without both halves the browser opens in a small box on a large monitor —
+ * desktop breakpoints never fire and screenshots are the wrong shape.
+ *
+ * In attach mode this does nothing: the QC browser is already maximized by its own
+ * launch args, and `--config` would describe a launch that never happens.
+ */
+function applyPlaywrightWindowConfig(entry: McpEntry, attach: boolean): boolean {
+  if (!Array.isArray(entry.args)) return false
+  const args = [...entry.args]
+  let changed = false
+  if (attach) {
+    changed = dropArg(args, '--config', true) || changed
+  } else {
+    changed = dropArg(args, '--viewport-size', true) || changed
+    const cfg = writePlaywrightMcpConfig()
+    if (cfg) changed = setArg(args, '--config', cfg) || changed
+  }
+  if (changed) entry.args = args
+  return changed
+}
+
 function normalizePlaywrightProfile(entry: McpEntry): boolean {
   if (!Array.isArray(entry.args)) return false
+  // A Playwright attached to the QC browser launches nothing, so it has no profile to
+  // fix — and re-adding one here would put back a flag attach mode just removed.
+  if (entry.args.includes('--cdp-endpoint')) return false
   const local = agentProfileDir()
   const i = entry.args.indexOf('--user-data-dir')
   if (i === -1) {
@@ -358,7 +450,7 @@ function normalizePlaywrightProfile(entry: McpEntry): boolean {
  * actually supports: drop retired servers, and repair a Playwright profile path that
  * belongs to a different user. Idempotent — writes only when something changed.
  */
-export function repairProjectMcpConfig(rootPath: string): void {
+export function repairProjectMcpConfig(rootPath: string, attachBrowser = false): void {
   const file = mcpJsonFor(rootPath)
   const data = readMcp(file)
   const servers = data.mcpServers
@@ -371,7 +463,14 @@ export function repairProjectMcpConfig(rootPath: string): void {
       }
     }
     const playwright = servers.playwright
-    if (playwright && normalizePlaywrightProfile(playwright)) changed = true
+    if (playwright) {
+      // Attach mode first: it strips the flags the two calls below would otherwise
+      // re-add (profile, viewport), and normalizePlaywrightProfile bails out once a
+      // --cdp-endpoint is present.
+      if (applyPlaywrightAttachMode(playwright, attachBrowser)) changed = true
+      if (normalizePlaywrightProfile(playwright)) changed = true
+      if (applyPlaywrightWindowConfig(playwright, attachBrowser)) changed = true
+    }
     if (changed) writeMcp(file, data)
   }
   const local = localProjectMcpServers(rootPath)

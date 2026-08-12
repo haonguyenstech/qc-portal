@@ -5,6 +5,7 @@ import { PORT, testingDirFor, ticketsDirFor } from '../config.js'
 import { getDatabaseRow } from '../db.js'
 import { dbMapDocName } from '../dbMap.js'
 import { resolveProject } from '../projectScope.js'
+import { ensureQcBrowser } from '../qcBrowser.js'
 import { revealFolderNative } from '../folderPicker.js'
 import { runClaudeStream, CRAWL_SUMMARY_MODELS } from '../claudeExec.js'
 import { listTestcaseVersions } from '../testcaseGen.js'
@@ -1042,6 +1043,24 @@ chatRouter.post('/stream', async (req, res) => {
             ? ` — ${asked - mentions.resolved.length} tag(s) no longer exist on disk`
             : '')
         : 'None of the tagged items could be found on disk — answering without them.',
+    })
+  }
+
+  // The project drives browser automation through the portal-owned QC browser, so make
+  // sure that window is open BEFORE the CLI starts: the .mcp.json Playwright entry
+  // points at its CDP endpoint, and a missing endpoint fails every browser tool mid-turn
+  // with a connection error that reads like a broken MCP install. Adopting an
+  // already-open browser is the normal case and costs one HTTP probe.
+  if (project.persistentBrowser) {
+    const browser = await ensureQcBrowser()
+    send({
+      type: 'log',
+      level: browser.ok ? 'info' : 'error',
+      text: browser.ok
+        ? browser.adopted
+          ? 'Using the QC browser that is already open — it keeps its pages between turns.'
+          : 'Opened the QC browser. It stays open when you press Stop, so you can adjust and continue.'
+        : `The QC browser could not be started, so browser tools will fail: ${browser.error}`,
     })
   }
 

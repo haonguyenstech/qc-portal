@@ -22,6 +22,7 @@ import { qcRouter } from './routes/qc.js'
 import { filesRouter } from './routes/files.js'
 import { skillsRouter } from './routes/skills.js'
 import { mcpRouter, repairProjectMcpConfig } from './routes/mcp.js'
+import { browserRouter } from './routes/browser.js'
 import { projectsRouter } from './routes/projects.js'
 import { clickupRouter } from './routes/clickup.js'
 import { jiraRouter } from './routes/jira.js'
@@ -50,7 +51,7 @@ const defaultProject = seedDefaultProject()
 // points at another user's home (an EPERM that blocks every browser call).
 for (const project of listProjects()) {
   try {
-    repairProjectMcpConfig(project.rootPath)
+    repairProjectMcpConfig(project.rootPath, project.persistentBrowser)
   } catch {
     /* unreadable/absent .mcp.json — nothing to clean */
   }
@@ -138,6 +139,7 @@ app.use('/api/diagrams', diagramsRouter)
 app.use('/api/api-tests', apiTestsRouter)
 app.use('/api/prototype', prototypeRouter)
 app.use('/api/chat', chatRouter)
+app.use('/api/browser', browserRouter)
 app.use('/api/version', versionRouter)
 
 // JSON error handler for /api routes: turn body-parser failures (notably

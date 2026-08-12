@@ -3,6 +3,80 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.11.15 — 2026-08-12
+
+**Two runs of one ticket keep their own results, end-to-end flows get a canvas, and the browser stays open when you press Stop**
+
+### Added
+
+- **An end-to-end flow is now drawn, not typed.** The advanced mode on **Launch QC run** is a
+  canvas: pick steps from a library (Navigate, Sign in, Fill & submit, Verify, Check data, Custom),
+  drag the cards anywhere, and connect them by pulling a line between any two edges — a step can fan
+  out to several, so a flow can branch. Run order is read off the picture (top to bottom, left to
+  right from the first card), and each card shows the number it will run as. The **App URL is now
+  per step**, since a flow walks several pages; the first step that names one is where the run opens.
+  A flow has **no ticket** — it's a path through the product, so the page no longer asks for one and
+  the run files its report under the flow's name.
+- **Every run says which kind it was.** Running, History and the run header badge a run as **Ticket**
+  or **Flow**, because both show a mono id and a flow's is only its name slugged. A flow group in
+  History no longer offers a ClickUp link it could never open.
+- **The QC browser — pause a flow instead of closing it.** Turn it on per project on the **MCP**
+  page and the portal owns one long-lived browser window that Playwright attaches to, instead of
+  launching its own. Two things follow: pressing **Stop** mid-flow no longer closes the browser, so
+  you can fix a step by hand and carry on from whatever is on screen; and the window is actually
+  **maximized**, so desktop breakpoints fire and screenshots are the right shape. Between turns it's
+  just a browser — click around in it. It survives a portal restart, and the card tells you when it
+  adopted a window it can no longer stop for you.
+- **Filing a run's issues to ClickUp fills in the fields you'd have set by hand.** Each bug is filed
+  with a **priority derived from its own severity** (blocker/critical → Urgent … low/minor → Low),
+  the parent ticket's **assignees** and **tags**, and its **screenshots attached _and_ posted as a
+  comment** so the evidence sits in the discussion thread. Before you file, a preview says exactly
+  what each selected issue will get — including a warning when the parent has **no assignee** —
+  and afterwards the portal reports what ClickUp actually stored, not what it asked for.
+- **Import a skill by browsing or dropping the folder.** The drop zone on **Skills** takes a folder
+  dragged from Finder/Explorer, and clicking it opens the **browser's own** folder picker — which
+  works even when the portal was started over SSH, from a scheduled task or via WMI, where the OS
+  dialog can never appear. Either way the folder is checked for a `SKILL.md` before anything is
+  written.
+- **Sync several repositories at once** on **Source code**, with one log panel per repo and a
+  **Sync all** button. A slow backend pull no longer blocks the two-second web pull behind it.
+
+### Changed
+
+- **The device pickers show the device you set up, not its address.** An Android emulator that
+  attaches over TCP — MuMu, LDPlayer, BlueStacks, Nox — used to read as `127.0.0.1:7555`, and an
+  Android Studio emulator as `emulator-5556`, in both the MCP page's mobile test and the Run form's
+  device picker. The portal now asks `adb` for the name you gave the device (AVD name first, then the
+  model), and it also looks for the `adb` those emulators **ship with**, so an Android SDK install
+  isn't required. When it genuinely can't ask, the picker says so instead of quietly showing ids
+  forever.
+- **The Run form no longer pre-selects a ticket the portal is already working on.** Opening
+  **Launch QC run** while ticket A is running — or while its **test cases are still being
+  generated** — used to restore A as the checked ticket, which is the one ticket you didn't come to
+  run. It's now left unchecked, with a line naming it and why; pick it anyway if you did mean to
+  queue it again.
+- **Continue session resumes with the same permissions the run had.** A resumed conversation used to
+  start asking for approval for tools it had been using all along, which stalls until you notice. It
+  now resumes under bypassed permissions (like the Terminal page), marked with a **bypass
+  permissions** chip so it's never a surprise.
+- **The test-case preview names the ticket** (`ABC-123 · Notification bell`) instead of just the
+  folder it lives in.
+
+### Fixed
+
+- **Running the same ticket twice no longer overwrites the first run's results.** Reported from the
+  field: run a ticket on web, then on a device, and the web report, issues and screenshots were gone
+  — the second run had written into the same folder, because the folder name was invented from the
+  ticket and feature alone. Each run now owns its folder (`…-<target>-<run id>`), and History
+  resolves a run's results **only** to its own folder, so one run's report can never be shown — or
+  counted — as another's. Runs recorded before this update are unaffected and keep reading as they
+  did.
+- **The native folder picker no longer opens behind the browser** on macOS, and on Windows a picker
+  that can't appear says why (and points at the drop zone) instead of leaving you waiting two
+  minutes.
+- **A bug filed to ClickUp is no longer left with no priority.** It inherited the parent ticket's,
+  and a feature ticket usually has none.
+
 ## 0.11.14 — 2026-08-07
 
 **A real SQL console on the Database page, a Notes scratchpad, dark mode, and a sidebar you can search**

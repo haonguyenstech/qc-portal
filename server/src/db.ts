@@ -95,6 +95,35 @@ db.exec(`
   }
 }
 
+// Migration: remember WHICH KIND of run this was — a single-ticket acceptance
+// test, or an E2E flow (which has no ticket at all; its "ticketId" is the flow
+// name's slug). Nothing else on the row can tell them apart, so Running/History
+// showed a flow's slug in the ticket column with no hint it wasn't one. Older
+// rows are NULL and read as 'ticket' — correct for them, since every advanced
+// run before this DID carry real tickets.
+{
+  const cols = db.prepare(`PRAGMA table_info(runs)`).all() as { name: string }[]
+  if (!cols.some((c) => c.name === 'runKind')) {
+    db.exec(`ALTER TABLE runs ADD COLUMN runKind TEXT`)
+  }
+}
+
+// Migration: the unique token the portal puts at the END of a run's output folder
+// name (testing/test-result/<ticket>-<feature>-<target>-<token>/). Without it the
+// folder name came from the ticket + a slug the MODEL invented, so two runs of the
+// same ticket — classically one on web and one on a device — picked the same name
+// and the second overwrote the first's report.md / issues.md / screenshots. The
+// token is what makes a run's folder its own, and what lets us resolve a run's
+// output without prefix-matching the ticket (which is how a finishing run could
+// claim a folder another run wrote). NULL = a row from before this landed; those
+// keep the old prefix-matching resolution, which is right for them.
+{
+  const cols = db.prepare(`PRAGMA table_info(runs)`).all() as { name: string }[]
+  if (!cols.some((c) => c.name === 'outDirToken')) {
+    db.exec(`ALTER TABLE runs ADD COLUMN outDirToken TEXT`)
+  }
+}
+
 // Migration: add the per-outcome breakdown to runs (blocked / not-tested /
 // cancelled) so the History list shows the SAME buckets as a run's detail page.
 // Existing rows default to 0 and self-heal on next detail view (routes/qc.ts).
@@ -245,6 +274,10 @@ db.exec(`
   addCol('groundingCheckModel', `TEXT NOT NULL DEFAULT 'haiku'`)
   addCol('autoLearn', `INTEGER NOT NULL DEFAULT 1`)
   addCol('autoLearnModel', `TEXT NOT NULL DEFAULT 'haiku'`)
+  // Attach browser automation to the portal-owned QC browser instead of letting
+  // Playwright MCP launch (and, on Stop, close) its own. OFF for existing projects:
+  // it changes what a browser run drives, so it is the engineer's call per project.
+  addCol('persistentBrowser', `INTEGER NOT NULL DEFAULT 0`)
 }
 
 // Migration: per-project default QC skill — the skill auto-selected on the Launch
@@ -399,6 +432,7 @@ function rowToProject(row: Record<string, unknown>): Project {
     autoLearn: Number(row.autoLearn ?? 1) === 1,
     autoLearnModel: (row.autoLearnModel as string | null) || 'haiku',
     defaultSkill: (row.defaultSkill as string | null) ?? '',
+    persistentBrowser: Number(row.persistentBrowser ?? 0) === 1,
   }
 }
 
@@ -438,6 +472,8 @@ export function createProject(name: string, rootPath: string, isDefault = false)
     autoLearn: AUTO_LEARN,
     autoLearnModel: AUTO_LEARN_MODEL,
     defaultSkill: '',
+    // Off by default: attaching changes which browser a run drives, so it's opt-in.
+    persistentBrowser: false,
   }
   insertProjectStmt.run(
     project.id,
@@ -468,6 +504,7 @@ export function updateProject(
       | 'autoLearn'
       | 'autoLearnModel'
       | 'defaultSkill'
+      | 'persistentBrowser'
     >
   >,
 ): void {
@@ -483,10 +520,11 @@ export function updateProject(
       'autoLearn',
       'autoLearnModel',
       'defaultSkill',
+      'persistentBrowser',
     ] as const
   ).filter((k) => k in partial)
   if (keys.length === 0) return
-  const boolCols = new Set(['pinned', 'groundingCheck', 'autoLearn'])
+  const boolCols = new Set(['pinned', 'groundingCheck', 'autoLearn', 'persistentBrowser'])
   const setClause = keys.map((k) => `${k} = ?`).join(', ')
   const values = keys.map((k) =>
     boolCols.has(k) ? (partial[k as keyof typeof partial] ? 1 : 0) : (partial[k] as string),
@@ -884,8 +922,8 @@ export function listDesignChecks(projectId: string, limit = 50): DesignCheckReco
 // ---------------- runs ----------------
 
 const insertRunStmt = db.prepare(`
-  INSERT INTO runs (id, projectId, ticketId, appUrl, testTarget, slug, status, passCount, failCount, blockedCount, untestedCount, cancelledCount, totalAcs, createdAt, finishedAt)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  INSERT INTO runs (id, projectId, ticketId, appUrl, testTarget, runKind, slug, outDirToken, status, passCount, failCount, blockedCount, untestedCount, cancelledCount, totalAcs, createdAt, finishedAt)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `)
 
 const RUN_SELECT = `
@@ -918,7 +956,12 @@ function rowToSummary(row: Record<string, unknown>): RunSummary {
     ticketId: row.ticketId as string,
     appUrl: row.appUrl as string,
     testTarget: runTestTarget(row),
+    // NULL means the row predates the column — 'ticket' is right for those.
+    kind: row.runKind === 'flow' ? 'flow' : 'ticket',
     slug: (row.slug as string | null) ?? null,
+    // NULL on rows written before the token existed — resolution falls back to
+    // prefix-matching for those (see runManager.resolveRunOutDir).
+    outDirToken: (row.outDirToken as string | null) ?? null,
     status: row.status as RunSummary['status'],
     passCount: Number(row.passCount),
     failCount: Number(row.failCount),
@@ -938,7 +981,9 @@ export function insertRun(summary: RunSummary): void {
     summary.ticketId,
     summary.appUrl,
     summary.testTarget,
+    summary.kind,
     summary.slug,
+    summary.outDirToken,
     summary.status,
     summary.passCount,
     summary.failCount,

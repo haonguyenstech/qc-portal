@@ -4,9 +4,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import {
   Activity,
-  ArrowDown,
   ArrowRight,
-  ArrowUp,
   Bookmark,
   Boxes,
   Brain,
@@ -61,12 +59,14 @@ import {
   listMcp,
   listRuns,
   listSkills,
+  listTestCaseJobs,
   runMcpTest,
   type CrawledTicket,
   type TestCaseFormat,
 } from '@/lib/api'
 import { cn } from '@/lib/utils'
-import { devicesFromDetection } from '@/lib/devices'
+import { busyTicketIds, type BusyReason } from '@/lib/busyTickets'
+import { deviceNameHint, devicesFromDetection, isUnnamed } from '@/lib/devices'
 import { TEST_TARGET_META } from '@/lib/testTarget'
 import type { TestTarget } from '@/lib/types'
 import { useProjects } from '@/lib/project-context'
@@ -83,6 +83,17 @@ import { TicketTestCasePicker } from '@/components/TicketTestCasePicker'
 import { TestCaseVersionsDialog } from '@/components/TestCaseVersionsDialog'
 import { testcaseRelPath } from '@/lib/testcases'
 import { McpRequiredNotice } from '@/components/McpRequiredNotice'
+import { RunWorkflowBuilder } from '@/components/RunWorkflowBuilder'
+import {
+  DEFAULT_FLOW_NAME,
+  flowEntryUrl,
+  flowSlug,
+  invalidStepUrls,
+  graphFromPreset,
+  workflowStepEntries,
+  type WorkflowEdge,
+  type WorkflowNode,
+} from '@/lib/run-workflow'
 import { GuideTour, type TourStep } from '@/components/GuideTour'
 
 // Which Claude model drives the QC run. Each maps to --model haiku/sonnet/opus
@@ -134,14 +145,13 @@ function loadRunModel(): string {
   return DEFAULT_RUN_MODEL
 }
 
-// Simple = one ticket, one run (the original flow). Advanced = pick several
-// related tickets + define an ordered feature workflow, all driven as one run.
+// Simple = one ticket, one run (the original flow). Advanced = build the feature
+// as a node workflow (tickets + ordered steps), all driven as one run. The advanced
+// editor lives in RunWorkflowBuilder; this page only holds its nodes and flattens
+// them into the SAME createRun fields the run has always taken.
 type RunMode = 'simple' | 'advanced'
-// Feature (advanced) mode is temporarily disabled — shown as "Coming soon" and not
-// selectable. Flip to true to bring it back; the advanced-mode code below is intact.
-const ADVANCED_ENABLED = false
+const ADVANCED_ENABLED = true
 const RUN_MODE_KEY = 'qc.runMode'
-const MAX_FEATURE_TICKETS = 5
 // Single-ticket mode: several tickets may be selected, but each becomes its OWN
 // run and the server executes them strictly one at a time (never in parallel).
 const MAX_QUEUE_TICKETS = 10
@@ -298,6 +308,8 @@ function RunDevicePicker({
     retry: false,
   })
   const devices = devicesFromDetection(detection)
+  // Why a chip reads as `emulator-5554` / `127.0.0.1:7555` rather than a device name.
+  const nameHint = devices.some(isUnnamed) ? deviceNameHint(detection) : null
   // A remembered device that isn't booted any more is shown as unavailable rather
   // than quietly used — the run would fail the "device_id not in the listing" check.
   const missing = !!value && devices.length > 0 && !devices.some((d) => d.deviceId === value)
@@ -370,6 +382,7 @@ function RunDevicePicker({
               — the run will fall back to Auto unless you pick one above.
             </p>
           )}
+          {nameHint && <p className="text-[11px] text-amber-700 dark:text-amber-400">{nameHint}</p>}
           {devices.length > 1 && !value && !missing && (
             <p className="text-[11px] text-muted-foreground">
               {devices.length} devices are available — pick one so the run doesn't test whichever
@@ -427,18 +440,16 @@ function DeviceChip({
 const ticketIdOf = (t: CrawledTicket) => t.displayId ?? t.name
 
 /**
- * Multi-select ticket picker over the crawled list. Two uses:
- *  - variant "feature" (advanced mode): the tickets make up ONE run; the first
- *    pick is the **lead** (the run's report lands under its slug).
- *  - variant "queue" (single-ticket mode): each ticket becomes its OWN run and
- *    the server executes them sequentially, one at a time.
+ * Multi-select ticket picker over the crawled list, for **single-ticket mode**:
+ * each pick becomes its OWN run and the server executes them sequentially, one at
+ * a time. (The feature/advanced run picks its tickets on the workflow canvas —
+ * see RunWorkflowBuilder.)
  */
 function FeatureTicketsPicker({
   tickets,
   value,
   onChange,
   disabled,
-  variant = 'feature',
   bugTickets,
   onToggleBug,
   projectId,
@@ -447,8 +458,7 @@ function FeatureTicketsPicker({
   value: string[]
   onChange: (next: string[]) => void
   disabled?: boolean
-  variant?: 'feature' | 'queue'
-  /** Ids tagged as bugs (queue mode) — those run without test cases. */
+  /** Ids tagged as bugs — those run without test cases. */
   bugTickets?: Set<string>
   onToggleBug?: (id: string) => void
   /** Enables the per-row "Test cases" preview (needs a project to read them from). */
@@ -461,6 +471,7 @@ function FeatureTicketsPicker({
   // version picker below doesn't apply.
   const [previewFolder, setPreviewFolder] = useState<string | null>(null)
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
+  const maxTickets = MAX_QUEUE_TICKETS
   const toggleCollapse = (name: string) =>
     setCollapsed((prev) => {
       const next = new Set(prev)
@@ -468,8 +479,6 @@ function FeatureTicketsPicker({
       else next.add(name)
       return next
     })
-  const isQueue = variant === 'queue'
-  const maxTickets = isQueue ? MAX_QUEUE_TICKETS : MAX_FEATURE_TICKETS
   const atMax = value.length >= maxTickets
   const q = query.trim().toLowerCase()
   // Roots most-recently-crawled first; subtasks nest beneath their parent.
@@ -493,10 +502,8 @@ function FeatureTicketsPicker({
     // A ticket with test cases runs as a feature check. One WITHOUT test cases can
     // only run if the user tagged it a bug (via the row's "Mark bug" toggle) — so
     // block selecting an untagged, test-case-less ticket here.
-    if (isQueue) {
-      const t = tickets.find((x) => ticketIdOf(x) === id)
-      if (!t?.hasTestcases && !bugTickets?.has(id)) return
-    }
+    const t = tickets.find((x) => ticketIdOf(x) === id)
+    if (!t?.hasTestcases && !bugTickets?.has(id)) return
     onChange([...value, id])
   }
 
@@ -504,12 +511,8 @@ function FeatureTicketsPicker({
     <div className="space-y-2">
       <div className="flex items-center justify-between gap-2">
         <Label className="flex items-center gap-1.5">
-          {isQueue ? (
-            <Ticket className="size-3.5 text-muted-foreground" />
-          ) : (
-            <Layers className="size-3.5 text-muted-foreground" />
-          )}
-          {isQueue ? 'Tickets to test' : 'Tickets in this feature'}
+          <Ticket className="size-3.5 text-muted-foreground" />
+          Tickets to test
           <span className="rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-muted-foreground">
             {value.length}/{maxTickets}
           </span>
@@ -535,17 +538,9 @@ function FeatureTicketsPicker({
               title={title ?? undefined}
               className="group flex w-full items-center gap-1.5 rounded-full border border-primary/30 bg-primary/5 py-1 pl-2.5 pr-1.5 text-xs font-medium text-foreground"
             >
-              {isQueue ? (
-                <span className="rounded-full bg-muted px-1.5 py-0.5 text-[9px] font-semibold tabular-nums text-muted-foreground">
-                  {i + 1}
-                </span>
-              ) : (
-                i === 0 && (
-                  <span className="rounded-full bg-primary px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-primary-foreground">
-                    Lead
-                  </span>
-                )
-              )}
+              <span className="rounded-full bg-muted px-1.5 py-0.5 text-[9px] font-semibold tabular-nums text-muted-foreground">
+                {i + 1}
+              </span>
               <span className="shrink-0 font-mono">{id}</span>
               {bugTickets?.has(id) && (
                 <span
@@ -595,7 +590,7 @@ function FeatureTicketsPicker({
       )}
 
       {/* Some tickets have no test cases — explain the "Mark bug" path to run them. */}
-      {isQueue && tickets.some((t) => !t.hasTestcases) && (
+      {tickets.some((t) => !t.hasTestcases) && (
         <div className="flex items-start gap-2.5 rounded-xl border border-border/60 bg-muted/50 px-3 py-2.5 text-xs text-muted-foreground">
           <Bug className="mt-0.5 size-4 shrink-0 text-red-600" />
           <div className="space-y-0.5 leading-snug">
@@ -654,7 +649,7 @@ function FeatureTicketsPicker({
                     // A test-case-less ticket shows the Bug toggle — tagging it a bug
                     // (which also selects it) is the only way to run it. A ticket WITH
                     // test cases runs as a feature check (no bug toggle).
-                    const canTagBug = isQueue && !t.hasTestcases && !!onToggleBug
+                    const canTagBug = !t.hasTestcases && !!onToggleBug
                     // Its checkbox can't select it until it's tagged a bug — lock the
                     // checkbox (with a tooltip) rather than leaving it silently inert.
                     const selectLocked = canTagBug && !isBug && !isSel
@@ -688,8 +683,7 @@ function FeatureTicketsPicker({
           )}
         </div>
       </div>
-      {isQueue ? (
-        <p className="text-xs text-muted-foreground">
+      <p className="text-xs text-muted-foreground">
           Each ticket becomes its <span className="font-medium text-foreground">own QC run</span>,
           executed one at a time — never in parallel. Only tickets with{' '}
           <span className="font-medium text-foreground">generated test cases</span> can be
@@ -698,14 +692,7 @@ function FeatureTicketsPicker({
             Test cases
           </Link>{' '}
           page first.
-        </p>
-      ) : (
-        <p className="text-xs text-muted-foreground">
-          Pick the tickets that make up one feature. The first one is the{' '}
-          <span className="font-medium text-foreground">lead</span> — the run’s report is written
-          under its folder.
-        </p>
-      )}
+      </p>
 
       {/* Read-only preview of whichever ticket's test cases were clicked. */}
       <TestCaseVersionsDialog
@@ -713,110 +700,6 @@ function FeatureTicketsPicker({
         projectId={projectId}
         onOpenChange={(open) => !open && setPreviewFolder(null)}
       />
-    </div>
-  )
-}
-
-/**
- * Ordered, editable list of workflow steps for an advanced feature run. Steps
- * are exercised in order as the primary acceptance path. Add / remove / reorder.
- */
-function WorkflowStepsEditor({
-  steps,
-  onChange,
-  disabled,
-}: {
-  steps: string[]
-  onChange: (next: string[]) => void
-  disabled?: boolean
-}) {
-  function setAt(i: number, val: string) {
-    const next = [...steps]
-    next[i] = val
-    onChange(next)
-  }
-  function add() {
-    onChange([...steps, ''])
-  }
-  function removeAt(i: number) {
-    const next = steps.filter((_, idx) => idx !== i)
-    onChange(next.length ? next : [''])
-  }
-  function move(i: number, dir: -1 | 1) {
-    const j = i + dir
-    if (j < 0 || j >= steps.length) return
-    const next = [...steps]
-    ;[next[i], next[j]] = [next[j], next[i]]
-    onChange(next)
-  }
-
-  return (
-    <div className="space-y-2">
-      <Label className="flex items-center gap-1.5">
-        <ListOrdered className="size-3.5 text-muted-foreground" />
-        Feature workflow
-        <span className="font-normal text-muted-foreground">· ordered steps</span>
-      </Label>
-      <div className="space-y-2">
-        {steps.map((step, i) => (
-          <div key={i} className="flex items-center gap-2">
-            <span className="grid size-6 shrink-0 place-items-center rounded-full bg-muted text-xs font-semibold tabular-nums text-muted-foreground">
-              {i + 1}
-            </span>
-            <Input
-              value={step}
-              onChange={(e) => setAt(i, e.target.value)}
-              disabled={disabled}
-              placeholder={
-                i === 0 ? 'e.g. Sign up with a new email' : 'Describe the next step…'
-              }
-              className="h-10 flex-1 shadow-xs transition-shadow focus-visible:shadow-sm"
-            />
-            <div className="flex shrink-0 items-center">
-              <button
-                type="button"
-                disabled={disabled || i === 0}
-                onClick={() => move(i, -1)}
-                aria-label="Move step up"
-                className="grid size-8 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-30"
-              >
-                <ArrowUp className="size-3.5" />
-              </button>
-              <button
-                type="button"
-                disabled={disabled || i === steps.length - 1}
-                onClick={() => move(i, 1)}
-                aria-label="Move step down"
-                className="grid size-8 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-30"
-              >
-                <ArrowDown className="size-3.5" />
-              </button>
-              <button
-                type="button"
-                disabled={disabled}
-                onClick={() => removeAt(i)}
-                aria-label="Remove step"
-                className="grid size-8 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive disabled:pointer-events-none disabled:opacity-30"
-              >
-                <X className="size-3.5" />
-              </button>
-            </div>
-          </div>
-        ))}
-      </div>
-      <button
-        type="button"
-        disabled={disabled}
-        onClick={add}
-        className="inline-flex items-center gap-1.5 rounded-full border border-dashed border-border/60 px-2.5 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:border-border hover:bg-muted/60 hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
-      >
-        <Plus className="size-3.5" />
-        Add step
-      </button>
-      <p className="text-xs text-muted-foreground">
-        Claude exercises these in order, verifying each before moving on — describe the end-to-end
-        flow that ties the tickets together.
-      </p>
     </div>
   )
 }
@@ -855,8 +738,15 @@ export default function RunPage() {
   // value asks for advanced.
   const mode: RunMode = ADVANCED_ENABLED ? requestedMode : 'simple'
   const [showOptions, setShowOptions] = useState(false)
-  const [featureTickets, setFeatureTickets] = useState<string[]>([])
-  const [workflowSteps, setWorkflowSteps] = useState<string[]>([''])
+  // E2E flow (advanced) mode: the workflow canvas. Its nodes are the single source
+  // of truth for the flow — the ordered step lines are DERIVED from them below,
+  // never held in a second piece of state. An E2E flow has NO ticket; `flowName`
+  // is what the run is filed under instead.
+  const [wfNodes, setWfNodes] = useState<WorkflowNode[]>([])
+  // …and the connections between them: a flow can branch, so the RUN ORDER is a
+  // walk of the graph rather than the order the cards were created in.
+  const [wfEdges, setWfEdges] = useState<WorkflowEdge[]>([])
+  const [flowName, setFlowName] = useState(DEFAULT_FLOW_NAME)
   const [testcaseVersion, setTestcaseVersion] = useState<number | null>(null)
   const [testcaseFormat, setTestcaseFormat] = useState<TestCaseFormat | null>(null)
   const [submitting, setSubmitting] = useState(false)
@@ -892,7 +782,7 @@ export default function RunPage() {
     {
       selector: '[data-tour="mode"]',
       title: 'Choose how to run',
-      body: 'Single ticket mode runs one selected ticket, or queues several tickets in order. Save common configurations as templates for faster repeat runs.',
+      body: 'Single ticket mode runs one selected ticket, or queues several tickets in order. E2E flow opens a workflow canvas — chain the steps Claude walks through and they run as ONE session with a single report, no ticket needed. Save common configurations as templates for faster repeat runs.',
       placement: 'bottom',
     },
     {
@@ -1006,35 +896,61 @@ export default function RunPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeProject?.id])
 
-  // Don't auto-select a ticket that's already running: the last-inputs restore above
-  // re-selects the previous lead (and bug) tickets, but if one of them still has an
-  // in-flight run the user came here to run a DIFFERENT ticket — so drop it from the
-  // selection. Runs once per project, after the runs list first loads (it's only the
-  // AUTO-restored selection we prune; a ticket the user picks by hand is left alone).
+  // Test-case generation jobs, for the same reason as `recentRuns` below: a ticket the
+  // portal is still writing test cases for must not be pre-selected here.
+  const { data: testcaseJobs } = useQuery({
+    queryKey: ['testcase-jobs', activeProject?.id],
+    queryFn: () => listTestCaseJobs(activeProject!.id).then((r) => r.jobs),
+    enabled: !!activeProject,
+  })
+
+  // Everything the portal is already working on, by ticket id — see busyTickets.ts.
+  const busyTickets = useMemo(
+    () =>
+      busyTicketIds({
+        projectId: activeProject?.id,
+        runs: recentRuns,
+        jobs: testcaseJobs,
+        crawled: crawledTickets,
+      }),
+    [activeProject?.id, recentRuns, testcaseJobs, crawledTickets],
+  )
+
+  // Don't auto-select a ticket the portal is already busy with: the last-inputs restore
+  // above re-selects the previous lead (and bug) tickets, but if one of them has an
+  // in-flight QC run OR a test-case generation still working through it, the engineer
+  // came here to run a DIFFERENT ticket — so drop it from the selection.
+  //
+  // It prunes ONCE per project, and only after both lists have loaded: latching on the
+  // first render would mean a cached-but-stale runs list (or jobs arriving a beat later)
+  // silently skipped the prune. Only the AUTO-restored selection is pruned — a ticket
+  // the engineer then picks by hand is left alone, so re-running a busy ticket on
+  // purpose still works.
   const prunedRunningRef = useRef<string | null>(null)
+  const [prunedBusy, setPrunedBusy] = useState<{ id: string; reason: BusyReason }[]>([])
   useEffect(() => {
-    if (!activeProject || !recentRuns) return
+    if (!activeProject || !recentRuns || !testcaseJobs) return
     if (prunedRunningRef.current === activeProject.id) return
     prunedRunningRef.current = activeProject.id
-    const active = new Set(
-      recentRuns
-        .filter(
-          (r) =>
-            r.projectId === activeProject.id &&
-            (r.status === 'running' || r.status === 'queued' || r.status === 'paused'),
-        )
-        .map((r) => r.ticketId)
-        .filter(Boolean),
-    )
-    if (!active.size) return
-    setSimpleTickets((sel) => sel.filter((id) => !active.has(id)))
+    if (!busyTickets.size) return
+    setSimpleTickets((sel) => {
+      const dropped = sel.filter((id) => busyTickets.has(id))
+      // Say WHICH tickets were left out; a selection that silently empties itself reads
+      // as the form losing the engineer's input.
+      if (dropped.length) {
+        setPrunedBusy(dropped.map((id) => ({ id, reason: busyTickets.get(id)! })))
+      }
+      return sel.filter((id) => !busyTickets.has(id))
+    })
     setBugTickets((prev) =>
-      [...prev].some((id) => active.has(id))
-        ? new Set([...prev].filter((id) => !active.has(id)))
+      [...prev].some((id) => busyTickets.has(id))
+        ? new Set([...prev].filter((id) => !busyTickets.has(id)))
         : prev,
     )
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeProject?.id, recentRuns])
+  }, [activeProject?.id, recentRuns, testcaseJobs])
+
+  const shownPrunedBusy = prunedBusy.filter((t) => !simpleTickets.includes(t.id))
 
   // app-mobile drives a native app already installed on the device — there's no URL,
   // so the URL field is hidden and never required/validated in that mode.
@@ -1113,13 +1029,6 @@ export default function RunPage() {
 
   function chooseMode(next: RunMode) {
     if (next === mode) return
-    // Carry the chosen ticket across the switch so nothing is lost: simple→advanced
-    // seeds the feature list with the single ticket; advanced→simple keeps the lead.
-    if (next === 'advanced' && featureTickets.length === 0 && simpleTickets.length > 0) {
-      setFeatureTickets(simpleTickets.slice(0, MAX_FEATURE_TICKETS))
-    } else if (next === 'simple' && simpleTickets.length === 0 && featureTickets.length > 0) {
-      setSimpleTickets(featureTickets.slice(0, MAX_QUEUE_TICKETS))
-    }
     writeMode(next)
   }
 
@@ -1136,14 +1045,19 @@ export default function RunPage() {
       p.model && QC_MODELS.some((m) => m.value === p.model) ? p.model : DEFAULT_RUN_MODEL,
     )
     if (nextMode === 'advanced') {
-      setFeatureTickets((p.tickets ?? []).slice(0, MAX_FEATURE_TICKETS))
-      setWorkflowSteps(p.workflowSteps && p.workflowSteps.length ? p.workflowSteps : [''])
+      // A template stores the flow's step lines; rebuild the canvas from them.
+      const graph = graphFromPreset(p.workflowSteps ?? [], p.workflowKinds ?? [])
+      setWfNodes(graph.nodes)
+      setWfEdges(graph.edges)
+      // The flow's own name is the run's report slug, so restore it too — a
+      // template saved before this carries none and keeps the default.
+      setFlowName(p.flowName?.trim() || DEFAULT_FLOW_NAME)
     }
+    const steps = nextMode === 'advanced' ? (p.workflowSteps?.length ?? 0) : 0
     toast.success('Template loaded', {
-      description:
-        nextMode === 'advanced' && p.tickets?.length
-          ? `${p.name} — ${p.tickets.length} ticket${p.tickets.length === 1 ? '' : 's'} ready to run.`
-          : `${p.name} — review and run.`,
+      description: steps
+        ? `${p.name} — ${steps} step${steps === 1 ? '' : 's'} on the canvas.`
+        : `${p.name} — review and run.`,
     })
   }
 
@@ -1157,9 +1071,21 @@ export default function RunPage() {
     requestAnimationFrame(() => instructionsRef.current?.focus())
   }
 
+  // Flattened from the workflow canvas — the run contract is unchanged, the flow
+  // just supplies ordered `workflowSteps` instead of a ticket's test cases.
+  const stepEntries = workflowStepEntries(wfNodes, wfEdges)
+  const cleanSteps = stepEntries.map((e) => e.line)
+  // What the run is filed under. A single-ticket run uses the ticket id; an E2E
+  // flow has no ticket, so its NAME becomes the run's slug.
+  const flowId = flowSlug(flowName)
+  // An E2E flow walks several pages, so the App URL is a per-STEP setting on the
+  // canvas rather than a field on this form. The run record still takes one URL —
+  // the first step that names one, i.e. where the flow opens.
+  const flowUrl = mode === 'advanced' && !isAppTarget ? flowEntryUrl(wfNodes, wfEdges) : ''
+  const badStepUrls = mode === 'advanced' && !isAppTarget ? invalidStepUrls(wfNodes) : []
   // The tickets driving this submit: in simple mode each one becomes its own
-  // sequential run; in advanced mode they form ONE feature run (first = lead).
-  const runTickets = mode === 'advanced' ? featureTickets : simpleTickets
+  // sequential run; an E2E flow is always exactly one run.
+  const runTickets = mode === 'advanced' ? (cleanSteps.length ? [flowId] : []) : simpleTickets
   const leadTicket = runTickets[0] ?? ''
   // A ticket runs as a feature (verified against its test cases) UNLESS the user
   // tagged it a bug — bug runs reproduce the issue and need no test cases.
@@ -1175,7 +1101,6 @@ export default function RunPage() {
           return !t?.hasTestcases
         })
       : []
-  const cleanSteps = workflowSteps.map((s) => s.trim()).filter(Boolean)
   // Multi-ticket queue: each run points at its OWN URL — there's no shared default,
   // so every selected ticket must have its own App URL filled in.
   const multiUrl = mode === 'simple' && runTickets.length > 1 && !isAppTarget
@@ -1191,11 +1116,15 @@ export default function RunPage() {
   // run knows which app to launch. Web targets need a reachable URL instead.
   const appUrlReady = isAppTarget
     ? !!appName.trim()
-    : multiUrl
-      ? missingTicketUrls.length === 0
-      : !!appUrl.trim()
-  // The shared App URL field is hidden in multi mode, so its validity is irrelevant there.
-  const sharedUrlInvalid = !multiUrl && appUrlInvalid
+    : mode === 'advanced'
+      ? !!flowUrl
+      : multiUrl
+        ? missingTicketUrls.length === 0
+        : !!appUrl.trim()
+  // The shared App URL field is hidden in multi and E2E mode, so its validity is
+  // irrelevant there — an E2E flow is graded on its own step URLs instead.
+  const sharedUrlInvalid =
+    mode === 'advanced' ? badStepUrls.length > 0 : !multiUrl && appUrlInvalid
   const canSubmit =
     !submitting &&
     !!leadTicket &&
@@ -1219,8 +1148,7 @@ export default function RunPage() {
   const readyChecks = [
     { label: 'Project', ok: !!activeProject, value: activeProject?.name ?? 'Select one' },
     {
-      label:
-        mode === 'advanced' ? 'Lead ticket' : runTickets.length > 1 ? 'Tickets' : 'Ticket',
+      label: mode === 'advanced' ? 'Flow' : runTickets.length > 1 ? 'Tickets' : 'Ticket',
       ok: !!leadTicket && unrunnableTickets.length === 0,
       value:
         unrunnableTickets.length > 0
@@ -1264,20 +1192,36 @@ export default function RunPage() {
       })
       return
     }
-    if (!isAppTarget && appUrl.trim() && !isValidHttpUrl(appUrl)) {
-      toast.error('Invalid App URL', { description: 'Enter a full http:// or https:// address.' })
-      return
-    }
-    if (multiUrl) {
-      const bad = runTickets.find((id) => !isValidHttpUrl(urlFor(id)))
-      if (bad) {
+    // E2E flow: the URL comes from the canvas steps, not this form.
+    if (mode === 'advanced' && !isAppTarget) {
+      if (badStepUrls.length > 0) {
         toast.error('Invalid App URL', {
-          description: `Check the URL for ${bad} — enter a full http:// or https:// address.`,
+          description: `“${(badStepUrls[0].title ?? '').trim() || 'A step'}” has an invalid URL — enter a full http:// or https:// address.`,
         })
         return
       }
-    } else if (!isAppTarget && !appUrl.trim()) {
+      if (!flowUrl) {
+        toast.error('App URL required', {
+          description: 'Give the step that opens the app its App URL — that is where the run starts.',
+        })
+        return
+      }
+    } else if (!isAppTarget && appUrl.trim() && !isValidHttpUrl(appUrl)) {
+      toast.error('Invalid App URL', { description: 'Enter a full http:// or https:// address.' })
       return
+    }
+    if (mode !== 'advanced') {
+      if (multiUrl) {
+        const bad = runTickets.find((id) => !isValidHttpUrl(urlFor(id)))
+        if (bad) {
+          toast.error('Invalid App URL', {
+            description: `Check the URL for ${bad} — enter a full http:// or https:// address.`,
+          })
+          return
+        }
+      } else if (!isAppTarget && !appUrl.trim()) {
+        return
+      }
     }
     if (unrunnableTickets.length > 0) {
       toast.error('Test cases required', {
@@ -1343,7 +1287,8 @@ export default function RunPage() {
         await createRun({
           projectId: activeProject.id,
           ticketId: leadTicket,
-          appUrl: isAppTarget ? appName.trim() : appUrl.trim(),
+          // The flow's entry point — the first step that names a URL.
+          appUrl: isAppTarget ? appName.trim() : flowUrl,
           skill: skill || undefined,
           instructions: finalInstructions || undefined,
           model,
@@ -1351,26 +1296,36 @@ export default function RunPage() {
           workflowSteps: cleanSteps.length ? cleanSteps : undefined,
           testTarget,
           deviceId: pinnedDevice,
+          // No ticket exists here — `ticketId` is the flow name's slug.
+          kind: 'flow',
         })
       }
       saveLastInputs(activeProject.id, {
-        ticketId: leadTicket,
-        appUrl: appUrl.trim(),
+        // An E2E flow's id is a flow name, not a ticket — storing it here would
+        // seed single-ticket mode with a ticket that doesn't exist, so keep the
+        // last real one.
+        ticketId:
+          mode === 'advanced'
+            ? (loadLastInputs(activeProject.id)?.ticketId ?? '')
+            : leadTicket,
+        // Likewise the URL: an E2E flow's entry point belongs to its canvas, not
+        // to single-ticket mode's shared field.
+        appUrl: mode === 'advanced' ? (loadLastInputs(activeProject.id)?.appUrl ?? '') : appUrl.trim(),
         skill,
         instructions: instructions.trim(),
       })
       saveAppName(activeProject.id, appName)
       queryClient.invalidateQueries({ queryKey: ['runs'] })
       toast.success(
-        mode === 'advanced' && runTickets.length > 1
-          ? 'Feature QC run started'
+        mode === 'advanced'
+          ? 'E2E flow started'
           : mode === 'simple' && runTickets.length > 1
             ? `${runTickets.length} QC runs queued`
             : 'QC run started',
         {
           description:
-            mode === 'advanced' && runTickets.length > 1
-              ? `Testing ${runTickets.length} tickets as one feature — tracking on the Running page.`
+            mode === 'advanced'
+              ? `Walking ${cleanSteps.length} step${cleanSteps.length === 1 ? '' : 's'} end to end — tracking on the Running page.`
               : mode === 'simple' && runTickets.length > 1
                 ? 'Runs execute one at a time, in order — tracking on the Running page.'
                 : 'Tracking progress on the Running page.',
@@ -1387,7 +1342,15 @@ export default function RunPage() {
   }
 
   return (
-    <div className="mx-auto max-w-6xl space-y-8">
+    <div
+      className={cn(
+        'mx-auto space-y-8',
+        // The canvas is the page in E2E mode, so it runs edge to edge: no max
+        // width, and the negative margins claw back the shell's own gutter
+        // (AppShell pads every route; only this one wants the pixels back).
+        mode === 'advanced' ? 'max-w-none -mx-2 sm:-mx-4 lg:-mx-6' : 'max-w-6xl',
+      )}
+    >
       <header className="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
         <div className="flex items-start gap-3" data-tour="header">
           <span className="mt-0.5 flex size-11 shrink-0 items-center justify-center rounded-2xl bg-foreground text-background">
@@ -1404,8 +1367,10 @@ export default function RunPage() {
               )}
             </div>
             <p className="max-w-2xl text-sm leading-6 text-muted-foreground">
-              Configure a ticket, live app URL, model, and run instructions. When started, the run
-              moves to the live tracker and writes a structured QC report.
+              {mode === 'advanced'
+                ? 'Chain the steps of an end-to-end flow, point it at the live app, and run it as one session.'
+                : 'Configure a ticket, live app URL, model, and run instructions.'}{' '}
+              When started, the run moves to the live tracker and writes a structured QC report.
             </p>
           </div>
         </div>
@@ -1450,9 +1415,16 @@ export default function RunPage() {
         feature="run QC tests"
       />
 
-      <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_18rem]">
+      <div
+        className={cn(
+          'grid gap-6',
+          // The E2E canvas needs every pixel — the readiness/recent-runs rail is a
+          // single-ticket aid (it reads a ticket + its test cases), so it stands down.
+          mode === 'simple' && 'xl:grid-cols-[minmax(0,1fr)_18rem]',
+        )}
+      >
         <Card className="overflow-hidden rounded-3xl border-border/60 py-0 shadow-none">
-          <CardContent className="p-6">
+          <CardContent className={cn(mode === 'advanced' ? 'p-4' : 'p-6')}>
           <form
             onSubmit={onSubmit}
             onKeyDown={(e) => {
@@ -1471,7 +1443,7 @@ export default function RunPage() {
                     { value: 'simple' as const, label: 'Single ticket', icon: Sparkles, disabled: false },
                     {
                       value: 'advanced' as const,
-                      label: 'Feature (advanced)',
+                      label: 'E2E flow',
                       icon: Workflow,
                       disabled: !ADVANCED_ENABLED,
                     },
@@ -1529,11 +1501,10 @@ export default function RunPage() {
               <div className="flex items-start gap-2 rounded-2xl border border-border/60 bg-muted/60 px-3 py-2 text-xs leading-relaxed text-muted-foreground">
                 <Layers className="mt-0.5 size-3.5 shrink-0 text-primary" />
                 <span>
-                  <span className="font-medium text-foreground">Feature run:</span> pick the related
-                  tickets and lay out the end-to-end workflow. They run as{' '}
+                  <span className="font-medium text-foreground">End-to-end flow:</span> chain the
+                  steps onto the canvas and name the flow. They run as{' '}
                   <span className="font-medium text-foreground">one</span> QC session with a single
-                  report — best for a multi-ticket feature, and a deeper model (Sonnet/Opus) is
-                  recommended.
+                  report — no ticket needed, and a deeper model (Sonnet/Opus) is recommended.
                 </span>
               </div>
             )}
@@ -1544,13 +1515,12 @@ export default function RunPage() {
                 n={1}
                 title="What to test"
                 hint={
-                  mode === 'advanced' ? 'a feature across tickets' : 'crawled tickets, one run each'
+                  mode === 'advanced' ? 'an end-to-end flow' : 'crawled tickets, one run each'
                 }
               />
               {mode === 'simple' ? (
                 <div className="space-y-4">
                   <FeatureTicketsPicker
-                    variant="queue"
                     tickets={crawledTickets ?? []}
                     value={simpleTickets}
                     onChange={setSimpleTickets}
@@ -1559,6 +1529,28 @@ export default function RunPage() {
                     onToggleBug={toggleBug}
                     projectId={activeProject?.id}
                   />
+
+                  {/* Why the ticket you last ran isn't pre-selected. Drops away for a
+                      ticket the engineer then picks anyway — the note explains an absence,
+                      so it has nothing left to say once the ticket is in the queue. */}
+                  {shownPrunedBusy.length > 0 && (
+                    <div className="flex items-start gap-2 rounded-2xl border border-amber-200 bg-amber-50/60 px-3 py-2 text-xs leading-relaxed text-amber-800 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-200">
+                      <Loader2 className="mt-0.5 size-3.5 shrink-0 animate-spin" />
+                      <span>
+                        <span className="font-medium">Not pre-selected:</span>{' '}
+                        {shownPrunedBusy.map((t, i) => (
+                          <span key={t.id}>
+                            {i > 0 ? ', ' : ''}
+                            <span className="font-mono">{t.id}</span>
+                            {t.reason === 'run'
+                              ? ' (a run is still in progress)'
+                              : ' (its test cases are still being generated)'}
+                          </span>
+                        ))}
+                        . Pick it anyway if you meant to queue it again.
+                      </span>
+                    </div>
+                  )}
 
                   {simpleTickets.length > 1 && (
                     <div className="flex items-start gap-2 rounded-2xl border border-border/60 bg-muted/60 px-3 py-2 text-xs leading-relaxed text-muted-foreground">
@@ -1590,20 +1582,16 @@ export default function RunPage() {
                   )}
                 </div>
               ) : (
-                <div className="space-y-4">
-                  <FeatureTicketsPicker
-                    tickets={crawledTickets ?? []}
-                    value={featureTickets}
-                    onChange={setFeatureTickets}
-                    disabled={!activeProject}
-                    projectId={activeProject?.id}
-                  />
-                  <WorkflowStepsEditor
-                    steps={workflowSteps}
-                    onChange={setWorkflowSteps}
-                    disabled={!activeProject}
-                  />
-                </div>
+                <RunWorkflowBuilder
+                  nodes={wfNodes}
+                  edges={wfEdges}
+                  onChange={setWfNodes}
+                  onEdgesChange={setWfEdges}
+                  flowName={flowName}
+                  onFlowNameChange={setFlowName}
+                  disabled={!activeProject}
+                  urls={!isAppTarget}
+                />
               )}
             </section>
 
@@ -1730,9 +1718,13 @@ export default function RunPage() {
                 </div>
               ) : (
                 <>
+                {/* E2E flow: the App URL is a setting on each step, so this form has
+                    no URL field and no note about one — the canvas says where the
+                    flow starts, and repeating it here was just noise. */}
+
                 {/* Single ticket: one shared App URL field. Multi-ticket queues use
                     the per-ticket list below instead (each run has its own URL). */}
-                {!multiUrl && (
+                {mode === 'simple' && !multiUrl && (
                 <div className="space-y-2">
                   <Label htmlFor="appUrl" className="flex items-center gap-1.5">
                     <Globe className="size-3.5 text-muted-foreground" />
@@ -2068,8 +2060,8 @@ export default function RunPage() {
                 ) : (
                   <>
                     <Play className="size-4" />
-                    {mode === 'advanced' && runTickets.length > 1
-                      ? 'Run feature QC'
+                    {mode === 'advanced'
+                      ? 'Run E2E flow'
                       : runTickets.length > 1
                         ? `Run ${runTickets.length} tickets in turn`
                         : 'Run QC'}
@@ -2082,6 +2074,7 @@ export default function RunPage() {
         </CardContent>
         </Card>
 
+        {mode === 'simple' && (
         <aside className="space-y-3">
           {/* Readiness — compact checklist (no big tiles), run mode folded into the footer. */}
           <Card data-tour="readiness" className="rounded-3xl border-border/60 shadow-none">
@@ -2115,7 +2108,7 @@ export default function RunPage() {
               </ul>
               <div className="flex items-center justify-between border-t border-border/60 pt-2.5 text-xs">
                 <span className="text-muted-foreground">
-                  {mode === 'advanced' ? 'Feature workflow' : 'Single ticket'}
+                  Single ticket
                 </span>
                 <span className="rounded-full bg-muted px-2 py-0.5 font-medium text-muted-foreground">
                   {selectedTestcaseLabel}
@@ -2165,6 +2158,7 @@ export default function RunPage() {
             </CardContent>
           </Card>
         </aside>
+        )}
       </div>
 
       <ManageHintsDialog
@@ -2183,12 +2177,14 @@ export default function RunPage() {
         presets={presets}
         current={{
           mode,
-          appUrl,
+          // In E2E mode the URL is carried by the step lines themselves.
+          appUrl: mode === 'advanced' ? flowUrl : appUrl,
           skill,
           instructions,
           model,
-          tickets: featureTickets,
+          flowName,
           workflowSteps: cleanSteps,
+          workflowKinds: stepEntries.map((e) => e.step),
         }}
         addPreset={addPreset}
         renamePreset={renamePreset}

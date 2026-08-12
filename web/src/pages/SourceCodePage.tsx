@@ -43,35 +43,16 @@ import {
   disconnectSource,
   getSource,
   getSourceCredential,
-  getSourceJob,
+  listSourceJobs,
   openSourceFolder,
   syncSource,
+  type SourceJob,
   type SourceLogLine,
   type SourceRepo,
 } from '@/lib/api'
 import { OpenFolderButton } from '@/components/OpenFolderButton'
+import { addActiveJobId, loadActiveJobIds } from '@/lib/activeSourceJobs'
 import { useProjects } from '@/lib/project-context'
-
-// The active clone/sync job id is remembered per project so a browser reload
-// reconnects to the still-running server-side job. The global SourceJobWatcher
-// clears this key once the job finishes — this page only writes & reads it.
-// One job runs at a time per project (the server enforces it too).
-const ACTIVE_JOB_PREFIX = 'qc.sourceJob.'
-function loadActiveJobId(projectId: string | null): string | null {
-  if (!projectId) return null
-  try {
-    return localStorage.getItem(ACTIVE_JOB_PREFIX + projectId)
-  } catch {
-    return null
-  }
-}
-function saveActiveJobId(projectId: string, jobId: string): void {
-  try {
-    localStorage.setItem(ACTIVE_JOB_PREFIX + projectId, jobId)
-  } catch {
-    /* storage unavailable */
-  }
-}
 
 function timeAgo(iso: string): string {
   if (!iso) return ''
@@ -98,8 +79,20 @@ function providerLabel(provider: string): string {
   return 'Git'
 }
 
-/** The terminal-style live log, same look as the test-case / crawl panels. */
-function JobLogPanel({ logs, running }: { logs: SourceLogLine[]; running: boolean }) {
+/**
+ * The terminal-style live log, same look as the test-case / crawl panels. Several
+ * repos sync at once, so each job gets its own panel and `title` says which repo's
+ * output this is — an untitled panel is unreadable once there are three of them.
+ */
+function JobLogPanel({
+  logs,
+  running,
+  title,
+}: {
+  logs: SourceLogLine[]
+  running: boolean
+  title?: string
+}) {
   const [open, setOpen] = useState(true)
   const bodyRef = useRef<HTMLDivElement>(null)
   useEffect(() => {
@@ -113,8 +106,10 @@ function JobLogPanel({ logs, running }: { logs: SourceLogLine[]; running: boolea
         onClick={() => setOpen((o) => !o)}
         className="flex w-full items-center gap-2 border-b border-zinc-800 bg-zinc-900/60 px-3 py-1.5 text-left"
       >
-        <Terminal className="size-3.5 text-zinc-400" />
-        <span className="font-mono text-[10px] uppercase tracking-wide text-zinc-400">Logs</span>
+        <Terminal className="size-3.5 shrink-0 text-zinc-400" />
+        <span className="min-w-0 truncate font-mono text-[10px] uppercase tracking-wide text-zinc-400">
+          {title ?? 'Logs'}
+        </span>
         {running && (
           <span className="flex items-center gap-1 font-mono text-[10px] text-emerald-400">
             <span className="inline-block size-1.5 animate-pulse rounded-full bg-emerald-400" />
@@ -634,18 +629,25 @@ function ConnectForm({
 export default function SourceCodePage() {
   const { activeProject, activeProjectId } = useProjects()
   const queryClient = useQueryClient()
-  const [jobId, setJobId] = useState<string | null>(() => loadActiveJobId(activeProjectId))
+  // Jobs this browser started (or reconnected to after a reload). Several repos
+  // can be cloning/syncing at once, so this is a LIST — the panel below shows one
+  // log per job, and each card reads its own repo's status out of the poll.
+  const [jobIds, setJobIds] = useState<string[]>(() => loadActiveJobIds(activeProjectId))
   // '' = no form; 'new' = add another repo; else the sourceId being re-pointed.
   const [formFor, setFormFor] = useState<'' | 'new' | string>('')
-  const [syncingId, setSyncingId] = useState<string | null>(null)
+  // Repos whose sync REQUEST is in flight — the optimistic spinner that covers the
+  // gap between the click and the server handing back a job. `sync.isPending` can't
+  // do this any more: "Sync all" fires several mutations and only the last one wins
+  // that flag.
+  const [pendingSync, setPendingSync] = useState<Set<string>>(() => new Set())
 
   // Reset per-project state when the active project changes.
   const [seenProject, setSeenProject] = useState(activeProjectId)
   if (seenProject !== activeProjectId) {
     setSeenProject(activeProjectId)
-    setJobId(loadActiveJobId(activeProjectId))
+    setJobIds(loadActiveJobIds(activeProjectId))
     setFormFor('')
-    setSyncingId(null)
+    setPendingSync(new Set())
   }
 
   const { data: info } = useQuery({
@@ -654,26 +656,52 @@ export default function SourceCodePage() {
     enabled: !!activeProjectId,
   })
 
-  // Poll the active job while it runs; stop when done/errored.
-  const { data: jobData } = useQuery({
-    queryKey: ['source-job', jobId, activeProjectId],
-    queryFn: () => getSourceJob(jobId as string, activeProjectId as string),
-    enabled: !!jobId && !!activeProjectId,
-    refetchInterval: (q) => (q.state.data?.job.status === 'running' ? 1500 : false),
+  // One poll covers every job in the project rather than one query per job — the
+  // list endpoint already returns them all, and the interval re-arms itself while
+  // ANY of them is running.
+  const { data: jobsData } = useQuery({
+    queryKey: ['source-jobs', activeProjectId],
+    queryFn: () => listSourceJobs(activeProjectId as string),
+    enabled: !!activeProjectId,
+    refetchInterval: (q) =>
+      q.state.data?.jobs.some((j) => j.status === 'running') ? 1500 : false,
   })
-  const job = jobData?.job
-  const running = job?.status === 'running'
+  const allJobs = jobsData?.jobs ?? []
+  // Newest job per repo — what the card's spinner and the log panels key on.
+  // (`listSourceJobs` is newest-first, so the first hit per source wins.)
+  const jobBySource = new Map<string, SourceJob>()
+  for (const j of allJobs) if (!jobBySource.has(j.sourceId)) jobBySource.set(j.sourceId, j)
+  const runningJobs = allJobs.filter((j) => j.status === 'running')
+  const running = runningJobs.length > 0
+  // Show a log for anything running plus the jobs this session started, so a
+  // finished sync's output stays readable without dragging in history from a
+  // previous visit.
+  const shownJobs = allJobs.filter((j) => j.status === 'running' || jobIds.includes(j.id))
+
+  function trackJob(jobId: string): void {
+    setJobIds((prev) => (prev.includes(jobId) ? prev : [...prev, jobId]))
+    addActiveJobId(activeProjectId as string, jobId)
+    // Re-arm the poll immediately — the last fetch saw nothing running and turned
+    // the interval off.
+    queryClient.invalidateQueries({ queryKey: ['source-jobs', activeProjectId] })
+  }
 
   // When a job finishes, refresh the source view (the watcher owns the toast).
-  const lastStatus = useRef<string | undefined>(undefined)
+  const finished = useRef<Set<string>>(new Set())
   useEffect(() => {
-    if (job && job.status !== 'running' && lastStatus.current === 'running') {
+    let changed = false
+    for (const j of jobsData?.jobs ?? []) {
+      if (j.status === 'running' || finished.current.has(j.id)) continue
+      finished.current.add(j.id)
+      if (jobIds.includes(j.id)) changed = true
+    }
+    if (changed) {
       queryClient.invalidateQueries({ queryKey: ['source', activeProjectId] })
       queryClient.invalidateQueries({ queryKey: ['projects'] })
-      setSyncingId(null)
     }
-    lastStatus.current = job?.status
-  }, [job, activeProjectId, queryClient])
+  }, [jobsData, jobIds, activeProjectId, queryClient])
+
+  const sources = info?.sources ?? []
 
   const connect = useMutation({
     mutationFn: (body: {
@@ -685,8 +713,7 @@ export default function SourceCodePage() {
       sourceId?: string
     }) => connectSource({ projectId: activeProjectId as string, ...body }),
     onSuccess: (res) => {
-      setJobId(res.jobId)
-      saveActiveJobId(activeProjectId as string, res.jobId)
+      trackJob(res.jobId)
       setFormFor('') // close the dialog — progress shows in the log panel below
     },
     onError: (e) =>
@@ -697,17 +724,23 @@ export default function SourceCodePage() {
 
   const sync = useMutation({
     mutationFn: (sourceId: string) => syncSource(activeProjectId as string, sourceId),
-    onMutate: (sourceId) => setSyncingId(sourceId),
-    onSuccess: (res) => {
-      setJobId(res.jobId)
-      saveActiveJobId(activeProjectId as string, res.jobId)
-    },
-    onError: (e) => {
-      setSyncingId(null)
+    onMutate: (sourceId) =>
+      setPendingSync((prev) => new Set(prev).add(sourceId)),
+    onSuccess: (res) => trackJob(res.jobId),
+    onError: (e, sourceId) => {
+      const repo = sources.find((s) => s.id === sourceId)
       toast.error('Could not start sync', {
-        description: e instanceof Error ? e.message : 'Unknown error',
+        description: `${repo ? `${repo.tag} — ` : ''}${e instanceof Error ? e.message : 'Unknown error'}`,
       })
     },
+    // Runs for both outcomes, so a failed request can't leave a repo spinning
+    // forever — and a batch "Sync all" clears each repo as its own call lands.
+    onSettled: (_res, _err, sourceId) =>
+      setPendingSync((prev) => {
+        const next = new Set(prev)
+        next.delete(sourceId)
+        return next
+      }),
   })
 
   const disconnect = useMutation({
@@ -724,7 +757,6 @@ export default function SourceCodePage() {
       }),
   })
 
-  const sources = info?.sources ?? []
   const changingRepo =
     formFor && formFor !== 'new' ? (sources.find((s) => s.id === formFor) ?? null) : null
 
@@ -752,9 +784,17 @@ export default function SourceCodePage() {
   const connected = sources.length > 0
   // Hold the form until the credential prefill has arrived (local + instant).
   const credReady = !changingRepo?.hasToken || Boolean(credData)
-  const busy = running || connect.isPending
+  // Is THIS repo working? Sync is per repo now, so a backend pull must not disable
+  // the web/mobile buttons — only the clone dialog (which can re-point any repo)
+  // still parks the page.
+  const repoBusy = (id: string) =>
+    pendingSync.has(id) || jobBySource.get(id)?.status === 'running'
+  const busy = connect.isPending
   const folderPath = `${info?.rootPath ?? activeProject.rootPath}/source`
   const folderExists = sources.some((s) => s.live?.isRepo)
+  // Repos that can be pulled right now — the folder has to exist on disk, and one
+  // already syncing is simply skipped rather than re-queued.
+  const syncableSources = sources.filter((s) => s.live !== null && !repoBusy(s.id))
 
   return (
     <div className="space-y-6">
@@ -824,23 +864,61 @@ export default function SourceCodePage() {
           projectId={activeProjectId}
           repo={repo}
           onSync={() => sync.mutate(repo.id)}
-          syncing={(running || sync.isPending) && syncingId === repo.id}
+          syncing={repoBusy(repo.id)}
           onDisconnect={() => disconnect.mutate(repo.id)}
           disconnecting={disconnect.isPending && disconnect.variables === repo.id}
           onChange={() => setFormFor(repo.id)}
-          busy={busy || sync.isPending}
+          busy={busy || repoBusy(repo.id)}
         />
       ))}
 
       {connected ? (
-        <Button
-          variant="outline"
-          onClick={() => setFormFor('new')}
-          disabled={busy}
-          className="gap-1.5 rounded-full active:scale-[0.98]"
-        >
-          <Plus className="size-4" /> Add repository
-        </Button>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            variant="outline"
+            onClick={() => setFormFor('new')}
+            disabled={busy}
+            className="gap-1.5 rounded-full active:scale-[0.98]"
+          >
+            <Plus className="size-4" /> Add repository
+          </Button>
+          {sources.length > 1 && (
+            <Button
+              variant="outline"
+              onClick={() => {
+                for (const s of syncableSources) sync.mutate(s.id)
+                toast.info(
+                  `Syncing ${syncableSources.length} ${syncableSources.length === 1 ? 'repository' : 'repositories'}`,
+                  { description: syncableSources.map((s) => s.tag).join(', ') },
+                )
+              }}
+              disabled={busy || syncableSources.length === 0}
+              className="gap-1.5 rounded-full active:scale-[0.98]"
+              title={
+                syncableSources.length === 0
+                  ? 'Every repository is already syncing'
+                  : `Pull ${syncableSources.map((s) => s.tag).join(', ')} in parallel`
+              }
+            >
+              {running ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : (
+                <RefreshCw className="size-4" />
+              )}
+              Sync all
+              {syncableSources.length > 0 && (
+                <span className="rounded-full bg-muted px-1.5 text-[11px] font-medium text-muted-foreground">
+                  {syncableSources.length}
+                </span>
+              )}
+            </Button>
+          )}
+          {running && (
+            <span className="text-xs text-muted-foreground">
+              {runningJobs.length} in progress — {runningJobs.map((j) => j.tag).join(', ')}
+            </span>
+          )}
+        </div>
       ) : (
         <Card className="rounded-3xl border-border/60 shadow-none">
           <CardContent className="flex flex-col items-center gap-3 p-10 text-center">
@@ -906,9 +984,14 @@ export default function SourceCodePage() {
         </DialogContent>
       </Dialog>
 
-      {job && (job.logs.length > 0 || running) && (
-        <JobLogPanel logs={job.logs} running={running} />
-      )}
+      {shownJobs.map((j) => (
+        <JobLogPanel
+          key={j.id}
+          logs={j.logs}
+          running={j.status === 'running'}
+          title={`${j.tag} · ${j.kind}`}
+        />
+      ))}
     </div>
   )
 }

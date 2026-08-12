@@ -20,6 +20,8 @@ import {
   Check,
   CheckCircle2,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   Compass,
   Crosshair,
   File as FileIcon,
@@ -32,7 +34,10 @@ import {
   Link2,
   ListChecks,
   Loader2,
+  MessageSquare,
   Send,
+  SignalHigh,
+  UserRound,
   TabletSmartphone,
   Terminal,
   Timer,
@@ -55,8 +60,11 @@ import { OpenFolderButton } from '@/components/OpenFolderButton'
 import ContinueSessionPanel from '@/components/ContinueSessionPanel'
 import { GuideTour, type TourStep } from '@/components/GuideTour'
 import { TargetTag } from '@/components/TargetTag'
+import { RunKindTag } from '@/components/RunKindTag'
+import { asRunKind } from '@/lib/runKind'
 import { asTestTarget } from '@/lib/testTarget'
 import {
+  clickupIssueFilingContext,
   createClickupIssueSubtasks,
   deleteRun,
   getRun,
@@ -65,6 +73,8 @@ import {
   openRunFolder,
   runFileUrl,
   screenshotUrl,
+  type AppliedIssueFields,
+  type ClickupFilingContext,
   type ClickupTask,
   type RunFile,
 } from '@/lib/api'
@@ -551,6 +561,12 @@ type ParsedIssue = {
   id: string
   title: string
   description: string
+  /**
+   * The issue's severity word, parsed once here rather than re-derived per consumer:
+   * the card badges it AND it becomes the ClickUp bug's priority, so the two must be
+   * the same value. null = the skill recorded none.
+   */
+  severity: string | null
   screenshots: string[]
 }
 
@@ -606,6 +622,177 @@ function severityMeta(sev: string): { label: string; className: string } {
   return { label: sev, className: 'border-border bg-muted text-muted-foreground' } // low / minor / trivial
 }
 
+/**
+ * Severity word -> the ClickUp priority label the bug will be filed with. MIRRORS
+ * `severityPriority()` in server/src/clickup.ts, which is what actually sets it — this
+ * copy exists only so the panel can show the outcome before filing. Keep them in step.
+ */
+function priorityFromSeverity(severity: string | null): string | null {
+  const s = (severity ?? '').toLowerCase()
+  if (!s) return null
+  if (/blocker|critical|urgent|showstopper/.test(s)) return 'Urgent'
+  if (/high|major|severe/.test(s)) return 'High'
+  if (/medium|moderate|normal/.test(s)) return 'Normal'
+  if (/low|minor|trivial|cosmetic|nit/.test(s)) return 'Low'
+  return null
+}
+
+/** Long-form version of a created card's inherited fields, for the chip's tooltip. */
+function appliedSummary(applied?: AppliedIssueFields): string | undefined {
+  if (!applied) return undefined
+  const parts = [
+    applied.assignees.length
+      ? `Assigned to ${applied.assignees.join(', ')}`
+      : 'Unassigned (the parent ticket has no assignee)',
+    applied.priority
+      ? `Priority ${applied.priority}${applied.prioritySource === 'severity' ? ' (from the issue severity)' : applied.prioritySource === 'parent' ? ' (from the parent ticket)' : ''}`
+      : 'No priority (neither the issue nor the parent had one)',
+    applied.screenshots
+      ? `${applied.screenshots} screenshot${applied.screenshots === 1 ? '' : 's'} attached${applied.commented ? ' and posted as a comment' : ''}`
+      : 'No screenshots attached',
+  ]
+  if (applied.screenshotsFailed) parts.push(`${applied.screenshotsFailed} could not be attached`)
+  return parts.join(' · ')
+}
+
+/**
+ * Turn a thrown API error into one readable sentence. `request()` throws the raw
+ * response body, so a ClickUp failure arrives as `{"error":"ClickUp API 404: {…}"}`
+ * — which is what the panel used to print at the engineer verbatim.
+ */
+function errorSentence(err: unknown, fallback: string): string {
+  const raw = err instanceof Error ? err.message : typeof err === 'string' ? err : ''
+  if (!raw.trim()) return fallback
+  let text = raw.trim()
+  try {
+    const parsed = JSON.parse(text) as { error?: string }
+    if (parsed?.error) text = parsed.error
+  } catch {
+    /* not JSON — use it as-is */
+  }
+  // ClickUp appends its own JSON body: "ClickUp API 404: {"err":"Not found",…}".
+  const nested = text.match(/^(.*?)[:\s]*\{.*"err"\s*:\s*"([^"]+)".*\}\s*$/)
+  if (nested) text = `${nested[1].trim()} — ${nested[2]}`
+  return text.slice(0, 240) || fallback
+}
+
+type FilingState =
+  | { kind: 'idle' }
+  | { kind: 'loading' }
+  | { kind: 'error'; message: string }
+  | { kind: 'ready'; context: ClickupFilingContext }
+
+/**
+ * What the selected issues will inherit from the parent ticket, shown before filing.
+ * The panel fills assignee / priority / evidence in automatically, and an automation
+ * whose result you can only check by opening ClickUp is one nobody relies on — this is
+ * also where a parent with NO assignee admits that the bugs would land unassigned.
+ */
+function FilingPreview({ state, issues }: { state: FilingState; issues: ParsedIssue[] }) {
+  if (state.kind === 'idle') return null
+
+  if (state.kind === 'loading') {
+    return (
+      <p className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+        <Loader2 className="size-3 animate-spin" />
+        Reading the parent ticket…
+      </p>
+    )
+  }
+  if (state.kind === 'error') {
+    return (
+      <p className="flex items-start gap-1.5 rounded-xl border border-amber-200 bg-amber-50/60 px-2.5 py-1.5 text-[11px] text-amber-700">
+        <AlertCircle className="mt-px size-3 shrink-0" />
+        <span>
+          Could not read that ticket, so nothing can be inherited from it.{' '}
+          <span className="opacity-80">{state.message}</span>
+        </span>
+      </p>
+    )
+  }
+
+  const { context } = state
+  const names = context.assignees.map((a) => a.username).filter(Boolean)
+
+  // Group the priorities these issues will get, so "High x3, Normal x1" is visible
+  // rather than a promise that priority is "handled".
+  const tally = new Map<string, number>()
+  for (const issue of issues) {
+    const label = priorityFromSeverity(issue.severity) ?? context.priority?.label ?? null
+    const key = label ?? 'not set'
+    tally.set(key, (tally.get(key) ?? 0) + 1)
+  }
+  const priorities = [...tally.entries()]
+  const shots = issues.reduce((n, i) => n + i.screenshots.length, 0)
+
+  return (
+    <div className="space-y-1.5 rounded-xl border border-border/60 bg-background/70 px-2.5 py-2">
+      <p className="text-[11px] font-semibold text-foreground">
+        Inherited from{' '}
+        <span className="font-mono font-normal">{context.displayId}</span>
+        {context.name ? <span className="text-muted-foreground"> · {context.name}</span> : null}
+      </p>
+      <FilingRow icon={<UserRound className="size-3" />} label="Assignee">
+        {names.length ? (
+          names.join(', ')
+        ) : (
+          <span className="text-amber-700">
+            none on the parent — the subtasks will be unassigned
+          </span>
+        )}
+      </FilingRow>
+      <FilingRow icon={<SignalHigh className="size-3" />} label="Priority">
+        {issues.length === 0
+          ? '—'
+          : priorities.map(([label, n], i) => (
+              <span key={label}>
+                {i > 0 ? ', ' : ''}
+                <span className={label === 'not set' ? 'text-muted-foreground' : 'font-medium'}>
+                  {label}
+                </span>
+                {n > 1 ? ` ×${n}` : ''}
+              </span>
+            ))}
+        {priorities.length > 0 && (
+          <span className="text-muted-foreground/70">
+            {' '}
+            (from each issue&apos;s severity
+            {context.priority ? `, else the parent's ${context.priority.label}` : ''})
+          </span>
+        )}
+      </FilingRow>
+      {context.tags.length > 0 && (
+        <FilingRow icon={<Link2 className="size-3" />} label="Tags">
+          {context.tags.join(', ')}
+        </FilingRow>
+      )}
+      <FilingRow icon={<MessageSquare className="size-3" />} label="Evidence">
+        {shots > 0
+          ? `${shots} screenshot${shots === 1 ? '' : 's'} attached to the cards and posted as a comment`
+          : 'no screenshots on the selected issues'}
+      </FilingRow>
+    </div>
+  )
+}
+
+function FilingRow({
+  icon,
+  label,
+  children,
+}: {
+  icon: React.ReactNode
+  label: string
+  children: React.ReactNode
+}) {
+  return (
+    <p className="flex items-start gap-1.5 text-[11px] leading-relaxed text-muted-foreground">
+      <span className="mt-0.5 shrink-0 text-muted-foreground/70">{icon}</span>
+      <span className="shrink-0 font-medium text-foreground/80">{label}:</span>
+      <span className="min-w-0">{children}</span>
+    </p>
+  )
+}
+
 function parseIssues(md: string | null): ParsedIssue[] {
   if (!md?.trim()) return []
   const lines = md.split('\n')
@@ -644,6 +831,7 @@ function parseIssues(md: string | null): ParsedIssue[] {
         id: `issue-${index}`,
         title: section.title.slice(0, 140),
         description,
+        severity: extractSeverity(section.body.join('\n')),
         screenshots,
       }
     })
@@ -675,6 +863,7 @@ function parseIssues(md: string | null): ParsedIssue[] {
           id: `issue-table-${index}`,
           title: title.slice(0, 140),
           description,
+          severity: extractSeverity(description),
           screenshots: extractScreenshots(description),
         }
       })
@@ -687,6 +876,7 @@ function parseIssues(md: string | null): ParsedIssue[] {
       id: 'issue-full',
       title: stripMd(firstContent ?? 'QC issue').slice(0, 140),
       description: md.trim().slice(0, 6000),
+      severity: extractSeverity(md),
       screenshots: extractScreenshots(md),
     },
   ]
@@ -1115,7 +1305,7 @@ function IssueCard({
   slug: string | null
   onViewImage: (path: string) => void
 }) {
-  const severity = extractSeverity(issue.description)
+  const severity = issue.severity
   const sev = severity ? severityMeta(severity) : null
   // The full issue heading below (EvidenceReport) is tagged with this same anchor.
   const anchor = issueHeadingId(issue.title)
@@ -1236,6 +1426,127 @@ function IssueCard({
   )
 }
 
+/**
+ * Full-size screenshot viewer, shared by the Issues panel's thumbnails and the
+ * Screenshots tab's grid. The caller hands it the whole list it was opened from
+ * plus the one that was clicked, so ← / → (and the on-image arrows) step through
+ * the gallery without closing and re-opening — a run's evidence is read in order,
+ * and a viewer that shows one image at a time makes that N round trips.
+ * `path === null` is the closed state; the list may hold a single item, in which
+ * case the navigation is simply not rendered.
+ */
+function ScreenshotLightbox({
+  projectId,
+  slug,
+  shots,
+  path,
+  onPick,
+  onClose,
+}: {
+  projectId: string
+  slug: string
+  shots: string[]
+  path: string | null
+  onPick: (path: string) => void
+  onClose: () => void
+}) {
+  const index = path ? shots.indexOf(path) : -1
+  const canStep = index >= 0 && shots.length > 1
+  // Wrap around: the last screenshot's "next" is the first one. Stepping off the
+  // end into a dead button reads as the viewer having broken.
+  const step = (delta: number) => {
+    if (!canStep) return
+    onPick(shots[(index + delta + shots.length) % shots.length])
+  }
+
+  // Arrow keys drive the gallery. Radix owns Escape; we only add the two it doesn't.
+  useEffect(() => {
+    if (!path || !canStep) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return
+      e.preventDefault()
+      onPick(shots[(index + (e.key === 'ArrowRight' ? 1 : -1) + shots.length) % shots.length])
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [path, canStep, index, shots, onPick])
+
+  const name = path?.split('/').pop() ?? ''
+  const src = path ? screenshotUrl(projectId, slug, path) : ''
+
+  return (
+    <Dialog open={!!path} onOpenChange={(open) => !open && onClose()}>
+      <DialogContent className="flex max-h-[92vh] w-[95vw] flex-col gap-0 overflow-hidden p-0 sm:max-w-5xl">
+        <DialogHeader className="shrink-0 space-y-0 border-b border-border/60 bg-muted/30 px-5 py-3">
+          <DialogTitle className="flex min-w-0 items-center gap-2 pr-8 text-sm">
+            <ImageIcon className="size-4 shrink-0 text-muted-foreground" />
+            <span className="truncate font-mono">{name}</span>
+            {canStep && (
+              <span className="shrink-0 rounded-full border border-border/60 px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
+                {index + 1} / {shots.length}
+              </span>
+            )}
+            {path && (
+              <a
+                href={src}
+                target="_blank"
+                rel="noreferrer"
+                className="ml-auto inline-flex shrink-0 items-center gap-1 rounded-full border border-border/60 px-2 py-0.5 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
+              >
+                Open
+                <ArrowUpRight className="size-3" />
+              </a>
+            )}
+          </DialogTitle>
+          <DialogDescription className="sr-only">Screenshot preview</DialogDescription>
+        </DialogHeader>
+        <div className="relative min-h-0 flex-1 overflow-auto bg-muted/20 p-4">
+          {path && (
+            <img
+              src={src}
+              alt={name || 'Screenshot'}
+              className="mx-auto h-auto max-w-full rounded-lg"
+            />
+          )}
+          {canStep && (
+            <>
+              <button
+                type="button"
+                onClick={() => step(-1)}
+                aria-label="Previous screenshot"
+                className="absolute left-4 top-1/2 inline-flex size-9 -translate-y-1/2 items-center justify-center rounded-full border border-border/60 bg-background/90 text-muted-foreground shadow-sm backdrop-blur transition-all duration-200 hover:border-border hover:text-foreground active:scale-[0.98]"
+              >
+                <ChevronLeft className="size-4" />
+              </button>
+              <button
+                type="button"
+                onClick={() => step(1)}
+                aria-label="Next screenshot"
+                className="absolute right-4 top-1/2 inline-flex size-9 -translate-y-1/2 items-center justify-center rounded-full border border-border/60 bg-background/90 text-muted-foreground shadow-sm backdrop-blur transition-all duration-200 hover:border-border hover:text-foreground active:scale-[0.98]"
+              >
+                <ChevronRight className="size-4" />
+              </button>
+            </>
+          )}
+        </div>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+/**
+ * Hold a value still for `ms` after the last change. Used by the ClickUp parent field:
+ * the filing-context lookup is a real API call, so it must not fire per keystroke.
+ */
+function useDebounced<T>(value: T, ms: number): T {
+  const [settled, setSettled] = useState(value)
+  useEffect(() => {
+    const t = setTimeout(() => setSettled(value), ms)
+    return () => clearTimeout(t)
+  }, [value, ms])
+  return settled
+}
+
 function IssueClickupPanel({
   issuesMd,
   projectId,
@@ -1250,11 +1561,28 @@ function IssueClickupPanel({
   const issues = parseIssues(issuesMd)
   const [parentTask, setParentTask] = useState('')
   const [selected, setSelected] = useState<Set<string>>(() => new Set(issues.map((issue) => issue.id)))
-  const [created, setCreated] = useState<ClickupTask[]>([])
+  const [created, setCreated] = useState<(ClickupTask & { applied?: AppliedIssueFields })[]>([])
   // Screenshot path currently open in the lightbox (null = closed).
   const [viewer, setViewer] = useState<string | null>(null)
+  // Every issue's evidence, in report order — the lightbox steps through the lot,
+  // so ← / → walks from one issue's last screenshot into the next issue's first.
+  const issueShots = issues.flatMap((issue) => issue.screenshots)
 
   const selectedIssues = issues.filter((issue) => selected.has(issue.id))
+
+  // What filing under this parent will inherit. Read-only and shown BEFORE the button:
+  // a parent with no assignee (the common case) has to say so, or the engineer only
+  // finds out by opening ClickUp and seeing unassigned bugs. Debounced because the
+  // field is typed/pasted a character at a time.
+  const parentRef = useDebounced(parentTask.trim(), 500)
+  const filing = useQuery({
+    queryKey: ['clickup-filing-context', projectId, parentRef],
+    queryFn: () => clickupIssueFilingContext(parentRef, projectId),
+    enabled: parentRef.length >= 6,
+    retry: false,
+    staleTime: 60_000,
+  })
+
   const mutation = useMutation({
     mutationFn: () =>
       createClickupIssueSubtasks({
@@ -1268,16 +1596,31 @@ function IssueClickupPanel({
             '',
             `Source: QC run ${ticketId}`,
           ].join('\n'),
+          // Sets the bug's ClickUp priority (the parent's is the fallback).
+          severity: issue.severity,
           screenshots: issue.screenshots,
         })),
       }),
     onSuccess: (result) => {
       setCreated((prev) => [...result.created, ...prev])
-      toast.success(`Created ${result.created.length} ClickUp subtask${result.created.length === 1 ? '' : 's'}`)
+      // Say what landed on the cards, not just that they were created — the whole
+      // point of the automation is the fields, so a silent success hides its own work.
+      const shots = result.created.reduce((n, t) => n + (t.applied?.screenshots ?? 0), 0)
+      const missed = result.created.reduce((n, t) => n + (t.applied?.screenshotsFailed ?? 0), 0)
+      const who = result.created[0]?.applied?.assignees ?? []
+      const parts = [
+        who.length ? `assigned to ${who.join(', ')}` : 'unassigned (parent has no assignee)',
+        `${shots} screenshot${shots === 1 ? '' : 's'} attached`,
+      ]
+      if (missed) parts.push(`${missed} could not be attached`)
+      toast.success(
+        `Created ${result.created.length} ClickUp subtask${result.created.length === 1 ? '' : 's'}`,
+        { description: parts.join(' · ') },
+      )
     },
     onError: (err) => {
       toast.error('Could not create ClickUp subtasks', {
-        description: err instanceof Error ? err.message : 'ClickUp request failed.',
+        description: errorSentence(err, 'ClickUp request failed.'),
       })
     },
   })
@@ -1311,7 +1654,9 @@ function IssueClickupPanel({
             </h3>
             <p className="mt-0.5 max-w-xl text-xs leading-relaxed text-muted-foreground">
               Pick the issues worth filing, then create them as subtasks under a parent ClickUp
-              ticket — screenshots attach automatically.
+              ticket. Each one inherits the parent&apos;s assignee and tags, takes its priority
+              from the issue&apos;s own severity, and gets its screenshots attached and posted as
+              a comment.
             </p>
           </div>
         </div>
@@ -1394,6 +1739,22 @@ function IssueClickupPanel({
               ? 'Select at least one issue to file.'
               : 'Each selected issue becomes a subtask inside that ticket.'}
           </p>
+
+          {/* What the subtasks will inherit, resolved from the parent ticket itself. */}
+          <FilingPreview
+            state={
+              parentTask.trim().length < 6
+                ? { kind: 'idle' }
+                : filing.isPending
+                  ? { kind: 'loading' }
+                  : filing.isError
+                    ? { kind: 'error', message: errorSentence(filing.error, 'Could not read that ticket.') }
+                    : filing.data
+                      ? { kind: 'ready', context: filing.data }
+                      : { kind: 'idle' }
+            }
+            issues={selectedIssues}
+          />
         </div>
 
         {created.length > 0 && (
@@ -1409,9 +1770,21 @@ function IssueClickupPanel({
                   href={task.url}
                   target="_blank"
                   rel="noreferrer"
+                  title={appliedSummary(task.applied)}
                   className="inline-flex items-center gap-1 rounded-full border border-emerald-200 bg-background px-2 py-1 text-xs font-medium text-emerald-700 transition-colors hover:bg-emerald-100"
                 >
                   {task.displayId}
+                  {/* What actually landed on the card, per subtask — the toast is a
+                      summary and disappears; this stays while the panel is open. */}
+                  {task.applied && (
+                    <span className="font-normal text-emerald-700/70">
+                      {task.applied.priority ? ` · ${task.applied.priority}` : ''}
+                      {task.applied.assignees.length
+                        ? ` · ${task.applied.assignees[0]}${task.applied.assignees.length > 1 ? ` +${task.applied.assignees.length - 1}` : ''}`
+                        : ' · unassigned'}
+                      {task.applied.screenshots ? ` · ${task.applied.screenshots} 🖼` : ''}
+                    </span>
+                  )}
                   <ArrowUpRight className="size-3" />
                 </a>
               ))}
@@ -1421,37 +1794,14 @@ function IssueClickupPanel({
       </div>
 
       {/* Screenshot lightbox */}
-      <Dialog open={!!viewer} onOpenChange={(open) => !open && setViewer(null)}>
-        <DialogContent className="flex max-h-[92vh] w-[95vw] flex-col gap-0 overflow-hidden p-0 sm:max-w-5xl">
-          <DialogHeader className="shrink-0 space-y-0 border-b border-border/60 bg-muted/30 px-5 py-3">
-            <DialogTitle className="flex min-w-0 items-center gap-2 text-sm">
-              <ImageIcon className="size-4 shrink-0 text-muted-foreground" />
-              <span className="truncate font-mono">{viewer?.split('/').pop() ?? ''}</span>
-              {viewer && (
-                <a
-                  href={screenshotUrl(projectId, slug ?? '', viewer)}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="ml-auto inline-flex shrink-0 items-center gap-1 rounded-full border border-border/60 px-2 py-0.5 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
-                >
-                  Open
-                  <ArrowUpRight className="size-3" />
-                </a>
-              )}
-            </DialogTitle>
-            <DialogDescription className="sr-only">Screenshot preview</DialogDescription>
-          </DialogHeader>
-          <div className="min-h-0 flex-1 overflow-auto bg-muted/20 p-4">
-            {viewer && (
-              <img
-                src={screenshotUrl(projectId, slug ?? '', viewer)}
-                alt={viewer.split('/').pop() ?? 'Screenshot'}
-                className="mx-auto h-auto max-w-full rounded-lg"
-              />
-            )}
-          </div>
-        </DialogContent>
-      </Dialog>
+      <ScreenshotLightbox
+        projectId={projectId}
+        slug={slug ?? ''}
+        shots={issueShots}
+        path={viewer}
+        onPick={setViewer}
+        onClose={() => setViewer(null)}
+      />
     </div>
   )
 }
@@ -2006,6 +2356,8 @@ export default function RunDetailPage() {
   const queryClient = useQueryClient()
   const [searchParams, setSearchParams] = useSearchParams()
   const [confirmDelete, setConfirmDelete] = useState(false)
+  // Screenshot open in the Screenshots tab's lightbox (null = closed).
+  const [shotViewer, setShotViewer] = useState<string | null>(null)
   const [tourOpen, setTourOpen] = useState(false)
   const { data: run, isLoading, isError, error } = useQuery({
     queryKey: ['run', id],
@@ -2255,6 +2607,9 @@ export default function RunDetailPage() {
                 <h1 className="font-mono text-3xl font-semibold tracking-tight sm:text-4xl">
                   {run.ticketId}
                 </h1>
+                {/* The heading is a mono id either way — this says whether it's a
+                    ticket or a flow name, matching Running/History. */}
+                <RunKindTag kind={asRunKind(run.kind)} />
                 <StatusBadge status={run.status} />
               </div>
               {ticketTitle && (
@@ -2543,20 +2898,23 @@ export default function RunDetailPage() {
                     const src = screenshotUrl(run.projectId, run.slug ?? '', path)
                     const name = path.split('/').pop() ?? path
                     return (
-                      <a
+                      <button
                         key={path}
-                        href={src}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="group overflow-hidden rounded-2xl border border-border/60 bg-card shadow-none transition-all duration-200 hover:-translate-y-0.5 hover:border-border hover:shadow-sm active:scale-[0.98]"
+                        type="button"
+                        onClick={() => setShotViewer(path)}
+                        title={`${name} — click to view`}
+                        className="group overflow-hidden rounded-2xl border border-border/60 bg-card text-left shadow-none transition-all duration-200 hover:-translate-y-0.5 hover:border-border hover:shadow-sm active:scale-[0.98]"
                       >
-                        <div className="overflow-hidden">
+                        <div className="relative overflow-hidden">
                           <img
                             src={src}
                             alt={`Screenshot ${name}`}
                             loading="lazy"
                             className="aspect-video w-full object-cover transition-transform duration-300 group-hover:scale-[1.03]"
                           />
+                          <span className="pointer-events-none absolute inset-0 flex items-center justify-center bg-foreground/0 text-background opacity-0 transition-all duration-200 group-hover:bg-foreground/35 group-hover:opacity-100">
+                            <ImageIcon className="size-5" />
+                          </span>
                         </div>
                         <div className="flex items-center gap-1.5 border-t border-border/60 px-3 py-2 text-xs text-muted-foreground">
                           <FileText className="h-3.5 w-3.5 shrink-0" />
@@ -2564,11 +2922,20 @@ export default function RunDetailPage() {
                             {name}
                           </span>
                         </div>
-                      </a>
+                      </button>
                     )
                   })}
                 </div>
               )}
+
+              <ScreenshotLightbox
+                projectId={run.projectId}
+                slug={run.slug ?? ''}
+                shots={run.screenshots}
+                path={shotViewer}
+                onPick={setShotViewer}
+                onClose={() => setShotViewer(null)}
+              />
             </TabsContent>
 
             <TabsContent value="files" className="m-0 p-6">

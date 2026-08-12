@@ -7,6 +7,7 @@ import { groundReport } from './groundingCheck.js'
 import { fillExecutedTestcases } from './fillTestcases.js'
 import { runKnowledgeUpdate } from './learn.js'
 import { totpPromptHint } from './totp.js'
+import { ensureQcBrowser } from './qcBrowser.js'
 import {
   appendEvent,
   getProject,
@@ -195,6 +196,9 @@ export function parseReport(md: string): ReportCounts {
   return { ...EMPTY_COUNTS, passCount, failCount, totalAcs: passCount + failCount }
 }
 
+/** A folder name already claimed by some run's token — never adopt one of these. */
+const TOKENED_DIR = /-[0-9a-f]{8}$/
+
 /**
  * Resolve the testing/<slug> output folder for a ticket. The qc-testing skill names
  * the folder itself (e.g. "<ticket>-notification-part1"), which can differ from one
@@ -202,6 +206,11 @@ export function parseReport(md: string): ReportCounts {
  * that actually contains report.md (most-recently-modified wins); otherwise the most
  * recently modified matching folder. A `preferred` slug (already stored on the run)
  * only wins when it itself contains a report — so a stale/empty slug self-heals.
+ *
+ * Only LEGACY runs (recorded before output folders carried a token) resolve this way;
+ * see `resolveRunOutDir`, which is what every current run goes through. Folders that
+ * end in a token belong to a specific newer run, so they are excluded here — a legacy
+ * row must not start showing a run that happened years later.
  */
 export function resolveSlug(
   testingDir: string,
@@ -217,6 +226,9 @@ export function resolveSlug(
   const dirs = entries
     .filter((e) => e.isDirectory() && e.name.startsWith(ticketId))
     .map((e) => e.name)
+    // A tokened folder is some newer run's own output — never adoptable here. Kept if
+    // it IS the stored slug, which can only happen if a caller passes one explicitly.
+    .filter((name) => !TOKENED_DIR.test(name) || name === preferred)
   if (dirs.length === 0) return preferred ?? null
 
   const hasReport = (name: string) => {
@@ -239,6 +251,96 @@ export function resolveSlug(
   if (withReport.length) return withReport[0]
   if (preferred && dirs.includes(preferred)) return preferred
   return dirs.slice().sort((a, b) => mtime(b) - mtime(a))[0]
+}
+
+/**
+ * The token the portal requires at the end of a run's output folder name. Eight
+ * hex chars off the run's uuid — unique per run, short enough to leave the folder
+ * readable (`86eut664j-notifications-web-3f9a12c4`).
+ */
+export function outDirToken(runId: string): string {
+  return runId.replace(/-/g, '').slice(0, 8)
+}
+
+/**
+ * Folder-name suffix the prompt demands: `<target>-<token>`. Built from the token
+ * STORED on the run, never re-derived, so the prompt and the resolver can't disagree.
+ */
+export function outDirSuffix(token: string, target: RunSummary['testTarget']): string {
+  const label =
+    target === 'app-mobile' ? 'mobile-app' : target === 'web-mobile' ? 'mobile-web' : 'web'
+  return `${label}-${token}`
+}
+
+type RunFolderRef = Pick<RunSummary, 'ticketId' | 'slug' | 'outDirToken' | 'createdAt'>
+
+/**
+ * Resolve the testing/test-result/<folder> a run wrote, and ONLY that run's folder.
+ *
+ * A run created since the token landed put `-<target>-<token>` at the end of its
+ * folder name, so its output is found by that token and can never be another run's:
+ * before this, two runs of the same ticket (web then device) agreed on the same
+ * model-invented name, the second overwrote the first's report/issues/screenshots,
+ * and `resolveSlug`'s ticket-prefix match then pointed BOTH history rows at the one
+ * surviving file — including re-persisting the second run's counts onto the first.
+ *
+ * When a tokened run has no matching folder the model ignored the instruction, so we
+ * fall back to a prefix match — but only to a folder that carries NO token (i.e. is
+ * not some other run's) and was last written AFTER this run started. That keeps the
+ * fallback from resurrecting the very bug this exists to fix.
+ *
+ * Rows with no token predate this and keep the old behavior via `resolveSlug`.
+ */
+export function resolveRunOutDir(testingDir: string | null, run: RunFolderRef): string | null {
+  if (!testingDir) return run.slug
+  if (!run.outDirToken) {
+    // Legacy row. A missing slug means it never produced a folder — don't fall back
+    // by ticket id, or a canceled run shows another run's report.
+    return run.slug ? resolveSlug(testingDir, run.ticketId, run.slug) : null
+  }
+
+  let dirs: string[]
+  try {
+    dirs = fs
+      .readdirSync(testingDir, { withFileTypes: true })
+      .filter((e) => e.isDirectory())
+      .map((e) => e.name)
+  } catch {
+    return null
+  }
+
+  const hasReport = (name: string) => {
+    try {
+      return fs.statSync(path.join(testingDir, name, 'report.md')).isFile()
+    } catch {
+      return false
+    }
+  }
+  const mtime = (name: string) => {
+    try {
+      return fs.statSync(path.join(testingDir, name)).mtimeMs
+    } catch {
+      return 0
+    }
+  }
+  const best = (names: string[]): string | null => {
+    if (names.length === 0) return null
+    const withReport = names.filter(hasReport)
+    const pool = withReport.length ? withReport : names
+    return pool.slice().sort((a, b) => mtime(b) - mtime(a))[0]
+  }
+
+  const own = best(dirs.filter((d) => d.endsWith(run.outDirToken as string)))
+  if (own) return own
+
+  const startedMs = Date.parse(run.createdAt)
+  const unclaimed = dirs.filter(
+    (d) =>
+      d.startsWith(run.ticketId) &&
+      !TOKENED_DIR.test(d) &&
+      (Number.isNaN(startedMs) ? false : mtime(d) >= startedMs),
+  )
+  return best(unclaimed)
 }
 
 function readIfExists(filePath: string): string | null {
@@ -271,10 +373,33 @@ function spawnRun(
     workflowSteps?: string[]
     testTarget?: 'web' | 'web-mobile' | 'app-mobile'
     deviceId?: string
+    kind?: 'ticket' | 'flow'
   },
   resumeSessionId?: string,
 ): void {
   const testingDir = testResultDirFor(project.rootPath)
+  // The row carries this run's output-folder token (and the target it was started
+  // with — `body` doesn't have it on a resume).
+  const runRow = getRun(id)
+
+  // Same reason as the chat route: when the project drives the portal-owned QC browser,
+  // its .mcp.json Playwright entry points at a CDP endpoint that has to be listening
+  // before the CLI starts, or every browser tool fails mid-run. Fire-and-forget with a
+  // system event — a run must not be blocked from starting by a browser probe, and the
+  // launch is fast enough (usually an adopt) to be up before the first browser call.
+  if (project.persistentBrowser) {
+    void ensureQcBrowser().then((browser) => {
+      record(id, {
+        ts: now(),
+        kind: browser.ok ? 'system' : 'error',
+        text: browser.ok
+          ? browser.adopted
+            ? 'Driving the QC browser that is already open (it survives Pause/Stop).'
+            : 'Opened the QC browser for this run (it survives Pause/Stop).'
+          : `The QC browser could not be started — browser steps will fail: ${browser.error}`,
+      })
+    })
+  }
 
   const handle = runQc(
     {
@@ -288,6 +413,12 @@ function spawnRun(
       workflowSteps: body.workflowSteps,
       testTarget: body.testTarget,
       deviceId: body.deviceId,
+      kind: body.kind,
+      // Read off the row, not recomputed, so a resumed run keeps writing into the
+      // folder it already created (and a legacy row stays untokened).
+      outDirSuffix: runRow?.outDirToken
+        ? outDirSuffix(runRow.outDirToken, runRow.testTarget)
+        : undefined,
       resumeSessionId,
       totpHint: totpPromptHint(project.id),
     },
@@ -297,13 +428,23 @@ function spawnRun(
       onDone: async ({ success }) => {
         // Pause/cancel both kill the child; if either status is already set,
         // keep the user's action from being overwritten by the process exit.
-        const currentStatus = getRun(id)?.status
-        if (currentStatus === 'paused' || currentStatus === 'canceled') {
+        const current = getRun(id)
+        if (current?.status === 'paused' || current?.status === 'canceled') {
           active.delete(id)
           startNextQueued()
           return
         }
-        const slug = resolveSlug(testingDir, body.ticketId)
+        // Resolve THIS run's folder by its token. Matching on the ticket prefix (the
+        // old behavior) let a finishing run adopt a folder an earlier run had written.
+        const slug = resolveRunOutDir(
+          testingDir,
+          current ?? {
+            ticketId: body.ticketId,
+            slug: null,
+            outDirToken: null,
+            createdAt: now(),
+          },
+        )
         let reportMd = slug ? readIfExists(path.join(testingDir, slug, 'report.md')) : null
 
         // Grounding check — before counting Pass/Fail, an independent cheap pass
@@ -484,7 +625,13 @@ export function startRun(body: CreateRunBody): RunSummary {
     appUrl: body.appUrl,
     // Recorded so History can tag the run's surface long after it finished.
     testTarget: body.testTarget ?? 'web',
+    // Ticket run or E2E flow — Running/History badge it, and the prompt phrases
+    // itself differently (a flow has no ticket to go and look for).
+    kind: body.kind ?? 'ticket',
     slug: null,
+    // Assigned up front: it goes into the prompt as the mandatory tail of the output
+    // folder name, so this run's report can't land in (or be resolved to) another's.
+    outDirToken: outDirToken(id),
     status: mustQueue ? 'queued' : 'running',
     passCount: 0,
     failCount: 0,
@@ -553,6 +700,8 @@ export function resumeRun(id: string): boolean {
     projectId: project.id,
     ticketId: run.ticketId,
     appUrl: run.appUrl,
+    // Carried over or the resume prompt calls an E2E flow's slug a ticket.
+    kind: run.kind,
   }
 
   // One run at a time — resuming while another run is live can't start now, so

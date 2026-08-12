@@ -22,6 +22,7 @@ import {
   Search,
   Sparkles,
   Ticket as TicketIcon,
+  Workflow,
   XCircle,
 } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
@@ -29,12 +30,14 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { GuideTour, type TourStep } from '@/components/GuideTour'
 import { TargetTag } from '@/components/TargetTag'
+import { RunKindTag } from '@/components/RunKindTag'
+import { asRunKind } from '@/lib/runKind'
 import { listCrawledTickets, listRuns } from '@/lib/api'
 import { StatusBadge } from '@/lib/status'
 import { useProjects } from '@/lib/project-context'
 import { asTestTarget } from '@/lib/testTarget'
 import { cn } from '@/lib/utils'
-import type { RunStatus, RunSummary, TestTarget } from '@/lib/types'
+import type { RunKind, RunStatus, RunSummary, TestTarget } from '@/lib/types'
 
 type Filter = 'all' | 'passed' | 'failed' | 'active'
 
@@ -260,6 +263,7 @@ function RunItem({ run }: { run: RunSummary }) {
           <Clock3 className="size-3 shrink-0 opacity-60" />
           {duration ?? '—'}
         </span>
+        <RunKindTag kind={asRunKind(run.kind)} compact />
         <TargetTag target={asTestTarget(run.testTarget)} />
         <span className="hidden min-w-0 flex-1 items-center gap-1.5 truncate font-mono text-[11px] text-muted-foreground/70 lg:flex" title={run.appUrl}>
           <Link2 className="size-3 shrink-0 opacity-60" />
@@ -277,6 +281,13 @@ function RunItem({ run }: { run: RunSummary }) {
 
 interface TicketGroup {
   ticketId: string
+  /**
+   * Whether this group is a ticket or an E2E flow. A flow's runs are grouped by
+   * the flow name's slug, which sits in the same column as a ticket id — without
+   * this the header offers a ClickUp link for something ClickUp has never heard
+   * of. Derived from the runs: 'flow' only when EVERY run in the group is one.
+   */
+  kind: RunKind
   /** Ticket title from the crawled ticket.json, when the ticket has been crawled. */
   title: string | null
   /** ClickUp ticket URL from the crawled ticket.json, when available. */
@@ -299,7 +310,9 @@ function TicketGroupCard({
   open: boolean
   onToggle: () => void
 }) {
-  const { ticketId, title, clickupUrl, projectName, runs, latest, passed, failed, active } = group
+  const { ticketId, kind, title, clickupUrl, projectName, runs, latest, passed, failed, active } =
+    group
+  const GroupIcon = kind === 'flow' ? Workflow : TicketIcon
   // Distinct surfaces across this ticket's runs, in the picker's own order.
   const targets = (['web', 'web-mobile', 'app-mobile'] as TestTarget[]).filter((t) =>
     runs.some((r) => asTestTarget(r.testTarget) === t),
@@ -327,7 +340,7 @@ function TicketGroupCard({
         className="flex w-full cursor-pointer items-center gap-3 px-4 py-3.5 text-left transition-colors hover:bg-muted/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       >
         <span className="flex size-9 shrink-0 items-center justify-center rounded-2xl bg-foreground text-background">
-          <TicketIcon className="size-4" />
+          <GroupIcon className="size-4" />
         </span>
 
         <div className="min-w-0 flex-1">
@@ -335,6 +348,7 @@ function TicketGroupCard({
             <span className="shrink-0 font-mono text-sm font-medium text-foreground" title={ticketId}>
               {ticketId}
             </span>
+            <RunKindTag kind={kind} />
             {title && (
               <span className="min-w-0 truncate text-sm text-foreground/80" title={title}>
                 {title}
@@ -476,6 +490,9 @@ export default function HistoryPage() {
   const passRate = decided > 0 ? Math.round((passed / decided) * 100) : null
   const latestRun = runs[0]
   const avgDuration = averageDuration(runs)
+  const flowCount = new Set(
+    runs.filter((r) => asRunKind(r.kind) === 'flow').map((r) => r.ticketId),
+  ).size
 
   // Distribution segments (out of total runs) for the overview bar.
   const total = runs.length || 1
@@ -541,10 +558,14 @@ export default function HistoryPage() {
         (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
       )
       const meta = ticketMeta.get(ticketId.toLowerCase())
+      const isFlow = sorted.every((r) => asRunKind(r.kind) === 'flow')
       result.push({
         ticketId,
+        kind: isFlow ? 'flow' : 'ticket',
         title: meta?.title ?? null,
-        clickupUrl: meta?.url ?? null,
+        // A flow has no ClickUp ticket — never offer the link, even if some old
+        // crawled ticket happens to share the slug.
+        clickupUrl: isFlow ? null : (meta?.url ?? null),
         projectName: sorted[0]?.projectName ?? null,
         runs: sorted,
         latest: sorted[0],
@@ -636,7 +657,24 @@ export default function HistoryPage() {
                 </span>
               </div>
               <div className="flex flex-wrap items-center gap-2">
-                <MetricChip icon={TicketIcon} label="tickets" value={new Set(runs.map((r) => r.ticketId)).size} />
+                {/* Counted apart: a flow is not a ticket, so folding both into one
+                    "tickets" figure overstated how much ticket coverage there is. */}
+                <MetricChip
+                  icon={TicketIcon}
+                  label="tickets"
+                  value={
+                    new Set(
+                      runs.filter((r) => asRunKind(r.kind) === 'ticket').map((r) => r.ticketId),
+                    ).size
+                  }
+                />
+                {flowCount > 0 && (
+                  <MetricChip
+                    icon={Workflow}
+                    label={flowCount === 1 ? 'flow' : 'flows'}
+                    value={flowCount}
+                  />
+                )}
                 <MetricChip icon={Layers} label="runs" value={runs.length} />
                 <MetricChip icon={Clock3} label="avg" value={avgDuration ?? '—'} />
                 <MetricChip

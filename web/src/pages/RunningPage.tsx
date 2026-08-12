@@ -22,6 +22,8 @@ import { cancelRun, listCrawledTickets, listRuns, pauseRun, resumeRun } from '@/
 import { useProjects } from '@/lib/project-context'
 import { useRunStream } from '@/lib/useRunStream'
 import { StatusBadge } from '@/lib/status'
+import { RunKindTag } from '@/components/RunKindTag'
+import { asRunKind } from '@/lib/runKind'
 import { formatDuration, relativeTime } from '@/lib/format'
 import type { LogEvent, Phase, RunSummary } from '@/lib/types'
 
@@ -287,6 +289,8 @@ function RunningRow({
               <span className="truncate text-sm font-medium text-foreground">{title}</span>
             )}
           </Link>
+          {/* What this run IS — a flow's id is a slugged name, not a ticket. */}
+          <RunKindTag kind={asRunKind(run.kind)} />
           <StatusBadge status={run.status} compact />
           <span className="truncate font-mono text-xs text-muted-foreground">
             {hostOf(run.appUrl)}
@@ -443,6 +447,7 @@ function QueuedRow({
           <span className="truncate text-sm font-medium text-foreground">{title}</span>
         )}
       </Link>
+      <RunKindTag kind={asRunKind(run.kind)} compact />
       <StatusBadge status={run.status} compact />
       <span className="min-w-0 truncate font-mono text-xs text-muted-foreground">
         {hostOf(run.appUrl)}

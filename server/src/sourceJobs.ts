@@ -236,7 +236,14 @@ export function listSourceJobs(projectId: string): PublicSourceJob[] {
     .map(toPublic)
 }
 
-/** True while any clone/sync is running for this project (one job at a time). */
-export function hasRunningSourceJob(projectId: string): boolean {
-  return [...jobs.values()].some((j) => j.projectId === projectId && j.status === 'running')
+/**
+ * True while a clone/sync is running for THIS source. Concurrency is bounded per
+ * repo, not per project: a project's repos (backend / web / mobile) live in
+ * separate folders and write separate `source-map-<tag>.md` docs, so syncing them
+ * together is safe — and serializing them meant a slow backend pull blocked the
+ * two-second web pull behind it. Two jobs on the SAME folder would have git
+ * fighting itself over one worktree, so that stays refused.
+ */
+export function hasRunningSourceJobFor(sourceId: string): boolean {
+  return [...jobs.values()].some((j) => j.sourceId === sourceId && j.status === 'running')
 }

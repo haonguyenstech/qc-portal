@@ -61,9 +61,20 @@ export interface MobileDevice {
   type: string | null
 }
 
-/** An adb serial we should replace with a real name (`emulator-5554`, `R58M12ABCDE`). */
-function looksLikeSerial(value: string): boolean {
-  return /^emulator-\d+$/i.test(value) || /^[A-Z0-9]{6,}$/.test(value)
+/**
+ * Entries adb has nothing to say about: Maestro's synthetic desktop-browser device,
+ * and iOS simulators (which Maestro already names properly). Everything else is
+ * worth an adb lookup when its name is just its id — deliberately NOT a
+ * serial-SHAPE test, which is how `127.0.0.1:7555` (MuMu / LDPlayer / BlueStacks
+ * and every other emulator that attaches over TCP) was skipped and kept showing
+ * its address as its name.
+ */
+function adbCanName(device: MobileDevice): boolean {
+  const haystack = `${device.deviceId} ${device.platform ?? ''} ${device.type ?? ''}`
+  if (/chromium|chrome|browser|safari|firefox|webkit|\bweb\b/i.test(haystack)) return false
+  if (/\bios\b|iphone|ipad|ipod|simulator/i.test(haystack)) return false
+  // An iOS UDID with no platform reported: 8-4-4-4-12 hex, or 40 hex chars.
+  return !/^[0-9A-F]{8}-[0-9A-F]{4}/i.test(device.deviceId) && !/^[0-9a-f]{40}$/.test(device.deviceId)
 }
 
 /**
@@ -75,8 +86,13 @@ function looksLikeSerial(value: string): boolean {
  * simulator I set up" complaint. adb knows the AVD/model name, so ask it and
  * prefer that. Legacy plain-string entries are still accepted so a cached result
  * (or an older reply shape) renders instead of vanishing.
+ *
+ * `namesUnavailable` says the leftover ids are unnamed because **adb** couldn't be
+ * run — a fixable, statable reason, unlike a device that simply won't answer.
  */
-async function normalizeDevices(raw: unknown[]): Promise<MobileDevice[]> {
+async function normalizeDevices(
+  raw: unknown[],
+): Promise<{ devices: MobileDevice[]; namesUnavailable: boolean }> {
   const devices: MobileDevice[] = []
   for (const entry of raw) {
     if (typeof entry === 'string') {
@@ -98,15 +114,18 @@ async function normalizeDevices(raw: unknown[]): Promise<MobileDevice[]> {
   }
 
   // Only pay for the adb round-trip when something actually needs renaming.
-  const needsName = devices.filter((d) => d.name === d.deviceId && looksLikeSerial(d.deviceId))
-  if (needsName.length) {
-    const names = await androidDeviceNames()
-    for (const device of needsName) {
-      const friendly = names.get(device.deviceId)
-      if (friendly) device.name = friendly
-    }
+  const needsName = devices.filter((d) => d.name === d.deviceId && adbCanName(d))
+  if (!needsName.length) return { devices, namesUnavailable: false }
+
+  const { names, adbAvailable } = await androidDeviceNames()
+  for (const device of needsName) {
+    const friendly = names.get(device.deviceId)
+    if (friendly) device.name = friendly
   }
-  return devices
+  return {
+    devices,
+    namesUnavailable: !adbAvailable && needsName.some((d) => d.name === d.deviceId),
+  }
 }
 
 function statusError(message: string, status: number): Error {
@@ -340,8 +359,11 @@ export async function runMcpCapabilityTest(opts: {
       // DETECT step (empty input) — report the device list. Normalize + name it
       // properly before it reaches the UI (see normalizeDevices), so the picker can
       // show "Pixel 7 API 34" and still drive the udid/serial behind it.
-      const devices = await normalizeDevices(data.devices)
+      const { devices, namesUnavailable } = await normalizeDevices(data.devices)
       data.devices = devices
+      // The picker turns this into a line saying WHY a device still reads as an
+      // address/serial, instead of leaving the engineer to guess.
+      if (namesUnavailable) data.deviceNamesUnavailable = true
       if (devices.length) {
         detail = `Found ${devices.length} device(s): ${devices
           .slice(0, 5)
@@ -358,7 +380,7 @@ export async function runMcpCapabilityTest(opts: {
       // the device_id, so name it the same way the picker did rather than echoing a
       // serial back at the engineer.
       const droven = String(data.device ?? 'device')
-      const [named] = await normalizeDevices([droven])
+      const [named] = (await normalizeDevices([droven])).devices
       detail = `Drove ${named?.name ?? droven}: ${String(data.info ?? 'screen read')}`
     }
   } else {

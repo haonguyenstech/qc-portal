@@ -77,6 +77,28 @@ function humanize(name: string): string {
   return /_/.test(name) && /^[\w.-]+$/.test(name) ? name.replace(/_/g, ' ').trim() : name
 }
 
+/**
+ * Whether a device is still labeled with its own id (an adb serial or an
+ * `127.0.0.1:7555` address), i.e. nothing could tell us the name the engineer gave
+ * it. The picker uses it to explain the row rather than leave it looking broken.
+ */
+export function isUnnamed(device: DetectedDevice): boolean {
+  return device.name === device.deviceId
+}
+
+/**
+ * Why the names are missing, when the server knows: adb couldn't be run at all, so
+ * EVERY Android device reads as its serial. Naming is best-effort, but this
+ * particular cause is fixable — and only if the engineer hears about it. `null`
+ * when the server didn't report it (nothing to say, or an older cached reply).
+ */
+export function deviceNameHint(result: { data?: unknown } | undefined): string | null {
+  const data = (result?.data ?? null) as { deviceNamesUnavailable?: unknown } | null
+  return data?.deviceNamesUnavailable
+    ? 'Showing ids instead of names: `adb` was not found on the PATH of the process running the portal. Start the portal from a terminal where `adb` works (or add the Android SDK platform-tools to the PATH) and re-scan.'
+    : null
+}
+
 /** Read the devices out of a `runMcpTest('maestro', …, '')` detection reply. */
 export function devicesFromDetection(result: { data?: unknown } | undefined): DetectedDevice[] {
   const data = (result?.data ?? null) as { devices?: unknown } | null

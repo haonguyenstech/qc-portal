@@ -771,10 +771,17 @@ function TicketRow({
 /** Read-only dialog that previews a ticket's test-case versions, one at a time. */
 function TestCasePreviewDialog({
   folder,
+  ticketId,
+  ticketTitle,
   projectId,
   onOpenChange,
 }: {
   folder: string | null
+  // Ticket display id + title from the crawled listing, so the header reads
+  // "ABC-123 · Notification bell" instead of a bare folder name — a folder alone
+  // doesn't say WHICH feature's cases are on screen.
+  ticketId?: string | null
+  ticketTitle?: string | null
   projectId: string
   onOpenChange: (open: boolean) => void
 }) {
@@ -982,9 +989,22 @@ function TestCasePreviewDialog({
           onInteractOutside={(e) => e.preventDefault()}
         >
           <DialogHeader className="shrink-0 space-y-2 border-b border-border/60 bg-muted/30 px-5 py-3">
-            <DialogTitle className="flex items-center gap-2 text-base">
-              <ClipboardList className="h-4 w-4 text-muted-foreground" />
-              <span className="truncate font-mono text-sm">{folder}</span>
+            <DialogTitle className="flex min-w-0 items-center gap-2 pr-8 text-base">
+              <ClipboardList className="h-4 w-4 shrink-0 text-muted-foreground" />
+              <span
+                className="shrink-0 font-mono text-sm"
+                title={folder ?? undefined}
+              >
+                {ticketId ?? folder}
+              </span>
+              {ticketTitle && (
+                <>
+                  <span className="shrink-0 text-muted-foreground">·</span>
+                  <span className="truncate text-sm font-medium" title={ticketTitle}>
+                    {ticketTitle}
+                  </span>
+                </>
+              )}
             </DialogTitle>
             <DialogDescription className="flex flex-wrap items-center gap-2">
               {versions.length > 0 ? (
@@ -1672,6 +1692,10 @@ export default function TestCasePage() {
     enabled: !!activeProjectId,
   })
   const hasCrawled = (crawled?.length ?? 0) > 0
+  // The crawled row behind the open preview — the eye is clicked from the ticket
+  // list AND from a finished job card, so resolve it by folder rather than
+  // threading the ticket through both call sites.
+  const previewTicket = crawled?.find((t) => t.name === previewFolder) ?? null
 
   const tourSteps: TourStep[] = [
     {
@@ -2565,6 +2589,8 @@ export default function TestCasePage() {
 
       <TestCasePreviewDialog
         folder={previewFolder}
+        ticketId={previewTicket?.displayId}
+        ticketTitle={previewTicket?.title}
         projectId={activeProjectId}
         onOpenChange={(open) => !open && setPreviewFolder(null)}
       />

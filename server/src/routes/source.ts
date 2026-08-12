@@ -15,7 +15,12 @@ import {
   tagSlug,
   type SourceCredential,
 } from '../sourceRepo.js'
-import { getSourceJob, hasRunningSourceJob, listSourceJobs, startSourceJob } from '../sourceJobs.js'
+import {
+  getSourceJob,
+  hasRunningSourceJobFor,
+  listSourceJobs,
+  startSourceJob,
+} from '../sourceJobs.js'
 import { deleteSourceMap } from '../sourceMap.js'
 
 // Multi-repo: a project can connect several repos, each with a tag ("Backend
@@ -99,10 +104,6 @@ sourceRouter.post('/connect', (req, res) => {
   if (!isDir(project.rootPath)) {
     return res.status(400).json({ error: `project folder not found: ${project.rootPath}` })
   }
-  if (hasRunningSourceJob(project.id)) {
-    return res.status(409).json({ error: 'another clone/sync is already running for this project' })
-  }
-
   const url = typeof req.body?.url === 'string' ? req.body.url.trim() : ''
   const branch = typeof req.body?.branch === 'string' ? req.body.branch.trim() : ''
   const token = typeof req.body?.token === 'string' ? req.body.token.trim() : ''
@@ -122,6 +123,10 @@ sourceRouter.post('/connect', (req, res) => {
   const existing = sourceId ? getSourceRow(sourceId) : undefined
   if (sourceId && (!existing || existing.projectId !== project.id)) {
     return res.status(404).json({ error: 'source not found' })
+  }
+  // Only THIS repo's folder is contended — another repo cloning in parallel is fine.
+  if (existing && hasRunningSourceJobFor(existing.id)) {
+    return res.status(409).json({ error: 'a clone/sync is already running for this repository' })
   }
 
   // Tag: explicit > the existing row's > derived from the repo name.
@@ -192,8 +197,8 @@ sourceRouter.post('/sync', (req, res) => {
   if (!isDir(row.sourcePath)) {
     return res.status(400).json({ error: `source folder is missing: ${row.sourcePath}` })
   }
-  if (hasRunningSourceJob(project.id)) {
-    return res.status(409).json({ error: 'another clone/sync is already running for this project' })
+  if (hasRunningSourceJobFor(row.id)) {
+    return res.status(409).json({ error: 'a clone/sync is already running for this repository' })
   }
 
   let parsed

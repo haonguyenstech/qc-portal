@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import ReactMarkdown from 'react-markdown'
@@ -57,7 +57,7 @@ import {
   updateSkill,
   uploadSkill,
 } from '@/lib/api'
-import { entriesFromDrop, readSkillDrop } from '@/lib/dropFolder'
+import { entriesFromDrop, readSkillDrop, readSkillFileList } from '@/lib/dropFolder'
 import { useProjects } from '@/lib/project-context'
 import type { SkillFile, SkillSummary } from '@/lib/types'
 
@@ -327,6 +327,7 @@ function NewSkillForm({
 
   const [dragOver, setDragOver] = useState(false)
   const [reading, setReading] = useState(false)
+  const folderInput = useRef<HTMLInputElement | null>(null)
 
   const uploadMutation = useMutation({
     mutationFn: (payload: { name: string; files: { path: string; content: string }[] }) =>
@@ -362,6 +363,23 @@ function NewSkillForm({
     }
   }
 
+  /** Browse: the BROWSER's own folder picker, not the server's native dialog. */
+  async function onPickFolder(list: FileList | null) {
+    if (!list || list.length === 0) return
+    setReading(true)
+    try {
+      uploadMutation.mutate(await readSkillFileList(list))
+    } catch (err) {
+      toast.error('Could not read that folder', {
+        description: err instanceof Error ? err.message : 'Unknown error',
+      })
+    } finally {
+      setReading(false)
+      // Let the same folder be picked again after a failure.
+      if (folderInput.current) folderInput.current.value = ''
+    }
+  }
+
   const busy = importMutation.isPending || uploadMutation.isPending || reading
 
   return (
@@ -376,11 +394,11 @@ function NewSkillForm({
           <div
             role="button"
             tabIndex={0}
-            onClick={() => !busy && importMutation.mutate()}
+            onClick={() => !busy && folderInput.current?.click()}
             onKeyDown={(e) => {
               if ((e.key === 'Enter' || e.key === ' ') && !busy) {
                 e.preventDefault()
-                importMutation.mutate()
+                folderInput.current?.click()
               }
             }}
             onDragOver={(e) => {
@@ -430,6 +448,39 @@ function NewSkillForm({
               </p>
             </div>
           </div>
+
+          {/*
+            The browser's own directory picker. `webkitdirectory` is non-standard
+            but supported everywhere we run, and unlike the server-side native
+            dialog it needs no interactive desktop session — which is exactly why
+            "click to browse" opens THIS and not POST /api/skills/import.
+          */}
+          <input
+            ref={folderInput}
+            type="file"
+            multiple
+            className="hidden"
+            // React doesn't type the non-standard directory attributes.
+            {...({ webkitdirectory: '', directory: '' } as Record<string, string>)}
+            onChange={(e) => onPickFolder(e.target.files)}
+          />
+
+          {/*
+            Server-side native dialog, kept as a fallback: it copies the folder
+            without the browser reading every byte, so it suits a large skill —
+            but it can only draw a window when the portal was launched from the
+            user's own desktop session, hence the caveat in the copy.
+          */}
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => importMutation.mutate()}
+            className="mx-auto block text-xs text-muted-foreground underline underline-offset-2 transition-colors hover:text-foreground disabled:opacity-50"
+          >
+            {importMutation.isPending
+              ? 'Waiting for the file explorer on this machine…'
+              : 'Trouble? Browse with the OS file explorer instead'}
+          </button>
 
           <div className="flex items-center gap-3">
             <span className="h-px flex-1 bg-border" />

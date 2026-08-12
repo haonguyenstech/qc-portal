@@ -19,13 +19,20 @@ export function pickFolderNative(
       if (defaultLocation) {
         chooser += ` default location (POSIX file "${defaultLocation.replace(/"/g, '')}")`
       }
-      execFile('osascript', ['-e', `POSIX path of (${chooser})`], (err, stdout, stderr) => {
-        if (err) {
-          if (/-128/.test(stderr) || /User canceled/i.test(stderr)) return resolve({ path: null })
-          return resolve({ path: null, error: stderr.trim() || err.message })
-        }
-        resolve({ path: stdout.trim() })
-      })
+      // `activate` first, or the dialog opens BEHIND the browser: osascript is a
+      // background process, so its window doesn't take focus and the page just
+      // sits on "opening the file explorer" while an unseen dialog waits.
+      execFile(
+        'osascript',
+        ['-e', 'activate', '-e', `POSIX path of (${chooser})`],
+        (err, stdout, stderr) => {
+          if (err) {
+            if (/-128/.test(stderr) || /User canceled/i.test(stderr)) return resolve({ path: null })
+            return resolve({ path: null, error: stderr.trim() || err.message })
+          }
+          resolve({ path: stdout.trim() })
+        },
+      )
     } else if (process.platform === 'win32') {
       // A bare FolderBrowserDialog.ShowDialog() has no owner window, so it often
       // opens BEHIND the browser / other windows — the user only sees the request
@@ -109,9 +116,12 @@ if ($r -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $f.SelectedPa
         resolve({
           path: null,
           error:
-            'The folder picker did not respond in time — the dialog may have opened behind another window. Please try again, or type the path manually.',
+            'The OS folder picker never appeared. It can only draw a window when the portal was started from your own desktop session — a portal launched over SSH, a scheduled task or WMI has no desktop to draw on. Drag the folder onto the drop zone instead, or click to browse (that one runs in the browser).',
         })
-      }, 2 * 60 * 1000)
+        // 60s, not the old 2 minutes: browsing now happens in the BROWSER, so
+        // this path is a fallback and a wedged dialog is the likelier cause of a
+        // long wait than someone still hunting for their folder.
+      }, 60 * 1000)
     } else {
       // Linux: best-effort via zenity if present.
       execFile(

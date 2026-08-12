@@ -11,7 +11,14 @@ import {
   listRuns,
   updateRun,
 } from '../db.js'
-import { cancelRun, parseReport, pauseRun, resumeRun, resolveSlug, startRun } from '../runManager.js'
+import {
+  cancelRun,
+  parseReport,
+  pauseRun,
+  resolveRunOutDir,
+  resumeRun,
+  startRun,
+} from '../runManager.js'
 import { revealFolderNative } from '../folderPicker.js'
 import { CRAWL_SUMMARY_MODELS } from '../claudeExec.js'
 import type { RunDetail, RunSummary } from '../types.js'
@@ -83,16 +90,20 @@ function listScreenshots(testingDir: string, slug: string): string[] {
   }
 }
 
+/**
+ * The output folder to read this run's report / issues / screenshots from.
+ *
+ * `resolveRunOutDir` finds it by the run's own folder token, so a run can never be
+ * shown another run's results — the bug where a web run and a device run of the same
+ * ticket shared one folder and one report. Legacy rows (no token) keep the previous
+ * ticket-prefix resolution, and a legacy row with no stored slug still resolves to
+ * nothing rather than to some other run's folder.
+ */
 function outputSlugForRun(
   testingDir: string | null,
-  run: Pick<RunSummary, 'ticketId' | 'slug'>,
+  run: Pick<RunSummary, 'ticketId' | 'slug' | 'outDirToken' | 'createdAt'>,
 ): string | null {
-  if (!testingDir) return run.slug
-  // A missing slug means this run never produced its own output folder. Do not
-  // fall back by ticket id here, because multiple runs for the same ticket can
-  // exist and a canceled run would show another run's report.
-  if (!run.slug) return null
-  return resolveSlug(testingDir, run.ticketId, run.slug)
+  return resolveRunOutDir(testingDir, run)
 }
 
 // Runs whose stored counts we've already reconciled against their report.md this
@@ -188,6 +199,7 @@ qcRouter.post('/run', (req, res) => {
     workflowSteps,
     testTarget,
     deviceId,
+    kind,
   } = req.body ?? {}
   if (typeof projectId !== 'string' || !projectId.trim()) {
     return res.status(400).json({ error: 'projectId is required' })
@@ -227,6 +239,11 @@ qcRouter.post('/run', (req, res) => {
       : []
   const relatedClean = sanitizeList(relatedTickets, 5, 200)
   const stepsClean = sanitizeList(workflowSteps, 30, 500)
+  // An E2E flow has no ticket — `ticketId` is the flow name's slug. The client
+  // says so explicitly rather than the server inferring it from the presence of
+  // steps: a single-ticket run may legitimately grow steps later, and guessing
+  // wrong would tell the model there is no ticket when there is one.
+  const runKind: 'ticket' | 'flow' = kind === 'flow' ? 'flow' : 'ticket'
   // app-mobile may have no id — store a readable label so history/messages aren't blank.
   const appUrlValue = appUrlClean || (target === 'app-mobile' ? 'Mobile app' : '')
   // Pin the device only for the mobile targets that actually drive one — a web run
@@ -249,6 +266,7 @@ qcRouter.post('/run', (req, res) => {
       workflowSteps: stepsClean.length ? stepsClean : undefined,
       testTarget: target,
       deviceId: deviceClean,
+      kind: runKind,
     })
     return res.status(201).json({ runId: summary.id, ...summary })
   } catch (err) {

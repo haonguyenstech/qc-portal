@@ -24,10 +24,14 @@ import {
   KeyRound,
   ListChecks,
   Loader2,
+  Maximize2,
+  MonitorPlay,
   MousePointerClick,
+  Play,
   Plug,
   PlugZap,
   Smartphone,
+  Square,
   SquareKanban,
   Unplug,
 } from 'lucide-react'
@@ -51,6 +55,11 @@ import {
   mcpOauthStatus,
   mcpUvStatus,
   mcpMaestroStatus,
+  maximizeQcBrowser,
+  qcBrowserStatus,
+  startQcBrowser,
+  stopQcBrowser,
+  updateProject,
   connectMaestro,
   openMcpFolder,
   removeMcp,
@@ -62,8 +71,8 @@ import {
   type McpCapabilityResult,
   type McpOauthProvider,
 } from '@/lib/api'
-import type { McpServer } from '@/lib/types'
-import { devicesFromDetection, type DetectedDevice } from '@/lib/devices'
+import type { McpServer, Project } from '@/lib/types'
+import { deviceNameHint, devicesFromDetection, isUnnamed, type DetectedDevice } from '@/lib/devices'
 import { useProjects } from '@/lib/project-context'
 
 const OAUTH_META: Record<
@@ -219,9 +228,12 @@ function playwrightArgs(headless: boolean): string[] {
     'googletagmanager.com;google-analytics.com;doubleclick.net;facebook.net;googlesyndication.com;adservice.google.com',
     '--timeout-navigation',
     '20000',
-    '--viewport-size',
-    '1280x720',
-    // NO --user-data-dir here. The profile directory is a fact about the machine
+    // NO --viewport-size. It emulates a fixed viewport over the real window, so a
+    // pinned 1280x720 rendered the app in a small box on a large monitor and desktop
+    // breakpoints never fired. The server adds a `--config` that opens the window
+    // maximized with `viewport: null` instead (see writePlaywrightMcpConfig), or drops
+    // launch flags entirely when the project attaches to the QC browser.
+    // NO --user-data-dir here either. The profile directory is a fact about the machine
     // running the server, which this bundle can't know — the server appends it (see
     // normalizePlaywrightProfile in routes/mcp.ts). Hardcoding one shipped the
     // author's own home path to every install and broke Chrome with EPERM.
@@ -376,6 +388,8 @@ function MobileFunctionalTest({
 
   const detectResult = detect.data
   const devices: DetectedDevice[] = devicesFromDetection(detectResult)
+  // Only worth saying when a row actually reads as an id — a named list needs no note.
+  const nameHint = devices.some(isUnnamed) ? deviceNameHint(detectResult) : null
   // Selection keys on the device_id — that's what the drive step must be given.
   const selected = devices.some((d) => d.deviceId === device) ? device : devices[0]?.deviceId ?? ''
   const detecting = detect.isPending
@@ -463,6 +477,11 @@ function MobileFunctionalTest({
                   )
                 })}
               </div>
+              {nameHint && (
+                <p className="rounded-lg bg-amber-500/10 px-2.5 py-2 text-[11px] leading-relaxed text-amber-700 dark:text-amber-400">
+                  {nameHint}
+                </p>
+              )}
             </div>
           ) : null}
 
@@ -1730,6 +1749,210 @@ function UvWarning() {
   )
 }
 
+/**
+ * THE QC BROWSER card — one long-lived browser window the portal owns, which
+ * Playwright MCP attaches to over CDP instead of launching its own.
+ *
+ * It exists because of two things a QC engineer hit constantly:
+ *  - **Stop closed the browser.** Stopping a chat turn kills the `claude` child, which
+ *    tears down its MCP servers, which closes the browser they launched. There was no
+ *    way to pause a flow, fix a step and continue — the logins, the filled form and the
+ *    page you were on all went with it.
+ *  - **The window was never full screen.** The MCP launched a default-size window and
+ *    we pinned `--viewport-size 1280x720` on top, so the app rendered in a small box.
+ *
+ * Attaching fixes both. The toggle is per project because it changes which browser that
+ * project's runs drive; the browser itself is one per machine, so status/Start/Stop are
+ * global.
+ */
+function QcBrowserCard({ project }: { project: Project }) {
+  const queryClient = useQueryClient()
+  const { data, isFetching } = useQuery({
+    queryKey: ['qc-browser'],
+    queryFn: qcBrowserStatus,
+    refetchInterval: 10_000,
+    staleTime: 5_000,
+  })
+  const attached = project.persistentBrowser === true
+
+  const start = useMutation({
+    mutationFn: () => startQcBrowser(),
+    onSuccess: () => {
+      toast.success('QC browser opened', {
+        description: 'It stays open when you press Stop, so you can adjust and continue.',
+      })
+      queryClient.invalidateQueries({ queryKey: ['qc-browser'] })
+    },
+    onError: (err) =>
+      toast.error('Could not open the QC browser', {
+        description: err instanceof Error ? err.message : 'Unknown error',
+      }),
+  })
+  const stop = useMutation({
+    mutationFn: stopQcBrowser,
+    onSuccess: () => {
+      toast.success('QC browser closed')
+      queryClient.invalidateQueries({ queryKey: ['qc-browser'] })
+    },
+    onError: (err) =>
+      toast.error('Could not close the QC browser', {
+        description: err instanceof Error ? err.message : 'Unknown error',
+      }),
+  })
+  const maximize = useMutation({
+    mutationFn: maximizeQcBrowser,
+    onSuccess: () => toast.success('Window maximized'),
+    onError: (err) =>
+      toast.error('Could not resize the window', {
+        description: err instanceof Error ? err.message : 'Unknown error',
+      }),
+  })
+  const toggle = useMutation({
+    mutationFn: (next: boolean) => updateProject(project.id, { persistentBrowser: next }),
+    onSuccess: (_res, next) => {
+      toast.success(next ? 'Browser automation attached' : 'Back to a per-run browser', {
+        description: next
+          ? "This project's Playwright now drives the QC browser, which survives Stop."
+          : 'Playwright will launch (and close) its own browser again.',
+      })
+      queryClient.invalidateQueries({ queryKey: ['projects'] })
+      queryClient.invalidateQueries({ queryKey: ['mcp', project.id] })
+      queryClient.invalidateQueries({ queryKey: ['mcp-health', project.id] })
+    },
+    onError: (err) =>
+      toast.error('Could not change the setting', {
+        description: err instanceof Error ? err.message : 'Unknown error',
+      }),
+  })
+
+  const running = data?.running === true
+  const noBrowser = data && data.available.length === 0
+
+  return (
+    <Card className="rounded-3xl border-border/60 shadow-none">
+      <CardContent className="flex flex-col gap-4 p-5">
+        <div className="flex flex-wrap items-start gap-3">
+          <span className="flex size-10 shrink-0 items-center justify-center rounded-2xl bg-foreground text-background">
+            <MonitorPlay className="size-5" />
+          </span>
+          <div className="min-w-0 flex-1 space-y-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <p className="font-semibold">QC browser</p>
+              <span
+                title={running ? data?.version : 'Not running'}
+                className={cn(
+                  'flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium',
+                  isFetching && !data
+                    ? 'bg-muted text-muted-foreground'
+                    : running
+                      ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-400'
+                      : 'bg-muted text-muted-foreground',
+                )}
+              >
+                {isFetching && !data ? (
+                  <Loader2 className="size-3 animate-spin" />
+                ) : (
+                  <span
+                    className={cn(
+                      'size-1.5 rounded-full',
+                      running ? 'bg-emerald-500' : 'bg-muted-foreground/50',
+                    )}
+                  />
+                )}
+                {isFetching && !data ? 'Checking' : running ? 'Open' : 'Closed'}
+              </span>
+              {attached && (
+                <span className="rounded-full bg-sky-500/10 px-2 py-0.5 text-[11px] font-medium text-sky-700 dark:text-sky-400">
+                  This project attaches to it
+                </span>
+              )}
+            </div>
+            <p className="text-sm text-muted-foreground">
+              A browser window the portal owns, so pressing <span className="font-medium">Stop</span>{' '}
+              pauses the run instead of closing it — the pages, logins and half-filled forms stay
+              put, you fix what you need, and the next message carries on from there. It also opens{' '}
+              <span className="font-medium">maximized</span> rather than in a 1280×720 box.
+            </p>
+          </div>
+        </div>
+
+        {noBrowser ? (
+          <p className="rounded-2xl border border-amber-300/70 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+            Neither Microsoft Edge nor Google Chrome was found on the machine running the portal.
+            Install one (or set <code className="font-mono">QC_BROWSER_PATH</code>) to use this.
+          </p>
+        ) : (
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              type="button"
+              size="sm"
+              variant={running ? 'outline' : 'default'}
+              disabled={start.isPending || running}
+              onClick={() => start.mutate()}
+              className="h-9 rounded-full active:scale-[0.98]"
+            >
+              {start.isPending ? <Loader2 className="size-4 animate-spin" /> : <Play className="size-4" />}
+              {running ? 'Already open' : 'Open browser'}
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={maximize.isPending || !running}
+              onClick={() => maximize.mutate()}
+              title="Resize the window to fill the screen"
+              className="h-9 rounded-full active:scale-[0.98]"
+            >
+              {maximize.isPending ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : (
+                <Maximize2 className="size-4" />
+              )}
+              Maximize
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={stop.isPending || !running}
+              onClick={() => stop.mutate()}
+              className="h-9 rounded-full active:scale-[0.98]"
+            >
+              {stop.isPending ? <Loader2 className="size-4 animate-spin" /> : <Square className="size-4" />}
+              Close
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant={attached ? 'outline' : 'default'}
+              disabled={toggle.isPending}
+              onClick={() => toggle.mutate(!attached)}
+              className="ml-auto h-9 rounded-full active:scale-[0.98]"
+            >
+              {toggle.isPending ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : attached ? (
+                <Unplug className="size-4" />
+              ) : (
+                <Plug className="size-4" />
+              )}
+              {attached ? 'Detach this project' : 'Attach this project'}
+            </Button>
+          </div>
+        )}
+
+        {running && (
+          <p className="font-mono text-[11px] text-muted-foreground">
+            {data?.endpoint}
+            {data?.version ? ` · ${data.version}` : ''}
+            {!data?.startedHere && ' · started outside this portal session — close it yourself'}
+          </p>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
 // Persisted health cache — the live probe (`claude mcp list`) is slow, so we keep
 // the last-known { name: status } map per project in localStorage. On reload the
 // cards seed from it and show their previous Connected/… badge INSTANTLY, while a
@@ -1928,6 +2151,8 @@ export default function McpPage() {
       )}
 
       <UvWarning />
+
+      {activeProject && <QcBrowserCard project={activeProject} />}
 
       <ConnectServices
         projectId={activeProjectId}

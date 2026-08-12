@@ -185,8 +185,10 @@ Everything the Portal reads and writes for a project lives under \`<project>/tes
 - \`testing/tickets/<ticket>/\` — crawled tickets (description, comments, attachments) and their
   generated \`testcases/v<N>.md|csv\`. A subtask nests under its parent, e.g.
   \`testing/tickets/ABC-100/ABC-101/\`.
-- \`testing/test-result/<ticket-id>-<slug>/\` — QC run output: \`report.md\`, \`issues.md\`, evidence,
-  screenshots, and the filled-in \`testcases-executed.<ext>\` sheet.
+- \`testing/test-result/<ticket-id>-<slug>-<target>-<run>/\` — QC run output: \`report.md\`,
+  \`issues.md\`, evidence, screenshots, and the filled-in \`testcases-executed.<ext>\` sheet. Each run
+  gets its OWN folder: the trailing \`<target>-<run>\` (e.g. \`web-3f9a12c4\`) is what keeps a web run
+  and a run of the same ticket on a device from overwriting each other's report.
 - \`testing/overview/*.md\` — the **Overview** documents (what the product is), one file per upload.
 - \`testing/knowledge/*.md\` — reference docs (specs, domain notes, plus the AI-written source map,
   database schema map, and design system).
@@ -773,8 +775,19 @@ a per-ticket grid once you queue two or more), pick a model, and start. Extras o
   (both drive a booted device via the **Maestro** MCP server, which the run requires). For
   **App on device** there's no URL: **name the app already installed on the device** instead (a display
   name like \`MyApp\`, or a package / bundle id like \`com.example.myapp\`) — the portal launches an
-  installed app, it won't install one for you. Advanced **Feature** mode (multiple related tickets as one
-  connected workflow) is **Coming soon**.
+  installed app, it won't install one for you.
+- **E2E flow mode** — a **workflow canvas** instead of a form, for an end-to-end path through the
+  product. **No ticket is involved**: drag step nodes from the left library (Navigate, Sign in,
+  Fill & submit, Verify, Check data, Custom) anywhere on the canvas — or click one to chain it after
+  the last step — then join them by pulling a line from any side of a card to the next; the
+  connectors re-route themselves and a step can branch to more than one. The number on each card is
+  the order it will actually run in, read off the connections. Click a card to set it up in the
+  panel below the canvas — what Claude does, its **App URL**, plus an optional **expected result**. The URL belongs to
+  the step here rather than to the form: a flow walks several pages, so set one on each step that
+  moves to a new page, and the **first** one is where the run opens (marked *Start*). Name the flow in the canvas header;
+  that name is what the run and its report are filed under. The whole canvas runs as **one** QC
+  session with a single report — a deeper model (Sonnet/Opus) is recommended, and a template saves
+  the steps for next time.
 - **Device picker** (mobile targets only) — with an Android emulator, an iOS simulator and Maestro's
   Chromium device all up at once, the run used to test whichever one Maestro listed first. Pick the
   device by its **real name** (\`Pixel 6 API 36\`, not \`emulator-5554\`); the choice is remembered per
@@ -798,7 +811,8 @@ in the sidebar shows how many runs are live from any page.
 
 ### Results
 When a run finishes it writes \`report.md\` + \`issues.md\` (and screenshots/evidence) under
-\`testing/test-result/<ticket-id>-<slug>/\`. Opening a run shows:
+\`testing/test-result/<ticket-id>-<slug>-<target>-<run>/\` — one folder per run, so re-testing the same
+ticket (or testing it on web and then on a device) never overwrites an earlier result. Opening a run shows:
 
 - the full rendered **report** and the **issues** list (screenshots are clickable), across **Report**,
   **Screenshots**, **Files**, and **Log** tabs,
@@ -806,7 +820,11 @@ When a run finishes it writes \`report.md\` + \`issues.md\` (and screenshots/evi
   Passed / Failed / Blocked / Untested / Cancelled status, with Reference cells that deep-link to the
   matching issue. The same sheet is saved to disk as \`testcases-executed.<ext>\` — a ready-to-file QC record.
 - **Push issues to ClickUp** — paste the parent ticket URL, select the logged issues, and the portal
-  creates them as **subtasks** (with the screenshots attached).
+  creates them as **subtasks**, each one filled in for you: the parent's **assignee** and **tags**, a
+  **priority** from that issue's own severity (the parent's priority is the fallback), and its
+  **screenshots** both attached to the card and posted as an inline comment. Before you press the
+  button the panel shows exactly what will be inherited — including a warning when the parent ticket
+  has no assignee, since the subtasks would then land unassigned.
 - **Delete run** — removes the history entry, event log, and the whole on-disk output folder (behind a
   confirm; an active run can't be deleted).
 
@@ -1502,9 +1520,11 @@ understood now). If you still see it, update the portal (\`qc-portal --update\`)
 status above.
 
 **A mobile run drove the wrong device.** Use the **device picker** on the Run form to name the device
-explicitly instead of leaving it on Auto. If your Android device shows as a raw serial rather than its
-name, \`adb\` wasn't on the PATH of the process that started the portal — start it from a terminal, or add
-Android platform-tools to your PATH.
+explicitly instead of leaving it on Auto. If an Android device shows as a raw serial (\`emulator-5554\`) or
+an address (\`127.0.0.1:7555\`) rather than the name you gave it, the portal couldn't reach \`adb\` to ask —
+start the portal from a terminal where \`adb\` works, or add Android platform-tools to your PATH. Emulators
+that attach over TCP (MuMu, LDPlayer, BlueStacks, Nox) are named the same way; the portal also looks for
+the \`adb\` those ship with, so installing Android platform-tools isn't strictly required.
 
 **The Terminal says a session is open in another window.** Only one browser window views a shell at a
 time. Use **Take over** in the window you want to work in.

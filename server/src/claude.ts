@@ -121,8 +121,14 @@ export function runQc(
     model?: string // Claude model alias (haiku/sonnet/opus); omitted = configured default
     relatedTickets?: string[] // advanced mode: extra tickets covered by the same feature run
     workflowSteps?: string[] // advanced mode: ordered end-to-end flow to exercise
+    kind?: 'ticket' | 'flow' // 'flow' = no ticket exists; ticketId is just the report slug
     testTarget?: 'web' | 'web-mobile' | 'app-mobile' // desktop browser (default), web app on device, or native app on device
     deviceId?: string // mobile targets: the Maestro device_id to drive (several booted devices → the engineer picks); omitted = whatever list_devices reports
+    // Mandatory tail of this run's output folder name ("web-3f9a12c4"), supplied by
+    // runManager. Two runs of the same ticket — classically one on web and one on a
+    // device — otherwise agree on a folder name and the second overwrites the first's
+    // report, issues and screenshots. Absent = the pre-token behavior.
+    outDirSuffix?: string
     resumeSessionId?: string // continue a previously paused session instead of starting fresh
     totpHint?: string // prompt block telling the run how to fetch live authenticator (2FA) codes
   },
@@ -137,9 +143,18 @@ export function runQc(
     // The session already holds the full original prompt and progress — just
     // tell it to pick up where it stopped.
     prompt =
-      `Continue the QC acceptance test for ClickUp ticket ${opts.ticketId} exactly where you left off. ` +
+      `Continue the QC acceptance test for ${
+        opts.kind === 'flow' ? `the E2E flow "${opts.ticketId}"` : `ClickUp ticket ${opts.ticketId}`
+      } exactly where you left off. ` +
       `Resume the ${skill} skill from the phase you had reached and carry it through to the end. ` +
-      `Do not restart from scratch and do not repeat work already completed.`
+      `Do not restart from scratch and do not repeat work already completed.` +
+      // The session already knows the folder, but a resumed run that invents a second
+      // one splits its own evidence across two folders — and the portal only reads one.
+      (opts.outDirSuffix
+        ? ` Keep writing everything into the SAME output folder you created for this run ` +
+          `(the one ending in "-${opts.outDirSuffix}") — do not create a new folder and do not ` +
+          `write into any other run's folder.`
+        : '')
   } else {
     // All tickets covered by this run — the lead ticket plus any related ones
     // selected in advanced mode. More than one means it's a connected feature.
@@ -149,12 +164,26 @@ export function runQc(
     const multiTicket = allTickets.length > 1
     const steps = (opts.workflowSteps ?? []).map((s) => s.trim()).filter(Boolean)
 
+    // An E2E flow has NO ticket: `ticketId` is only the slug its report is filed
+    // under. Saying "ClickUp ticket: <slug>" sent the model hunting through
+    // testing/tickets/ for a folder that doesn't exist (observed: four wasted
+    // tool calls before it worked out the truth on its own).
+    const isFlow = opts.kind === 'flow'
     const lines = [
-      multiTicket
-        ? `Use the ${skill} skill to run a deep QC acceptance test across a connected feature that spans multiple ClickUp tickets.`
-        : `Use the ${skill} skill to run a deep QC acceptance test.`,
+      isFlow
+        ? `Use the ${skill} skill to run a deep QC acceptance test of an END-TO-END FLOW through the product.`
+        : multiTicket
+          ? `Use the ${skill} skill to run a deep QC acceptance test across a connected feature that spans multiple ClickUp tickets.`
+          : `Use the ${skill} skill to run a deep QC acceptance test.`,
     ]
-    if (multiTicket) {
+    if (isFlow) {
+      lines.push(
+        `There is NO ticket for this run — do NOT look for one in testing/tickets/ and do not ` +
+          `treat the name below as a ticket id. The acceptance criteria are the flow's own steps, ` +
+          `listed further down; test exactly those, in order.`,
+        `Flow name (write the report under this slug): ${opts.ticketId}`,
+      )
+    } else if (multiTicket) {
       lines.push(
         `ClickUp tickets — treat them together as ONE end-to-end feature, not as separate tests: ${allTickets.join(', ')}`,
         `Lead ticket (write the report under its slug): ${opts.ticketId}`,
@@ -251,8 +280,25 @@ export function runQc(
           `to understand the real implementation, expected behavior, validation, and edge cases ` +
           `before you exercise the app. Read only; never modify the code.`,
         ``,
-        `Follow the skill literally and in order through all 7 phases. ` +
-          `Write the report and issues into testing/test-result/<ticket-slug>/ as the skill specifies.`,
+        `Follow the skill literally and in order through all 7 phases.`,
+        ``,
+        // OUTPUT FOLDER — the portal owns the tail of the name. The skill lets the
+        // model name the folder `<ticket-id>-<slug>`, so two runs of the same ticket
+        // (the classic case: one on desktop web, then one on a device) picked the same
+        // name and the second overwrote the first's report.md / issues.md /
+        // screenshots — and the portal, which used to find a run's folder by ticket
+        // prefix, then showed that one surviving report for BOTH runs in History.
+        opts.outDirSuffix
+          ? `OUTPUT FOLDER — write this run's results into EXACTLY ONE new folder, named:\n` +
+            `    testing/test-result/${opts.ticketId}-<short-feature-slug>-${opts.outDirSuffix}/\n` +
+            `<short-feature-slug> is yours to choose (a few words about the feature, lowercase, ` +
+            `hyphenated). The "${opts.outDirSuffix}" ending is MANDATORY and must be the LAST part ` +
+            `of the folder name, character for character — it identifies this run. Create that ` +
+            `folder yourself and put report.md, issues.md, screenshots/ and every other artifact ` +
+            `inside it. Do NOT write into, reuse, or delete a folder from an earlier run, even one ` +
+            `for the same ticket, and do NOT drop the ending — the skill's own examples omit it, ` +
+            `and this instruction overrides them.`
+          : `Write the report and issues into testing/test-result/<ticket-slug>/ as the skill specifies.`,
         ``,
         // Report structure contract — EVERY report.md must open with these three
         // sections, in this order and format, before any AC-level or per-case
