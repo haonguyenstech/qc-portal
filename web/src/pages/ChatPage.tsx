@@ -47,6 +47,7 @@ import {
   Ticket,
   Trash2,
   User,
+  Wand2,
   Wrench,
   X,
 } from 'lucide-react'
@@ -83,6 +84,7 @@ import {
   getDatabases,
   listChats,
   listCrawledTickets,
+  listSkills,
   pinChat,
   renameChat,
   streamChat,
@@ -98,6 +100,7 @@ import {
   type ChatTools,
   type DatabaseConn,
 } from '@/lib/api'
+import type { SkillSummary } from '@/lib/types'
 
 /**
  * Chat — ask Claude Code about this project in plain language and read the answer as a
@@ -223,29 +226,32 @@ const IMAGE_MIMES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif']
 const MAX_IMAGES = 4
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024
 
-// --------------------------------------------------------------- @ mentions
+// --------------------------------------------------------------- @ and / pickers
 
 /**
- * `@` tags a crawled ticket or its test cases.
+ * `@` tags a crawled ticket or its test cases; `/` picks one of the project's own skills.
  *
  * "Are these cases enough?" only means something next to a ticket, and the alternatives
  * are pasting a folder path or hoping the model greps for the right one. The token that
- * lands in the message (`@ABC-123`) is what the engineer reads; the machine-readable
- * reference rides alongside in `mentions` and is resolved to files server-side.
+ * lands in the message (`@ABC-123`, `/qc-testing`) is what the engineer reads; the
+ * machine-readable reference rides alongside in `mentions` and is resolved server-side —
+ * to files to Read for an artifact, to a SKILL.md to follow for a skill.
  *
  * The token stays in the text on purpose: it's the record of what was asked, and it's why
  * a mention whose token the engineer deleted is dropped at send time.
  */
 interface StagedMention {
   token: string
-  kind: 'ticket' | 'testcase' | 'database'
+  kind: 'ticket' | 'testcase' | 'database' | 'skill'
   /** Tickets/test cases only — the folder under testing/tickets/. */
   folder?: string
   /** Databases only — the connected database's id (re-checked against the project). */
   databaseId?: string
+  /** Skills only — the folder name under .claude/skills/. */
+  skill?: string
 }
 
-/** One row of the `@` menu. */
+/** One row of the `@` / `/` menu. */
 interface MentionOption extends StagedMention {
   label: string
   detail: string
@@ -253,15 +259,24 @@ interface MentionOption extends StagedMention {
 
 const MAX_MENTION_ROWS = 8
 
+/** Which picker is open: `@` for project artifacts, `/` for the project's skills. */
+type TriggerChar = '@' | '/'
+
 /**
- * The `@…` being typed at the caret, if any: where it starts and what's been typed after
- * it. Anchored to a word boundary so an email address or a decorator (`@Injectable`) mid
- * word doesn't open the menu.
+ * The `@…` or `/…` being typed at the caret, if any: which character opened it, where it
+ * starts, and what's been typed after it. Anchored to a word boundary so an email address,
+ * a decorator (`@Injectable`) or `and/or` mid word doesn't open the menu.
  */
-function activeMention(text: string, caret: number): { start: number; query: string } | null {
-  const m = /(?:^|\s)@([\w.\-/]*)$/.exec(text.slice(0, caret))
+function activeTrigger(
+  text: string,
+  caret: number,
+): { char: TriggerChar; start: number; query: string } | null {
+  const m = /(?:^|\s)([@/])([\w.\-/]*)$/.exec(text.slice(0, caret))
   if (!m) return null
-  return { start: caret - m[1].length - 1, query: m[1] }
+  // A `/` inside the query only makes sense for `@ABC-123/testcases`. A skill name is one
+  // folder, so a second segment means this is a pasted path (`/Users/…`), not a pick.
+  if (m[1] === '/' && m[2].includes('/')) return null
+  return { char: m[1] as TriggerChar, start: caret - m[2].length - 1, query: m[2] }
 }
 
 /**
@@ -324,6 +339,30 @@ function mentionOptions(
     if (ticketRows.length >= MAX_MENTION_ROWS * 2) break
   }
   return [...out, ...ticketRows].slice(0, MAX_MENTION_ROWS + out.length)
+}
+
+/**
+ * Turn the project's skills into `/` menu rows.
+ *
+ * A skill is a procedure the team already wrote down on the Skills page — the whole point
+ * is that the answer follows it instead of Claude improvising its own. Typing `/` is how
+ * every other Claude surface asks for one, so it's what the composer answers to.
+ */
+function skillOptions(skills: SkillSummary[], query: string): MentionOption[] {
+  const q = query.trim().toLowerCase()
+  const out: MentionOption[] = []
+  for (const s of skills) {
+    if (q && !`${s.name} ${s.description}`.toLowerCase().includes(q)) continue
+    out.push({
+      token: `/${s.name}`,
+      kind: 'skill',
+      skill: s.name,
+      label: s.name,
+      detail: s.description.trim() || 'No description in its SKILL.md',
+    })
+    if (out.length >= MAX_MENTION_ROWS) break
+  }
+  return out
 }
 
 /**
@@ -2449,7 +2488,7 @@ function ChatWorkspace({
   const [attached, setAttached] = useState<{ name: string; markdown: string }[]>([])
   /** Images pasted/dropped/picked for the NEXT message (see StagedImage). */
   const [images, setImages] = useState<StagedImage[]>([])
-  /** `@`-tagged tickets/test cases staged for the next message (see StagedMention). */
+  /** `@`-tagged artifacts and `/`-picked skills staged for the next message (StagedMention). */
   const [mentions, setMentions] = useState<StagedMention[]>([])
   /**
    * The `+` menu action armed for the NEXT message (web search / deep research / diagram),
@@ -2457,8 +2496,17 @@ function ChatWorkspace({
    * follow-up after a web answer goes back to reading the project unless you ask again.
    */
   const [action, setAction] = useState<ChatAction | null>(null)
-  /** The `@…` being typed right now (where it starts, the caret, what's typed) — or null. */
-  const [mention, setMention] = useState<{ start: number; end: number; query: string } | null>(null)
+  /**
+   * The `@…` or `/…` being typed right now — which character opened it, where it starts, the
+   * caret, and what's typed after it — or null when no picker is open. One piece of state for
+   * both, so the arrows/Enter/Escape handling and the painted chips are written once.
+   */
+  const [mention, setMention] = useState<{
+    char: TriggerChar
+    start: number
+    end: number
+    query: string
+  } | null>(null)
   const [mentionIndex, setMentionIndex] = useState(0)
   const [converting, setConverting] = useState(false)
   // The turn in flight: what was asked, what has streamed back, which tools ran.
@@ -2645,25 +2693,37 @@ function ChatWorkspace({
     }
   }, [projectId, slug, running, queryClient])
 
-  // The `@` menu's source list. Fetched only once the engineer actually types `@` (it's a
-  // disk scan of testing/tickets), then cached for the session by React Query.
+  // The `@` menu's source lists. Fetched only once the engineer actually types `@` (it's a
+  // disk scan of testing/tickets), then cached for the session by React Query — and not at
+  // all for `/`, which needs neither.
+  const atOpen = mention?.char === '@'
+  const slashOpen = mention?.char === '/'
   const { data: crawled, isFetching: crawledFetching } = useQuery({
     queryKey: ['crawled-tickets', projectId],
     queryFn: () => listCrawledTickets(projectId),
-    enabled: !!projectId && mention !== null,
+    enabled: !!projectId && atOpen,
     staleTime: 60_000,
   })
   // Connected databases, on the same "only once `@` is typed" terms.
   const { data: dbInfo } = useQuery({
     queryKey: ['databases', projectId],
     queryFn: () => getDatabases(projectId),
-    enabled: !!projectId && mention !== null,
+    enabled: !!projectId && atOpen,
     staleTime: 60_000,
   })
-  const mentionRows = useMemo(
-    () => (mention ? mentionOptions(crawled ?? [], dbInfo?.databases ?? [], mention.query) : []),
-    [crawled, dbInfo, mention],
-  )
+  // The `/` menu's source list — the project's skills, as the Skills page defines them.
+  const { data: skills, isFetching: skillsFetching } = useQuery({
+    queryKey: ['skills', projectId],
+    queryFn: () => listSkills(projectId),
+    enabled: !!projectId && slashOpen,
+    staleTime: 60_000,
+  })
+  const mentionRows = useMemo(() => {
+    if (!mention) return []
+    return mention.char === '/'
+      ? skillOptions(skills ?? [], mention.query)
+      : mentionOptions(crawled ?? [], dbInfo?.databases ?? [], mention.query)
+  }, [crawled, dbInfo, skills, mention])
 
   const messages = chat?.messages ?? []
   const streaming = pending !== null
@@ -2709,11 +2769,13 @@ function ChatWorkspace({
     setAtBottom(el.scrollHeight - el.scrollTop - el.clientHeight < 80)
   }, [])
 
-  /** Track (or close) the `@…` under the caret after any edit or cursor move. */
+  /** Track (or close) the `@…` / `/…` under the caret after any edit or cursor move. */
   const syncMention = useCallback((el: HTMLTextAreaElement) => {
     const caret = el.selectionStart ?? el.value.length
-    const found = activeMention(el.value, caret)
-    setMention(found ? { start: found.start, end: caret, query: found.query } : null)
+    const found = activeTrigger(el.value, caret)
+    setMention(
+      found ? { char: found.char, start: found.start, end: caret, query: found.query } : null,
+    )
     setMentionIndex(0)
   }, [])
 
@@ -2754,6 +2816,7 @@ function ChatWorkspace({
                 kind: opt.kind,
                 folder: opt.folder,
                 databaseId: opt.databaseId,
+                skill: opt.skill,
               },
             ],
       )
@@ -2797,7 +2860,12 @@ function ChatWorkspace({
       // engineer can't see but the model still reads would be a lie about what was asked.
       const tags: ChatMention[] = mentions
         .filter((m) => base.includes(m.token))
-        .map((m) => ({ kind: m.kind, folder: m.folder, databaseId: m.databaseId }))
+        .map((m) => ({
+          kind: m.kind,
+          folder: m.folder,
+          databaseId: m.databaseId,
+          skill: m.skill,
+        }))
       const sendingAction = action
       setInput('')
       setAttached([])
@@ -3366,8 +3434,8 @@ function ChatWorkspace({
             onDragOver={(e) => e.preventDefault()}
             className="relative w-full rounded-2xl bg-primary/10 p-1 pt-0"
           >
-            {/* The `@` menu. Anchored to the WELL (which doesn't clip) and opening upward,
-                so it never covers the message being typed. */}
+            {/* The `@` / `/` menu. Anchored to the WELL (which doesn't clip) and opening
+                upward, so it never covers the message being typed. */}
             {mention && (
               <div className="absolute bottom-full left-0 z-20 mb-2 w-full overflow-hidden rounded-xl border bg-popover shadow-md">
                 {mentionRows.length > 0 ? (
@@ -3388,7 +3456,9 @@ function ChatWorkspace({
                             i === mentionIndex ? 'bg-accent' : 'hover:bg-accent/60',
                           )}
                         >
-                          {opt.kind === 'database' ? (
+                          {opt.kind === 'skill' ? (
+                            <Wand2 className="size-4 shrink-0 text-amber-500" />
+                          ) : opt.kind === 'database' ? (
                             <Database className="size-4 shrink-0 text-sky-500" />
                           ) : opt.kind === 'ticket' ? (
                             <Ticket className="size-4 shrink-0 text-muted-foreground" />
@@ -3407,11 +3477,17 @@ function ChatWorkspace({
                   </ul>
                 ) : (
                   <p className="px-3 py-2.5 text-xs text-muted-foreground">
-                    {crawledFetching
-                      ? 'Looking for tickets and databases…'
-                      : (crawled?.length ?? 0) === 0 && (dbInfo?.databases.length ?? 0) === 0
-                        ? 'Nothing to tag yet — crawl a ticket on the Tickets page, or connect a database on the Database page.'
-                        : `Nothing matches “${mention.query}”.`}
+                    {mention.char === '/'
+                      ? skillsFetching
+                        ? 'Looking for this project’s skills…'
+                        : (skills?.length ?? 0) === 0
+                          ? 'This project has no skills yet — add one on the Skills page.'
+                          : `No skill matches “${mention.query}”.`
+                      : crawledFetching
+                        ? 'Looking for tickets and databases…'
+                        : (crawled?.length ?? 0) === 0 && (dbInfo?.databases.length ?? 0) === 0
+                          ? 'Nothing to tag yet — crawl a ticket on the Tickets page, or connect a database on the Database page.'
+                          : `Nothing matches “${mention.query}”.`}
                   </p>
                 )}
               </div>
@@ -3437,6 +3513,10 @@ function ChatWorkspace({
               <span>•</span>
               <span>
                 <code className="font-mono text-foreground">@</code> to tag a ticket or database
+              </span>
+              <span>•</span>
+              <span>
+                <code className="font-mono text-foreground">/</code> for a skill
               </span>
               <span>•</span>
               <span>

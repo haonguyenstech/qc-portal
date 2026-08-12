@@ -3,6 +3,34 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.11.16 — 2026-08-12
+
+**Type `/` in Chat to run one of your skills, and deleting a saved request now clears it everywhere**
+
+### Added
+
+- **`/` in Chat picks one of your project's skills.** Type **`/`** in the message box and the picker
+  lists the skills on your **Skills** page — filter by typing, ↑/↓ to move, Enter or Tab to pick.
+  It drops a `/skill-name` tag into your message, and deleting that text untags it, exactly like
+  `@`. A skill is a procedure your team already wrote down, so this is how you get the answer to
+  **follow it** rather than have Claude decide its own approach: *`/qc-testing` verify @ABC-123 on
+  http://localhost:3000*. It works in **Fast mode** too, and a skill that no longer exists is
+  reported instead of quietly ignored. Typing a path or a URL (`/Users/…`, `https://x.co/y`) doesn't
+  open the menu.
+
+### Fixed
+
+- **Import from cURL: the Cancel and Import buttons are reachable again.** The paste box grows to fit
+  what you paste, and a real browser "Copy as cURL" (a couple of dozen headers plus a body) grew it
+  taller than the screen — pushing **Import** off the bottom and the ✕ off the top, with no way to
+  scroll to either. The box now stops growing and scrolls its own content, so the dialog always fits.
+- **Deleting a saved request no longer leaves it on screen.** The row disappeared from **Saved
+  requests**, but the editor kept the deleted request's method, URL, headers, body, assertions and
+  its last response — so it looked like the delete hadn't worked until you reloaded the page. Worse,
+  the next **Send** re-created the file you had just deleted. Deleting the request you're looking at
+  now clears the editor and its stored run history with it; deleting a different one leaves your
+  open request untouched.
+
 ## 0.11.15 — 2026-08-12
 
 **Two runs of one ticket keep their own results, end-to-end flows get a canvas, and the browser stays open when you press Stop**

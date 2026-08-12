@@ -3208,17 +3208,20 @@ export interface ChatImageUpload {
 }
 
 /**
- * A project artifact tagged with `@` in a message. Only the reference travels — the server
- * resolves it to files and tells Claude to Read them (see routes/chat.ts `resolveMentions`).
+ * A project artifact tagged with `@` — or a skill picked with `/` — in a message. Only the
+ * reference travels: the server resolves an artifact to files and tells Claude to Read them,
+ * and a skill to its SKILL.md to follow (see routes/chat.ts `resolveMentions`).
  */
 export interface ChatMention {
-  kind: 'ticket' | 'testcase' | 'database'
+  kind: 'ticket' | 'testcase' | 'database' | 'skill'
   /** Crawled-ticket folder under testing/tickets/ (nested PARENT/CHILD for a subtask). */
   folder?: string
   /** Test-case version, or omitted for the newest. */
   version?: number
   /** Connected database id — the server re-checks it belongs to this project. */
   databaseId?: string
+  /** Skill folder name under the project's .claude/skills/. */
+  skill?: string
 }
 
 export interface Chat {

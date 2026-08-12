@@ -315,7 +315,8 @@ The sidebar is grouped by purpose. Here's what each page does.
 
 ### Tools
 - **Chat** — a plain conversation with Claude inside your project folder: ask anything, paste a
-  screenshot, tag a ticket or its test cases with \`@\`. See the [Chat](/document/chat) page.
+  screenshot, tag a ticket or its test cases with \`@\`, run one of the project's skills with \`/\`. See the
+  [Chat](/document/chat) page.
 - **Prototype** — describe a screen (or build it straight **from a crawled ticket**) and the AI writes a
   working HTML prototype you can click through on desktop / tablet / phone. Refine it by chatting, or by
   **clicking an element and commenting on it**; every refine is kept as a revision you can compare and
@@ -961,6 +962,16 @@ for it. Use ↑/↓ and Enter (while the menu is open, Enter picks rather than s
 **reference** travels: Claude reads the real files on disk, so five tags cost a few lines of prompt
 instead of 200 KB of pasted ticket text. **Deleting the \`@TICKET\` text is how you untag**, and a tag
 whose files are gone says so rather than failing quietly.
+
+### Run a skill with \`/\`
+Type **\`/\`** to pick one of this project's **skills** — the ones on the **Skills** page. The picker works
+like \`@\` (type to filter, ↑/↓, Enter or Tab to pick, Escape to close) and drops a \`/skill-name\` tag into
+your message.
+
+A skill is a procedure your team already wrote down, so this is how you get the answer to **follow it**
+instead of Claude deciding its own approach: *\`/qc-testing\` verify @ABC-123 on http://localhost:3000*.
+Deleting the \`/skill-name\` text untags it, same as \`@\`, and a skill that no longer exists is reported
+rather than silently ignored. A path or URL you type (\`/Users/…\`, \`https://x.co/y\`) doesn't open the menu.
 
 ### The answer keeps being written even if you leave
 A turn belongs to the **conversation**, not to the browser tab that started it. Reload, navigate away,

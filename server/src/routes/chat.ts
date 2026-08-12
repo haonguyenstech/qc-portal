@@ -1,7 +1,7 @@
 import { Router } from 'express'
 import fs from 'node:fs'
 import path from 'node:path'
-import { PORT, testingDirFor, ticketsDirFor } from '../config.js'
+import { PORT, skillsDirFor, testingDirFor, ticketsDirFor } from '../config.js'
 import { getDatabaseRow } from '../db.js'
 import { dbMapDocName } from '../dbMap.js'
 import { resolveProject } from '../projectScope.js'
@@ -595,7 +595,8 @@ function saveImages(root: string, raw: unknown): { file: string; abs: string }[]
 }
 
 /**
- * `@`-mentions — the project artifacts a message is ABOUT.
+ * `@`-mentions — the project artifacts a message is ABOUT — and `/`-picks, the SKILL it
+ * should be answered with.
  *
  * A question like "are these cases enough?" only means something next to a ticket, and
  * making the engineer paste a path (or hope Claude greps for the right folder) is the slow
@@ -603,15 +604,21 @@ function saveImages(root: string, raw: unknown): { file: string; abs: string }[]
  * this resolves each one to real files — same trick as the images: absolute paths in the
  * prompt, opened with Read. Nothing is inlined, so tagging five tickets costs a few lines
  * of prompt rather than 200 KB of ticket text.
+ *
+ * `/` rides the same rails for the project's own skills (the ones the Skills page defines,
+ * under `.claude/skills/`): the reference is the folder name, and it resolves to that
+ * skill's SKILL.md — telling the model to FOLLOW it, in a block of its own (see below).
  */
 interface Mention {
-  kind: 'ticket' | 'testcase' | 'database'
+  kind: 'ticket' | 'testcase' | 'database' | 'skill'
   /** Folder under testing/tickets/ — possibly nested (PARENT/CHILD), as the UI reports it. */
   folder?: string
   /** For a testcase mention: which version, or null/absent for the newest. */
   version?: number | null
   /** For a database mention: the connected database's id (checked against the project). */
   databaseId?: string
+  /** For a skill picked with `/`: its folder name under the project's .claude/skills/. */
+  skill?: string
 }
 
 const MAX_MENTIONS = 8
@@ -702,10 +709,26 @@ function resolveMentions(
 ): { block: string; resolved: { kind: string; label: string }[] } {
   if (!Array.isArray(raw) || !raw.length) return { block: '', resolved: [] }
   const lines: string[] = []
+  const skillLines: string[] = []
   const resolved: { kind: string; label: string }[] = []
   const seen = new Set<string>()
   for (const item of raw.slice(0, MAX_MENTIONS)) {
     const m = (item ?? {}) as Partial<Mention>
+
+    if (m.kind === 'skill') {
+      if (typeof m.skill !== 'string') continue
+      const name = m.skill.trim()
+      // One folder name, guarded like any other client-supplied path segment.
+      if (!/^[\w.-]{1,80}$/.test(name)) continue
+      const key = `skill:${name}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      const file = path.join(skillsDirFor(root), name, 'SKILL.md')
+      if (!fs.existsSync(file)) continue
+      skillLines.push(`- SKILL \`${name}\` — its instructions are in ${file}`)
+      resolved.push({ kind: 'skill', label: `/${name}` })
+      continue
+    }
 
     if (m.kind === 'database') {
       if (typeof m.databaseId !== 'string') continue
@@ -760,15 +783,31 @@ function resolveMentions(
     )
     resolved.push({ kind: 'testcase', label: `${label} ${pick.label}` })
   }
-  if (!lines.length) return { block: '', resolved: [] }
-  return {
-    block:
-      `\n\n--- TAGGED WITH @ IN THIS MESSAGE ---\n` +
-      `The user tagged these project artifacts; they are what the question is about. Go to them ` +
-      `BEFORE answering — Read every file listed, and follow the instructions given for a tagged ` +
-      `database — and don't guess at their contents:\n${lines.join('\n')}\n`,
-    resolved,
+  const blocks: string[] = []
+  // Skills come first, and in their own block: a tagged artifact is what the question is
+  // ABOUT, while a skill is HOW to answer it. Folding the two into one "read these" list
+  // reliably got the SKILL.md read like reference material and then improvised over.
+  if (skillLines.length) {
+    blocks.push(
+      `\n\n--- SKILLS THE USER PICKED WITH / IN THIS MESSAGE ---\n` +
+        `These are this project's own skills, and they are the PROCEDURE for this request — ` +
+        `not background reading. Use each one: invoke it by name if a Skill tool is available, ` +
+        `otherwise Read the SKILL.md named here (and any file it points to) and follow it step ` +
+        `by step. Its instructions take precedence over your default approach; if you can't ` +
+        `follow a step, say which one and why rather than quietly doing something else:\n` +
+        `${skillLines.join('\n')}\n`,
+    )
   }
+  if (lines.length) {
+    blocks.push(
+      `\n\n--- TAGGED WITH @ IN THIS MESSAGE ---\n` +
+        `The user tagged these project artifacts; they are what the question is about. Go to them ` +
+        `BEFORE answering — Read every file listed, and follow the instructions given for a tagged ` +
+        `database — and don't guess at their contents:\n${lines.join('\n')}\n`,
+    )
+  }
+  if (!blocks.length) return { block: '', resolved: [] }
+  return { block: blocks.join(''), resolved }
 }
 
 /**
@@ -920,7 +959,7 @@ chatRouter.get('/images/:name', (req, res) => {
 /**
  * POST /api/chat/stream — send a message and stream the reply (Server-Sent Events).
  * Body: { projectId, prompt, slug?, model?, tools?, images?: [{mime, data}],
- *         mentions?: [{kind:'ticket'|'testcase', folder, version?}] }.
+ *         mentions?: [{kind:'ticket'|'testcase', folder, version?} | {kind:'skill', skill}] }.
  * Frames: {type:'start', slug} as soon as the conversation exists (so the client can
  * adopt a brand-new one), {type:'delta', text} per token, {type:'tool', name} per tool
  * call, {type:'log', level, text}, then {type:'done', chat} or {type:'error', error}.
@@ -1034,13 +1073,20 @@ chatRouter.post('/stream', async (req, res) => {
   // would otherwise look like the model ignored the tag.
   if (Array.isArray(b.mentions) && b.mentions.length) {
     const asked = Math.min(b.mentions.length, MAX_MENTIONS)
+    // A skill and a tagged artifact are different claims about the turn ("this is the
+    // procedure" vs "this is what it's about"), so the line says which is which.
+    const picked = mentions.resolved.filter((r) => r.kind === 'skill').map((r) => r.label)
+    const tagged = mentions.resolved.filter((r) => r.kind !== 'skill').map((r) => r.label)
+    const parts: string[] = []
+    if (picked.length) parts.push(`Following skill ${picked.join(', ')}`)
+    if (tagged.length) parts.push(`Tagged: ${tagged.join(', ')}`)
     send({
       type: 'log',
       level: mentions.resolved.length < asked ? 'error' : 'info',
-      text: mentions.resolved.length
-        ? `Tagged: ${mentions.resolved.map((r) => r.label).join(', ')}` +
+      text: parts.length
+        ? parts.join(' · ') +
           (mentions.resolved.length < asked
-            ? ` — ${asked - mentions.resolved.length} tag(s) no longer exist on disk`
+            ? ` — ${asked - mentions.resolved.length} pick(s) no longer exist on disk`
             : '')
         : 'None of the tagged items could be found on disk — answering without them.',
     })

@@ -1314,6 +1314,30 @@ does this endpoint validate?").
     same trap SqlEditor documents), and longest-token-first matching keeps `@X/testcases` from
     being chipped as `@X` plus loose text. `spellCheck` is off because a squiggle would draw
     across a chip with no readable word under it.
+- **`/` picks one of the PROJECT'S SKILLS** — the ones `/skills` defines under
+  `.claude/skills/`. A skill is a procedure the team already wrote down, and the point of it is
+  that the answer follows that instead of Claude improvising; typing `/` is how every other
+  Claude surface asks for one, so it's what the composer answers to. It rides the **same rails
+  as `@`** — one `mention` state carrying the trigger `char`, so the ↑/↓/Enter/Tab/Escape
+  handling, the painted chip and the "deleting the token untags it" rule are written once
+  (`activeTrigger` replaced `activeMention`; `skillOptions` sits beside `mentionOptions`; the
+  reference is `{kind:'skill', skill}`). Load-bearing details:
+  - **The two blocks in the prompt are SEPARATE, and skills come first.** A tagged artifact is
+    what the question is ABOUT; a skill is HOW to answer it. Folded into the one "Read every
+    file listed" list, the SKILL.md gets read as reference material and then improvised over —
+    so `resolveMentions` emits its own `SKILLS THE USER PICKED WITH /` block saying the skill is
+    the procedure, to invoke it by name if a Skill tool is available and otherwise Read the
+    SKILL.md and follow it, and that it **takes precedence over the model's default approach**.
+    Naming the file too is what makes it work in `read` (fast) tool mode, where the Skill tool
+    isn't in the allow-list but Read is. Verified on screen: `/brainstorm` answered "I'm
+    following the brainstorm skill … its first step is to read the codebase".
+  - **Only `@` costs a disk scan.** The ticket + database queries are gated on `char === '@'`
+    (they were gated on "a picker is open"), so typing `/` doesn't scan `testing/tickets`.
+  - **A `/` query containing a second `/` closes the menu**, which is what keeps a pasted path
+    (`/Users/…`) or a URL from opening it. `@` still allows the slash — `@ABC-123/testcases`
+    needs it. Verified: `and/or`, `https://x.co/y` and `/Users/hao` open nothing.
+  - The log frame distinguishes them (`Following skill /x · Tagged: …`), and a skill whose
+    folder is gone is dropped and counted like any other stale pick.
 - **Width: the column grows past the reference's `max-w-4xl`** (`xl:max-w-5xl 2xl:max-w-[88rem]`) —
   4xl on a 1440px+ screen left the answer in a ribbon between empty gutters. Three pieces make that
   work together, so don't change one alone: the assistant bubble is **`w-fit`** (a one-line answer

@@ -909,7 +909,7 @@ function CurlImportDialog({
   }
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="rounded-3xl sm:max-w-xl">
+      <DialogContent className="max-h-[85vh] overflow-y-auto rounded-3xl sm:max-w-xl">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <TerminalSquare className="size-4 text-primary" />
@@ -927,7 +927,11 @@ function CurlImportDialog({
             setError(null)
           }}
           placeholder={`curl 'https://api.example.com/login' \\\n  -H 'Content-Type: application/json' \\\n  --data '{"email":"a@b.co","password":"…"}'`}
-          className="min-h-[160px] rounded-xl font-mono text-xs shadow-none"
+          // The shadcn Textarea is `field-sizing-content`, so it grows to fit whatever is
+          // pasted. A real browser "Copy as cURL" (25 headers + a body) grew it past 1100px,
+          // which pushed Cancel/Import below the fold and the ✕ above it — the dialog is
+          // centred with translate-y-[-50%] and doesn't scroll. Cap it and scroll inside.
+          className="max-h-[45vh] min-h-[160px] overflow-y-auto rounded-xl font-mono text-xs shadow-none"
           spellCheck={false}
           autoFocus
         />
@@ -2274,7 +2278,20 @@ function ApiTesting({ projectId }: { projectId: string }) {
     mutationFn: (n: string) => deleteApiRequest(projectId, n),
     onSuccess: (_r, n) => {
       queryClient.invalidateQueries({ queryKey: ['api-requests', projectId] })
-      if (selected === n) setSelected(null)
+      // Drop the deleted request's run history from the cache — the server removed the
+      // folder, and a later request reusing the name would otherwise read the dead one's
+      // evidence out of cache.
+      queryClient.removeQueries({ queryKey: ['api-results', projectId, n] })
+      // Clearing `selected` alone left the whole editor — method, URL, headers, body,
+      // assertions, the response and its AI verdict — showing the request that was just
+      // deleted. It then reads as an unsaved new request (only a reload cleared it), and
+      // the next Send RE-CREATED the file the user deleted.
+      if (selected === n) {
+        setSelected(null)
+        setDraft(emptyDraft())
+        setRes(null)
+        setAiResult(null)
+      }
       setDeleting(null)
       toast.success(`Deleted "${n}"`)
     },
