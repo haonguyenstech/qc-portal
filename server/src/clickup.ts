@@ -358,6 +358,9 @@ export interface AppliedIssueFields {
   /** Screenshots uploaded to the card, and how many could not be attached. */
   screenshots: number
   screenshotsFailed: number
+  /** Why the failed uploads failed (first reason only) — so the panel can say
+   *  "ClickUp storage is full" instead of a bare count. Null when none failed. */
+  screenshotsError: string | null
   /** Whether the evidence comment was posted on the card. */
   commented: boolean
 }
@@ -490,6 +493,7 @@ export async function createIssueSubtask(
       prioritySource: fromSeverity ? 'severity' : context.priority ? 'parent' : null,
       screenshots: 0,
       screenshotsFailed: 0,
+      screenshotsError: null,
       commented: false,
     },
   }
@@ -522,7 +526,16 @@ export async function attachTaskFile(
   })
   if (!res.ok) {
     const body = await res.text().catch(() => '')
-    throw Object.assign(new Error(`ClickUp attachment ${res.status}: ${body.slice(0, 200)}`), {
+    // ClickUp error bodies are `{"err":"...","ECODE":"..."}` — surface the human
+    // sentence, not the envelope (e.g. "Over allocated storage", not the JSON).
+    let detail = body.slice(0, 200)
+    try {
+      const parsed = JSON.parse(detail)
+      if (typeof parsed?.err === 'string' && parsed.err) detail = parsed.err
+    } catch {
+      /* not JSON — keep the raw body */
+    }
+    throw Object.assign(new Error(`ClickUp attachment ${res.status}: ${detail}`), {
       status: 502,
     })
   }

@@ -1918,3 +1918,4 @@ navigating; the window measured 2560x1410 maximized instead of 1619x936.
 | `QC_BROWSER_PORT` | `19222` | CDP port for the QC browser (deliberately not 9222 — that's the engineer's own Chrome) |
 | `QC_BROWSER_PROFILE_DIR` | `~/.pw-agent-profile-qc` | QC browser profile; separate from the self-launch one because Chrome won't open a profile twice |
 | `QC_BROWSER_PATH` | _(unset)_ | explicit browser executable, when neither Edge nor Chrome is where we look |
+| `IMGBB_API_KEY` | _(unset)_ | free imgbb API key (api.imgbb.com); when set, issue screenshots upload to imgbb and their URLs are embedded in the ClickUp comment — a workaround for a workspace that has hit ClickUp's "Over allocated storage" limit (`GBUSED_005`) |

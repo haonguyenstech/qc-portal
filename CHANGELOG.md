@@ -3,6 +3,27 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.11.17 — 2026-08-13
+
+**Issue screenshots survive a full ClickUp storage quota, and filing tells you why an upload failed**
+
+### Added
+
+- **Host issue screenshots on imgbb when ClickUp storage is full.** A ClickUp workspace at its
+  "Over allocated storage" limit (`GBUSED_005`) rejects every attachment, so bug screenshots never
+  made it onto the card. Set a free **imgbb** API key (`IMGBB_API_KEY`, from api.imgbb.com) and the
+  Issues panel uploads each screenshot there instead, then embeds the hotlink in the subtask's
+  comment — the evidence still shows inline in the discussion thread, without consuming ClickUp
+  storage. Without a key, filing works exactly as before (screenshot attached to the card directly).
+
+### Fixed
+
+- **A failed screenshot upload now says *why*.** When a screenshot could not be attached, the panel
+  used to show only a bare count ("2 could not be attached"), which read as "the portal is broken"
+  and hid the real cause — most often a ClickUp workspace that has run out of storage. The toast and
+  the created-card chips now name the reason (e.g. *"2 could not be attached — Over allocated
+  storage"*), and the ClickUp error envelope is unwrapped into a human sentence.
+
 ## 0.11.16 — 2026-08-12
 
 **Type `/` in Chat to run one of your skills, and deleting a saved request now clears it everywhere**

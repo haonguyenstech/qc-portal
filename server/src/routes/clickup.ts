@@ -17,7 +17,8 @@ import {
   searchTasks,
   withClickupToken,
 } from '../clickup.js'
-import { testResultDirFor, ticketsDirFor } from '../config.js'
+import { IMGBB_API_KEY, testResultDirFor, ticketsDirFor } from '../config.js'
+import { uploadImageToImgbb } from '../imgbb.js'
 import { resolveProject } from '../projectScope.js'
 import { revealFolderNative } from '../folderPicker.js'
 import { crawlOneTicket, safeSegment } from '../crawl.js'
@@ -232,27 +233,42 @@ clickupRouter.post('/issues/subtasks', async (req, res) => {
       // card instead of a dead local path. Never fail the subtask over an upload.
       const uploaded: { title: string; url: string }[] = []
       let failed = 0
+      let failedError: string | null = null
       if (project && slug && issue.screenshots.length) {
         for (const rel of issue.screenshots) {
           const abs = resolveRunScreenshot(project.rootPath, slug, rel)
           if (!abs) {
             failed++
+            failedError ??= `missing on disk: ${rel}`
             continue
           }
           try {
             const bytes = fs.readFileSync(abs)
-            const ext = path.extname(abs).toLowerCase()
-            const att = await attachTaskFile(
-              task.id,
-              path.basename(abs),
-              bytes,
-              IMAGE_CONTENT_TYPE[ext] ?? 'application/octet-stream',
-            )
-            if (att.url) uploaded.push({ title: att.title, url: att.url })
-            else failed++
-          } catch {
+            // Prefer imgbb (free host) when a key is configured — a ClickUp workspace
+            // at its storage limit (GBUSED_005) rejects every attachment, so hosting
+            // the screenshot on imgbb and embedding its URL in the comment is the way
+            // the evidence still shows up inline. No key -> the classic attachment.
+            if (IMGBB_API_KEY) {
+              const url = await uploadImageToImgbb(bytes, path.basename(abs), IMGBB_API_KEY)
+              uploaded.push({ title: path.basename(abs), url })
+            } else {
+              const ext = path.extname(abs).toLowerCase()
+              const att = await attachTaskFile(
+                task.id,
+                path.basename(abs),
+                bytes,
+                IMAGE_CONTENT_TYPE[ext] ?? 'application/octet-stream',
+              )
+              if (att.url) uploaded.push({ title: att.title, url: att.url })
+              else {
+                failed++
+                failedError ??= `no upload URL returned for ${rel}`
+              }
+            }
+          } catch (err) {
             /* best-effort — keep the subtask even if an attachment fails */
             failed++
+            failedError ??= err instanceof Error ? err.message : String(err)
           }
         }
       }
@@ -276,6 +292,7 @@ clickupRouter.post('/issues/subtasks', async (req, res) => {
       }
       task.applied.screenshots = uploaded.length
       task.applied.screenshotsFailed = failed
+      task.applied.screenshotsError = failedError
       created.push(task)
     }
     res.status(201).json({ created })

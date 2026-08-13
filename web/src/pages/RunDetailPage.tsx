@@ -651,8 +651,21 @@ function appliedSummary(applied?: AppliedIssueFields): string | undefined {
       ? `${applied.screenshots} screenshot${applied.screenshots === 1 ? '' : 's'} attached${applied.commented ? ' and posted as a comment' : ''}`
       : 'No screenshots attached',
   ]
-  if (applied.screenshotsFailed) parts.push(`${applied.screenshotsFailed} could not be attached`)
+  if (applied.screenshotsFailed) {
+    const why = screenshotErrorSentence(applied.screenshotsError)
+    parts.push(
+      why ? `${applied.screenshotsFailed} could not be attached (${why})` : `${applied.screenshotsFailed} could not be attached`,
+    )
+  }
   return parts.join(' · ')
+}
+
+/** Strip the server's `ClickUp attachment <status>: ` envelope from a failure
+ *  reason — "ClickUp attachment 400: Over allocated storage" → "Over allocated
+ *  storage". The surrounding UI already says these are ClickUp attachments. */
+function screenshotErrorSentence(err?: string | null): string | undefined {
+  if (!err) return undefined
+  return err.replace(/^ClickUp attachment \d+: /, '') || undefined
 }
 
 /**
@@ -1612,7 +1625,12 @@ function IssueClickupPanel({
         who.length ? `assigned to ${who.join(', ')}` : 'unassigned (parent has no assignee)',
         `${shots} screenshot${shots === 1 ? '' : 's'} attached`,
       ]
-      if (missed) parts.push(`${missed} could not be attached`)
+      if (missed) {
+        const why = screenshotErrorSentence(
+          result.created.find((t) => t.applied?.screenshotsError)?.applied?.screenshotsError,
+        )
+        parts.push(why ? `${missed} could not be attached — ${why}` : `${missed} could not be attached`)
+      }
       toast.success(
         `Created ${result.created.length} ClickUp subtask${result.created.length === 1 ? '' : 's'}`,
         { description: parts.join(' · ') },
@@ -1783,6 +1801,9 @@ function IssueClickupPanel({
                         ? ` · ${task.applied.assignees[0]}${task.applied.assignees.length > 1 ? ` +${task.applied.assignees.length - 1}` : ''}`
                         : ' · unassigned'}
                       {task.applied.screenshots ? ` · ${task.applied.screenshots} 🖼` : ''}
+                      {task.applied.screenshotsFailed
+                        ? ` · ${task.applied.screenshotsFailed} ⚠️`
+                        : ''}
                     </span>
                   )}
                   <ArrowUpRight className="size-3" />

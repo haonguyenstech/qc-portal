@@ -66,6 +66,12 @@ export const GROUNDING_CHECK = !['0', 'false', 'no', 'off'].includes(
 )
 export const GROUNDING_CHECK_MODEL = process.env.QC_GROUNDING_CHECK_MODEL?.trim() || 'haiku'
 
+// Free imgbb API key (https://api.imgbb.com) used to host QC screenshots so they
+// can be embedded in ClickUp comments as hotlinks — a workaround for a ClickUp
+// workspace that has hit its "Over allocated storage" limit (GBUSED_005). When
+// set, issue screenshots upload to imgbb instead of ClickUp's attachment endpoint.
+export const IMGBB_API_KEY = process.env.IMGBB_API_KEY?.trim() || ''
+
 // The `claude` binary. Override with QC_CLAUDE_BIN if not on PATH.
 //
 // On Windows the portal server is launched detached by the `qc-portal` command,

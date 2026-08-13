@@ -713,6 +713,8 @@ export interface AppliedIssueFields {
   prioritySource: 'severity' | 'parent' | null
   screenshots: number
   screenshotsFailed: number
+  /** First reason a screenshot upload failed (e.g. ClickUp storage full). */
+  screenshotsError: string | null
   commented: boolean
 }
 
