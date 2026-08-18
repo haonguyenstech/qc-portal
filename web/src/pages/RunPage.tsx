@@ -16,6 +16,7 @@ import {
   Compass,
   Cpu,
   Eye,
+  EyeOff,
   Gauge,
   Globe,
   Layers,
@@ -184,6 +185,20 @@ function loadTestTarget(): TestTarget {
     return COMING_SOON_TARGETS.includes(v as TestTarget) ? 'web' : (v as TestTarget)
   } catch {
     return 'web'
+  }
+}
+
+// Headless-or-not for the WEB target, remembered across runs (it's a working habit,
+// not a per-ticket decision): watch the browser while building a flow, then leave the
+// box ticked for the long sweeps. It overrides the project's Playwright MCP setting for
+// that one run only — the server never rewrites .mcp.json (see playwrightRunMode.ts).
+// Default false: a QC engineer's first instinct is to WATCH the run.
+const RUN_HEADLESS_KEY = 'qc.runHeadless'
+function loadRunHeadless(): boolean {
+  try {
+    return localStorage.getItem(RUN_HEADLESS_KEY) === '1'
+  } catch {
+    return false
   }
 }
 
@@ -723,6 +738,8 @@ export default function RunPage() {
   // Blank = the ticket uses the shared App URL field as its default.
   const [ticketUrls, setTicketUrls] = useState<Record<string, string>>({})
   const [testTarget, setTestTarget] = useState<TestTarget>(loadTestTarget)
+  // Web target only: run the browser with no visible window (see RUN_HEADLESS_KEY).
+  const [headless, setHeadless] = useState<boolean>(loadRunHeadless)
   // Maestro device_id the mobile run must drive ('' = let the run pick). Restored
   // per project below, and only sent when the picker confirms it's still booted.
   const [deviceId, setDeviceId] = useState('')
@@ -955,6 +972,9 @@ export default function RunPage() {
   // app-mobile drives a native app already installed on the device — there's no URL,
   // so the URL field is hidden and never required/validated in that mode.
   const isAppTarget = testTarget === 'app-mobile'
+  // The project attaches Playwright to the portal-owned QC browser over CDP — that
+  // browser is a window the portal already opened, so a run can't be headless.
+  const attachedBrowser = activeProject?.persistentBrowser === true
   // Both mobile targets drive a real device through Maestro, so both get the picker.
   const isMobileTarget = testTarget !== 'web'
   // The MCP server(s) this target drives the browser/device with. Web → Playwright.
@@ -1280,6 +1300,9 @@ export default function RunPage() {
             model,
             testTarget,
             deviceId: pinnedDevice,
+            // Only the desktop-browser target launches a browser to hide — and an
+            // attached QC browser is a window nobody can hide, so don't claim otherwise.
+            headless: testTarget === 'web' && !attachedBrowser ? headless : undefined,
           })
         }
       } else {
@@ -1296,6 +1319,7 @@ export default function RunPage() {
           workflowSteps: cleanSteps.length ? cleanSteps : undefined,
           testTarget,
           deviceId: pinnedDevice,
+          headless: testTarget === 'web' && !attachedBrowser ? headless : undefined,
           // No ticket exists here — `ticketId` is the flow name's slug.
           kind: 'flow',
         })
@@ -1644,6 +1668,66 @@ export default function RunPage() {
                     )
                   })}
                 </div>
+                {/* Headless — a per-RUN choice, not a project setting: the same engineer
+                    watches a flaky login flow and then wants a long sweep to run without
+                    a window stealing focus. It overrides the project's Playwright MCP
+                    setting for this run only. Meaningless when the project drives the
+                    portal-owned QC browser (an already-open window), so it's disabled
+                    there rather than silently ignored. */}
+                {testTarget === 'web' && (
+                  <div className="space-y-1.5">
+                    <label
+                      className={cn(
+                        'flex items-center justify-between gap-3 rounded-xl border border-border/60 bg-muted/60 px-3 py-2.5 transition-colors',
+                        activeProject && !attachedBrowser
+                          ? 'cursor-pointer hover:border-border'
+                          : 'cursor-not-allowed opacity-60',
+                      )}
+                    >
+                      <span className="flex items-center gap-2">
+                        {headless && !attachedBrowser ? (
+                          <EyeOff className="size-3.5 text-muted-foreground" />
+                        ) : (
+                          <Eye className="size-3.5 text-muted-foreground" />
+                        )}
+                        <span className="text-xs font-medium">Run headless</span>
+                        <span className="text-[11px] text-muted-foreground">
+                          no browser window
+                        </span>
+                      </span>
+                      <input
+                        type="checkbox"
+                        checked={headless && !attachedBrowser}
+                        disabled={!activeProject || attachedBrowser}
+                        onChange={(e) => {
+                          setHeadless(e.target.checked)
+                          try {
+                            localStorage.setItem(RUN_HEADLESS_KEY, e.target.checked ? '1' : '0')
+                          } catch {
+                            /* ignore quota / disabled storage */
+                          }
+                        }}
+                        className="size-4 accent-primary"
+                      />
+                    </label>
+                    <p className="text-[11px] text-muted-foreground">
+                      {attachedBrowser ? (
+                        <>
+                          This project drives the QC browser, which is a visible window —
+                          turn that off on the{' '}
+                          <Link to="/mcp" className="font-medium text-primary hover:underline">
+                            MCP page
+                          </Link>{' '}
+                          to run headless.
+                        </>
+                      ) : headless ? (
+                        'The run drives Chrome with no window at a 1440×900 desktop viewport. Screenshots and evidence are captured exactly as usual.'
+                      ) : (
+                        'The browser opens maximized so you can watch the run. Tick the box to hide it.'
+                      )}
+                    </p>
+                  </div>
+                )}
                 {testTarget === 'web-mobile' && (
                   <p className="text-[11px] text-muted-foreground">
                     Opens the App URL on a booted device via{' '}

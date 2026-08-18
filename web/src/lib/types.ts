@@ -4,7 +4,7 @@ export interface Project { id: string; name: string; rootPath: string; isDefault
 export type TestTarget = 'web' | 'web-mobile' | 'app-mobile'
 /** What a run tested: one ticket's acceptance criteria, or an end-to-end flow (no ticket — `ticketId` is the flow name's slug). */
 export type RunKind = 'ticket' | 'flow'
-export interface RunSummary { id: string; projectId: string; projectName: string | null; ticketId: string; appUrl: string; testTarget: TestTarget; kind?: RunKind; slug: string | null; outDirToken?: string | null; status: RunStatus; passCount: number; failCount: number; blockedCount: number; untestedCount: number; cancelledCount: number; totalAcs: number; createdAt: string; finishedAt: string | null }
+export interface RunSummary { id: string; projectId: string; projectName: string | null; ticketId: string; appUrl: string; testTarget: TestTarget; kind?: RunKind; headless?: boolean; slug: string | null; outDirToken?: string | null; status: RunStatus; passCount: number; failCount: number; blockedCount: number; untestedCount: number; cancelledCount: number; totalAcs: number; createdAt: string; finishedAt: string | null }
 export type Phase = 'intake'|'plan'|'setup'|'collect'|'analyze'|'aggregate'|'report'|'unknown'
 export interface LogEvent { ts: string; kind: 'text'|'tool'|'tool_result'|'phase'|'system'|'error'|'done'; phase?: Phase; text: string; tool?: string }
 export interface RunDetail extends RunSummary { reportMd: string | null; issuesMd: string | null; screenshots: string[]; logTail: LogEvent[]; hasSession?: boolean }

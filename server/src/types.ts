@@ -61,6 +61,14 @@ export interface RunSummary {
    * as 'ticket'.
    */
   kind: RunKind
+  /**
+   * Web runs only: whether this run drove the browser with NO visible window
+   * (the per-run checkbox on `/qc-run`). Stored so a paused run resumes in the
+   * same mode — otherwise a resume silently fell back to the project's default
+   * and popped a window mid-sweep. NULL/undefined = the project's own `.mcp.json`
+   * setting decided, which is every run recorded before this landed.
+   */
+  headless?: boolean
   slug: string | null // testing/<slug> folder name once known
   /**
    * The unique token the portal required at the END of this run's output folder
@@ -136,6 +144,10 @@ export interface CreateRunBody {
   // than inferred, so the prompt never sends the model looking for a ticket
   // folder that doesn't exist. Omitted = 'ticket', the previous behavior.
   kind?: RunKind
+  // Web target only: run the browser with no visible window. Omitted = whatever the
+  // project's .mcp.json says (the previous behavior); true/false overrides it for THIS
+  // run only, via a per-run MCP config (see playwrightRunMode.ts).
+  headless?: boolean
   // Advanced mode: a single run that covers a connected feature spanning several
   // tickets. `ticketId` is the lead ticket; `relatedTickets` are the rest, and
   // `workflowSteps` is the ordered end-to-end flow Claude should exercise.

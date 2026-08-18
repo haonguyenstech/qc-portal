@@ -8,6 +8,7 @@ import { fillExecutedTestcases } from './fillTestcases.js'
 import { runKnowledgeUpdate } from './learn.js'
 import { totpPromptHint } from './totp.js'
 import { ensureQcBrowser } from './qcBrowser.js'
+import { clearPlaywrightRunConfig, playwrightRunConfig } from './playwrightRunMode.js'
 import {
   appendEvent,
   getProject,
@@ -374,6 +375,7 @@ function spawnRun(
     testTarget?: 'web' | 'web-mobile' | 'app-mobile'
     deviceId?: string
     kind?: 'ticket' | 'flow'
+    headless?: boolean
   },
   resumeSessionId?: string,
 ): void {
@@ -401,6 +403,36 @@ function spawnRun(
     })
   }
 
+  // PER-RUN browser mode (web target only). `body` doesn't carry it on a resume, so the
+  // row is the source of truth — a run paused headless must not come back with a window.
+  // Only an explicit choice that DIFFERS from the project's .mcp.json produces a config;
+  // everything else spawns exactly as before (see playwrightRunMode.ts).
+  const target = body.testTarget ?? runRow?.testTarget ?? 'web'
+  const headless = body.headless ?? runRow?.headless
+  let mcpConfigPath: string | undefined
+  if (typeof headless === 'boolean' && target === 'web') {
+    const mode = playwrightRunConfig(id, project.rootPath, headless)
+    if (mode.override) {
+      mcpConfigPath = mode.override
+      record(id, {
+        ts: now(),
+        kind: 'system',
+        text: headless
+          ? 'Browser: headless for this run — no window opens (screenshots are still captured).'
+          : 'Browser: visible window for this run.',
+      })
+    } else if (mode.reason === 'attached' && headless) {
+      record(id, {
+        ts: now(),
+        kind: 'system',
+        text:
+          'Headless was requested, but this project drives the QC browser over CDP — that ' +
+          'browser is an already-open window, so the run stays visible. Turn off "Drive the QC ' +
+          'browser" on the MCP page to run headless.',
+      })
+    }
+  }
+
   const handle = runQc(
     {
       ticketId: body.ticketId,
@@ -419,6 +451,7 @@ function spawnRun(
       outDirSuffix: runRow?.outDirToken
         ? outDirSuffix(runRow.outDirToken, runRow.testTarget)
         : undefined,
+      mcpConfigPath,
       resumeSessionId,
       totpHint: totpPromptHint(project.id),
     },
@@ -426,6 +459,8 @@ function spawnRun(
       onSession: (sessionId) => setRunSession(id, sessionId),
       onEvent: (event) => record(id, event),
       onDone: async ({ success }) => {
+        // The per-run MCP config describes this spawn only; a resume writes a fresh one.
+        clearPlaywrightRunConfig(id)
         // Pause/cancel both kill the child; if either status is already set,
         // keep the user's action from being overwritten by the process exit.
         const current = getRun(id)
@@ -628,6 +663,9 @@ export function startRun(body: CreateRunBody): RunSummary {
     // Ticket run or E2E flow — Running/History badge it, and the prompt phrases
     // itself differently (a flow has no ticket to go and look for).
     kind: body.kind ?? 'ticket',
+    // Only stored when the run overrides the project's browser mode, so a resume
+    // reuses it (see spawnRun).
+    headless: body.testTarget === 'web' || body.testTarget == null ? body.headless : undefined,
     slug: null,
     // Assigned up front: it goes into the prompt as the mandatory tail of the output
     // folder name, so this run's report can't land in (or be resolved to) another's.
@@ -702,6 +740,9 @@ export function resumeRun(id: string): boolean {
     appUrl: run.appUrl,
     // Carried over or the resume prompt calls an E2E flow's slug a ticket.
     kind: run.kind,
+    // Same reason as `kind`: without it a run started headless would resume headed.
+    headless: run.headless,
+    testTarget: run.testTarget,
   }
 
   // One run at a time — resuming while another run is live can't start now, so

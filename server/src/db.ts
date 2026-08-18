@@ -108,6 +108,17 @@ db.exec(`
   }
 }
 
+// Migration: remember whether a web run drove the browser HEADLESS (the per-run
+// checkbox on the Run page). Without it a paused headless run resumed with whatever
+// the project's .mcp.json says and popped a window mid-sweep. NULL = the run didn't
+// override the project setting, which is every row written before this landed.
+{
+  const cols = db.prepare(`PRAGMA table_info(runs)`).all() as { name: string }[]
+  if (!cols.some((c) => c.name === 'headless')) {
+    db.exec(`ALTER TABLE runs ADD COLUMN headless INTEGER`)
+  }
+}
+
 // Migration: the unique token the portal puts at the END of a run's output folder
 // name (testing/test-result/<ticket>-<feature>-<target>-<token>/). Without it the
 // folder name came from the ticket + a slug the MODEL invented, so two runs of the
@@ -922,8 +933,8 @@ export function listDesignChecks(projectId: string, limit = 50): DesignCheckReco
 // ---------------- runs ----------------
 
 const insertRunStmt = db.prepare(`
-  INSERT INTO runs (id, projectId, ticketId, appUrl, testTarget, runKind, slug, outDirToken, status, passCount, failCount, blockedCount, untestedCount, cancelledCount, totalAcs, createdAt, finishedAt)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  INSERT INTO runs (id, projectId, ticketId, appUrl, testTarget, runKind, headless, slug, outDirToken, status, passCount, failCount, blockedCount, untestedCount, cancelledCount, totalAcs, createdAt, finishedAt)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `)
 
 const RUN_SELECT = `
@@ -958,6 +969,9 @@ function rowToSummary(row: Record<string, unknown>): RunSummary {
     testTarget: runTestTarget(row),
     // NULL means the row predates the column — 'ticket' is right for those.
     kind: row.runKind === 'flow' ? 'flow' : 'ticket',
+    // NULL = the run took the project's browser mode; only an explicit per-run
+    // choice is stored, and it is what a resume must reuse.
+    headless: row.headless == null ? undefined : Number(row.headless) === 1,
     slug: (row.slug as string | null) ?? null,
     // NULL on rows written before the token existed — resolution falls back to
     // prefix-matching for those (see runManager.resolveRunOutDir).
@@ -982,6 +996,7 @@ export function insertRun(summary: RunSummary): void {
     summary.appUrl,
     summary.testTarget,
     summary.kind,
+    summary.headless == null ? null : summary.headless ? 1 : 0,
     summary.slug,
     summary.outDirToken,
     summary.status,

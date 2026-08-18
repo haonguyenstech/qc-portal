@@ -3,6 +3,66 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.11.18 — 2026-08-18
+
+**Chat answers you can check — and a QC run that can hide its browser**
+
+### Added
+
+- **Run headless, per run.** Step 2 of the Run form ("Where to run") has a **Run headless** checkbox
+  for the **Web** target. Leave it off to watch the browser work; tick it and the run drives Chrome
+  with no window at all — right for a long sweep you don't want stealing focus, and screenshots and
+  evidence are captured exactly as before. It is a choice about *this run*, so it never changes the
+  project's Playwright setting on the MCP page, and a run you pause and resume comes back in the
+  mode it started in. Projects that drive the **QC browser** (a window the portal opens for you)
+  show the box disabled with a pointer to where to turn that off.
+- **Rate a chat answer, and the project learns from it.** Under every answer are a **👍** and a
+  **👎**. They're not a satisfaction survey — nothing is counted or sent anywhere. Rating asks the
+  AI what the *project* should remember because of that answer and saves it as a **Memory note**
+  (Instructions → Memory), which every later chat turn reads. A 👎 asks what was wrong, and typing
+  it is what makes the difference: *"the orders API is v2, v1 was removed"* is remembered as the
+  correction. The toast names the note it wrote and links to it, and says so plainly when there was
+  nothing durable to keep.
+- **Fact-check any answer.** The **magnifier** button beside Copy sends the answer to a *second,
+  independent* model that re-reads your project and rates each factual claim: **confirmed** (with
+  the file and line), **contradicted** (with what the project actually says), or **not confirmed**.
+  It takes about a minute and costs a little, which is why it's a button — press it on the answer
+  you're about to act on. The result is saved with the answer, and a check that couldn't finish says
+  so rather than reporting "nothing wrong".
+- **Files an answer names are checked automatically.** If an answer points at a file that isn't in
+  the project, an amber line under it says so and names the path. The check is instant and free, so
+  it runs on every answer. Read it as "look before you rely on this line" — an answer may be
+  *proposing* a file, or the file may since have been deleted.
+- **Screenshots an answer mentions are one click from the picture.** A path like
+  `testing/test-result/…/screenshots/ac3-cancel.png` in an answer becomes a chip that opens the
+  image, instead of a filename you had to go hunting for. Paths that don't exist stay plain text.
+- **Three answer modes, and a thinking-effort pill.** The mode pill beside the model picker now
+  offers **Read only** (reads and answers, MCP servers off, first token in about a second),
+  **Workspace write** (may edit files in the project, still no browser or ClickUp) and **Full
+  access** — the default, the same setup the Terminal page runs, with the project's MCP servers.
+  Beside it, an **effort** pill (**Low** / **Medium** / **High**): Low for a lookup, High for a
+  judgement call like "are these test cases enough?".
+- **Every turn is told to look before it speaks.** Chat must open the ticket or test-case file *in
+  that turn* before stating what's in it, copy ids and statuses exactly, **count** instead of
+  estimating, and say where each project fact came from — and when the project doesn't say, *"the
+  ticket doesn't say"* is now the answer instead of a plausible invention.
+- **Keep typing while an answer is still coming.** Extra messages queue under the composer in order
+  and send themselves as each turn finishes; a queued message can be removed before its turn. And
+  **Stop** ends the current turn without losing the conversation.
+- **Every answer shows what it took.** A footer line reports how long the turn ran, time to the
+  first word, tokens in/out (with how much of the input was a cache hit), the cost, and which model
+  and effort actually answered. A finished turn also shows its **tool trail** — each step where it
+  happened in the answer, folded behind one line when there are many — plus a *"Thought · 38s"* row
+  for a thinking block, and what the model was **sent** for that turn.
+
+### Fixed
+
+- **Importing a big project no longer fails with "too large".** A real QC export is mostly ticket
+  attachments and video evidence — a measured one was **1.87 GB across 4348 files** — and import
+  used to reject anything past 1 GB before it even looked at the archive. The upload now streams to
+  disk and is extracted file by file, so multi-gigabyte projects import instead of dying, and the
+  size ceiling is 16 GB.
+
 ## 0.11.17 — 2026-08-13
 
 **Issue screenshots survive a full ClickUp storage quota, and filing tells you why an upload failed**

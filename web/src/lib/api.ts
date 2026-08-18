@@ -215,6 +215,11 @@ export function createRun(body: {
   deviceId?: string
   /** 'flow' = an E2E flow, which has no ticket — `ticketId` is only the report slug. */
   kind?: 'ticket' | 'flow'
+  /**
+   * Web target only: drive the browser with NO visible window for THIS run. Omitted =
+   * whatever the project's Playwright MCP entry says (the MCP page's own checkbox).
+   */
+  headless?: boolean
 }): Promise<{ runId: string } & RunSummary> {
   return request('/api/qc/run', { method: 'POST', body: JSON.stringify(body) })
 }
@@ -2144,6 +2149,31 @@ export function runFileUrl(projectId: string, slug: string, path: string): strin
   return screenshotUrl(projectId, slug, path)
 }
 
+/**
+ * URL that serves any image file under the project root, named by a project-relative path.
+ * Used by Chat: an answer that cites `testing/test-result/<run>/screenshots/ac1.png` gets a
+ * clickable chip, and the dialog behind it loads the picture from here.
+ */
+export function projectImageUrl(projectId: string, relPath: string): string {
+  return `/api/files/project-image?projectId=${encodeURIComponent(projectId)}&path=${encodeURIComponent(relPath)}`
+}
+
+/**
+ * Which of these cited image paths are real files. Returns cited path → project-relative
+ * path; a path that resolves to nothing is simply absent, so the caller can leave it as
+ * plain text instead of drawing a chip that 404s. Pure `stat` work server-side.
+ */
+export async function resolveProjectImages(
+  projectId: string,
+  paths: string[],
+): Promise<Record<string, string>> {
+  const res = await request<{ resolved: Record<string, string> }>('/api/files/resolve-images', {
+    method: 'POST',
+    body: JSON.stringify({ projectId, paths }),
+  })
+  return res.resolved ?? {}
+}
+
 export type RunFileKind = 'markdown' | 'image' | 'text' | 'other'
 
 export interface RunFile {
@@ -3167,8 +3197,19 @@ export function getAutoAgentStatus(): Promise<AutoAgentStatus> {
 
 // ---- Chat (plain conversation with Claude Code, in the project folder) -------
 
-/** How much a chat turn is allowed to do. See routes/chat.ts `toolArgs`. */
-export type ChatTools = 'read' | 'full'
+/**
+ * How much a chat turn is allowed to do — `read` (ask only), `write` (may edit files in the
+ * project, no MCP servers), `full` (Terminal parity: everything, MCP loaded).
+ * See routes/chat.ts `toolArgs`; the labels live in ChatPage's `CHAT_MODES`.
+ */
+export type ChatTools = 'read' | 'write' | 'full'
+
+/**
+ * How hard the model thinks — the CLI's `--effort`. `'default'` sends no flag at all, so
+ * the turn runs at whatever effort the engineer's own Claude Code is configured for.
+ * See routes/chat.ts `ChatEffort`; the labels live in ChatPage's `CHAT_EFFORTS`.
+ */
+export type ChatEffort = 'default' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 
 /**
  * An action picked from the composer's `+` menu, applied to ONE message: `web` answers from
@@ -3181,9 +3222,19 @@ export interface ChatMessage {
   role: 'user' | 'assistant'
   text: string
   at: string
-  /** Tool names the turn used, in order (rendered as an activity trail). */
+  /**
+   * Tool names the turn used, in order.
+   *
+   * Superseded by `steps`; still sent, and still read here, because every conversation
+   * saved before `steps` existed has only this — dropping the fallback would blank the
+   * trail on the whole back catalogue.
+   */
   tools?: string[]
+  /** What the turn did, with targets and positions in the answer — see ChatToolCall. */
+  steps?: ChatToolCall[]
   model?: string
+  /** Effort the turn ran at — absent when it was the engineer's own default. */
+  effort?: ChatEffort
   error?: boolean
   /** Images pasted with this message — file names, shown via `chatImageUrl`. */
   images?: string[]
@@ -3191,6 +3242,118 @@ export interface ChatMessage {
   suggestions?: string[]
   /** The `+` menu action this message was sent with (badged in the transcript). */
   action?: ChatAction
+  /** What the portal appended to this message before sending it (see ContextBlock). */
+  context?: ContextBlock[]
+  /** What this turn took and cost (assistant messages only — see TurnStats). */
+  stats?: TurnStats
+  /** The engineer's 👍/👎 on this answer, and the memory it wrote — see ChatFeedback. */
+  feedback?: ChatFeedback
+  /**
+   * Project files this answer named that are NOT on disk — the free citation check.
+   *
+   * Absent when there were none (never `[]`), so an answer saved before the check existed
+   * is not drawn as "verified clean". A path here means "look before you trust this line",
+   * not "the answer is wrong": in Workspace-write mode the model creates files, and an
+   * answer may legitimately propose one that doesn't exist yet.
+   */
+  refs?: string[]
+  /** The fact check, if one was run on this answer — see ChatAudit. */
+  audit?: ChatAudit
+}
+
+/**
+ * A RATING ON ONE ANSWER, and what the project learned from it.
+ *
+ * Rating an answer is not a like button: it writes to project MEMORY. The server reflects
+ * on the question, the answer and the vote and persists the durable fact behind it into
+ * `testing/memory` — which every later chat turn already reads — so a 👎 on a wrong answer
+ * is what stops the next one repeating it. `captured` names the notes that were written
+ * (they show on Instructions → Memory); `skipped` says why there weren't any, which for a
+ * vote on wording is the normal outcome. See routes/chat.ts `ChatFeedback`.
+ */
+export interface ChatFeedback {
+  vote: 'up' | 'down'
+  at: string
+  /** What was typed with a 👎, if anything — optional, because requiring it stops people voting. */
+  note?: string
+  /** Memory note names written or updated because of this vote. */
+  captured?: string[]
+  /** Why nothing was captured — "nothing worth remembering" is a normal answer. */
+  skipped?: string
+}
+
+/**
+ * ONE CHECKED CLAIM from a fact check — see ChatAudit.
+ *
+ * `wrong` is the only one that means the answer is defective. `unverified` is an honest
+ * outcome and is shown as such: the auditor looked and could not confirm it either way,
+ * which is different from (and much more common than) a contradiction.
+ */
+export interface AuditClaim {
+  claim: string
+  status: 'supported' | 'wrong' | 'unverified'
+  /** Where it was confirmed — or, for `wrong`, what the project actually says. */
+  evidence?: string
+}
+
+/**
+ * THE FACT CHECK on one answer — run on demand, stored with the answer.
+ *
+ * A second, independent, cheap model re-reads the project and rates the answer's checkable
+ * claims about it. It is a button and not something that happens automatically because it
+ * re-reads real files: 30-90 seconds and real money, which would otherwise be added to
+ * every question including the ones nobody is going to act on.
+ *
+ * `skipped` present means the check DID NOT RUN (timed out, no reply). That must never be
+ * drawn as a clean verdict — "not checked" and "nothing wrong" are opposite facts.
+ */
+export interface ChatAudit {
+  at: string
+  /** Which model audited — a haiku verdict and an opus one are not equal evidence. */
+  model: string
+  /** `none` = the answer made no checkable claim about the project, which is normal. */
+  verdict: 'clean' | 'issues' | 'unverified' | 'none'
+  claims: AuditClaim[]
+  skipped?: string
+}
+
+/**
+ * What one turn took and cost, recorded with the answer.
+ *
+ * Every value was already reported by the CLI on its final `result` event and then thrown
+ * away, so showing it costs no request, no token and no latency — and it lands ONCE, when
+ * the turn ends, never per streamed frame.
+ *
+ * There is deliberately no share-of-context-window figure: the portal doesn't assemble the
+ * prompt (the CLI owns the system prompt, the MCP tool schemas and the history), so any
+ * split of `inputTokens` would be a guess that goes quietly wrong when the CLI changes.
+ */
+export interface TurnStats {
+  /** Wall clock for the whole turn, ms. */
+  ms: number
+  /** Time to the first character of the answer, ms. */
+  ttftMs?: number
+  inputTokens?: number
+  outputTokens?: number
+  /** Of `inputTokens`, how many were served from the provider's prefix cache. */
+  cacheReadTokens?: number
+  costUsd?: number
+}
+
+/**
+ * One block of text the PORTAL added to a message before it went to the model.
+ *
+ * A chat turn is never only what was typed: the resolved `@`/`/` picks, the paths of
+ * pasted images, the `+` menu action's instructions and — after a lapsed session — a
+ * replayed summary all ride along. None of it used to be visible, so a strange answer
+ * had no explanation available to the person reading it. Shown in the transcript as
+ * collapsed rows under the question.
+ */
+export interface ContextBlock {
+  /** Short label for the collapsed row. */
+  label: string
+  /** The exact text that was appended (capped server-side, which says so inline). */
+  text: string
 }
 
 /**
@@ -3198,9 +3361,25 @@ export interface ChatMessage {
  * interesting argument (the file read, the pattern searched for, the command run). The
  * detail is NOT persisted — a saved message keeps `tools` (names only).
  */
+/**
+ * ONE THING A TURN DID — a tool call, or a block of thinking.
+ *
+ * `pos` is a character offset into the answer text, so the trail can be put back exactly
+ * where it happened when the conversation is reopened. It is the answer's own coordinate
+ * system on purpose: a timestamp would need the deltas' arrival times, which nothing
+ * stores, and a step index would need the text to have been segmented at write time.
+ */
 export interface ChatToolCall {
   name: string
   detail?: string
+  /** `think` blocks read differently from tool calls, and are not tool calls. */
+  kind?: 'think'
+  /**
+   * Characters of answer written when this landed. Absent on a pre-`steps` transcript.
+   * `pos` rather than `at`: every other `at` in this file is an ISO timestamp, including
+   * one on the very same SSE frame type.
+   */
+  pos?: number
 }
 
 /** A pasted image on its way to the server: base64 bytes, typed by its MIME. */
@@ -3233,6 +3412,8 @@ export interface Chat {
   updatedAt: string
   model: string
   tools: ChatTools
+  /** Effort the last turn ran at — the default for the next one. */
+  effort?: ChatEffort
   /** The Claude CLI session backing the conversation (what makes follow-ups work). */
   sessionId: string | null
   /** Starred — the rail pins it above the date groups. */
@@ -3245,6 +3426,11 @@ export interface Chat {
   temporary?: boolean
   /** A reply is being generated right now; the page re-attaches to it (see attachChat). */
   running?: boolean
+  /**
+   * Messages waiting behind the running turn. Only present while `running` — a fresh page
+   * load has no stream yet, so this is how it learns what is queued.
+   */
+  queued?: QueuedChatMessage[]
   messages: ChatMessage[]
 }
 
@@ -3256,6 +3442,7 @@ export interface ChatSummary {
   updatedAt: string
   model: string
   tools: ChatTools
+  effort?: ChatEffort
   messageCount: number
   preview: string
   pinned?: boolean
@@ -3294,6 +3481,47 @@ export function pinChat(projectId: string, slug: string, pinned: boolean): Promi
   })
 }
 
+/**
+ * Rate one answer (`POST /api/chat/:slug/feedback`) — 'up', 'down', or null to clear.
+ *
+ * `index` is the message's position in the transcript. The vote is saved first and the AI
+ * capture runs after it, so this call takes as long as a cheap model turn (a few seconds)
+ * and resolves with what it remembered. Abandoning it does not lose the vote — or the
+ * capture, which finishes server-side either way. Clearing a vote leaves any note it
+ * already wrote in place: by then it is an ordinary project fact on the Memory tab.
+ */
+export function rateChatAnswer(
+  projectId: string,
+  slug: string,
+  index: number,
+  vote: 'up' | 'down' | null,
+  note?: string,
+): Promise<{ ok: true; feedback: ChatFeedback | null }> {
+  return request(`/api/chat/${encodeURIComponent(slug)}/feedback`, {
+    method: 'POST',
+    body: JSON.stringify({ projectId, index, vote, note }),
+  })
+}
+
+/**
+ * Fact-check one stored answer (`POST /api/chat/:slug/audit`).
+ *
+ * SLOW ON PURPOSE — it spawns a second model that re-reads the project, so it takes as
+ * long as a small chat turn. It never touches the answer or the conversation; the verdict
+ * is stored beside the answer and comes back here. The server refuses a second check on
+ * the same answer while one is running (409) rather than paying twice.
+ */
+export function auditChatAnswer(
+  projectId: string,
+  slug: string,
+  index: number,
+): Promise<{ ok: true; audit: ChatAudit }> {
+  return request(`/api/chat/${encodeURIComponent(slug)}/audit`, {
+    method: 'POST',
+    body: JSON.stringify({ projectId, index }),
+  })
+}
+
 export function deleteChat(projectId: string, slug: string): Promise<{ ok: true }> {
   return request(
     `/api/chat/${encodeURIComponent(slug)}?projectId=${encodeURIComponent(projectId)}`,
@@ -3321,11 +3549,42 @@ export interface ChatStreamHandlers {
   onResume?: (info: { prompt: string; at: string; images: string[] }) => void
   onDelta: (text: string) => void
   onTool?: (call: ChatToolCall) => void
-  onDone: (chat: Chat) => void
-  /** The turn was stopped; `chat` carries the partial answer when one was saved. */
-  onStopped?: (chat?: Chat) => void
-  onError: (message: string) => void
+  /**
+   * The ANSWER is over; the follow-up chips are still being written. Carries the model
+   * that answered and the timings, both of which the server already knows at this point —
+   * the token counts and the cost cannot exist until the run ends and arrive with `done`.
+   */
+  onSettled?: (model: string, stats: TurnStats) => void
+  /**
+   * The turn finished and was saved. `dropped` appears when it finished BADLY (the CLI
+   * reported an error even though it produced text): the queue does not advance past a
+   * turn that never really answered, so what was waiting comes back instead.
+   */
+  onDone: (chat: Chat, dropped?: string[]) => void
+  /**
+   * The turn was stopped; `chat` carries the partial answer when one was saved.
+   * `dropped` is the text of any messages that were waiting behind it — Stop halts the
+   * whole conversation, so they never run and the composer takes them back.
+   */
+  onStopped?: (chat?: Chat, dropped?: string[]) => void
+  onError: (message: string, dropped?: string[]) => void
   onLog?: (level: 'info' | 'success' | 'error', text: string) => void
+  /**
+   * The messages waiting behind the turn being watched, as a WHOLE list every time —
+   * never a delta. A viewer that attached late gets the identical frame, so there is one
+   * way to be right about the queue instead of a fold the client could get out of step.
+   */
+  onQueue?: (queued: QueuedChatMessage[]) => void
+}
+
+/** One message accepted while another turn was running, waiting for its own turn. */
+export interface QueuedChatMessage {
+  id: string
+  prompt: string
+  at: string
+  /** File names of images pasted with it (served by `chatImageUrl`). */
+  images: string[]
+  action?: ChatAction
 }
 
 /** Turn an SSE body into handler calls. Shared by starting a turn and re-attaching to one. */
@@ -3349,6 +3608,10 @@ async function consumeChatStream(res: Response, handlers: ChatStreamHandlers): P
         text?: string
         name?: string
         detail?: string
+        kind?: 'think'
+        pos?: number
+        model?: string
+        stats?: TurnStats
         slug?: string
         prompt?: string
         at?: string
@@ -3356,6 +3619,8 @@ async function consumeChatStream(res: Response, handlers: ChatStreamHandlers): P
         level?: 'info' | 'success' | 'error'
         chat?: Chat
         error?: string
+        queued?: QueuedChatMessage[]
+        dropped?: string[]
       }
       try {
         msg = JSON.parse(dataLine.slice(5).trim())
@@ -3363,20 +3628,30 @@ async function consumeChatStream(res: Response, handlers: ChatStreamHandlers): P
         continue
       }
       if (msg.type === 'delta') handlers.onDelta(msg.text ?? '')
-      else if (msg.type === 'tool') handlers.onTool?.({ name: msg.name ?? '', detail: msg.detail })
-      else if (msg.type === 'start' && msg.slug) handlers.onStart?.(msg.slug, msg.name ?? '')
-      else if (msg.type === 'resume')
+      else if (msg.type === 'settled') {
+        if (msg.model && msg.stats) handlers.onSettled?.(msg.model, msg.stats)
+      } else if (msg.type === 'tool')
+        handlers.onTool?.({ name: msg.name ?? '', detail: msg.detail, kind: msg.kind, pos: msg.pos })
+      else if (msg.type === 'start' && msg.slug) {
+        // One stream can carry SEVERAL turns: when a queued message follows, the server
+        // hands over on the same connection and opens the next turn with `start` again.
+        // So the terminal flag resets here — otherwise a connection that dropped during a
+        // LATER turn would look cleanly finished because an earlier one had ended.
+        settled = false
+        handlers.onStart?.(msg.slug, msg.name ?? '')
+      } else if (msg.type === 'resume')
         handlers.onResume?.({ prompt: msg.prompt ?? '', at: msg.at ?? '', images: msg.images ?? [] })
       else if (msg.type === 'log') handlers.onLog?.(msg.level ?? 'info', msg.text ?? '')
+      else if (msg.type === 'queue') handlers.onQueue?.(msg.queued ?? [])
       else if (msg.type === 'done' && msg.chat) {
         settled = true
-        handlers.onDone(msg.chat)
+        handlers.onDone(msg.chat, msg.dropped)
       } else if (msg.type === 'stopped') {
         settled = true
-        handlers.onStopped?.(msg.chat)
+        handlers.onStopped?.(msg.chat, msg.dropped)
       } else if (msg.type === 'error') {
         settled = true
-        handlers.onError(msg.error ?? 'The message failed')
+        handlers.onError(msg.error ?? 'The message failed', msg.dropped)
       }
     }
   }
@@ -3411,7 +3686,10 @@ export async function attachChat(
  * Cancel a reply in flight. Closing the tab no longer does this — the run outlives the
  * request — so Stop has to say so explicitly.
  */
-export function stopChat(projectId: string, slug: string): Promise<{ ok: boolean }> {
+export function stopChat(
+  projectId: string,
+  slug: string,
+): Promise<{ ok: boolean; dropped: string[] }> {
   return request(`/api/chat/${encodeURIComponent(slug)}/stop`, {
     method: 'POST',
     body: JSON.stringify({ projectId }),
@@ -3435,6 +3713,8 @@ export async function streamChat(
     prompt: string
     model: string
     tools: ChatTools
+    /** Effort for this turn; 'default' leaves the CLI on the engineer's own setting. */
+    effort: ChatEffort
     /**
      * Start this conversation as a TEMPORARY one — nothing written to testing/chats, nothing
      * in the history rail. Only read when a NEW conversation is created; a message sent into
@@ -3450,7 +3730,7 @@ export async function streamChat(
   },
   handlers: ChatStreamHandlers,
   signal: AbortSignal,
-): Promise<void> {
+): Promise<ChatSendResult> {
   const res = await fetch('/api/chat/stream', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -3459,7 +3739,45 @@ export async function streamChat(
   })
   if (!res.ok || !res.body) {
     handlers.onError(await streamErrorText(res))
-    return
+    return { kind: 'failed' }
+  }
+  // 202 — a reply was already being generated, so this message is WAITING its turn and
+  // there is no stream to read: the answer will arrive on whichever stream is watching the
+  // conversation (the running turn's, which the server hands over to this message). Feeding
+  // this JSON body to the SSE reader would find no frames and report "the answer ended
+  // before finishing", i.e. an error for a message that is perfectly fine.
+  if (res.status === 202) {
+    const info = (await res.json()) as { id?: string; slug?: string; position?: number }
+    return {
+      kind: 'queued',
+      id: info.id ?? '',
+      slug: info.slug ?? '',
+      position: info.position ?? 1,
+    }
   }
   await consumeChatStream(res, handlers)
+  return { kind: 'streamed' }
+}
+
+/** What `streamChat` did with the message. */
+export type ChatSendResult =
+  | { kind: 'streamed' }
+  | { kind: 'queued'; id: string; slug: string; position: number }
+  | { kind: 'failed' }
+
+/**
+ * Take back a queued message before it runs (`DELETE /api/chat/:slug/queue/:id`).
+ *
+ * 404 means it has already started, in which case Stop is the control that applies.
+ */
+export function cancelQueuedChat(
+  projectId: string,
+  slug: string,
+  id: string,
+): Promise<{ ok: boolean; queued: QueuedChatMessage[] }> {
+  return request(
+    `/api/chat/${encodeURIComponent(slug)}/queue/${encodeURIComponent(id)}` +
+      `?projectId=${encodeURIComponent(projectId)}`,
+    { method: 'DELETE' },
+  )
 }

@@ -938,13 +938,56 @@ Claude answers from **inside your project folder**, so \`CLAUDE.md\`, your Overv
 and Memory are already in scope — and a follow-up question understands what "it" refers to, because the
 conversation continues the same Claude session rather than replaying a transcript at it.
 
-### Two answer modes — read-only is the default
-The toggle beside the model picker always says which one you're in:
+### Pick how hard it thinks
+Beside the model picker is an **effort** pill — **Low**, **Medium** *(default)* or **High**. Low is
+right for a lookup ("where is this field validated?"); High is for a judgement call ("are these test
+cases enough for this ticket?"), where the model reasons before it writes. A turn that didn't run at
+the default records its level under the answer, so you can tell later why one reply was thinner than
+another.
 
-- **Read-only** *(default)* — Claude can read your repo but **not change it**, and MCP servers aren't
-  loaded, so answers start in about a second. Right for almost every question.
-- **Full tools** — can **write files** and drive the project's MCP servers (a browser, ClickUp) when you
-  want the work done, not just described.
+### Three answer modes
+The pill beside the model picker always says which one you're in — click it to switch:
+
+- **Read only** — Claude reads your repo and answers; it isn't asked to change anything, and MCP
+  servers aren't loaded, so answers start in about a second. Right for almost every question.
+- **Workspace write** — Claude may **edit files in this project**, but MCP servers stay off, so it
+  can't drive a browser or reach ClickUp. Pick it when you want a fix made, not just described.
+- **Full access** *(default)* — the same setup the **Terminal** page runs: full permissions plus the
+  project's MCP servers (a browser, ClickUp). Most thorough, about 20 seconds slower to start.
+
+### Rate an answer, and the project learns it
+Under every answer are a **👍** and a **👎**. They aren't a satisfaction survey — nothing is counted or
+sent anywhere. Rating an answer asks the AI to work out **what the project should remember** because of
+it and save that as a **Memory note** (Instructions → Memory), which every later chat turn in this
+project reads. So a 👎 on *"the orders API is v1"* is what stops the next answer saying v1.
+
+- **👎 asks what was wrong.** Typing it is optional, but it's what makes the difference — *"the orders
+  API is v2, v1 was removed"* is remembered as the correction. **Skip** sends the vote alone.
+- The toast **names the note it wrote**, with a link to open Memory, so you can edit or delete it. Often
+  there's nothing durable to keep ("thanks, correct") and it says so instead of inventing a note.
+- Your note becomes a **file in the project**, so don't paste passwords or one-time codes into it.
+- **Un-rating** removes the vote and leaves the note — by then it's an ordinary project fact you may
+  have already edited.
+
+### When the answer has to be right
+Chat answers about tickets, test cases and past runs are the ones you act on — you file the bug, you
+sign off, you send the report. Three things now stand behind them:
+
+- **Every turn is told to look before it speaks.** It must open the ticket or the test-case file *in
+  that turn* before stating what's in it, copy ids and statuses exactly as written, **count** rather
+  than estimate, and say where each project fact came from. If something isn't in the project, it now
+  says so instead of filling the gap — *"the ticket doesn't say"* is a correct answer.
+- **Files it names are checked automatically.** If an answer points you at a file that isn't in the
+  project, an amber line under it says so, and names the path. That check is instant and free, so it
+  runs on every answer. It means "look before you rely on this line", not "the answer is wrong" — an
+  answer may be *proposing* the file, or the file may have been deleted since.
+- **Fact-check any answer** with the **magnifier** button (beside Copy and the 👍/👎). A *second*,
+  independent model re-reads your project and rates every factual claim the answer made about it:
+  **confirmed** (with the file and line), **contradicted** (with what the project actually says), or
+  **not confirmed** — it looked and couldn't tell. That takes about a minute and costs a little,
+  which is why it's a button and not automatic: press it on the answer you're about to act on. The
+  result is saved with the answer, so it's still there when you reopen the conversation. If the check
+  can't finish, it says that — it never reports "nothing wrong" when it simply didn't run.
 
 ### Paste a screenshot
 QC evidence is usually an image. **Cmd/Ctrl-V** a screenshot into the box, drop an image on it, or use

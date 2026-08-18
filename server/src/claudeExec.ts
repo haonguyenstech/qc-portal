@@ -6,7 +6,7 @@ import { spawnEnv } from './toolPath.js'
 /** Extract cost + token usage from a Claude CLI result object (or null). */
 export function usageFromResultObject(
   j: unknown,
-): { costUsd: number; inputTokens: number; outputTokens: number } | null {
+): ClaudeUsage | null {
   if (!j || typeof j !== 'object') return null
   const o = j as {
     total_cost_usd?: number
@@ -19,17 +19,34 @@ export function usageFromResultObject(
   }
   const cost = typeof o.total_cost_usd === 'number' ? o.total_cost_usd : 0
   const u = o.usage ?? {}
-  const inputTokens =
-    (u.input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0)
+  const cacheReadTokens = u.cache_read_input_tokens ?? 0
+  const cacheWriteTokens = u.cache_creation_input_tokens ?? 0
+  const inputTokens = (u.input_tokens ?? 0) + cacheWriteTokens + cacheReadTokens
   const outputTokens = u.output_tokens ?? 0
   if (!cost && !inputTokens && !outputTokens) return null
-  return { costUsd: cost, inputTokens, outputTokens }
+  // The cache split is kept ALONGSIDE the total rather than folded into it: every existing
+  // caller reads `inputTokens` and must keep seeing everything the turn was billed for,
+  // while the chat transcript wants to show how much of that was a cache HIT (a cheap
+  // re-read of the same prefix) rather than fresh tokens. Two questions, one parse.
+  return { costUsd: cost, inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens }
+}
+
+/** Token/cost accounting for one CLI run, exactly as the CLI reported it. */
+export interface ClaudeUsage {
+  costUsd: number
+  /** Everything billed as input: fresh + cache writes + cache reads. */
+  inputTokens: number
+  outputTokens: number
+  /** Of `inputTokens`, how many came from the provider's prefix cache. */
+  cacheReadTokens: number
+  /** Of `inputTokens`, how many were written INTO that cache. */
+  cacheWriteTokens: number
 }
 
 /** Parse cost/tokens from a buffered `--output-format json` result string. */
 export function parseClaudeUsage(
   raw: string,
-): { costUsd: number; inputTokens: number; outputTokens: number } | null {
+): ClaudeUsage | null {
   try {
     return usageFromResultObject(JSON.parse(raw.trim()))
   } catch {
@@ -210,6 +227,22 @@ export interface StreamResult {
   timedOut: boolean
   /** True when the caller's AbortSignal fired and the child was killed. */
   aborted: boolean
+  /**
+   * What the CLI reported this run cost, when it reported anything.
+   *
+   * It arrives on the FINAL `result` event, so reading it adds no latency and no extra
+   * request — the numbers were already being parsed here to feed `recordUsage`, and then
+   * thrown away. Absent on a killed run: that event never lands.
+   */
+  usage: ClaudeUsage | null
+  /**
+   * Time to first token: ms from spawn to the first character of the answer. The one
+   * number that separates "the model is slow" from "the model spent nine minutes in
+   * tools" — measured from timestamps we already had, not from an added probe.
+   */
+  ttftMs: number | null
+  /** Wall-clock ms from spawn to settle. */
+  durationMs: number
 }
 
 /**
@@ -237,6 +270,17 @@ export function runClaudeStream(
     // `--include-partial-messages` (stream_event / content_block_delta). Lets a caller
     // surface the assistant's output token-by-token; no-op otherwise.
     onDelta?: (text: string) => void
+    // Called ONCE per finished thinking block, with how long it took and roughly how many
+    // tokens went into it — never per delta.
+    //
+    // It reports the SHAPE of the thought and not a word of its content, because that is
+    // all there is: the CLI redacts extended thinking in stream-json, sending
+    // `{"type":"thinking_delta","thinking":"","estimated_tokens":100}` — an empty string
+    // and a running count. Verified against the live CLI before this was written, after a
+    // first attempt tried to summarise the text and would have shipped a row that was
+    // always blank. A silent 20-second gap before the first token is the single most
+    // common "is it stuck?" moment, and "Thought for 20s" answers it exactly.
+    onThinking?: (info: { ms: number; tokens: number | null }) => void
     // When true, the full assistant text block isn't emitted via onLog (a caller that
     // already consumes it through onDelta doesn't want it duplicated into the log).
     // Tool-use and other events are still logged.
@@ -258,13 +302,33 @@ export function runClaudeStream(
   },
 ): Promise<StreamResult> {
   return new Promise((resolve) => {
+    /**
+     * Every exit reports the same measurements. Built in one place so a new resolve site
+     * cannot quietly report a turn with no timing — the outcome flags stay independent of
+     * each other, but the accounting is not one of the flags.
+     */
+    const settle = (r: Omit<StreamResult, 'usage' | 'ttftMs' | 'durationMs'>): StreamResult => ({
+      ...r,
+      usage,
+      ttftMs: firstTokenAt === null ? null : firstTokenAt - startedAt,
+      durationMs: Date.now() - startedAt,
+    })
     let settled = false
     let resultText = ''
     /** Any text delta has been forwarded — drives the block separator (see stream_event). */
     let sawText = false
+    /** When the thinking block in flight opened, or null when none is. */
+    let thinkStartedAt: number | null = null
+    /** The CLI's running estimate for that block. Running, NOT per-delta — take the last. */
+    let thinkTokens: number | null = null
     let isError = false
     let stdoutBuf = ''
-    let usage: { costUsd: number; inputTokens: number; outputTokens: number } | null = null
+    let usage: ClaudeUsage | null = null
+    // Free measurements: two timestamps around work that was happening anyway. `startedAt`
+    // is taken before the spawn so TTFT includes the CLI's own startup (~20s with MCP
+    // servers loading), which is exactly the part a reader is wondering about.
+    const startedAt = Date.now()
+    let firstTokenAt: number | null = null
     // When opts.input is set, the prompt arrives over stdin (keeps a large prompt off
     // the OS command line — Windows caps argv at ~32 KB → ENAMETOOLONG). Otherwise stdin
     // is 'ignore' so the CLI sees EOF immediately instead of waiting ~3s for piped stdin
@@ -289,7 +353,7 @@ export function runClaudeStream(
       } catch {
         /* already closed */
       }
-      resolve({ text: resultText, isError, code: null, timedOut: true, aborted: false })
+      resolve(settle({ text: resultText, isError, code: null, timedOut: true, aborted: false }))
     }
     // With an idle timeout, `timer` is the silence clock (reset by touch() on every byte)
     // and `hardTimer` is the absolute ceiling. Without one, `timer` alone is the old fixed
@@ -317,7 +381,7 @@ export function runClaudeStream(
       } catch {
         /* already closed */
       }
-      resolve({ text: resultText, isError: true, code: null, timedOut: false, aborted: true })
+      resolve(settle({ text: resultText, isError: true, code: null, timedOut: false, aborted: true }))
     }
     if (opts?.signal) {
       if (opts.signal.aborted) queueMicrotask(onAbort)
@@ -347,7 +411,7 @@ export function runClaudeStream(
       clearTimers()
       opts?.signal?.removeEventListener('abort', onAbort)
       onLog({ level: 'error', text: err.message })
-      resolve({ text: resultText, isError: true, code: null, timedOut: false, aborted: false })
+      resolve(settle({ text: resultText, isError: true, code: null, timedOut: false, aborted: false }))
     })
     child.on('close', (code) => {
       if (settled) return
@@ -358,13 +422,13 @@ export function runClaudeStream(
       if (opts?.usageSource && usage) {
         recordUsage({ source: opts.usageSource, model: opts.model, ...usage })
       }
-      resolve({
+      resolve(settle({
         text: resultText,
         isError: isError || (code !== 0 && !resultText),
         code,
         timedOut: false,
         aborted: false,
-      })
+      }))
     })
 
     function handleLine(line: string): void {
@@ -378,7 +442,7 @@ export function runClaudeStream(
         message?: { content?: { type?: string; text?: string; name?: string; input?: unknown }[] }
         event?: {
           type?: string
-          delta?: { type?: string; text?: string }
+          delta?: { type?: string; text?: string; estimated_tokens?: number | null }
           content_block?: { type?: string }
         }
       }
@@ -391,6 +455,11 @@ export function runClaudeStream(
         case 'stream_event': {
           // Partial streaming (--include-partial-messages): forward text deltas live.
           const ev = msg.event
+          if (ev?.type === 'content_block_start' && ev.content_block?.type === 'thinking') {
+            thinkStartedAt = Date.now()
+            thinkTokens = null
+            return
+          }
           if (ev?.type === 'content_block_start' && ev.content_block?.type === 'text') {
             // A turn that stops to run a tool resumes in a NEW text block, and the deltas
             // carry no separator — so "…listing the folders.Now I'll read package.json"
@@ -399,8 +468,24 @@ export function runClaudeStream(
             return
           }
           if (ev?.type === 'content_block_delta' && ev.delta?.type === 'text_delta' && ev.delta.text) {
+            if (firstTokenAt === null) firstTokenAt = Date.now()
             sawText = true
             opts?.onDelta?.(ev.delta.text)
+            return
+          }
+          if (ev?.type === 'content_block_delta' && ev.delta?.type === 'thinking_delta') {
+            // A RUNNING total, so it's assigned and not accumulated. It also goes null on
+            // the last delta of a block, which must not wipe the count already reported.
+            if (typeof ev.delta.estimated_tokens === 'number') thinkTokens = ev.delta.estimated_tokens
+            return
+          }
+          // The block ended — report it now, while we still know it was a thought. The
+          // start time is cleared unconditionally so a following text block can't be
+          // mistaken for thinking that never stopped.
+          if (ev?.type === 'content_block_stop' && thinkStartedAt !== null) {
+            const ms = Date.now() - thinkStartedAt
+            thinkStartedAt = null
+            opts?.onThinking?.({ ms, tokens: thinkTokens })
           }
           return
         }

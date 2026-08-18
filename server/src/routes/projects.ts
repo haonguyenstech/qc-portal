@@ -20,6 +20,13 @@ import {
 } from '../config.js'
 import { pickFolderNative } from '../folderPicker.js'
 import { repairProjectMcpConfig } from './mcp.js'
+import {
+  discardUpload,
+  extractZipToFolder,
+  hasZipSignature,
+  receiveUploadToTempFile,
+  UploadTooLargeError,
+} from '../projectArchive.js'
 import { recordSkillInstall } from '../skillSync.js'
 import { recordTemplateInstall } from '../templateSync.js'
 import { listTestcaseJobs } from '../testcaseJobs.js'
@@ -465,48 +472,58 @@ projectsRouter.get('/:id/export', async (req, res) => {
 })
 
 /**
- * Create a project from an exported .zip. The zip is sent as the **raw request
- * body** (binary) — not base64-in-JSON — so large exports (crawled attachments +
- * evidence) transfer without the ~33% base64 bloat or JSON body-size fragility
- * that broke import for real projects. The display name and destination parent
- * folder travel as query params. The project folder is `<parentPath>/<safeName>`.
+ * Create a project from an exported .zip. The zip arrives as the **raw request
+ * body** (binary) — not base64-in-JSON — and is streamed to a temp file, then
+ * extracted member by member, so an export dominated by ticket attachments
+ * (a measured real one: 1.87 GB / 4348 files) imports instead of dying. See
+ * `projectArchive.ts` for why neither `express.raw` nor JSZip can carry that
+ * size. The display name and destination parent folder travel as query params.
+ * The project folder is `<parentPath>/<safeName>`.
  */
-projectsRouter.post(
-  '/import',
-  express.raw({ type: () => true, limit: '1gb' }),
-  async (req, res) => {
-    const name = typeof req.query.name === 'string' ? req.query.name : ''
-    const parentPath = typeof req.query.parentPath === 'string' ? req.query.parentPath : ''
-    if (!name.trim()) {
-      return res.status(400).json({ error: 'name is required' })
+projectsRouter.post('/import', async (req, res) => {
+  const name = typeof req.query.name === 'string' ? req.query.name : ''
+  const parentPath = typeof req.query.parentPath === 'string' ? req.query.parentPath : ''
+  if (!name.trim()) {
+    return res.status(400).json({ error: 'name is required' })
+  }
+  if (!parentPath.trim()) {
+    return res.status(400).json({ error: 'parentPath is required' })
+  }
+
+  const parent = path.resolve(parentPath.trim())
+  if (!isDir(parent)) {
+    return res.status(400).json({ error: `not a folder: ${parent}` })
+  }
+  const safe = safeFolderName(name)
+  if (!safe) return res.status(400).json({ error: 'invalid project name' })
+  const dest = path.join(parent, safe)
+  if (fs.existsSync(dest)) {
+    return res.status(409).json({ error: `a folder named "${safe}" already exists here` })
+  }
+
+  // Validate everything we can BEFORE spending minutes streaming gigabytes to
+  // disk, then take the upload.
+  let upload: { filePath: string; bytes: number }
+  try {
+    upload = await receiveUploadToTempFile(req)
+  } catch (err) {
+    if (err instanceof UploadTooLargeError) {
+      return res.status(413).json({ error: err.message })
     }
-    if (!parentPath.trim()) {
-      return res.status(400).json({ error: 'parentPath is required' })
-    }
-    const zipBuffer = Buffer.isBuffer(req.body) ? req.body : null
-    if (!zipBuffer || zipBuffer.length === 0) {
+    return res.status(400).json({
+      error: `the upload did not complete${err instanceof Error && err.message ? `: ${err.message}` : ''}`,
+    })
+  }
+
+  try {
+    if (upload.bytes === 0) {
       return res.status(400).json({ error: 'a .zip file is required' })
     }
 
-    const parent = path.resolve(parentPath.trim())
-    if (!isDir(parent)) {
-      return res.status(400).json({ error: `not a folder: ${parent}` })
-    }
-    const safe = safeFolderName(name)
-    if (!safe) return res.status(400).json({ error: 'invalid project name' })
-    const dest = path.join(parent, safe)
-    if (fs.existsSync(dest)) {
-      return res.status(409).json({ error: `a folder named "${safe}" already exists here` })
-    }
-
-    // Diagnose an unreadable upload precisely instead of the old opaque
-    // "could not read that .zip file", which hid the real cause (a partial
-    // download, a non-zip file renamed .zip, or a password-protected archive).
-    // Every real .zip starts with the "PK" signature (0x50 0x4B) — a local file
-    // header (PK\x03\x04) or an empty-archive end record (PK\x05\x06).
-    const hasZipSignature =
-      zipBuffer.length >= 2 && zipBuffer[0] === 0x50 && zipBuffer[1] === 0x4b
-    if (!hasZipSignature) {
+    // Diagnose an unreadable upload precisely instead of an opaque "could not
+    // read that .zip file", which hid the real cause (a partial download, a
+    // non-zip file renamed .zip, or a password-protected archive).
+    if (!hasZipSignature(upload.filePath)) {
       return res.status(400).json({
         error:
           'That file is not a .zip archive — its header is missing the "PK" zip signature. ' +
@@ -515,55 +532,22 @@ projectsRouter.post(
       })
     }
 
-    let zip: JSZip
     try {
-      zip = await JSZip.loadAsync(zipBuffer)
-    } catch (err) {
-      const reason = err instanceof Error ? err.message : ''
-      const friendly = /encrypted/i.test(reason)
-        ? 'This .zip is password-protected, which is not supported — re-export the project ' +
-          'from QC Portal (its exports are never encrypted) and import that file.'
-        : /end of central directory|end of data|corrupt/i.test(reason)
-          ? 'This .zip looks incomplete or corrupted — its central directory could not be read. ' +
-            'A partial or interrupted download is the usual cause; re-download or re-export the ' +
-            'project and import the fresh file.'
-          : `Could not read that .zip file${reason ? `: ${reason}` : ''}.`
-      return res.status(400).json({ error: friendly })
-    }
-    const files = Object.values(zip.files).filter((f) => !f.dir)
-    if (files.length === 0) return res.status(400).json({ error: 'the .zip is empty' })
-
-    try {
-      fs.mkdirSync(dest, { recursive: true })
-      for (const file of files) {
-        const rel = file.name.replace(/\\/g, '/').replace(/^\/+/, '')
-        if (rel === EXPORT_MANIFEST) continue // manifest is metadata, not a project file
-        if (!rel || rel.split('/').some((seg) => seg === '..' || seg === '')) {
-          throw new Error(`invalid path in zip: ${file.name}`)
-        }
-        const target = path.resolve(dest, rel)
-        if (target !== dest && !target.startsWith(dest + path.sep)) {
-          throw new Error(`path escapes project folder: ${file.name}`)
-        }
-        fs.mkdirSync(path.dirname(target), { recursive: true })
-        fs.writeFileSync(target, await file.async('nodebuffer'))
-      }
+      // The manifest is metadata, not a project file.
+      await extractZipToFolder(upload.filePath, dest, new Set([EXPORT_MANIFEST]))
     } catch (err) {
       fs.rmSync(dest, { recursive: true, force: true }) // roll back a partial extract
-      const reason = err instanceof Error ? err.message : ''
-      // An encrypted zip loads its directory fine and only fails here, when a
-      // member is actually read — surface that as an actionable message.
-      const friendly = /encrypted/i.test(reason)
-        ? 'This .zip is password-protected, which is not supported — re-export the project from ' +
-          'QC Portal (its exports are never encrypted) and import that file.'
-        : reason || 'failed to extract the zip'
-      return res.status(400).json({ error: friendly })
+      return res
+        .status(400)
+        .json({ error: err instanceof Error ? err.message : 'failed to extract the zip' })
     }
 
     const project = createProject(name.trim(), dest, false)
     return res.status(201).json({ ...project, ...rootInfo(project.rootPath) })
-  },
-)
+  } finally {
+    discardUpload(upload.filePath)
+  }
+})
 
 projectsRouter.put('/:id', (req, res) => {
   const existing = getProject(req.params.id)

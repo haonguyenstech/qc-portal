@@ -1,4 +1,4 @@
-import { isValidElement, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { cloneElement, isValidElement, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 // Aliased: the DOM's ClipboardEvent/DragEvent are also in scope in this file.
 import type {
   ClipboardEvent as ReactClipboardEvent,
@@ -15,9 +15,13 @@ import { toast } from 'sonner'
 import {
   ArrowUp,
   Blocks,
+  Brain,
   Bug,
   Check,
   ChevronDown,
+  CircleCheck,
+  CircleHelp,
+  Clock,
   ClipboardList,
   Compass,
   Copy,
@@ -25,8 +29,10 @@ import {
   Download,
   FileSearch,
   FileText,
+  Gauge,
   Globe,
   History,
+  ImageIcon,
   Library,
   ListTodo,
   Loader2,
@@ -37,15 +43,21 @@ import {
   PenLine,
   Plus,
   Search,
+  SearchCheck,
+  ShieldAlert,
   ShieldCheck,
+  ShieldHalf,
   Sparkles,
   Square,
   Workflow,
   Star,
   Telescope,
   TerminalSquare,
+  ThumbsDown,
+  ThumbsUp,
   Ticket,
   Trash2,
+  TriangleAlert,
   User,
   Wand2,
   Wrench,
@@ -72,12 +84,16 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
+import { Textarea } from '@/components/ui/textarea'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { copyText } from '@/lib/clipboard'
 import { convertFileToMarkdown, KNOWLEDGE_ACCEPT, MAX_FILE_BYTES } from '@/lib/docConvert'
 import { useProjects } from '@/lib/project-context'
 import {
+  auditChatAnswer,
   chatImageUrl,
+  projectImageUrl,
+  resolveProjectImages,
   createWorkspaceNote,
   deleteChat,
   getChat,
@@ -86,6 +102,7 @@ import {
   listCrawledTickets,
   listSkills,
   pinChat,
+  rateChatAnswer,
   renameChat,
   streamChat,
   attachChat,
@@ -95,8 +112,16 @@ import {
   type ChatMention,
   type CrawledTicket,
   type ChatMessage,
+  type ContextBlock,
+  type TurnStats,
+  type QueuedChatMessage,
+  cancelQueuedChat,
   type ChatSummary,
   type ChatToolCall,
+  type ChatEffort,
+  type ChatAudit,
+  type AuditClaim,
+  type ChatFeedback,
   type ChatTools,
   type DatabaseConn,
 } from '@/lib/api'
@@ -181,6 +206,201 @@ function mdComponents(renderDiagrams: boolean): Components {
   }
 }
 
+/**
+ * Evidence images an answer CITED, made clickable.
+ *
+ * A chat turn that ran the `qc-testing` skill answers with evidence: "the cancel dialog
+ * never closed — see testing/test-result/ABC-1-checkout/screenshots/ac3-cancel.png". Until
+ * now that path was dead text: the engineer had to find the run, open its Screenshots tab
+ * and match the filename by eye. So the transcript turns a cited image path into a chip
+ * that opens the picture in a dialog, exactly as RunDetailPage does inside a run.
+ *
+ * Two rules keep this from touching an answer that has no evidence in it:
+ * - Only paths WITH a directory and an image extension are candidates; a bare word is not.
+ * - A candidate becomes a chip only after the server confirms the file exists
+ *   (`resolveProjectImages`). A path the model invented, or one from another machine, stays
+ *   plain text — the same "never report what we aren't sure about" rule `answerCheck` uses.
+ * With no candidates nothing is fetched and the markdown renders through the exact same
+ * module-level `components` identity it did before.
+ */
+const IMAGE_REF_RE = /(?:\.{0,2}\/)?(?:[A-Za-z0-9_.@~-]+\/)+[A-Za-z0-9_.@()-]+\.(?:png|jpe?g|gif|webp|bmp)/gi
+
+/** Image-shaped paths named in an answer, deduped, order preserved. Fences excluded: a
+ *  path inside a code block is a command being shown, not evidence to open. */
+function collectImageRefs(text: string): string[] {
+  if (!text || !/\.(png|jpe?g|gif|webp|bmp)\b/i.test(text)) return []
+  const body = text.replace(/```[\s\S]*?(?:```|$)/g, '\n').replace(/~~~[\s\S]*?(?:~~~|$)/g, '\n')
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const m of body.matchAll(IMAGE_REF_RE)) {
+    const raw = m[0]
+    const start = m.index ?? 0
+    // The tail of a URL (`https://host/a.png`) is not a file in this project.
+    if (/[A-Za-z0-9_@:/-]$/.test(body.slice(Math.max(0, start - 3), start))) continue
+    const cleaned = raw.replace(/^\.\//, '')
+    if (cleaned.startsWith('..') || seen.has(cleaned)) continue
+    seen.add(cleaned)
+    out.push(cleaned)
+    if (out.length >= 40) break
+  }
+  return out
+}
+
+/** cited path → project-relative path, for the ones that are real files. */
+function useResolvedImages(projectId: string | undefined, refs: string[]) {
+  const key = refs.join('|')
+  const { data } = useQuery({
+    queryKey: ['chat-image-refs', projectId, key],
+    queryFn: () => resolveProjectImages(projectId!, refs),
+    enabled: !!projectId && refs.length > 0,
+    staleTime: 60_000,
+  })
+  return data
+}
+
+/** The chip itself — a filename, an image glyph, and the click that opens the picture. */
+function ImageRefChip({ cited, onOpen }: { cited: string; onOpen: () => void }) {
+  const name = cited.split('/').pop() ?? cited
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      title={`${cited} — click to view`}
+      className={cn(
+        'mx-0.5 inline-flex max-w-full items-center gap-1 rounded-md border px-1.5 py-0.5 align-middle',
+        'font-mono text-[11px] leading-none transition-colors',
+        'border-violet-500/30 bg-violet-500/5 text-violet-600 hover:border-violet-500/50',
+        'hover:bg-violet-500/10 dark:text-violet-400',
+      )}
+    >
+      <ImageIcon className="size-3 shrink-0" />
+      <span className="truncate">{name}</span>
+    </button>
+  )
+}
+
+/** Walk rendered markdown children, swapping confirmed image paths for chips. */
+function linkifyImageRefs(
+  node: ReactNode,
+  resolved: Record<string, string>,
+  onOpen: (cited: string) => void,
+  keyPrefix = 'img',
+): ReactNode {
+  if (typeof node === 'string') {
+    if (!node.includes('.')) return node
+    const parts: ReactNode[] = []
+    let last = 0
+    let i = 0
+    IMAGE_REF_RE.lastIndex = 0
+    let match: RegExpExecArray | null
+    while ((match = IMAGE_REF_RE.exec(node)) !== null) {
+      const cited = match[0].replace(/^\.\//, '')
+      if (!resolved[cited]) continue
+      if (match.index > last) parts.push(node.slice(last, match.index))
+      parts.push(<ImageRefChip key={`${keyPrefix}-${i++}`} cited={cited} onOpen={() => onOpen(cited)} />)
+      last = match.index + match[0].length
+    }
+    if (parts.length === 0) return node
+    if (last < node.length) parts.push(node.slice(last))
+    return parts
+  }
+  if (Array.isArray(node)) {
+    return node.map((child, idx) => linkifyImageRefs(child, resolved, onOpen, `${keyPrefix}-${idx}`))
+  }
+  if (isValidElement(node)) {
+    const el = node as React.ReactElement<{ children?: ReactNode }>
+    if (el.props?.children != null) {
+      return cloneElement(el, {
+        children: linkifyImageRefs(el.props.children, resolved, onOpen, keyPrefix),
+      })
+    }
+  }
+  return node
+}
+
+/** Flatten a node tree to plain text — an inline `code` path is one text child. */
+function nodeText(node: ReactNode): string {
+  if (node == null || typeof node === 'boolean') return ''
+  if (typeof node === 'string' || typeof node === 'number') return String(node)
+  if (Array.isArray(node)) return node.map(nodeText).join('')
+  if (isValidElement(node)) return nodeText((node.props as { children?: ReactNode }).children)
+  return ''
+}
+
+/**
+ * The finished-answer `components`, with evidence chips. Built only for an answer that
+ * actually cites a real image — otherwise the shared `MD_COMPONENTS` identity is used, so
+ * every other turn on the page renders exactly as it did before.
+ */
+function imageRefComponents(
+  resolved: Record<string, string>,
+  onOpen: (cited: string) => void,
+): Components {
+  const linkify = (children: ReactNode) => linkifyImageRefs(children, resolved, onOpen)
+  return {
+    ...MD_COMPONENTS,
+    p: ({ children, ...rest }) => <p {...rest}>{linkify(children)}</p>,
+    li: ({ children, ...rest }) => <li {...rest}>{linkify(children)}</li>,
+    td: ({ children, ...rest }) => <td {...rest}>{linkify(children)}</td>,
+    // An inline `code` path becomes the chip itself, not a chip inside a code pill.
+    code: ({ children, className, ...rest }) => {
+      const cited = className ? '' : nodeText(children).trim().replace(/^\.\//, '')
+      if (cited && resolved[cited]) {
+        return <ImageRefChip cited={cited} onOpen={() => onOpen(cited)} />
+      }
+      return (
+        <code className={className} {...rest}>
+          {children}
+        </code>
+      )
+    },
+    // `![alt](screenshots/ac1.png)` — a relative src is meaningless to the browser, so
+    // point it at the file route and make it open the same dialog.
+    img: ({ src, alt }) => {
+      const cited = typeof src === 'string' ? src.replace(/^\.\//, '') : ''
+      if (cited && resolved[cited]) {
+        return <ImageRefChip cited={cited} onOpen={() => onOpen(cited)} />
+      }
+      return <span className="text-xs text-muted-foreground">{alt || cited}</span>
+    },
+  }
+}
+
+/** The picture, full size, over the transcript. Escape / clicking away closes it. */
+function ImageRefDialog({
+  projectId,
+  cited,
+  rel,
+  onClose,
+}: {
+  projectId: string
+  cited: string
+  rel: string
+  onClose: () => void
+}) {
+  const src = projectImageUrl(projectId, rel)
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="max-w-5xl">
+        <DialogHeader>
+          <DialogTitle className="break-all font-mono text-sm">{cited.split('/').pop()}</DialogTitle>
+          <DialogDescription className="break-all font-mono text-[11px]">{rel}</DialogDescription>
+        </DialogHeader>
+        <div className="max-h-[70vh] overflow-auto rounded-lg border bg-muted/40 p-2">
+          <img src={src} alt={cited} className="mx-auto max-w-full" />
+        </div>
+        <DialogFooter>
+          <Button variant="outline" size="sm" asChild>
+            <a href={src} target="_blank" rel="noreferrer">
+              Open in new tab
+            </a>
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 /** Module-level so a re-render never hands ReactMarkdown a new `components` identity. */
 const MD_COMPONENTS = mdComponents(true)
 const MD_COMPONENTS_STREAMING = mdComponents(false)
@@ -189,7 +409,10 @@ const MODELS = [
   // `default` sends no --model, so the CLI uses the same model an interactive `claude`
   // does in the Terminal page. That parity is the point — pinning Sonnet here answered
   // measurably shallower than the Terminal on the same repo question.
-  { value: 'default', label: 'Same as Terminal' },
+  // Named for what it GIVES you, not for how it's implemented: "Same as Terminal" made the
+  // strongest option sound like a compatibility setting, and the Terminal page is not where
+  // most people form their idea of "good". The hint keeps the mechanism visible one line down.
+  { value: 'default', label: 'Best (your default)', hint: 'Same model as the Terminal' },
   { value: 'haiku', label: 'Claude Haiku' },
   { value: 'sonnet', label: 'Claude Sonnet' },
   { value: 'opus', label: 'Claude Opus' },
@@ -210,10 +433,48 @@ function shortModel(model: string): string {
   return m[2] ? `Claude ${name} ${m[2]}` : `Claude ${name}`
 }
 
+/**
+ * HOW HARD THE MODEL THINKS, as its own picker beside the model.
+ *
+ * It is a genuinely separate axis: "where is this field validated?" is a `low` question on
+ * any model, and "does this ticket's test coverage hold up?" is a judgement call that gets
+ * measurably better when the model is allowed to reason before it writes.
+ *
+ * THREE levels, defaulting to `medium`. The CLI also accepts `xhigh` and `max`; they are
+ * deliberately not offered — on chat-sized questions they mostly buy minutes of thinking and
+ * a bigger bill, and a picker whose top two options nobody should routinely choose is a trap.
+ * `medium` is sent EXPLICITLY (not by omitting the flag), so a chat turn runs the same way
+ * whatever the engineer's own Claude Code happens to be configured for.
+ *
+ * `'default'` — inherit that configured effort by passing no flag — stays in the type because
+ * conversations and localStorage values written before this table existed carry it; it is
+ * simply not offered any more, and `pickEffort`/the validation below map anything unknown
+ * onto `medium`. See routes/chat.ts `ChatEffort`.
+ */
+const CHAT_EFFORTS: { value: ChatEffort; label: string; hint?: string }[] = [
+  { value: 'low', label: 'Low', hint: 'Fastest, cheapest — for lookups' },
+  { value: 'medium', label: 'Medium', hint: 'Balanced — the default' },
+  { value: 'high', label: 'High', hint: 'Thinks before answering' },
+]
+
+/** The level a missing or no-longer-offered stored value lands on. */
+const DEFAULT_EFFORT: ChatEffort = 'medium'
+
+const effortLabel = (e: ChatEffort) =>
+  e === 'default' ? 'Default' : (CHAT_EFFORTS.find((x) => x.value === e)?.label ?? e)
+
 const MODEL_KEY = 'qc.chatModel.v2'
 const TOOLS_KEY = 'qc.chatTools.v2'
+/** v1 — this setting is new, so there is no old value whose meaning could have changed. */
+const EFFORT_KEY = 'qc.chatEffort.v1'
 /** Mirrors the server's cap (routes/chat.ts). Over it the server 413s rather than truncating. */
 const MAX_PROMPT = 48_000
+/**
+ * How many messages may wait behind the reply being written. Mirrors `MAX_QUEUED` in
+ * routes/chat.ts — this copy only exists so the Send button can go quiet at the limit
+ * instead of the engineer learning it from a 429 after typing.
+ */
+const MAX_QUEUED = 3
 
 /**
  * Pasted screenshots. A QC engineer's evidence is almost always an image — a broken
@@ -466,6 +727,115 @@ function readImage(file: File): Promise<StagedImage> {
     }
     fr.readAsDataURL(file)
   })
+}
+
+// ------------------------------------------------------ the composer's mode picker
+
+/**
+ * The THREE things a turn may be allowed to do, as one table the pill, the menu, the header
+ * badge and the hint strip all read from — the labels used to be inline ternaries in four
+ * places, which is how "Fast mode" and "Full tools" ended up naming the same setting two
+ * ways on one screen.
+ *
+ * The middle mode is the one worth explaining: **Workspace write** lets Claude change files
+ * in THIS project and nothing else — no MCP servers, so no browser, no ClickUp, no outside
+ * system — and it keeps read-only's ~1s start because there are no servers to boot. See
+ * routes/chat.ts `toolArgs`.
+ *
+ * Honest wording matters here: none of these is a sandbox (`--allowedTools` is a permission
+ * allow-list, and the engineer's own `permissions.defaultMode` can widen it), so the copy
+ * says what the turn is FOR, and only `full` is described as unrestricted.
+ */
+const CHAT_MODES: {
+  value: ChatTools
+  label: string
+  hint: string
+  icon: LucideIcon
+  /** Tint for the active trigger + the header badge. */
+  pill: string
+  /** The long form, for the tooltip and the badge's title. */
+  title: string
+}[] = [
+  {
+    value: 'read',
+    label: 'Read only',
+    hint: 'Answer from the repo, change nothing',
+    icon: ShieldCheck,
+    pill: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400',
+    title:
+      'Read only — file tools only, MCP servers skipped, so answers start in about a second. Claude explores less, so expect shallower answers.',
+  },
+  {
+    value: 'write',
+    label: 'Workspace write',
+    hint: 'May edit files in this project only',
+    icon: ShieldHalf,
+    pill: 'border-sky-500/40 bg-sky-500/10 text-sky-600 dark:text-sky-400',
+    title:
+      'Workspace write — Claude may read AND edit files in this project, but MCP servers stay off, so it can’t drive a browser, ClickUp or anything outside the folder. Still starts in about a second.',
+  },
+  {
+    value: 'full',
+    label: 'Full access',
+    hint: 'Everything the Terminal page can do',
+    icon: ShieldAlert,
+    pill: 'border-amber-500/40 bg-amber-500/10 text-amber-600 dark:text-amber-400',
+    title:
+      'Full access — the same setup the Terminal page runs: full permissions and this project’s MCP servers. Most accurate, ~20s slower to start.',
+  },
+]
+
+const modeMeta = (t: ChatTools) => CHAT_MODES.find((m) => m.value === t) ?? CHAT_MODES[2]
+
+/**
+ * The permission picker in the composer.
+ *
+ * Deliberately the SAME control as the model and effort pickers next to it — one shadcn
+ * `Select`, label over hint in each row, the label collapsing to the icon below `lg`. It
+ * started as a hand-rolled panel portaled into the composer well (the `+` menu still needs
+ * that, because it lives inside the `overflow-hidden` input card); as a sibling of two
+ * Selects that read as a third, slightly-different menu, which is exactly the drift the
+ * shared `CHAT_MODES` table was introduced to stop. The only thing kept from the pill
+ * version is the per-mode TINT on the trigger: "what is this turn allowed to do" is the one
+ * composer setting worth seeing without reading it.
+ */
+function ComposerModePicker({
+  tools,
+  onPick,
+}: {
+  tools: ChatTools
+  onPick: (t: ChatTools) => void
+}) {
+  const active = modeMeta(tools)
+  return (
+    <Select value={tools} onValueChange={(v) => onPick(v as ChatTools)}>
+      {/* The long explanation is a NATIVE `title`, not a Radix tooltip: a tooltip anchored to
+          this trigger stays open while the menu is (the trigger keeps focus) and covers the
+          very options it is explaining — measured on screen. The header badge does the same,
+          and each row carries its own one-line hint. */}
+      <SelectTrigger
+        size="sm"
+        title={active.title}
+        aria-label={`What this chat may do: ${active.label}`}
+        className={cn('w-fit rounded-full focus:ring-0!', active.pill)}
+      >
+        <active.icon className="size-4" />
+        <div className="hidden lg:flex">
+          <SelectValue>{active.label}</SelectValue>
+        </div>
+      </SelectTrigger>
+      <SelectContent>
+        {CHAT_MODES.map((m) => (
+          <SelectItem key={m.value} value={m.value}>
+            <span className="flex flex-col items-start gap-0.5">
+              <span>{m.label}</span>
+              <span className="text-xs text-muted-foreground">{m.hint}</span>
+            </span>
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
+  )
 }
 
 // --------------------------------------------------------- the composer's + menu
@@ -1517,10 +1887,24 @@ function describeTool(name: string): { label: string; verb: string; Icon: Lucide
   return { label: `Using ${name}`, verb: name, Icon: Wrench }
 }
 
-function phaseOf(tools: string[]): { label: string; Icon: LucideIcon } {
-  const last = tools[tools.length - 1]
+/**
+ * The same description, for a step that may be a THOUGHT rather than a call.
+ *
+ * Keyed on `kind`, never on the name: a step called "Think" that came back from a tool of
+ * that name is a tool call, and quietly relabelling it would be a lie about what ran.
+ */
+function describeStep(c: ChatToolCall): { label: string; verb: string; Icon: LucideIcon } {
+  // "Thought", past tense: the row only ever appears once the block has CLOSED, and the
+  // detail beside it is how long it took — a present-tense label next to a finished
+  // duration reads as though it were still going.
+  if (c.kind === 'think') return { label: 'Thinking it through', verb: 'Thought', Icon: Brain }
+  return describeTool(c.name)
+}
+
+function phaseOf(calls: ChatToolCall[]): { label: string; Icon: LucideIcon } {
+  const last = calls[calls.length - 1]
   if (!last) return { label: 'Thinking', Icon: Sparkles }
-  const { label, Icon } = describeTool(last)
+  const { label, Icon } = describeStep(last)
   return { label, Icon }
 }
 
@@ -1529,18 +1913,23 @@ function phaseOf(tools: string[]): { label: string; Icon: LucideIcon } {
  * same target become one row with a count, so twelve reads of one file don't fill the bubble.
  * Distinct targets stay distinct — the target IS the information here.
  */
-function stepsFrom(calls: ChatToolCall[]): { name: string; detail?: string; n: number }[] {
-  const out: { name: string; detail?: string; n: number }[] = []
+function stepsFrom(calls: ChatToolCall[]): (ChatToolCall & { n: number })[] {
+  const out: (ChatToolCall & { n: number })[] = []
   for (const c of calls) {
     const last = out[out.length - 1]
-    if (last && last.name === c.name && last.detail === c.detail) last.n += 1
-    else out.push({ name: c.name, detail: c.detail, n: 1 })
+    // Thoughts are never folded together even when identical: two thinking blocks are two
+    // separate decisions, and "Think ×2" hides which one led where.
+    if (last && c.kind !== 'think' && last.name === c.name && last.detail === c.detail) last.n += 1
+    else out.push({ ...c, n: 1 })
   }
   return out
 }
 
 /** How many steps stay on screen; the rest are summarised as "+N earlier steps". */
 const MAX_VISIBLE_STEPS = 4
+
+/** Above this many rows a FINISHED turn's trail folds behind one line (see StepTrail). */
+const COLLAPSE_STEPS_OVER = 3
 
 /**
  * The live activity list: what the turn has actually DONE while the engineer waits.
@@ -1565,10 +1954,10 @@ function ActivitySteps({ calls, active }: { calls: ChatToolCall[]; active: boole
         // Only the newest call can still be running — and only while nothing has come back
         // yet. Everything above it has, by definition, already returned.
         const running = active && i === shown.length - 1
-        const { verb, Icon } = describeTool(s.name)
+        const { verb, Icon } = describeStep(s)
         return (
           <li
-            key={`${s.name}-${s.detail ?? ''}-${i}`}
+            key={`${s.kind ?? ''}${s.name}-${s.detail ?? ''}-${i}`}
             className={cn(
               'flex min-w-0 items-center gap-2',
               running ? 'text-foreground/80' : 'text-muted-foreground',
@@ -1581,7 +1970,15 @@ function ActivitySteps({ calls, active }: { calls: ChatToolCall[]; active: boole
             )}
             <span className="shrink-0">{verb}</span>
             {s.detail && (
-              <span className="min-w-0 truncate font-mono text-[11px] opacity-80" title={s.detail}>
+              <span
+                // A thought is a sentence; a target is a path, a pattern or a command.
+                // Mono is right for the second and actively hard to read for the first.
+                className={cn(
+                  'min-w-0 truncate text-[11px] opacity-80',
+                  s.kind !== 'think' && 'font-mono',
+                )}
+                title={s.detail}
+              >
                 {s.detail}
               </span>
             )}
@@ -1625,9 +2022,8 @@ function ThinkingBubble({
 
   // `compact` means text is already on screen, so "Thinking" is no longer true — it's
   // writing. A tool call still wins, since that's the more specific thing it's doing.
-  const tools = calls.map((c) => c.name)
   const { label, Icon } =
-    compact && !tools.length ? { label: 'Writing the answer', Icon: PenLine } : phaseOf(tools)
+    compact && !calls.length ? { label: 'Writing the answer', Icon: PenLine } : phaseOf(calls)
 
   return (
     <div className={cn('space-y-3.5', compact && 'mt-3')} role="status" aria-live="polite">
@@ -1673,7 +2069,14 @@ function ThinkingBubble({
   )
 }
 
-/** The tool calls a turn made — "what did it actually look at?". */
+/**
+ * The tool calls of a turn saved BEFORE steps were recorded — names only, no targets and
+ * no positions, because that is all those transcripts contain.
+ *
+ * Kept as its own component rather than folded into StepTrail: the old shape genuinely
+ * carries less, and drawing it in the new layout would imply the detail is missing from
+ * this particular turn rather than from every turn of that era.
+ */
 function ToolTrail({ tools }: { tools: string[] }) {
   if (!tools.length) return null
   // Collapse runs of the same tool ("Read Read Read" → "Read ×3"), so a turn that read
@@ -1698,6 +2101,218 @@ function ToolTrail({ tools }: { tools: string[] }) {
       ))}
     </div>
   )
+}
+
+/**
+ * A finished turn's steps, drawn where they happened.
+ *
+ * One quiet line each — icon, what it was, what it was aimed at — reading as part of the
+ * answer's flow rather than as a chrome strip above it. The row is deliberately NOT a
+ * card, a pill or an accordion: it sits between two paragraphs, and anything with its own
+ * background there breaks the reading line the answer depends on.
+ */
+function StepTrail({ steps }: { steps: ChatToolCall[] }) {
+  const rows = stepsFrom(steps)
+  // A long turn writes eight or ten of these between two paragraphs, and the answer — the
+  // thing actually being read — ends up pushed off screen by its own footnotes. Past this
+  // many they fold behind ONE line that still says what they were (`Ran ×5 · Read ×2`), so
+  // the trail stays checkable without being the loudest thing in the bubble. Short trails
+  // are untouched: three rows were never the problem, and a toggle on them is one more
+  // thing to click for nothing. Collapsed by DEFAULT — a folded trail the reader opens is
+  // the whole point, and one that has to be folded first has already cost them the screen.
+  // This only ever runs for a FINISHED turn; the live list (`ActivitySteps`) must keep
+  // naming every step as it lands, because that is what says the turn isn't hung.
+  const collapsible = rows.length > COLLAPSE_STEPS_OVER
+  const [open, setOpen] = useState(false)
+  if (!rows.length) return null
+  return (
+    <div className="my-2 flex flex-col gap-1.5">
+      {collapsible && (
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          aria-expanded={open}
+          className="flex min-w-0 items-center gap-2 text-start text-muted-foreground transition-colors hover:text-foreground"
+        >
+          <span
+            className="flex size-5 shrink-0 items-center justify-center rounded-md border border-border/60"
+            aria-hidden
+          >
+            <ChevronDown className={cn('size-3 transition-transform', !open && '-rotate-90')} />
+          </span>
+          <span className="shrink-0 text-xs">{rows.length} steps</span>
+          <span className="shrink-0 text-xs opacity-40" aria-hidden>
+            ·
+          </span>
+          <span className="min-w-0 truncate text-xs opacity-70">{stepSummary(rows)}</span>
+        </button>
+      )}
+      {(!collapsible || open) && (
+        <ol
+        // The `!` overrides are load-bearing: this <ol> lives INSIDE the answer's markdown
+        // container, whose `[&_ol]:list-decimal [&_ol]:pl-5` and `[&_li]:my-1` are element
+        // selectors and therefore outrank a plain utility class. Without them the trail is
+        // drawn as a numbered list, indented past the paragraph it sits between — which is
+        // exactly the alignment this row exists to keep. Flex + gap rather than space-y,
+        // because forcing the li margins to zero would kill space-y's margins too.
+        // The wrapper owns the outer margin now, so the list itself carries none.
+        className="flex list-none! flex-col gap-1.5 pl-0! [&>li]:my-0!"
+        aria-label="What this turn did here"
+      >
+        {rows.map((s, i) => {
+          const { verb, Icon } = describeStep(s)
+          return (
+            <li
+              key={`${s.kind ?? ''}${s.name}-${s.detail ?? ''}-${i}`}
+              className="flex min-w-0 items-center gap-2 text-muted-foreground"
+            >
+              <span
+                className="flex size-5 shrink-0 items-center justify-center rounded-md border border-border/60"
+                aria-hidden
+              >
+                <Icon className="size-3" />
+              </span>
+              <span className="shrink-0 text-xs">{verb}</span>
+              {s.detail && (
+                <>
+                  <span className="shrink-0 text-xs opacity-40" aria-hidden>
+                    ·
+                  </span>
+                  <span
+                    className={cn(
+                      'min-w-0 truncate text-xs opacity-70',
+                      s.kind !== 'think' && 'font-mono text-[11px]',
+                    )}
+                    title={s.detail}
+                  >
+                    {s.detail}
+                  </span>
+                </>
+              )}
+              {s.n > 1 && <span className="shrink-0 text-xs tabular-nums opacity-50">×{s.n}</span>}
+            </li>
+          )
+        })}
+        </ol>
+      )}
+    </div>
+  )
+}
+
+/**
+ * `Ran ×5 · Read ×2` — what a folded trail did, in the order it did it.
+ *
+ * The VERB, not the tool name: it is the same word the rows themselves use, so opening the
+ * fold shows exactly what the summary line promised.
+ */
+function stepSummary(rows: (ChatToolCall & { n: number })[]): string {
+  const counts: { verb: string; n: number }[] = []
+  for (const r of rows) {
+    const { verb } = describeStep(r)
+    const last = counts[counts.length - 1]
+    if (last && last.verb === verb) last.n += r.n
+    else counts.push({ verb, n: r.n })
+  }
+  return counts.map((c) => (c.n > 1 ? `${c.verb} ×${c.n}` : c.verb)).join(' · ')
+}
+
+/**
+ * Offsets in `text` where the answer can be CUT IN TWO and both halves still render as the
+ * markdown they were written as.
+ *
+ * Only blank lines qualify, and only outside a fenced code block: a fence has blank lines
+ * inside it all the time, and splitting there paints half a code block as prose and the
+ * other half as an unterminated fence. A break that would land between two items of the
+ * same list is dropped too — two documents means two lists, and the second one restarts
+ * its numbering at 1.
+ */
+function safeBreaks(text: string): number[] {
+  const lines = text.split('\n')
+  const out: number[] = []
+  let fence: string | null = null
+  let at = 0
+  /** The last non-blank line seen, to tell "blank line inside a list" from "end of a list". */
+  let prev = ''
+  for (let k = 0; k < lines.length; k++) {
+    const line = lines[k]
+    const open = /^\s{0,3}(`{3,}|~{3,})/.exec(line)
+    if (open) fence = fence && line.trimStart().startsWith(fence) ? null : (fence ?? open[1])
+    at += line.length + 1 // the '\n' that split() consumed
+    if (fence || line.trim() !== '' || k === lines.length - 1) {
+      if (line.trim() !== '') prev = line
+      continue
+    }
+    const next = lines[k + 1] ?? ''
+    const listish = (l: string) => /^\s*(?:[-*+]|\d+[.)])\s/.test(l) || /^\s{2,}\S/.test(l)
+    if (listish(prev) && listish(next)) continue
+    out.push(at)
+  }
+  return out
+}
+
+/** A run of the answer, or the steps that landed at one point in it. */
+type AnswerPart = { text: string; steps?: undefined } | { steps: ChatToolCall[]; text?: undefined }
+
+/**
+ * Above how many pieces the answer is left whole and the steps go on top of it.
+ *
+ * A turn that alternates a call and a sentence forty times would otherwise render forty
+ * markdown documents, and read as a chopped-up transcript rather than an answer.
+ */
+const MAX_ANSWER_PARTS = 13
+
+/**
+ * Put the steps back where they happened.
+ *
+ * Each step's `pos` is snapped BACK to the nearest safe break — never forward. A step
+ * runs after the text that precedes it, so moving it earlier can put it before the
+ * sentence that announced it, while snapping back only ever leaves it in the gap it
+ * already belonged to. In practice the snap is a no-op: the CLI starts a new text block
+ * after every tool call, and the portal writes a paragraph break between blocks, so `pos`
+ * is nearly always sitting on a break already.
+ */
+function splitAnswer(text: string, steps: ChatToolCall[]): AnswerPart[] {
+  const positioned = steps.filter((s) => typeof s.pos === 'number')
+  if (!positioned.length) return [{ text }]
+  // 0 and the end are always safe, and the end matters: a turn whose last act was a tool
+  // call has a `pos` past every blank line, and without it that step would snap backwards
+  // over the closing paragraph and read as though it ran before the conclusion.
+  const breaks = [0, ...safeBreaks(text), text.length]
+  const snap = (pos: number) => {
+    // Skip WHITESPACE first, and only then snap back. A step recorded at the end of a
+    // paragraph sits two characters short of the break, because the blank line that ends
+    // that paragraph isn't written until the model starts the NEXT one — which happens
+    // after the call returns. Without this, every step lands one paragraph too early:
+    // measured on the first live turn, a `Bash` that ran after "I'll list the files
+    // first." was drawn above that sentence. Whitespace-only means no text is skipped,
+    // so this can never move a step past something the model actually said.
+    let p = pos
+    while (p < text.length && /\s/.test(text[p])) p++
+    let best = 0
+    for (const b of breaks) if (b <= p) best = b
+    return best
+  }
+  const byBreak = new Map<number, ChatToolCall[]>()
+  for (const s of positioned) {
+    const b = snap(s.pos as number)
+    const bucket = byBreak.get(b)
+    if (bucket) bucket.push(s)
+    else byBreak.set(b, [s])
+  }
+  const parts: AnswerPart[] = []
+  let cursor = 0
+  for (const b of [...byBreak.keys()].sort((x, y) => x - y)) {
+    const chunk = text.slice(cursor, b)
+    if (chunk.trim()) parts.push({ text: chunk })
+    parts.push({ steps: byBreak.get(b)! })
+    cursor = b
+  }
+  const tail = text.slice(cursor)
+  if (tail.trim()) parts.push({ text: tail })
+  if (parts.length > MAX_ANSWER_PARTS) {
+    return [{ steps: positioned }, ...(text.trim() ? [{ text }] : [])]
+  }
+  return parts
 }
 
 // ------------------------------------------------------------- smooth streaming
@@ -1800,6 +2415,147 @@ function RowName({ who, className }: { who: 'user' | 'assistant'; className?: st
  * Either way the engineer sees what they attached, so a follow-up ("the second one")
  * refers to something still on screen.
  */
+/**
+ * WHAT THE MODEL WAS ACTUALLY SENT, under the question that was typed.
+ *
+ * A turn is never just the words in the bubble: the portal appends the resolved `@`/`/`
+ * picks, the absolute paths of pasted images, the `+` menu action's instructions, and —
+ * when a lapsed CLI session is replayed — a summary of the conversation so far. All of
+ * that steers the answer, and until now none of it appeared anywhere, so "why did it
+ * answer that?" had no answer available to the person reading it. Since this page's
+ * output ends up in test cases and bug reports, that gap is what stops people trusting it.
+ *
+ * Collapsed by default — this is an audit trail, not part of the conversation. One row
+ * per block; opening one shows the exact text (server-capped, and it says so inline).
+ */
+function ContextRows({ blocks }: { blocks: ContextBlock[] }) {
+  const [open, setOpen] = useState<number | null>(null)
+  if (!blocks.length) return null
+  return (
+    <div className="mt-1.5 flex flex-col items-end gap-1">
+      {blocks.map((b, i) => (
+        <div key={`${b.label}-${i}`} className="w-full">
+          <button
+            type="button"
+            onClick={() => setOpen((cur) => (cur === i ? null : i))}
+            aria-expanded={open === i}
+            className={cn(
+              'ms-auto flex items-center gap-1.5 rounded-md border border-border/60 px-2 py-1',
+              'text-[11px] text-muted-foreground transition-colors hover:border-border hover:text-foreground',
+            )}
+          >
+            <FileText className="size-3" />
+            <span>Context sent · {b.label}</span>
+            <ChevronDown
+              className={cn('size-3 transition-transform', open === i && 'rotate-180')}
+            />
+          </button>
+          {open === i && (
+            <pre className="mt-1 max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-md border border-border/60 bg-muted/50 p-2.5 text-start font-mono text-[11px] leading-relaxed text-muted-foreground">
+              {b.text}
+            </pre>
+          )}
+        </div>
+      ))}
+    </div>
+  )
+}
+
+/**
+ * WHAT THIS TURN TOOK — in the answer's footer, beside the model that wrote it.
+ *
+ * A chat turn here is not cheap: a full-tools Opus question runs for minutes and costs
+ * real money. "Why was that one slow?" has two completely different answers — the model
+ * wrote a lot, or one bash command took four minutes — and only time-to-first-token
+ * against total time tells them apart. A week later the transcript is the only place
+ * that question can still be answered, so the numbers live there rather than on screen
+ * for a moment.
+ *
+ * Every value came free with the turn (the CLI reports them on its final event), and they
+ * arrive ONCE, when it ends — this must never become a meter that ticks per delta, which
+ * is exactly the kind of per-frame work the transcript's memoisation exists to avoid.
+ */
+function TurnStatsLine({ stats }: { stats: TurnStats }) {
+  const parts: string[] = [`Ran ${fmtDuration(stats.ms)}`]
+  if (stats.ttftMs !== undefined) parts.push(`first token ${fmtDuration(stats.ttftMs)}`)
+  if (stats.inputTokens !== undefined || stats.outputTokens !== undefined) {
+    parts.push(`${fmtTokens(stats.inputTokens ?? 0)} in / ${fmtTokens(stats.outputTokens ?? 0)} out`)
+  }
+  // Share of the input that the provider served from its warm prefix cache — the reason a
+  // long conversation doesn't cost its whole history again on every turn.
+  if (stats.cacheReadTokens && stats.inputTokens) {
+    parts.push(`${Math.round((stats.cacheReadTokens / stats.inputTokens) * 100)}% cached`)
+  }
+  // Sub-cent turns round to $0.00, which reads as free; show them as a floor instead.
+  if (stats.costUsd) parts.push(stats.costUsd < 0.01 ? '<$0.01' : `$${stats.costUsd.toFixed(2)}`)
+  return (
+    <>
+      <span className="px-1.5 text-[11px] text-muted-foreground">•</span>
+      <span className="text-[11px] text-muted-foreground">{parts.join(' · ')}</span>
+    </>
+  )
+}
+
+/** `847ms` / `12s` / `4m 30s` — whichever reads without arithmetic. */
+function fmtDuration(ms: number): string {
+  if (ms < 1000) return `${Math.round(ms)}ms`
+  const s = Math.round(ms / 1000)
+  if (s < 60) return `${s}s`
+  const m = Math.floor(s / 60)
+  const rest = s % 60
+  return rest ? `${m}m ${rest}s` : `${m}m`
+}
+
+/** `8.8K` rather than `8823` — this is a size, not a count anyone will add up. */
+function fmtTokens(n: number): string {
+  if (n < 1000) return String(n)
+  if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}K`
+  return `${(n / 1_000_000).toFixed(1)}M`
+}
+
+/**
+ * MESSAGES WAITING THEIR TURN, under the answer they're queued behind.
+ *
+ * They are drawn as the questions they are — same side, same shape as a sent message — but
+ * dimmed and outlined rather than solid, because they have not been asked yet. Each carries
+ * its own cancel: a follow-up typed in the middle of a long answer is quite often answered
+ * BY that answer, and the alternative would be letting it run and then stopping it.
+ */
+function QueuedRows({
+  items,
+  onCancel,
+}: {
+  items: QueuedChatMessage[]
+  onCancel: (id: string) => void
+}) {
+  return (
+    <div className="flex flex-col gap-2">
+      {items.map((m, i) => (
+        <div key={m.id} className="flex justify-end gap-3">
+          <div className="max-w-[85%] flex-1 justify-end text-end sm:max-w-[75%]">
+            <div className="mb-1 flex items-center justify-end gap-1.5 pe-1 text-[11px] text-muted-foreground">
+              <Clock className="size-3" />
+              <span>{i === 0 ? 'Next in this conversation' : `Waiting · ${i + 1}`}</span>
+            </div>
+            <div className="inline-flex items-start gap-2 rounded-lg border border-dashed border-border/70 bg-muted/40 p-3 text-start text-sm text-muted-foreground">
+              <span className="whitespace-pre-wrap break-words">{m.prompt}</span>
+              <button
+                type="button"
+                onClick={() => onCancel(m.id)}
+                aria-label="Cancel this queued message"
+                className="mt-0.5 shrink-0 rounded-md p-0.5 text-muted-foreground transition-colors hover:bg-background hover:text-foreground"
+              >
+                <X className="size-3.5" />
+              </button>
+            </div>
+          </div>
+          <RowAvatar who="user" />
+        </div>
+      ))}
+    </div>
+  )
+}
+
 function UserRow({
   text,
   images,
@@ -1807,6 +2563,7 @@ function UserRow({
   projectId,
   at,
   action,
+  context,
 }: {
   text: string
   images?: string[]
@@ -1815,6 +2572,8 @@ function UserRow({
   at?: string
   /** The `+` menu action this message ran with — shown, because it changes the answer. */
   action?: ChatAction | null
+  /** Blocks the portal appended to this message before sending it (see ContextRows). */
+  context?: ContextBlock[]
 }) {
   const meta = action ? actionMeta(action) : null
   const srcs = previews ?? (images && projectId ? images.map((n) => chatImageUrl(projectId, n)) : [])
@@ -1846,6 +2605,7 @@ function UserRow({
         <div className="inline-flex whitespace-pre-wrap break-words rounded-lg bg-primary p-4 text-start text-sm text-primary-foreground">
           {text}
         </div>
+        {context && context.length > 0 && <ContextRows blocks={context} />}
         <MessageTime at={at} className="mt-1 block pe-1" />
       </div>
       <RowAvatar who="user" />
@@ -1905,7 +2665,11 @@ const FollowUps = memo(function FollowUps({
 }) {
   if (!items.length) return null
   return (
-    <div className="flex w-full flex-wrap items-center gap-2 px-1">
+    // `ps-12` = the avatar column (`size-8`) plus the row's `gap-3` plus `RowName`'s own
+    // `ps-1`, so the row starts on the same edge as the "AI Assistant" label and the bubble
+    // under it. It renders OUTSIDE `Turn` (see above) and so has to reproduce that indent
+    // by hand; `SuggestingChips`, which sits inside the column, needs only the `ps-1`.
+    <div className="flex w-full flex-wrap items-center gap-2 ps-12 pe-1">
       <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
         <Sparkles className="size-3.5" />
         Ask next
@@ -1930,13 +2694,15 @@ const FollowUps = memo(function FollowUps({
  * The gap between "the answer finished" and "the chips arrived" — the tail of the turn
  * where the model is writing the SUGGESTIONS marker and nothing visible is happening.
  *
- * It deliberately mirrors `FollowUps`' own row (same `px-1`, same "Ask next" label slot,
+ * It deliberately mirrors `FollowUps`' own row (aligned to the same left edge — this one
+ * is already inside the message column, so it needs `ps-1` where that one spells out
+ * `ps-12` — same "Ask next" label slot,
  * two chip-shaped placeholders) so the real chips replace it in place instead of the
  * layout jumping when they land. Skeleton, not a spinner: it says WHAT is coming.
  */
 function SuggestingChips() {
   return (
-    <div className="flex w-full flex-wrap items-center gap-2 px-1" aria-hidden>
+    <div className="flex w-full flex-wrap items-center gap-2 ps-1 pe-1" aria-hidden>
       <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
         <Sparkles className="size-3.5" />
         Ask next
@@ -2022,6 +2788,348 @@ function SaveToNoteButton({
       <TooltipContent>{saved ? 'Saved to Notes' : 'Save this answer to Notes'}</TooltipContent>
     </Tooltip>
   )
+}
+
+/**
+ * 👍 / 👎 UNDER AN ANSWER — the control that teaches the project.
+ *
+ * It is deliberately NOT a satisfaction survey: nothing here is counted, scored or sent
+ * anywhere. A vote runs `POST /:slug/feedback`, which reflects on the question, the answer
+ * and the vote with a cheap model and writes the durable fact behind it into the project's
+ * MEMORY — the same `testing/memory` folder every later chat turn already reads. So the
+ * honest description of the button is "remember this", and the toast says which note it
+ * wrote rather than thanking the engineer for their feedback.
+ *
+ * Three things follow from that, and they are why this isn't three lines of JSX:
+ *
+ * - **A 👎 asks WHY, and takes no for an answer.** The reason is by far the most useful
+ *   input the capture gets ("the orders API is v2" beats inferring a mistake from a wrong
+ *   answer), so the dialog asks for it — and sends without one if the engineer would rather
+ *   not, because a required box is how a feedback control gets ignored forever. A 👍 asks
+ *   nothing: the answer itself is the evidence.
+ * - **The note becomes a FILE in the repo**, so the dialog says so, and says not to paste
+ *   credentials into it. The portal's rule is that a secret never reaches disk, and this is
+ *   the one box on the page whose contents are written to a versioned project folder.
+ * - **Un-voting does not un-remember.** Clearing a rating drops the vote and leaves the
+ *   note, which by then is an ordinary project fact somebody may already have edited on the
+ *   Memory tab. The toast says where it is instead of quietly deleting project context.
+ *
+ * The vote shows immediately from local state (the mutation is the slow part — the capture
+ * is a model call), while the refetched transcript carries the durable record.
+ */
+function AnswerFeedback({
+  projectId,
+  slug,
+  index,
+  feedback,
+}: {
+  projectId: string
+  slug: string
+  /** The answer's position in the transcript — what the server rates. */
+  index: number
+  /** The rating already stored with this message, if it has one. */
+  feedback?: ChatFeedback
+}) {
+  const navigate = useNavigate()
+  const queryClient = useQueryClient()
+  const [vote, setVote] = useState<'up' | 'down' | null>(feedback?.vote ?? null)
+  const [asking, setAsking] = useState(false)
+  const [note, setNote] = useState('')
+  const rate = useMutation({
+    mutationFn: (v: { vote: 'up' | 'down' | null; note?: string }) =>
+      rateChatAnswer(projectId, slug, index, v.vote, v.note),
+    onSuccess: (r, v) => {
+      setVote(v.vote)
+      setAsking(false)
+      setNote('')
+      queryClient.invalidateQueries({ queryKey: ['chat', projectId, slug] })
+      if (!v.vote) {
+        toast.success('Rating removed', {
+          description: 'Anything it already remembered stays on the Memory tab.',
+        })
+        return
+      }
+      const names = r.feedback?.captured ?? []
+      if (!names.length) {
+        toast.success('Noted', { description: 'Nothing durable to remember from this one.' })
+        return
+      }
+      queryClient.invalidateQueries({ queryKey: ['memory', projectId] })
+      toast.success(`Remembered — ${names.join(', ')}`, {
+        description: 'Later answers in this project read this.',
+        action: { label: 'Open Memory', onClick: () => navigate('/instructions?tab=memory') },
+      })
+    },
+    onError: (err: unknown) =>
+      toast.error(err instanceof Error ? err.message : 'Could not save that rating'),
+  })
+  const busy = rate.isPending
+  const btn = (active: boolean) =>
+    cn(
+      'flex size-9 items-center justify-center rounded-full transition-colors hover:bg-accent hover:text-accent-foreground disabled:opacity-60',
+      active && 'text-emerald-500 hover:text-emerald-500',
+    )
+  return (
+    <>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            type="button"
+            disabled={busy}
+            aria-pressed={vote === 'up'}
+            onClick={() => rate.mutate({ vote: vote === 'up' ? null : 'up' })}
+            className={btn(vote === 'up')}
+          >
+            {busy && vote !== 'down' ? (
+              <Loader2 className="size-4 animate-spin" />
+            ) : (
+              <ThumbsUp className={cn('size-4', vote === 'up' && 'fill-current')} />
+            )}
+          </button>
+        </TooltipTrigger>
+        <TooltipContent className="max-w-xs">
+          {vote === 'up'
+            ? 'Rated good — click to undo. Anything already remembered stays on the Memory tab.'
+            : 'Good answer — the AI saves what makes it right to project memory, so later answers use it.'}
+        </TooltipContent>
+      </Tooltip>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            type="button"
+            disabled={busy}
+            aria-pressed={vote === 'down'}
+            // Undoing needs no reason; giving one does — hence the dialog on the way in only.
+            onClick={() => (vote === 'down' ? rate.mutate({ vote: null }) : setAsking(true))}
+            className={cn(
+              'flex size-9 items-center justify-center rounded-full transition-colors hover:bg-accent hover:text-accent-foreground disabled:opacity-60',
+              vote === 'down' && 'text-amber-600 hover:text-amber-600 dark:text-amber-500',
+            )}
+          >
+            {busy && vote === 'down' ? (
+              <Loader2 className="size-4 animate-spin" />
+            ) : (
+              <ThumbsDown className={cn('size-4', vote === 'down' && 'fill-current')} />
+            )}
+          </button>
+        </TooltipTrigger>
+        <TooltipContent className="max-w-xs">
+          {vote === 'down'
+            ? 'Rated wrong — click to undo. Anything already remembered stays on the Memory tab.'
+            : 'Wrong or unhelpful — say what it got wrong and the AI remembers the correction.'}
+        </TooltipContent>
+      </Tooltip>
+      <Dialog open={asking} onOpenChange={(o) => !o && setAsking(false)}>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>What was wrong with this answer?</DialogTitle>
+            <DialogDescription>
+              Optional — but it is what makes the difference. The AI turns it into a note in this
+              project&apos;s memory, so later answers stop repeating the mistake. It becomes a file
+              in the project, so don&apos;t paste credentials or codes.
+            </DialogDescription>
+          </DialogHeader>
+          <Textarea
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+            rows={4}
+            autoFocus
+            placeholder="e.g. the orders API is v2 — v1 was removed in July"
+            className="resize-none"
+          />
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => rate.mutate({ vote: 'down' })} disabled={busy}>
+              Skip
+            </Button>
+            <Button
+              onClick={() => rate.mutate({ vote: 'down', note: note.trim() || undefined })}
+              disabled={busy}
+            >
+              {busy && <Loader2 className="size-4 animate-spin" />}
+              Save and remember
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
+  )
+}
+
+/**
+ * FILES THIS ANSWER NAMED THAT AREN'T THERE — the free accuracy check, drawn.
+ *
+ * The server checked every project path in the answer with one `existsSync` each (no AI,
+ * no tokens, ~1 ms — see `answerCheck.ts`), and these are the ones that don't exist. It is
+ * the single most common concrete way an answer is wrong, and the only one that can be
+ * caught for certain and for free.
+ *
+ * Worded as "not found", never "wrong", and amber rather than red, because a missing path
+ * has three innocent explanations as well as the bad one: the answer PROPOSED the file, it
+ * was written before the file was deleted, or the model typed a near-miss of a real path.
+ * The strip's job is to send the reader to look, not to overrule the answer.
+ */
+function MissingRefs({ refs }: { refs: string[] }) {
+  return (
+    <div className="flex items-start gap-2 rounded-2xl border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-700 dark:text-amber-500">
+      <TriangleAlert className="mt-0.5 size-3.5 shrink-0" />
+      <div className="min-w-0 space-y-1">
+        <p className="font-medium">
+          {refs.length === 1 ? 'This file' : `These ${refs.length} files`} named above{' '}
+          {refs.length === 1 ? "isn't" : "aren't"} in the project — check before relying on{' '}
+          {refs.length === 1 ? 'it' : 'them'}.
+        </p>
+        <p className="break-all font-mono text-[11px] opacity-80">{refs.join('  ·  ')}</p>
+      </div>
+    </div>
+  )
+}
+
+/** How each checked claim is drawn. `wrong` is the only status that means "the answer is
+ *  defective"; `unverified` says the auditor looked and couldn't confirm, which is honest
+ *  and common — colouring it red would train the reader to ignore the whole panel. */
+const CLAIM_LOOK: Record<
+  AuditClaim['status'],
+  { icon: LucideIcon; tone: string; label: string }
+> = {
+  supported: { icon: CircleCheck, tone: 'text-emerald-600 dark:text-emerald-500', label: 'Confirmed' },
+  wrong: { icon: TriangleAlert, tone: 'text-destructive', label: 'Contradicted' },
+  unverified: { icon: CircleHelp, tone: 'text-muted-foreground', label: 'Not confirmed' },
+}
+
+/** The one-line headline for a finished check, and the tint of its border. */
+function auditHeadline(audit: ChatAudit): { text: string; tone: string } {
+  const wrong = audit.claims.filter((c) => c.status === 'wrong').length
+  const ok = audit.claims.filter((c) => c.status === 'supported').length
+  const open = audit.claims.filter((c) => c.status === 'unverified').length
+  if (audit.skipped) {
+    return { text: `The check did not finish — ${audit.skipped}. Nothing was verified.`, tone: 'border-border/60' }
+  }
+  if (audit.verdict === 'none') {
+    return {
+      text: 'Nothing here to check against the project — this answer makes no factual claim about it.',
+      tone: 'border-border/60',
+    }
+  }
+  if (audit.verdict === 'issues') {
+    return {
+      text: `${wrong} claim${wrong === 1 ? '' : 's'} the project contradicts${ok ? `, ${ok} confirmed` : ''}${open ? `, ${open} not confirmed` : ''}.`,
+      tone: 'border-destructive/40',
+    }
+  }
+  if (audit.verdict === 'clean') {
+    return {
+      text: `${ok} claim${ok === 1 ? '' : 's'} confirmed against the files${open ? `, ${open} could not be confirmed` : ''}.`,
+      tone: 'border-emerald-500/30',
+    }
+  }
+  return {
+    text: `Nothing could be confirmed either way — ${open} claim${open === 1 ? '' : 's'} left open.`,
+    tone: 'border-amber-500/30',
+  }
+}
+
+/**
+ * THE FACT CHECK, drawn under the answer it is about.
+ *
+ * Collapsed to its headline unless something was CONTRADICTED — the point of the check is
+ * the one claim that doesn't hold, and making the reader expand a panel to find out
+ * whether there is one wastes the 40 seconds they just spent. A clean result is a single
+ * reassuring line they can open if they want the citations.
+ */
+function AuditPanel({ audit, pending }: { audit?: ChatAudit; pending?: boolean }) {
+  const [open, setOpen] = useState(false)
+  // Deliberately derived, not state: the first render of a result with contradictions must
+  // already be expanded, and an effect would flash the collapsed version first.
+  const expanded = open || (!pending && audit?.verdict === 'issues')
+  if (pending) {
+    return (
+      <div className="flex items-center gap-2 rounded-2xl border border-border/60 bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+        <Loader2 className="size-3.5 animate-spin" />
+        Re-reading the project to check this answer — this takes a while, and you can keep working.
+      </div>
+    )
+  }
+  if (!audit) return null
+  const head = auditHeadline(audit)
+  return (
+    <div className={cn('rounded-2xl border bg-muted/40 text-xs', head.tone)}>
+      <button
+        type="button"
+        onClick={() => setOpen(!expanded)}
+        className="flex w-full items-start gap-2 px-3 py-2 text-left"
+        aria-expanded={expanded}
+      >
+        <SearchCheck className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
+        <span className="min-w-0 flex-1 space-y-0.5">
+          <span className="block font-medium text-foreground">Fact check · {head.text}</span>
+          <span className="block text-[11px] text-muted-foreground">
+            {shortModel(audit.model)} re-read the project · {new Date(audit.at).toLocaleString()}
+          </span>
+        </span>
+        {!!audit.claims.length && (
+          <ChevronDown
+            className={cn('mt-0.5 size-3.5 shrink-0 text-muted-foreground transition-transform', expanded && 'rotate-180')}
+          />
+        )}
+      </button>
+      {expanded && !!audit.claims.length && (
+        <ul className="space-y-2 border-t border-border/60 px-3 py-2">
+          {audit.claims.map((c, i) => {
+            const look = CLAIM_LOOK[c.status]
+            return (
+              <li key={i} className="flex items-start gap-2">
+                <look.icon className={cn('mt-0.5 size-3.5 shrink-0', look.tone)} />
+                <div className="min-w-0 space-y-0.5">
+                  <p className="text-foreground">{c.claim}</p>
+                  <p className="text-[11px] text-muted-foreground">
+                    <span className={look.tone}>{look.label}</span>
+                    {c.evidence ? ` — ${c.evidence}` : ''}
+                  </p>
+                </div>
+              </li>
+            )
+          })}
+        </ul>
+      )}
+    </div>
+  )
+}
+
+/**
+ * Run (or re-run) the fact check on one stored answer.
+ *
+ * Lives here rather than inside the button because the button and the RESULT sit in two
+ * different places in the row — the icon belongs with Copy and the 👍/👎, the panel belongs
+ * under the answer — and both need to know it is running.
+ */
+function useAnswerAudit(projectId?: string, slug?: string, index?: number) {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: () => auditChatAnswer(projectId!, slug!, index!),
+    onSuccess: (r) => {
+      // Refetch so the verdict is read back off the stored message: the panel then shows
+      // exactly what a reader who reopens this conversation tomorrow will see.
+      queryClient.invalidateQueries({ queryKey: ['chat', projectId, slug] })
+      if (r.audit.skipped) {
+        toast.error('The fact check did not finish', { description: r.audit.skipped })
+        return
+      }
+      const wrong = r.audit.claims.filter((c) => c.status === 'wrong').length
+      if (wrong) {
+        toast.warning(`${wrong} claim${wrong === 1 ? '' : 's'} the project contradicts`, {
+          description: 'Opened below the answer.',
+        })
+      } else if (r.audit.verdict === 'clean') {
+        toast.success('Checked — nothing contradicted', {
+          description: `${r.audit.claims.length} claim(s) re-read against the files.`,
+        })
+      } else {
+        toast.success('Checked', { description: auditHeadline(r.audit).text })
+      }
+    },
+    onError: (err: unknown) =>
+      toast.error(err instanceof Error ? err.message : 'Could not check this answer'),
+  })
 }
 
 /** A highlighted passage and where to float the button. Viewport coordinates, because the
@@ -2158,27 +3266,51 @@ function SelectionNoteBubble({
 function AssistantRow({
   text,
   tools,
+  steps,
   calls,
   streaming,
   failed,
   at,
   model,
+  effort,
+  stats,
   question,
   projectId,
+  slug,
+  index,
+  feedback,
+  refs,
+  audit,
 }: {
   text: string
-  /** A saved turn's tool names — the trail above the answer. */
+  /** A saved turn's tool names — the trail above the answer, for pre-`steps` transcripts. */
   tools?: string[]
+  /** A saved turn's steps, with targets and positions — drawn inside the answer. */
+  steps?: ChatToolCall[]
   /** The in-flight turn's calls, with targets. Live only; never persisted. */
   calls?: ChatToolCall[]
   streaming?: boolean
   failed?: boolean
   at?: string
   model?: string
+  /** Only set when the turn ran at a chosen effort — a default-effort turn shows nothing. */
+  effort?: ChatEffort
+  /** What the turn took and cost — absent while it's still streaming. */
+  stats?: TurnStats
   /** The question this answer replied to — titles the note the save button writes. */
   question?: string
   /** Omitted while the project is unknown; without it there's nowhere to save a note. */
   projectId?: string
+  /** The conversation this answer belongs to — a rating addresses a stored message. */
+  slug?: string
+  /** Its position in the transcript. Absent on the streaming turn, which isn't stored yet. */
+  index?: number
+  /** The rating already on this answer, if any — see AnswerFeedback. */
+  feedback?: ChatFeedback
+  /** Files this answer named that aren't on disk — the free check (see MissingRefs). */
+  refs?: string[]
+  /** The fact check already run on this answer, if any — see AuditPanel. */
+  audit?: ChatAudit
 }) {
   // While streaming, what's on screen trails the received text by a few frames on purpose
   // (see useSmoothReveal). A saved message renders whole — and was already stripped of the
@@ -2191,6 +3323,32 @@ function AssistantRow({
   // Copy available — and only the small chip below says the chips are still coming.
   const answerSettled = !!streaming && suggestMarkerStarted(text) && visible.length >= body.length
   const live = !!streaming && !answerSettled
+  // Interleaved only once the turn is FINISHED. While it streams there is exactly one
+  // markdown document, as before: the reveal animation walks a single growing string, and
+  // re-segmenting it on every frame would re-parse the whole answer many times a second
+  // for a layout the reader is about to see settle anyway. The live trail below the text
+  // is already showing these same steps, in order, with their targets.
+  const parts = useMemo<AnswerPart[]>(
+    () => (streaming || !steps?.length ? [{ text: visible }] : splitAnswer(visible, steps)),
+    [visible, steps, streaming],
+  )
+  // Evidence images this answer cited (see collectImageRefs). Not while it streams: half a
+  // path is not a path, and the chips would flicker in as the text arrives.
+  const imageRefs = useMemo(() => (live ? [] : collectImageRefs(body)), [body, live])
+  const resolvedImages = useResolvedImages(projectId, imageRefs)
+  const [openImage, setOpenImage] = useState<string | null>(null)
+  const hasImageRefs = !!resolvedImages && Object.keys(resolvedImages).length > 0
+  // The shared module-level identity for every answer without evidence — only one that
+  // cites a real image gets its own `components`, and only after the check came back.
+  const components = useMemo(() => {
+    if (live) return MD_COMPONENTS_STREAMING
+    if (!hasImageRefs) return MD_COMPONENTS
+    return imageRefComponents(resolvedImages!, setOpenImage)
+  }, [live, hasImageRefs, resolvedImages])
+  // Unconditional, as a hook must be — whether the answer can be checked is decided at the
+  // button below (a streaming turn has no stored position to check yet).
+  const auditRun = useAnswerAudit(projectId, slug, index)
+  const canAudit = !!projectId && !!slug && index !== undefined && !failed
   return (
     <div className="group flex justify-start gap-3">
       <RowAvatar who="assistant" />
@@ -2207,7 +3365,9 @@ function AssistantRow({
           >
             {/* Not while streaming: the waiting indicator below already lists the same
                 calls, with their targets and in the order they ran. */}
-            {!live && <ToolTrail tools={tools ?? []} />}
+            {/* Only for a transcript from before steps were recorded — a turn that HAS
+                steps draws them inside the answer, in the places they happened. */}
+            {!live && !steps?.length && <ToolTrail tools={tools ?? []} />}
             {/* Keyed, and the indicator stays MOUNTED once text starts arriving — it just
                 goes compact and moves below the answer. Remounting it there would restart
                 its elapsed timer from zero mid-answer. */}
@@ -2218,18 +3378,29 @@ function AssistantRow({
                 {/* The caret is a CHARACTER appended to the text, not an element beside the
                     markdown: markdown renders blocks, so a sibling <span> would sit on its
                     own line under the answer instead of at the end of the last one. */}
-                <ReactMarkdown
-                  remarkPlugins={[remarkGfm]}
-                  components={live ? MD_COMPONENTS_STREAMING : MD_COMPONENTS}
-                >
-                  {live ? `${visible}▊` : visible}
-                </ReactMarkdown>
+                {parts.map((p, i) =>
+                  p.steps ? (
+                    <StepTrail key={`s${i}`} steps={p.steps} />
+                  ) : (
+                    <ReactMarkdown key={`t${i}`} remarkPlugins={[remarkGfm]} components={components}>
+                      {live && i === parts.length - 1 ? `${p.text}▊` : p.text}
+                    </ReactMarkdown>
+                  ),
+                )}
               </div>
             )}
             {(live || !visible) && (
               <ThinkingBubble key="waiting" calls={calls ?? []} compact={!!visible} startedAt={at} />
             )}
           </div>
+          {/* Accuracy, directly under the answer rather than in the icon row: both of these
+              qualify what was just said, and a reader who trusts a wrong line has already
+              stopped reading by the time they reach a row of buttons. Neither is drawn while
+              the turn streams — the checks run against the SAVED answer. */}
+          {!live && !!refs?.length && <MissingRefs refs={refs} />}
+          {!live && (auditRun.isPending || !!audit) && (
+            <AuditPanel audit={audit} pending={auditRun.isPending} />
+          )}
           {/* The answer is done; only the follow-up chips are outstanding. Its own quiet
               line, in the slot the chips will take, so the reply itself reads as finished. */}
           {answerSettled && <SuggestingChips />}
@@ -2258,6 +3429,47 @@ function AssistantRow({
               {projectId && !failed && (
                 <SaveToNoteButton answer={body} question={question} projectId={projectId} />
               )}
+              {/* Only for a STORED answer: rating one addresses it by its position in the
+                  transcript, and the turn still streaming has no position yet. It gets its
+                  buttons a moment later, when the finished transcript is refetched. */}
+              {projectId && slug && index !== undefined && !failed && (
+                <AnswerFeedback
+                  projectId={projectId}
+                  slug={slug}
+                  index={index}
+                  feedback={feedback}
+                />
+              )}
+              {/* Fact-check. Same "stored answer only" rule as the rating — and deliberately
+                  a BUTTON: it re-reads the project with a second model, so it costs a real
+                  minute and is worth it for the answer you're about to act on, not for every
+                  question asked while pairing. */}
+              {canAudit && (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <button
+                      type="button"
+                      onClick={() => auditRun.mutate()}
+                      disabled={auditRun.isPending}
+                      aria-label="Fact-check this answer"
+                      className="flex size-9 items-center justify-center rounded-full transition-colors hover:bg-accent hover:text-accent-foreground disabled:opacity-60"
+                    >
+                      {auditRun.isPending ? (
+                        <Loader2 className="size-4 animate-spin" />
+                      ) : (
+                        <SearchCheck className={cn('size-4', audit && 'text-emerald-600 dark:text-emerald-500')} />
+                      )}
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent className="max-w-xs">
+                    {auditRun.isPending
+                      ? 'Checking this answer against the project…'
+                      : audit
+                        ? 'Check again — a second model re-reads the project and re-rates every factual claim in this answer.'
+                        : 'Check the facts. A second model re-reads the project and says which claims in this answer hold up, which the files contradict, and which it could not confirm. Takes a minute and costs a little — worth it before you act on the answer.'}
+                  </TooltipContent>
+                </Tooltip>
+              )}
               <MessageTime at={at} />
               {model && (
                 <>
@@ -2265,12 +3477,33 @@ function AssistantRow({
                   <span className="text-[11px] text-muted-foreground" title={model}>
                     {shortModel(model)}
                   </span>
+                  {/* Muted and unlabelled next to the model, the way the CLI itself shows
+                      it — an absent effort means "your own default", not "unknown". */}
+                  {effort && effort !== 'default' && effort !== DEFAULT_EFFORT && (
+                    <span
+                      className="ps-1 text-[11px] text-muted-foreground/70"
+                      title={`Reasoning effort: ${effortLabel(effort)}`}
+                    >
+                      {effortLabel(effort).toLowerCase()}
+                    </span>
+                  )}
                 </>
               )}
+              {stats && <TurnStatsLine stats={stats} />}
             </div>
           )}
         </div>
       </div>
+      {/* The evidence viewer. Rendered only while a chip is open, so an answer with no
+          screenshots costs nothing. */}
+      {openImage && projectId && resolvedImages?.[openImage] && (
+        <ImageRefDialog
+          projectId={projectId}
+          cited={openImage}
+          rel={resolvedImages[openImage]}
+          onClose={() => setOpenImage(null)}
+        />
+      )}
     </div>
   )
 }
@@ -2288,23 +3521,43 @@ const Turn = memo(function Turn({
   m,
   projectId,
   question,
+  slug,
+  index,
 }: {
   m: ChatMessage
   projectId: string
   /** The user message above this one — a plain string, so the memo still holds. */
   question?: string
+  /** Conversation + position, which is how a rating addresses this answer. */
+  slug?: string
+  index?: number
 }) {
   return m.role === 'user' ? (
-    <UserRow text={m.text} images={m.images} projectId={projectId} at={m.at} action={m.action} />
+    <UserRow
+      text={m.text}
+      images={m.images}
+      projectId={projectId}
+      at={m.at}
+      action={m.action}
+      context={m.context}
+    />
   ) : (
     <AssistantRow
       text={m.text}
       tools={m.tools}
+      steps={m.steps}
       failed={m.error}
       at={m.at}
       model={m.model}
+      effort={m.effort}
+      stats={m.stats}
       question={question}
       projectId={projectId}
+      slug={slug}
+      index={index}
+      feedback={m.feedback}
+      refs={m.refs}
+      audit={m.audit}
     />
   )
 })
@@ -2365,8 +3618,14 @@ function ChatHeader({
   onExport?: () => void
 }) {
   const live = !!onRename // a conversation exists (the new-chat screen has nothing to act on)
+  // pe-[6.5rem] keeps this row clear of the FIXED chrome cluster that floats over it on
+  // /chat — NotificationBell (`right-4`) and ThemeToggle (`right-[3.75rem]`), both 2.25rem
+  // wide, so the two together own the rightmost 6rem. `pe-14` (3.5rem) reserved room for one
+  // of them, and the mode badge and this row's own buttons were drawn under the other
+  // (verified on screen: "Read only" was sliced in half by the theme button). If either of
+  // those two moves, this number moves with it.
   return (
-    <div className="flex h-14 shrink-0 items-center gap-3 border-b px-4 pe-14">
+    <div className="flex h-14 shrink-0 items-center gap-3 border-b px-4 pe-[6.5rem]">
       <div className="flex min-w-0 flex-1 items-center gap-2">
         {/* Same treatment as the rail row, or the conversation you just clicked would be
             titled two different ways on the same screen. Rename still seeds the RAW name. */}
@@ -2387,22 +3646,22 @@ function ChatHeader({
         )}
       </div>
 
-      <span
-        title={
-          tools === 'full'
-            ? 'Matches the Terminal page — the CLI’s own model, full permissions, this project’s MCP servers'
-            : 'Fast mode — file tools only and no MCP, so answers start quickly but Claude explores less'
-        }
-        className={cn(
-          'inline-flex shrink-0 items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px]',
-          tools === 'full'
-            ? 'border-amber-500/40 bg-amber-500/10 text-amber-600 dark:text-amber-400'
-            : 'border-border/60 bg-muted/60 text-muted-foreground',
-        )}
-      >
-        <ShieldCheck className="size-3" />
-        {tools === 'full' ? 'Full access' : 'Fast mode'}
-      </span>
+      {/* One source for the wording — see CHAT_MODES. */}
+      {(() => {
+        const mode = modeMeta(tools)
+        return (
+          <span
+            title={mode.title}
+            className={cn(
+              'inline-flex shrink-0 items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px]',
+              mode.pill,
+            )}
+          >
+            <mode.icon className="size-3" />
+            {mode.label}
+          </span>
+        )
+      })()}
 
       {live && (
         <>
@@ -2481,9 +3740,19 @@ function ChatWorkspace({
   const [temporary, setTemporary] = useState(!!restoredTemp)
   const [input, setInput] = useState('')
   const [model, setModel] = useState<string>(() => localStorage.getItem(MODEL_KEY) || 'default')
-  const [tools, setTools] = useState<ChatTools>(() =>
-    localStorage.getItem(TOOLS_KEY) === 'read' ? 'read' : 'full',
-  )
+  const [tools, setTools] = useState<ChatTools>(() => {
+    // Validated against the table, not a string compare: a stored value from before
+    // `write` existed (or a hand-edited one) must fall back to the default, not to a mode
+    // the server would reject.
+    const saved = localStorage.getItem(TOOLS_KEY)
+    return CHAT_MODES.some((m) => m.value === saved) ? (saved as ChatTools) : 'full'
+  })
+  const [effort, setEffort] = useState<ChatEffort>(() => {
+    // Validated against the table for the same reason `tools` is: a hand-edited or
+    // future-dated value must land on the inherit-the-CLI default, never be forwarded.
+    const saved = localStorage.getItem(EFFORT_KEY)
+    return CHAT_EFFORTS.some((e) => e.value === saved) ? (saved as ChatEffort) : DEFAULT_EFFORT
+  })
   /** Files attached to the NEXT message — converted to markdown here in the browser. */
   const [attached, setAttached] = useState<{ name: string; markdown: string }[]>([])
   /** Images pasted/dropped/picked for the NEXT message (see StagedImage). */
@@ -2524,8 +3793,52 @@ function ChatWorkspace({
     /** When it was sent — the saved message gets its `at` from the server, this is the
      *  same stamp for the row that's still streaming, so the time doesn't pop in late. */
     at: string
+    /**
+     * Set by the `settled` frame — the answer is over, the chips are still coming.
+     *
+     * They arrive early on purpose. The model has been known since the CLI's `init` event
+     * and the timings are fixed the moment the reply stops, so making them wait for the
+     * token counts (which genuinely can't exist until the run ends) left the footer blank
+     * through the whole follow-up-chip tail. The values are the SERVER'S, measured once —
+     * this side never computes its own, or the reading would change when `done` lands.
+     */
+    model?: string
+    stats?: TurnStats
   } | null>(null)
+  /**
+   * MESSAGES WAITING THEIR TURN behind the one being answered.
+   *
+   * A full-tools turn legitimately spends minutes grepping and reading, and the follow-up
+   * you think of while watching it is the one worth asking. The composer used to be dead
+   * for all of that (the server answered 409); now the message is accepted and runs next.
+   *
+   * Replaced WHOLESALE by every `queue` frame — the server sends the entire list, never a
+   * delta, so there is one way to be right about it instead of a fold this side could get
+   * out of step with. A local optimistic entry is therefore safe: the next frame overwrites.
+   */
+  const [queued, setQueued] = useState<QueuedChatMessage[]>([])
   const [atBottom, setAtBottom] = useState(true)
+
+  /**
+   * Put messages that never ran back where they came from.
+   *
+   * Stopping a reply — or a turn that failed — cancels whatever was queued behind it, and
+   * those are words the engineer typed. Losing them silently is the one outcome this page
+   * refuses everywhere else (an oversize message is a 413 with the text put back, a stopped
+   * turn still saves its partial answer), so they go into the composer, unless something
+   * has already been typed there.
+   */
+  const restoreDropped = useCallback((dropped?: string[]) => {
+    if (!dropped?.length) return
+    setInput((cur) => (cur.trim() ? cur : dropped.join('\n\n')))
+    toast.info(
+      dropped.length === 1
+        ? 'The queued message was put back in the composer'
+        : `${dropped.length} queued messages were put back in the composer`,
+      { description: 'A reply that stops or fails also cancels anything waiting behind it.' },
+    )
+  }, [])
+
   /** The conversation the rename / delete dialog is about, or null when closed. */
   const [renaming, setRenaming] = useState<{ slug: string; name: string } | null>(null)
   const [deleting, setDeleting] = useState<{ slug: string; name: string } | null>(null)
@@ -2571,6 +3884,9 @@ function ChatWorkspace({
   useEffect(() => {
     localStorage.setItem(TOOLS_KEY, tools)
   }, [tools])
+  useEffect(() => {
+    localStorage.setItem(EFFORT_KEY, effort)
+  }, [effort])
 
   // Leaving the page only stops WATCHING: the turn is registered server-side and runs to
   // completion, so coming back re-attaches (or finds the finished answer) instead of
@@ -2666,20 +3982,33 @@ function ChatWorkspace({
           setPicked(slug)
           setPending({ prompt, answer: '', tools: [], images: [], imageFiles: files, at })
         },
+        // The catch-up ends with the whole queue, so a page that reloaded mid-answer comes
+        // back knowing what is still waiting — not just what is being answered.
+        onQueue: (list) => setQueued(list),
         onDelta: (t) => setPending((p) => (p ? { ...p, answer: p.answer + t } : p)),
         onTool: (call) => setPending((p) => (p ? { ...p, tools: [...p.tools, call] } : p)),
-        onStopped: (saved) => {
+        onSettled: (model, stats) => setPending((p) => (p ? { ...p, model, stats } : p)),
+        onStopped: (saved, dropped) => {
           setPending(null)
+          setQueued([])
+          restoreDropped(dropped)
           if (saved) queryClient.setQueryData(['chat', projectId, saved.slug], saved)
           void queryClient.invalidateQueries({ queryKey: ['chats', projectId] })
         },
-        onDone: (saved) => {
+        onDone: (saved, dropped) => {
+          // Not an unconditional clear — a queued message may be handed this same stream
+          // next, and its own `queue` frame says what remains. `dropped` only arrives when
+          // the turn failed, which does end the queue.
           setPending(null)
+          if (dropped?.length) setQueued([])
+          restoreDropped(dropped)
           queryClient.setQueryData(['chat', projectId, saved.slug], saved)
           void queryClient.invalidateQueries({ queryKey: ['chats', projectId] })
         },
-        onError: () => {
+        onError: (_message, dropped) => {
           setPending(null)
+          setQueued([])
+          restoreDropped(dropped)
           void queryClient.invalidateQueries({ queryKey: ['chat', projectId, slug] })
         },
       },
@@ -2691,7 +4020,7 @@ function ChatWorkspace({
       ac.abort()
       clear()
     }
-  }, [projectId, slug, running, queryClient])
+  }, [projectId, slug, running, restoreDropped, queryClient])
 
   // The `@` menu's source lists. Fetched only once the engineer actually types `@` (it's a
   // disk scan of testing/tickets), then cached for the session by React Query — and not at
@@ -2837,7 +4166,13 @@ function ChatWorkspace({
       const base = text.trim()
       // An image on its own is a real message ("what's wrong here?"), so images alone are
       // enough to send; the server supplies the wording when nothing was typed.
-      if ((!base && !images.length) || streaming) return
+      if (!base && !images.length) return
+      // Sending DURING a turn is allowed — the message waits its turn (see `queued`). The
+      // one case that isn't: the split second before the server has named a brand-new
+      // conversation, when there is no slug to queue into and sending would create a
+      // SECOND chat instead. The Send button is disabled for that window too.
+      const queueing = streaming
+      if (queueing && !openSlug) return
       if (!projectId) {
         toast.error('Pick a project first', {
           description: 'Chat runs Claude inside the active project’s folder.',
@@ -2874,18 +4209,33 @@ function ChatWorkspace({
       setMention(null)
       setAction(null)
       setAtBottom(true)
-      setPending({
-        prompt: base || 'Take a look at the attached screenshot.',
-        answer: '',
-        tools: [],
-        // Previews come from the data URLs already in memory — the files aren't on disk
-        // (and so aren't servable) until the turn finishes.
-        images: sending.map((i) => i.dataUrl),
-        action: sendingAction,
-        at: new Date().toISOString(),
-      })
+      const shown = base || 'Take a look at the attached screenshot.'
+      const sentAt = new Date().toISOString()
+      /** A local stand-in until the server answers with the real id; any `queue` frame wins. */
+      const localId = `local-${sentAt}-${Math.random().toString(36).slice(2, 8)}`
+      if (queueing) {
+        // Show it immediately. The server emits the authoritative list a moment later and
+        // that REPLACES this, so the optimistic row can never linger or double up.
+        setQueued((q) => [
+          ...q,
+          { id: localId, prompt: shown, at: sentAt, images: [], action: sendingAction ?? undefined },
+        ])
+      } else {
+        setPending({
+          prompt: shown,
+          answer: '',
+          tools: [],
+          // Previews come from the data URLs already in memory — the files aren't on disk
+          // (and so aren't servable) until the turn finishes.
+          images: sending.map((i) => i.dataUrl),
+          action: sendingAction,
+          at: sentAt,
+        })
+      }
       const ac = new AbortController()
-      abortRef.current = ac
+      // A queued send is a short POST, not a subscription: it must NOT take over
+      // `abortRef`, which belongs to the stream currently watching the running turn.
+      if (!queueing) abortRef.current = ac
       // The slug this turn belongs to: the open conversation, or whatever the server
       // names the new one (delivered in the `start` frame before any text).
       let targetSlug = openSlug
@@ -2896,6 +4246,7 @@ function ChatWorkspace({
           prompt,
           model,
           tools,
+          effort,
           // Only read when this creates a conversation; a follow-up inherits the one it's
           // sent into, so an existing chat can't be flipped by the toggle mid-thread.
           temporary: !openSlug && temporary ? true : undefined,
@@ -2916,23 +4267,40 @@ function ChatWorkspace({
             // dot would never clear on its own either.
             void queryClient.invalidateQueries({ queryKey: ['chats', projectId] })
           },
+          // The server hands this stream over to a queued message when the current turn
+          // finishes, opening it with the same `resume` frame a re-attaching viewer gets.
+          // So the row for the next question appears here, on the same connection.
+          onResume: ({ prompt: q, at: qAt, images: files }) => {
+            setPending({ prompt: q, answer: '', tools: [], images: [], imageFiles: files, at: qAt })
+          },
+          onQueue: (list) => setQueued(list),
           onDelta: (t) => setPending((p) => (p ? { ...p, answer: p.answer + t } : p)),
           onTool: (call) => setPending((p) => (p ? { ...p, tools: [...p.tools, call] } : p)),
-          onStopped: (saved?: Chat) => {
+          onSettled: (model, stats) => setPending((p) => (p ? { ...p, model, stats } : p)),
+          onStopped: (saved?: Chat, dropped?: string[]) => {
             setPending(null)
+            setQueued([])
+            restoreDropped(dropped)
             if (saved) queryClient.setQueryData(['chat', projectId, saved.slug], saved)
             void queryClient.invalidateQueries({ queryKey: ['chats', projectId] })
           },
-          onDone: (saved: Chat) => {
+          onDone: (saved: Chat, dropped?: string[]) => {
+            // NOT an unconditional `setQueued([])`: a queued message may be starting on this
+            // same stream, and its own `queue` frame is what says what is left behind it.
+            // `dropped` only arrives when the turn failed, which does clear the queue.
             setPending(null)
+            if (dropped?.length) setQueued([])
+            restoreDropped(dropped)
             // Seed the cache from the response so the finished turn appears without a
             // round trip (and the transcript doesn't blink empty in between).
             queryClient.setQueryData(['chat', projectId, saved.slug], saved)
             void queryClient.invalidateQueries({ queryKey: ['chats', projectId] })
           },
-          onError: (message) => {
+          onError: (message, dropped?: string[]) => {
             setPending(null)
+            setQueued([])
             toast.error('The message failed', { description: message })
+            restoreDropped(dropped)
             // A refused message (413 oversize, 409 already answering) never reached the
             // transcript, so clearing the composer would simply lose what was typed — and
             // the longer the message, the more likely it was refused. Put it back, unless
@@ -2943,26 +4311,41 @@ function ChatWorkspace({
           },
         },
         ac.signal,
-      ).catch((err) => {
-        // An abort is the Stop button, not a failure — the server still saves whatever
-        // had been written, so refetch rather than reporting an error.
-        setPending(null)
-        if ((err as Error)?.name !== 'AbortError') {
-          toast.error('The message failed', { description: (err as Error)?.message })
-        }
-        void queryClient.invalidateQueries({ queryKey: ['chat', projectId, targetSlug] })
-        void queryClient.invalidateQueries({ queryKey: ['chats', projectId] })
-      })
-      .finally(() => {
-        // Release the slot so the re-attach effect can take over a later turn.
-        if (abortRef.current === ac) abortRef.current = null
-      })
+      )
+        .then((r) => {
+          // Accepted but waiting: swap the optimistic row for the server's identity so its
+          // cancel button addresses the real message. Any `queue` frame overrides this.
+          if (r?.kind === 'queued') {
+            setQueued((q) => q.map((m) => (m.id === localId ? { ...m, id: r.id } : m)))
+          } else if (r?.kind === 'failed' && queueing) {
+            // Refused (queue full, conversation gone): take the row back off screen —
+            // `onError` has already put the text back in the composer.
+            setQueued((q) => q.filter((m) => m.id !== localId))
+          }
+        })
+        .catch((err) => {
+          // An abort is the Stop button, not a failure — the server still saves whatever
+          // had been written, so refetch rather than reporting an error.
+          if (queueing) setQueued((q) => q.filter((m) => m.id !== localId))
+          else setPending(null)
+          if ((err as Error)?.name !== 'AbortError') {
+            toast.error('The message failed', { description: (err as Error)?.message })
+          }
+          void queryClient.invalidateQueries({ queryKey: ['chat', projectId, targetSlug] })
+          void queryClient.invalidateQueries({ queryKey: ['chats', projectId] })
+        })
+        .finally(() => {
+          // Release the slot so the re-attach effect can take over a later turn. A queued
+          // send never owned it, so this is a no-op for one.
+          if (abortRef.current === ac) abortRef.current = null
+        })
     },
     [
       projectId,
       openSlug,
       model,
       tools,
+      effort,
       temporary,
       action,
       streaming,
@@ -2970,6 +4353,7 @@ function ChatWorkspace({
       images,
       mentions,
       rememberTemp,
+      restoreDropped,
       queryClient,
     ],
   )
@@ -2994,6 +4378,8 @@ function ChatWorkspace({
     // its key still marked as watched and never subscribe again.
     attachedRef.current = null
     setPending(null)
+    // The queue belongs to the conversation being left, not to this page.
+    setQueued([])
   }, [])
 
   /**
@@ -3006,8 +4392,16 @@ function ChatWorkspace({
   const stop = useCallback(() => {
     abortRef.current?.abort()
     setPending(null)
+    // Stop halts the whole conversation, queue included. Aborting the local subscription
+    // means the `stopped` frame (which carries the dropped text) may not reach us, so the
+    // rows go now and `stopChat`'s own response is what the toast below reports.
+    setQueued([])
     if (!openSlug) return
     void stopChat(projectId, openSlug)
+      // Messages that were waiting behind the stopped turn never ran, and this response is
+      // the copy of them this client actually receives: Stop aborts the local subscription
+      // above, so the `stopped` FRAME (which carries the same list) is never read here.
+      .then((r) => restoreDropped(r.dropped))
       .catch(() => {
         /* already finished — the transcript refresh below covers it */
       })
@@ -3015,7 +4409,7 @@ function ChatWorkspace({
         void queryClient.invalidateQueries({ queryKey: ['chat', projectId, openSlug] })
         void queryClient.invalidateQueries({ queryKey: ['chats', projectId] })
       })
-  }, [projectId, openSlug, queryClient])
+  }, [projectId, openSlug, restoreDropped, queryClient])
 
   /**
    * Stage image files (paste, drop, or the file picker). Images can't go through
@@ -3371,6 +4765,8 @@ function ChatWorkspace({
                 m={m}
                 projectId={projectId}
                 question={messages[i - 1]?.role === 'user' ? messages[i - 1]?.text : undefined}
+                slug={openSlug ?? undefined}
+                index={i}
               />
             ))}
             {pending && (
@@ -3388,10 +4784,27 @@ function ChatWorkspace({
                   calls={pending.tools}
                   streaming
                   at={pending.at}
+                  model={pending.model}
+                  stats={pending.stats}
                   question={pending.prompt}
                   projectId={projectId}
                 />
               </>
+            )}
+            {/* Waiting their turn, under the answer they'll follow. Shown as the questions
+                they are, dimmed — they haven't been asked yet. */}
+            {queued.length > 0 && (
+              <QueuedRows
+                items={queued}
+                onCancel={(id) => {
+                  if (!projectId || !openSlug) return
+                  // Optimistic: the row goes now, and the server's `queue` frame confirms.
+                  setQueued((q) => q.filter((m) => m.id !== id))
+                  void cancelQueuedChat(projectId, openSlug, id).catch(() => {
+                    // 404 = it already started, which Stop covers; the frame will correct us.
+                  })
+                }}
+              />
             )}
             {/* Inside the scroller, under the newest answer — it belongs to that answer,
                 and pinning it above the composer would cover the transcript instead. */}
@@ -3501,7 +4914,15 @@ function ChatWorkspace({
                 </span>
               </span>
               <span>•</span>
-              <span>{tools === 'full' ? 'Full tools' : 'Fast mode'}</span>
+              <span>{modeMeta(tools).label}</span>
+              {/* Only when it isn't the default level — a line that always says "Medium
+                  effort" teaches nobody anything. */}
+              {effort !== DEFAULT_EFFORT && (
+                <>
+                  <span>•</span>
+                  <span>{effortLabel(effort)} effort</span>
+                </>
+              )}
               {isTemporary && (
                 <>
                   <span>•</span>
@@ -3709,11 +5130,53 @@ function ChatWorkspace({
                     <SelectContent>
                       {MODELS.map((m) => (
                         <SelectItem key={m.value} value={m.value}>
-                          {m.label}
+                          {/* The trigger renders its own explicit label (above), so the
+                              second line lives here without ever leaking into the pill. */}
+                          <span className="flex flex-col items-start gap-0.5">
+                            <span>{m.label}</span>
+                            {m.hint && (
+                              <span className="text-xs text-muted-foreground">{m.hint}</span>
+                            )}
+                          </span>
                         </SelectItem>
                       ))}
                     </SelectContent>
                   </Select>
+
+                  {/* Effort sits next to the model because it is the second half of the same
+                      decision — which brain, and how hard it thinks. Same Select as the
+                      model picker rather than a nested "Model › Effort" sheet: two flat
+                      pills say what is armed without a click, and the label collapses to
+                      the icon on narrow screens exactly like the model's does. */}
+                  <Select value={effort} onValueChange={(v) => setEffort(v as ChatEffort)}>
+                    <SelectTrigger
+                      size="sm"
+                      className="w-fit rounded-full focus:ring-0!"
+                      aria-label="Reasoning effort"
+                    >
+                      <Gauge className="size-4 text-muted-foreground" />
+                      <div className="hidden lg:flex">
+                        <SelectValue>{effortLabel(effort)}</SelectValue>
+                      </div>
+                    </SelectTrigger>
+                    <SelectContent>
+                      {CHAT_EFFORTS.map((e) => (
+                        <SelectItem key={e.value} value={e.value}>
+                          <span className="flex flex-col items-start gap-0.5">
+                            <span>{e.label}</span>
+                            {e.hint && (
+                              <span className="text-xs text-muted-foreground">{e.hint}</span>
+                            )}
+                          </span>
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+
+                  {/* The reference's mic slot, moved next to the model picker: a voice
+                      button would be decoration, and what a turn may DO belongs beside
+                      which model does it — and beside how hard it thinks. */}
+                  <ComposerModePicker tools={tools} onPick={setTools} />
                 </div>
 
                 <div className="flex gap-2">
@@ -3754,51 +5217,41 @@ function ChatWorkspace({
                     </TooltipContent>
                   </Tooltip>
 
-                  {/* The reference's mic slot. A voice button would be decoration; the
-                      control that actually matters here is what a turn may DO. */}
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Button
-                        variant="outline"
-                        size="icon"
-                        onClick={() => setTools(tools === 'read' ? 'full' : 'read')}
-                        aria-label={tools === 'full' ? 'Full tools' : 'Fast mode'}
-                        className={cn(
-                          'size-9 rounded-full',
-                          tools === 'full' &&
-                            'border-amber-500/40 bg-amber-500/15 text-amber-600 hover:bg-amber-500/25 dark:text-amber-400',
-                        )}
-                      >
-                        {tools === 'full' ? (
-                          <Wrench className="size-4" />
-                        ) : (
-                          <ShieldCheck className="size-4" />
-                        )}
-                      </Button>
-                    </TooltipTrigger>
-                    <TooltipContent className="max-w-xs">
-                      {tools === 'full'
-                        ? 'Full tools — the same setup the Terminal page runs: full permissions and this project’s MCP servers. Most accurate, ~20s slower to start. Click for fast mode.'
-                        : 'Fast mode — file tools only, MCP servers skipped, so answers start in about a second. Claude explores less, so expect shallower answers. Click for full tools.'}
-                    </TooltipContent>
-                  </Tooltip>
-
-                  {streaming ? (
-                    <Button
-                      size="icon"
-                      variant="destructive"
-                      onClick={() => stop()}
-                      aria-label="Stop generating"
-                      className="size-9 rounded-full"
-                    >
-                      <Square className="size-4" />
-                    </Button>
+                  {/* The button follows WHAT IS TYPED, not whether a reply is running: with
+                      something in the composer it sends (queuing behind the current turn),
+                      empty during a turn it stops. Keying it on `streaming` alone is what
+                      made the composer dead for the whole of a ten-minute answer. */}
+                  {streaming && !input.trim() && !images.length ? (
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Button
+                          size="icon"
+                          variant="destructive"
+                          onClick={() => stop()}
+                          aria-label="Stop generating"
+                          className="size-9 rounded-full"
+                        >
+                          <Square className="size-4" />
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent className="max-w-xs">
+                        Stop this reply. Whatever has been written so far is kept, and anything
+                        still queued behind it is cancelled.
+                      </TooltipContent>
+                    </Tooltip>
                   ) : (
                     <Button
                       size="icon"
                       onClick={() => send(input)}
-                      disabled={(!input.trim() && !images.length) || !projectId}
-                      aria-label="Send"
+                      disabled={
+                        (!input.trim() && !images.length) ||
+                        !projectId ||
+                        // The split second before a brand-new conversation has a slug: there
+                        // is nothing to queue into yet, and sending would start a SECOND chat.
+                        (streaming && !openSlug) ||
+                        queued.length >= MAX_QUEUED
+                      }
+                      aria-label={streaming ? 'Send — waits for the current reply' : 'Send'}
                       className="size-9 rounded-full"
                     >
                       <ArrowUp className="size-4" />

@@ -200,6 +200,7 @@ qcRouter.post('/run', (req, res) => {
     testTarget,
     deviceId,
     kind,
+    headless,
   } = req.body ?? {}
   if (typeof projectId !== 'string' || !projectId.trim()) {
     return res.status(400).json({ error: 'projectId is required' })
@@ -254,6 +255,11 @@ qcRouter.post('/run', (req, res) => {
     target !== 'web' && typeof deviceId === 'string' && /^[\w.:@-]{1,80}$/.test(deviceId.trim())
       ? deviceId.trim()
       : undefined
+  // Per-run browser mode: only the web target launches a browser the portal can put in
+  // headless mode (the mobile targets drive a real device via Maestro). Anything other
+  // than a boolean means "don't override the project's .mcp.json" — the old behavior.
+  const headlessClean =
+    target === 'web' && typeof headless === 'boolean' ? headless : undefined
   try {
     const summary = startRun({
       projectId: projectId.trim(),
@@ -267,6 +273,7 @@ qcRouter.post('/run', (req, res) => {
       testTarget: target,
       deviceId: deviceClean,
       kind: runKind,
+      headless: headlessClean,
     })
     return res.status(201).json({ runId: summary.id, ...summary })
   } catch (err) {

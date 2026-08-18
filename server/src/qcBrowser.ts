@@ -92,6 +92,37 @@ export function writePlaywrightMcpConfig(): string | null {
   }
 }
 
+/**
+ * The HEADLESS counterpart of the file above, for a run the engineer asked to execute
+ * without a visible window (the per-run checkbox on `/qc-run`).
+ *
+ * It cannot reuse the headed config: that one says `viewport: null` (fill the real
+ * window) plus `--start-maximized`, and headless Chrome has no window to fill — the
+ * page then renders at Chrome's 800x600 default, which is a mobile-ish layout that
+ * fires the wrong breakpoints and makes every screenshot the wrong shape. So headless
+ * pins a real desktop viewport instead (same 1440x900 the API scanner uses).
+ */
+export function playwrightHeadlessMcpConfigPath(): string {
+  return path.join(path.dirname(DB_PATH), 'playwright-mcp-headless.json')
+}
+
+export function writeHeadlessPlaywrightMcpConfig(): string | null {
+  const file = playwrightHeadlessMcpConfigPath()
+  const body = {
+    browser: {
+      launchOptions: { headless: true },
+      contextOptions: { viewport: { width: 1440, height: 900 } },
+    },
+  }
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true })
+    fs.writeFileSync(file, JSON.stringify(body, null, 2) + '\n', 'utf8')
+    return file
+  } catch {
+    return null
+  }
+}
+
 /** Well-known install locations, per platform. First hit wins. */
 function executableCandidates(channel: QcBrowserChannel): string[] {
   const home = os.homedir()

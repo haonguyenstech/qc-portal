@@ -129,6 +129,12 @@ export function runQc(
     // device — otherwise agree on a folder name and the second overwrites the first's
     // report, issues and screenshots. Absent = the pre-token behavior.
     outDirSuffix?: string
+    // Per-run MCP config (see playwrightRunMode.ts): a complete copy of the project's
+    // MCP servers with only the Playwright browser mode swapped, so ONE run can be
+    // headless (or headed) without rewriting the project's .mcp.json. Passed with
+    // `--strict-mcp-config` — which is why the file has to hold EVERY server, not just
+    // Playwright. Absent = the project's own .mcp.json, loaded from the cwd as always.
+    mcpConfigPath?: string
     resumeSessionId?: string // continue a previously paused session instead of starting fresh
     totpHint?: string // prompt block telling the run how to fetch live authenticator (2FA) codes
   },
@@ -384,6 +390,10 @@ export function runQc(
   }
   if (opts.resumeSessionId) {
     args.push('--resume', opts.resumeSessionId)
+  }
+  // Only present when this run's browser mode differs from the project's saved one.
+  if (opts.mcpConfigPath) {
+    args.push('--mcp-config', opts.mcpConfigPath, '--strict-mcp-config')
   }
 
   const child = spawn(CLAUDE_BIN, args, {
