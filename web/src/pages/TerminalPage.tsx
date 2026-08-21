@@ -490,7 +490,7 @@ function TerminalTabs({
           aria-label="New terminal"
           title={canAdd ? 'New terminal' : `At most ${MAX_TABS} terminals at once`}
           className={cn(
-            'ml-0.5 flex size-7 shrink-0 items-center justify-center rounded-xl text-zinc-500 transition-colors',
+            'ml-0.5 flex size-7 shrink-0 items-center justify-center rounded-full text-zinc-500 transition-colors',
             canAdd ? 'hover:bg-white/10 hover:text-zinc-100 active:scale-[0.95]' : 'opacity-40',
           )}
         >

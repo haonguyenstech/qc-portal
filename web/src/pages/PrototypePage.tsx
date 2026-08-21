@@ -959,7 +959,7 @@ function PreviewPane({
                 size="icon"
                 onClick={captureImage}
                 disabled={!html || capturing}
-                className="size-8 rounded-lg text-muted-foreground hover:text-foreground"
+                className="size-8 rounded-full text-muted-foreground hover:text-foreground"
               >
                 {capturing ? <Loader2 className="size-3.5 animate-spin" /> : <Camera className="size-3.5" />}
               </Button>
@@ -971,7 +971,7 @@ function PreviewPane({
               size="icon"
               onClick={onDownload}
               disabled={!html}
-              className="size-8 rounded-lg text-muted-foreground hover:text-foreground"
+              className="size-8 rounded-full text-muted-foreground hover:text-foreground"
               aria-label="Download HTML"
             >
               <Download className="size-3.5" />
@@ -984,7 +984,7 @@ function PreviewPane({
                 size="icon"
                 onClick={copyCode}
                 disabled={!code}
-                className="size-8 rounded-lg text-muted-foreground hover:text-foreground"
+                className="size-8 rounded-full text-muted-foreground hover:text-foreground"
               >
                 {copied ? <Check className="size-3.5 text-emerald-500" /> : <Copy className="size-3.5" />}
               </Button>
@@ -996,7 +996,7 @@ function PreviewPane({
               size="icon"
               onClick={() => setNonce((n) => n + 1)}
               disabled={!html || view !== 'preview'}
-              className="size-8 rounded-lg text-muted-foreground hover:text-foreground"
+              className="size-8 rounded-full text-muted-foreground hover:text-foreground"
             >
               <RefreshCw className="size-3.5" />
             </Button>
@@ -1007,7 +1007,7 @@ function PreviewPane({
               size="icon"
               onClick={() => html && openInNewTab(html)}
               disabled={!html}
-              className="size-8 rounded-lg text-muted-foreground hover:text-foreground"
+              className="size-8 rounded-full text-muted-foreground hover:text-foreground"
             >
               <ExternalLink className="size-3.5" />
             </Button>
@@ -1029,7 +1029,7 @@ function PreviewPane({
             value={String(shownVersion)}
             onValueChange={(v) => onViewVersion(Number(v) === latestVersion ? null : Number(v))}
           >
-            <SelectTrigger className="h-7 w-[132px] rounded-lg text-xs shadow-none">
+            <SelectTrigger className="h-7 w-[132px] text-xs shadow-none">
               <span className="truncate">
                 v{shownVersion}
                 {shownVersion === latestVersion ? ' · latest' : ''}
@@ -1590,7 +1590,7 @@ function CompareDialog({
 
   const picker = (value: number, onChange: (n: number) => void) => (
     <Select value={String(value)} onValueChange={(v) => onChange(Number(v))}>
-      <SelectTrigger className="h-8 w-full rounded-lg text-xs shadow-none">
+      <SelectTrigger className="h-8 w-full text-xs shadow-none">
         <span className="truncate">
           v{value}
           {value === latest ? ' · latest' : ''}
@@ -1700,7 +1700,7 @@ function CommentDialog({
           }}
           placeholder="What should change here? e.g. “make this a secondary button”, “this label should read Member ID”"
           rows={3}
-          className="min-h-[84px] resize-y rounded-xl"
+          className="min-h-[84px] resize-y "
         />
         <DialogFooter>
           <Button variant="ghost" onClick={onCancel} className="rounded-full">
@@ -1915,7 +1915,7 @@ function QuestionsPanel({
                 disabled={disabled}
                 placeholder="Your answer…"
                 rows={1}
-                className="max-h-24 min-h-[32px] resize-y rounded-lg bg-background py-1.5 text-[11px]"
+                className="max-h-24 min-h-[32px] resize-y bg-background py-1.5 text-[11px]"
               />
             </div>
           ))}
@@ -2382,7 +2382,7 @@ function PrototypePage({ projectId }: { projectId: string }) {
 
   const modelPicker = (
     <Select value={model} onValueChange={setModel}>
-      <SelectTrigger className="h-8 w-[104px] rounded-lg text-xs shadow-none">
+      <SelectTrigger className="h-8 w-[104px] text-xs shadow-none">
         {/* Compact trigger: just the model name, not the full description. */}
         <span className="truncate">{MODEL_INFO[model as keyof typeof MODEL_INFO]?.label ?? model}</span>
       </SelectTrigger>
@@ -2444,7 +2444,7 @@ function PrototypePage({ projectId }: { projectId: string }) {
               variant="ghost"
               size="icon"
               onClick={newPrototype}
-              className="size-7 rounded-lg text-muted-foreground hover:text-foreground"
+              className="size-7 rounded-full text-muted-foreground hover:text-foreground"
               title="New prototype"
             >
               <Plus className="size-4" />
@@ -3005,7 +3005,7 @@ function PrototypePage({ projectId }: { projectId: string }) {
                 }}
                 placeholder="Prototype name"
                 rows={2}
-                className="min-h-[64px] w-full resize-y rounded-lg"
+                className="min-h-[64px] w-full resize-y "
               />
               <div className="flex justify-end">
                 <Button

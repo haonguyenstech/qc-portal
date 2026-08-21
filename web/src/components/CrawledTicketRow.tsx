@@ -1,6 +1,5 @@
 import {
   Bug,
-  Check,
   CheckCircle2,
   ChevronDown,
   ChevronRight,
@@ -13,6 +12,7 @@ import { cn } from '@/lib/utils'
 import { relativeTime } from '@/lib/format'
 import { priorityClass } from '@/lib/crawled-tickets'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { CheckboxIndicator } from '@/components/ui/checkbox'
 import type { CrawledTicket } from '@/lib/api'
 
 /** Sticky status header for a group of crawled tickets. */
@@ -89,15 +89,7 @@ export function CrawledTicketRow({
         selectLocked && 'opacity-60',
       )}
     >
-      <span
-        className={cn(
-          'flex size-4 shrink-0 items-center justify-center rounded-[5px] border transition-colors',
-          selected ? 'border-primary bg-primary text-primary-foreground' : 'border-muted-foreground/40',
-        )}
-        aria-hidden
-      >
-        {selected && <Check className="size-3" />}
-      </span>
+      <CheckboxIndicator checked={selected} />
       <Ticket className="size-3.5 shrink-0 text-muted-foreground" />
       <span className="flex min-w-0 flex-1 items-center gap-2">
         <span className="shrink-0 font-mono text-xs font-medium">
@@ -135,7 +127,7 @@ export function CrawledTicketRow({
           type="button"
           onClick={onToggleExpand}
           aria-label={isOpen ? 'Collapse subtasks' : 'Expand subtasks'}
-          className="flex size-5 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:text-foreground"
+          className="flex size-5 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:text-foreground"
         >
           {isOpen ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />}
         </button>

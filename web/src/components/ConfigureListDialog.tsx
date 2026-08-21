@@ -122,7 +122,7 @@ export function ConfigureListDialog({
               Workspace
             </Label>
             <Select value={team} onValueChange={setTeam}>
-              <SelectTrigger className="h-10 w-full rounded-xl">
+              <SelectTrigger className="h-10 w-full ">
                 <SelectValue placeholder="Choose a workspace" />
               </SelectTrigger>
               <SelectContent>
@@ -141,7 +141,7 @@ export function ConfigureListDialog({
               Space
             </Label>
             <Select value={space} onValueChange={setSpace} disabled={!team || spacesLoading}>
-              <SelectTrigger className="h-10 w-full rounded-xl">
+              <SelectTrigger className="h-10 w-full ">
                 <SelectValue placeholder={spacesLoading ? 'Loading…' : 'Choose a space'} />
               </SelectTrigger>
               <SelectContent>
@@ -161,7 +161,7 @@ export function ConfigureListDialog({
               {listsLoading && <Loader2 className="size-3 animate-spin text-muted-foreground" />}
             </Label>
             <Select value={listId} onValueChange={setListId} disabled={!space || listsLoading}>
-              <SelectTrigger className="h-10 w-full rounded-xl">
+              <SelectTrigger className="h-10 w-full ">
                 <SelectValue placeholder={listsLoading ? 'Loading…' : 'Choose a list'} />
               </SelectTrigger>
               <SelectContent>

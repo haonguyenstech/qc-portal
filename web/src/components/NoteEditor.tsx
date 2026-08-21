@@ -329,7 +329,7 @@ export default function NoteEditor({
                 placeholder="https://…"
                 autoFocus
                 aria-label="Link URL"
-                className="h-8 flex-1 rounded-lg border-border/70 bg-background text-xs"
+                className="h-8 flex-1 border-border/70 bg-background text-xs"
               />
               <button
                 type="button"

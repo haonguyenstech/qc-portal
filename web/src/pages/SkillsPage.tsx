@@ -1208,7 +1208,7 @@ export default function SkillsPage() {
                   placeholder="Search skills…"
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
-                  className="h-11 rounded-full pl-9 text-sm shadow-none"
+                  className="h-11 pl-9 text-sm shadow-none"
                 />
               </div>
             </div>

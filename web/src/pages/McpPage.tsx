@@ -48,6 +48,7 @@ import {
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { Checkbox } from '@/components/ui/checkbox'
 import {
   addMcp,
   listMcp,
@@ -1324,7 +1325,7 @@ function ConnectServices({
                     value={jiraUrl}
                     onChange={(e) => setJiraUrl(e.target.value)}
                     aria-label="Jira site URL"
-                    className="h-9 rounded-xl text-xs"
+                    className="h-9 text-xs"
                   />
                 </Field>
                 <Field label="Account email">
@@ -1334,7 +1335,7 @@ function ConnectServices({
                     value={jiraEmail}
                     onChange={(e) => setJiraEmail(e.target.value)}
                     aria-label="Jira account email"
-                    className="h-9 rounded-xl text-xs"
+                    className="h-9 text-xs"
                   />
                 </Field>
               </>
@@ -1349,7 +1350,7 @@ function ConnectServices({
                     value={azureOrgUrl}
                     onChange={(e) => setAzureOrgUrl(e.target.value)}
                     aria-label="Azure DevOps organization URL"
-                    className="h-9 rounded-xl text-xs"
+                    className="h-9 text-xs"
                   />
                 </Field>
                 <Field label="Default project (optional)">
@@ -1359,7 +1360,7 @@ function ConnectServices({
                     value={azureProject}
                     onChange={(e) => setAzureProject(e.target.value)}
                     aria-label="Azure DevOps default project"
-                    className="h-9 rounded-xl text-xs"
+                    className="h-9 text-xs"
                   />
                 </Field>
               </>
@@ -1376,7 +1377,7 @@ function ConnectServices({
                     if (e.key === 'Enter' && canSave) saveToken.mutate(provider)
                   }}
                   aria-label={`${meta.label} API token`}
-                  className="h-9 rounded-xl pr-9 font-mono text-xs"
+                  className="h-9 pr-9 font-mono text-xs"
                 />
                 <button
                   type="button"
@@ -1496,11 +1497,9 @@ function ConnectServices({
             <div className="mt-auto space-y-2">
             <label className="flex items-center justify-between rounded-xl bg-muted/60 px-3 py-2 text-xs text-muted-foreground">
               <span>Headless</span>
-              <input
-                type="checkbox"
+              <Checkbox
                 checked={playwrightHeadless}
                 onChange={(e) => setPlaywrightHeadless(e.target.checked)}
-                className="h-4 w-4 accent-primary"
               />
             </label>
             <Button

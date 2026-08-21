@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import {
   AlertCircle,
   AlertTriangle,
+  Bug,
   Boxes,
   CheckCircle2,
   ChevronRight,
@@ -20,8 +22,10 @@ import {
   Pencil,
   Plus,
   Radar,
+  Route,
   Search,
   Send,
+  ListChecks,
   ShieldAlert,
   Sparkles,
   TerminalSquare,
@@ -32,6 +36,7 @@ import {
   X,
   XCircle,
   Zap,
+  type LucideIcon,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -45,6 +50,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { Checkbox } from '@/components/ui/checkbox'
 import {
   Dialog,
   DialogContent,
@@ -56,10 +62,12 @@ import {
 import { OpenFolderButton } from '@/components/OpenFolderButton'
 import { useProjects } from '@/lib/project-context'
 import { cn } from '@/lib/utils'
-import { parseCurl, toCurl } from '@/lib/curl'
+import { toCurl } from '@/lib/curl'
+import { CurlImportDialog } from '@/components/CurlImportDialog'
+import { deriveName, emptyDraft, uniqueName, type ApiDraft } from '@/lib/apiDraft'
 import { scanResponse, type ApiFinding, type Severity } from '@/lib/apiChecks'
 import { evaluateAssertions, getJsonPath, type AssertionResult } from '@/lib/apiAssert'
-import { ApiFlowsCard } from '@/components/ApiFlowPanel'
+import { ApiFlowsWorkspace } from '@/components/ApiFlowPanel'
 import {
   aiCheckApi,
   captureApiVariable,
@@ -69,6 +77,7 @@ import {
   getApiResult,
   getApiScan,
   getScanAvailable,
+  listApiFlows,
   listApiRequests,
   listApiResults,
   openApiTestsFolder,
@@ -165,24 +174,10 @@ const ASSERTION_LABELS: Record<ApiAssertionType, string> = {
   'time-below': 'Response time < (ms)',
 }
 
-// The request the builder edits. `group` (the module a saved request is filed under)
-// is deliberately NOT part of it — it's collection organization, changed from the
-// saved list, and a PUT without it keeps whatever the server has on disk.
-type Draft = Omit<ApiRequestDef, 'name' | 'savedAt' | 'group'>
-
-function emptyDraft(): Draft {
-  return {
-    method: 'GET',
-    url: '',
-    query: [],
-    headers: [],
-    bodyMode: 'none',
-    body: '',
-    assertions: [{ id: 'a0', type: 'status-2xx', target: '', expected: '', enabled: true }],
-    aiExpect: '',
-    captures: [],
-  }
-}
+// `Draft` / `emptyDraft` / `deriveName` / `uniqueName` live in `lib/apiDraft.ts` — the
+// Flows tab creates saved requests too (Add request → Import cURL), and the naming rules
+// have to be the same code on both sides, not a copy.
+type Draft = ApiDraft
 
 /** The draft-relevant slice of a saved request (drops name/savedAt) for equality checks. */
 function draftOf(r: ApiRequestDef): Draft {
@@ -223,22 +218,14 @@ function requestKey(r: { method: string; url: string; query: ApiKV[] }): string 
   return `${r.method} ${composedUrl(r)}`
 }
 
-/** A readable, filename-safe name derived from a request (server NAME_RE: [\w .-]). */
-function deriveName(d: Draft): string {
-  let path = d.url
-  try {
-    const u = new URL(d.url)
-    path = u.pathname && u.pathname !== '/' ? u.pathname : u.host
-  } catch {
-    /* schemeless URL — use it as typed */
-  }
-  const base = `${d.method} ${path}`
-    .replace(/[^\w .-]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, 60)
-  return base || d.method
-}
+/**
+ * "New request" creates the record immediately, so it needs a name before it has a URL
+ * to derive one from. Those placeholder names are recognisable, and the first Send
+ * upgrades them to the derived `METHOD /path` name — see `handleSend`.
+ */
+const PLACEHOLDER_NAME = 'New request'
+const isPlaceholderName = (name: string) =>
+  name === PLACEHOLDER_NAME || new RegExp(`^${PLACEHOLDER_NAME} \\d+$`).test(name)
 
 // ---------------------------------------------------------------- modules (groups)
 
@@ -312,24 +299,22 @@ function KVEditor({
       )}
       {rows.map((r, i) => (
         <div key={i} className="flex items-center gap-2">
-          <input
-            type="checkbox"
+          <Checkbox
             checked={r.enabled}
             onChange={(e) => update(i, { enabled: e.target.checked })}
-            className="size-4 shrink-0 rounded border-border accent-primary"
             aria-label="Enabled"
           />
           <Input
             value={r.key}
             onChange={(e) => update(i, { key: e.target.value })}
             placeholder={keyPlaceholder}
-            className="h-9 flex-1 rounded-lg font-mono text-xs shadow-none"
+            className="h-9 flex-1 font-mono text-xs shadow-none"
           />
           <Input
             value={r.value}
             onChange={(e) => update(i, { value: e.target.value })}
             placeholder={valuePlaceholder}
-            className="h-9 flex-[2] rounded-lg font-mono text-xs shadow-none"
+            className="h-9 flex-[2] font-mono text-xs shadow-none"
           />
           <Button
             variant="ghost"
@@ -504,11 +489,9 @@ function AssertionEditor({
                 )}
               >
                 <div className="flex flex-wrap items-center gap-2">
-                  <input
-                    type="checkbox"
+                  <Checkbox
                     checked={a.enabled}
                     onChange={(e) => update(i, { enabled: e.target.checked })}
-                    className="size-4 shrink-0 rounded border-border accent-primary"
                     aria-label={a.enabled ? 'Enabled — click to skip' : 'Disabled — click to enable'}
                     title={a.enabled ? 'Enabled' : 'Disabled (skipped)'}
                   />
@@ -516,7 +499,7 @@ function AssertionEditor({
                     value={a.type}
                     onValueChange={(v) => update(i, { type: v as ApiAssertionType })}
                   >
-                    <SelectTrigger className="h-9 w-[180px] shrink-0 rounded-lg text-xs shadow-none">
+                    <SelectTrigger className="h-9 w-[180px] shrink-0 text-xs shadow-none">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
@@ -536,7 +519,7 @@ function AssertionEditor({
                           ? 'data.items[0].id'
                           : 'Header-Name'
                       }
-                      className="h-9 min-w-0 flex-1 rounded-lg font-mono text-xs shadow-none"
+                      className="h-9 min-w-0 flex-1 font-mono text-xs shadow-none"
                     />
                   )}
                   {isEquals(a.type) && (
@@ -555,7 +538,7 @@ function AssertionEditor({
                               ? '200'
                               : 'expected value'
                       }
-                      className="h-9 min-w-0 flex-1 rounded-lg font-mono text-xs shadow-none"
+                      className="h-9 min-w-0 flex-1 font-mono text-xs shadow-none"
                     />
                   )}
                   {r && (
@@ -674,14 +657,14 @@ function CaptureEditor({
                 value={c.jsonPath}
                 onChange={(e) => update(i, { jsonPath: e.target.value })}
                 placeholder="data.token"
-                className="h-9 min-w-0 flex-1 rounded-lg font-mono text-xs shadow-none"
+                className="h-9 min-w-0 flex-1 font-mono text-xs shadow-none"
               />
               <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />
               <Input
                 value={c.varName}
                 onChange={(e) => update(i, { varName: e.target.value })}
                 placeholder="token"
-                className="h-9 min-w-0 flex-1 rounded-lg font-mono text-xs shadow-none"
+                className="h-9 min-w-0 flex-1 font-mono text-xs shadow-none"
               />
               <Button
                 type="button"
@@ -873,91 +856,6 @@ function ResponseView({ res }: { res: ApiSendResult }) {
   )
 }
 
-// ---------------------------------------------------------------- cURL import
-
-function CurlImportDialog({
-  open,
-  onOpenChange,
-  onImport,
-}: {
-  open: boolean
-  onOpenChange: (v: boolean) => void
-  onImport: (draft: Draft) => void
-}) {
-  const [text, setText] = useState('')
-  const [error, setError] = useState<string | null>(null)
-  const doImport = () => {
-    const parsed = parseCurl(text)
-    if (!parsed) {
-      setError('Could not find a URL in that command. Paste a full curl command.')
-      return
-    }
-    onImport({
-      method: parsed.method,
-      url: parsed.url,
-      query: parsed.query,
-      headers: parsed.headers,
-      bodyMode: parsed.bodyMode,
-      body: parsed.body,
-      assertions: [{ id: 'a0', type: 'status-2xx', target: '', expected: '', enabled: true }],
-      aiExpect: '',
-      captures: [],
-    })
-    setText('')
-    setError(null)
-    onOpenChange(false)
-  }
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[85vh] overflow-y-auto rounded-3xl sm:max-w-xl">
-        <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
-            <TerminalSquare className="size-4 text-primary" />
-            Import from cURL
-          </DialogTitle>
-          <DialogDescription>
-            Paste a <span className="font-mono">curl</span> command — from your browser's “Copy as
-            cURL”, Postman, or the API docs. Method, URL, headers, query and body are filled in.
-          </DialogDescription>
-        </DialogHeader>
-        <Textarea
-          value={text}
-          onChange={(e) => {
-            setText(e.target.value)
-            setError(null)
-          }}
-          placeholder={`curl 'https://api.example.com/login' \\\n  -H 'Content-Type: application/json' \\\n  --data '{"email":"a@b.co","password":"…"}'`}
-          // The shadcn Textarea is `field-sizing-content`, so it grows to fit whatever is
-          // pasted. A real browser "Copy as cURL" (25 headers + a body) grew it past 1100px,
-          // which pushed Cancel/Import below the fold and the ✕ above it — the dialog is
-          // centred with translate-y-[-50%] and doesn't scroll. Cap it and scroll inside.
-          className="max-h-[45vh] min-h-[160px] overflow-y-auto rounded-xl font-mono text-xs shadow-none"
-          spellCheck={false}
-          autoFocus
-        />
-        {error && (
-          <p className="flex items-center gap-1.5 text-xs text-destructive">
-            <AlertCircle className="size-3.5" />
-            {error}
-          </p>
-        )}
-        <DialogFooter>
-          <Button variant="ghost" onClick={() => onOpenChange(false)} className="rounded-full">
-            Cancel
-          </Button>
-          <Button
-            onClick={doImport}
-            disabled={!text.trim()}
-            className="rounded-full active:scale-[0.98]"
-          >
-            Import
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  )
-}
-
 // ---------------------------------------------------------------- Scan page for APIs
 
 /** Turn one detected request into an editable draft (URL split into base + query). */
@@ -1145,7 +1043,7 @@ function ScanPageDialog({
         onOpenChange(v)
       }}
     >
-      <DialogContent className="rounded-3xl sm:max-w-2xl">
+      <DialogContent className="max-h-[88vh] overflow-y-auto sm:max-w-5xl">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Radar className="size-4 text-primary" />
@@ -1179,7 +1077,7 @@ function ScanPageDialog({
                   if (e.key === 'Enter' && canStart) start.mutate(url.trim())
                 }}
                 placeholder="http://localhost:5173/administration/medical-billing-management"
-                className="h-10 flex-1 rounded-xl font-mono text-xs shadow-none"
+                className="h-10 flex-1 font-mono text-xs shadow-none"
                 spellCheck={false}
                 autoFocus
                 disabled={!!jobId}
@@ -1212,11 +1110,10 @@ function ScanPageDialog({
             {/* Mode: headless by default, opt into a visible window for login-walled pages. */}
             {!jobId && (
               <label className="flex cursor-pointer items-center gap-2 px-1 text-[11px] text-muted-foreground">
-                <input
-                  type="checkbox"
+                <Checkbox
+                  size="sm"
                   checked={headed}
                   onChange={(e) => setHeaded(e.target.checked)}
-                  className="size-3.5 rounded border-border accent-primary"
                 />
                 Open a visible browser window (only needed if the page makes you log in first)
               </label>
@@ -1276,12 +1173,7 @@ function ScanPageDialog({
                       onClick={toggleAll}
                       className="inline-flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground hover:text-foreground"
                     >
-                      <input
-                        type="checkbox"
-                        checked={allSelected}
-                        readOnly
-                        className="size-3.5 rounded border-border accent-primary"
-                      />
+                      <Checkbox size="sm" checked={allSelected} readOnly />
                       {allSelected ? 'Deselect all' : 'Select all'}
                     </button>
                     <span className="text-[11px] text-muted-foreground">
@@ -1311,11 +1203,9 @@ function ScanPageDialog({
                               : 'border-transparent bg-muted/20 opacity-60',
                           )}
                         >
-                          <input
-                            type="checkbox"
+                          <Checkbox
                             checked={checked}
                             onChange={() => toggle(r.id)}
-                            className="size-4 shrink-0 rounded border-border accent-primary"
                             aria-label="Import this request"
                           />
                           <span
@@ -1374,11 +1264,10 @@ function ScanPageDialog({
         <DialogFooter className="sm:items-center sm:justify-between">
           {/* A scan usually spans several features — file them like Swagger does. */}
           <label className="flex items-center gap-2 text-xs text-muted-foreground sm:mr-auto">
-            <input
-              type="checkbox"
+            <Checkbox
+              size="sm"
               checked={groupByPath}
               onChange={(e) => setGroupByPath(e.target.checked)}
-              className="size-3.5 rounded border-border accent-primary"
             />
             Group into modules by URL path
           </label>
@@ -1436,14 +1325,14 @@ function VariableRows({
             value={v.key}
             onChange={(e) => update(i, { key: e.target.value })}
             placeholder="name"
-            className="h-9 w-[34%] shrink-0 rounded-lg font-mono text-xs shadow-none"
+            className="h-9 w-[34%] shrink-0 font-mono text-xs shadow-none"
           />
           <Input
             value={v.value}
             onChange={(e) => update(i, { value: e.target.value })}
             type={v.secret ? 'password' : 'text'}
             placeholder={v.secret && v.hasValue && !v.value ? '•••• stored (blank = keep)' : 'value'}
-            className="h-9 flex-1 rounded-lg font-mono text-xs shadow-none"
+            className="h-9 flex-1 font-mono text-xs shadow-none"
             spellCheck={false}
             autoComplete="off"
           />
@@ -1550,7 +1439,7 @@ function ManageEnvironmentsDialog({
 
   return (
     <Dialog open onOpenChange={(v) => !v && !save.isPending && onClose()}>
-      <DialogContent className="rounded-3xl sm:max-w-2xl">
+      <DialogContent className="max-h-[88vh] overflow-y-auto rounded-3xl sm:max-w-4xl">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Boxes className="size-4 text-primary" />
@@ -1632,14 +1521,14 @@ function ManageEnvironmentsDialog({
                   }
                 }}
                 placeholder="New environment"
-                className="h-8 flex-1 rounded-lg text-xs shadow-none"
+                className="h-8 flex-1 text-xs shadow-none"
               />
               <Button
                 variant="outline"
                 size="icon"
                 onClick={addEnv}
                 disabled={!newEnvName.trim()}
-                className="size-8 shrink-0 rounded-lg"
+                className="size-8 shrink-0 rounded-full"
                 aria-label="Add environment"
               >
                 <Plus className="size-4" />
@@ -1836,6 +1725,13 @@ function timeAgo(iso: string): string {
   return d.toLocaleString()
 }
 
+/**
+ * Stored runs for the selected request. It lives inside the result panel's Runs tab,
+ * so it draws no card of its own (a card inside a card reads as a rendering mistake)
+ * and no "Run history" heading — the tab already says that. Two lines per run: the
+ * verdict on top, the URL under it, because the column is narrow and a one-line row
+ * truncated the URL to "http://loc…".
+ */
 function HistoryPanel({
   items,
   onLoad,
@@ -1848,23 +1744,23 @@ function HistoryPanel({
   clearing: boolean
 }) {
   return (
-    <div className="rounded-2xl border border-border/60 bg-card p-4 shadow-none">
-      <div className="mb-3 flex items-center justify-between">
-        <h2 className="flex items-center gap-2 text-sm font-semibold">
-          <HistoryIcon className="size-4 text-muted-foreground" />
-          Run history
-          <span className="rounded-full bg-muted px-1.5 py-0.5 text-[11px] font-medium tabular-nums text-muted-foreground">
-            {items.length}
-          </span>
-        </h2>
+    <div className="space-y-2">
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-[11px] text-muted-foreground">
+          Click a run to load its response back into the panel.
+        </span>
         <Button
           variant="ghost"
           size="sm"
           onClick={onClear}
           disabled={clearing}
-          className="gap-1.5 rounded-full text-muted-foreground hover:text-destructive active:scale-[0.98]"
+          className="h-7 shrink-0 gap-1.5 rounded-full text-[11px] text-muted-foreground hover:text-destructive active:scale-[0.98]"
         >
-          {clearing ? <Loader2 className="size-3.5 animate-spin" /> : <Trash2 className="size-3.5" />}
+          {clearing ? (
+            <Loader2 className="size-3.5 animate-spin" />
+          ) : (
+            <Trash2 className="size-3.5" />
+          )}
           Clear
         </Button>
       </div>
@@ -1874,48 +1770,62 @@ function HistoryPanel({
             <button
               type="button"
               onClick={() => onLoad(r.id)}
-              className="flex w-full items-center gap-2.5 rounded-xl border border-transparent px-2.5 py-2 text-left transition-colors hover:border-border/60 hover:bg-muted/40"
+              className="flex w-full flex-col gap-0.5 rounded-xl border border-transparent px-2.5 py-2 text-left transition-colors hover:border-border/60 hover:bg-muted/40"
             >
-              <span
-                className={cn(
-                  'shrink-0 rounded-full px-2 py-0.5 text-[11px] font-semibold tabular-nums',
-                  r.ok ? statusTone(r.status) : 'bg-red-100 text-red-700',
-                )}
-              >
-                {r.ok ? r.status : 'ERR'}
-              </span>
-              <span className={cn('shrink-0 font-mono text-[10px] font-bold', methodColor(r.method))}>
-                {r.method}
-              </span>
-              <span className="min-w-0 flex-1 truncate font-mono text-xs text-muted-foreground" title={r.url}>
-                {r.url}
-              </span>
-              {r.checks.total > 0 && (
+              <span className="flex w-full min-w-0 items-center gap-2">
                 <span
                   className={cn(
-                    'inline-flex shrink-0 items-center gap-1 text-[11px] font-medium tabular-nums',
-                    r.checks.passed === r.checks.total ? 'text-emerald-600' : 'text-red-600',
+                    'shrink-0 rounded-full px-2 py-0.5 text-[11px] font-semibold tabular-nums',
+                    r.ok ? statusTone(r.status) : 'bg-red-100 text-red-700',
                   )}
                 >
-                  {r.checks.passed === r.checks.total ? (
-                    <CheckCircle2 className="size-3" />
-                  ) : (
-                    <XCircle className="size-3" />
-                  )}
-                  {r.checks.passed}/{r.checks.total}
+                  {r.ok ? r.status : 'ERR'}
                 </span>
-              )}
-              {r.scan.high > 0 && (
-                <span className="inline-flex shrink-0 items-center gap-1 text-[11px] font-medium tabular-nums text-red-600">
-                  <ShieldAlert className="size-3" />
-                  {r.scan.high}
+                <span
+                  className={cn('shrink-0 font-mono text-[10px] font-bold', methodColor(r.method))}
+                >
+                  {r.method}
                 </span>
-              )}
-              <span className="hidden shrink-0 text-[11px] tabular-nums text-muted-foreground/70 sm:inline">
-                {r.timeMs}ms
+                {r.checks.total > 0 && (
+                  <span
+                    className={cn(
+                      'inline-flex shrink-0 items-center gap-1 text-[11px] font-medium tabular-nums',
+                      r.checks.passed === r.checks.total ? 'text-emerald-600' : 'text-red-600',
+                    )}
+                    title="Assertions passed"
+                  >
+                    {r.checks.passed === r.checks.total ? (
+                      <CheckCircle2 className="size-3" />
+                    ) : (
+                      <XCircle className="size-3" />
+                    )}
+                    {r.checks.passed}/{r.checks.total}
+                  </span>
+                )}
+                {r.scan.high > 0 && (
+                  <span
+                    className="inline-flex shrink-0 items-center gap-1 text-[11px] font-medium tabular-nums text-red-600"
+                    title="High-severity QC scan findings"
+                  >
+                    <ShieldAlert className="size-3" />
+                    {r.scan.high}
+                  </span>
+                )}
+                <span className="ml-auto shrink-0 text-[11px] tabular-nums text-muted-foreground/70">
+                  {r.timeMs}ms
+                </span>
+                <span
+                  className="shrink-0 text-[11px] text-muted-foreground/70"
+                  title={new Date(r.at).toLocaleString()}
+                >
+                  {timeAgo(r.at)}
+                </span>
               </span>
-              <span className="shrink-0 text-[11px] text-muted-foreground/70" title={new Date(r.at).toLocaleString()}>
-                {timeAgo(r.at)}
+              <span
+                className="min-w-0 truncate font-mono text-[10px] text-muted-foreground/80"
+                title={r.url}
+              >
+                {r.url}
               </span>
             </button>
           </li>
@@ -1966,7 +1876,7 @@ function MoveToModuleDialog({
         </DialogHeader>
         <div className="space-y-3">
           <Select value={choice} onValueChange={setChoice}>
-            <SelectTrigger className="h-9 rounded-xl text-sm shadow-none">
+            <SelectTrigger className="h-9 text-sm shadow-none">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -1993,7 +1903,7 @@ function MoveToModuleDialog({
               }}
               placeholder="Module name (e.g. Orders)"
               maxLength={60}
-              className="h-9 rounded-xl text-sm shadow-none"
+              className="h-9 text-sm shadow-none"
             />
           )}
         </div>
@@ -2046,6 +1956,165 @@ function loadCollapsedModules(projectId: string): Set<string> {
   return new Set()
 }
 
+// ---------------------------------------------------------------- result summary
+
+/**
+ * One verdict tile in the result column. Tiles are the answer to "did my request
+ * pass?" at a glance, and clicking one jumps to the tab that explains it — so the
+ * summary is never a dead end the reader has to translate into a click themselves.
+ */
+function VerdictTile({
+  icon: Icon,
+  label,
+  value,
+  hint,
+  tone,
+  active,
+  onClick,
+}: {
+  icon: LucideIcon
+  label: string
+  value: string
+  hint: string
+  tone: 'ok' | 'bad' | 'warn' | 'idle'
+  active: boolean
+  onClick: () => void
+}) {
+  const tones = {
+    ok: 'border-emerald-500/30 bg-emerald-500/5 text-emerald-600 dark:text-emerald-400',
+    bad: 'border-red-500/30 bg-red-500/5 text-red-600 dark:text-red-400',
+    warn: 'border-amber-500/30 bg-amber-500/5 text-amber-600 dark:text-amber-400',
+    idle: 'border-border/60 bg-muted/40 text-muted-foreground',
+  } as const
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={hint}
+      className={cn(
+        'flex min-w-0 flex-col gap-0.5 rounded-2xl border p-2.5 text-left transition-all duration-200 hover:-translate-y-0.5 hover:shadow-sm active:scale-[0.98]',
+        tones[tone],
+        active && 'ring-2 ring-ring/40',
+      )}
+    >
+      <span className="inline-flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wide opacity-80">
+        <Icon className="size-3" />
+        <span className="truncate">{label}</span>
+      </span>
+      <span className="truncate text-sm font-semibold tabular-nums">{value}</span>
+    </button>
+  )
+}
+
+/**
+ * Read-only pass/fail list for the assertions that ran against the response on
+ * screen. The Assertions tab is where checks are *authored*; this is where they are
+ * *read*, so "what failed" doesn't require leaving the result panel.
+ */
+function ChecksList({ results }: { results: AssertionResult[] }) {
+  if (results.length === 0) {
+    return (
+      <p className="rounded-xl border border-dashed border-border/60 px-3 py-6 text-center text-xs text-muted-foreground">
+        No assertions on this request yet. Add one in{' '}
+        <span className="font-medium text-foreground">Configure → Assertions</span> so a Send can
+        pass or fail on its own.
+      </p>
+    )
+  }
+  return (
+    <ul className="space-y-1.5">
+      {results.map((r, i) => (
+        <li
+          key={`${r.key}-${i}`}
+          className={cn(
+            'flex items-start gap-2.5 rounded-xl border p-2.5',
+            r.pass ? 'border-emerald-500/25 bg-emerald-500/5' : 'border-red-500/25 bg-red-500/5',
+          )}
+        >
+          {r.pass ? (
+            <CheckCircle2 className="mt-0.5 size-4 shrink-0 text-emerald-500" />
+          ) : (
+            <XCircle className="mt-0.5 size-4 shrink-0 text-red-500" />
+          )}
+          <div className="min-w-0 space-y-0.5">
+            <p className="font-mono text-xs font-medium">{r.key}</p>
+            <p className="break-words text-xs text-muted-foreground">
+              got <span className="font-mono text-foreground">{r.actual || '(empty)'}</span>
+              {r.expected && (
+                <>
+                  {' · '}expected <span className="font-mono text-foreground">{r.expected}</span>
+                </>
+              )}
+            </p>
+          </div>
+        </li>
+      ))}
+    </ul>
+  )
+}
+
+/** Section label used across the three workspace columns ("1 · Request", …). */
+/**
+ * One of the two page tabs (Requests / Flows). A plain button, not shadcn Tabs: the two
+ * panels are whole workspaces switched by the URL, and the tab bar has to read as
+ * navigation — a pill rail with a count, the same vocabulary as the sidebar.
+ */
+function PageTab({
+  icon: Icon,
+  label,
+  count,
+  active,
+  onClick,
+  tour,
+}: {
+  icon: LucideIcon
+  label: string
+  count: number
+  active: boolean
+  onClick: () => void
+  tour: string
+}) {
+  return (
+    <button
+      type="button"
+      data-tour={tour}
+      onClick={onClick}
+      aria-current={active ? 'page' : undefined}
+      className={cn(
+        'inline-flex items-center gap-2 rounded-full px-4 py-1.5 text-sm font-medium transition-all duration-200 active:scale-[0.98]',
+        active
+          ? 'bg-background text-foreground shadow-sm'
+          : 'text-muted-foreground hover:text-foreground',
+      )}
+    >
+      <Icon className="size-4" />
+      {label}
+      {count > 0 && (
+        <span
+          className={cn(
+            'rounded-full px-1.5 py-0.5 text-[10px] font-semibold tabular-nums',
+            active ? 'bg-muted text-muted-foreground' : 'bg-background/60 text-muted-foreground',
+          )}
+        >
+          {count}
+        </span>
+      )}
+    </button>
+  )
+}
+
+function StepChip({ n, children }: { n: number; children: React.ReactNode }) {
+  return (
+    <span className="inline-flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+      <span className="flex size-4 items-center justify-center rounded-full bg-foreground text-[9px] font-bold text-background">
+        {n}
+      </span>
+      {children}
+    </span>
+  )
+}
+
+
 export default function ApiTestingPage() {
   const { activeProjectId } = useProjects()
   if (!activeProjectId) {
@@ -2064,6 +2133,19 @@ function ApiTesting({ projectId }: { projectId: string }) {
   const queryClient = useQueryClient()
   const draftKey = `qc.apiTest.draft.${projectId}`
 
+  // Which half of the page is showing. It lives in the URL (`?tab=flows`) rather than in
+  // component state so a scenario is linkable and survives a reload — the same `?tab=`
+  // idiom /settings uses. Single requests are the default: that's where a flow's steps
+  // come from, so nobody lands on Flows with an empty collection behind it.
+  const [searchParams, setSearchParams] = useSearchParams()
+  const tab: 'requests' | 'flows' = searchParams.get('tab') === 'flows' ? 'flows' : 'requests'
+  const goTab = (next: 'requests' | 'flows') => {
+    const params = new URLSearchParams(searchParams)
+    if (next === 'requests') params.delete('tab')
+    else params.set('tab', next)
+    setSearchParams(params, { replace: true })
+  }
+
   // Lazy initializer runs once on mount — seed from the persisted draft.
   const [draft, setDraft] = useState<Draft>(() => loadDraft(projectId).draft)
   const [selected, setSelected] = useState<string | null>(() => loadDraft(projectId).selected)
@@ -2072,13 +2154,25 @@ function ApiTesting({ projectId }: { projectId: string }) {
   const [curlOpen, setCurlOpen] = useState(false)
   const [scanOpen, setScanOpen] = useState(false)
   const [manageEnvOpen, setManageEnvOpen] = useState(false)
+  // "New request" writes the record straight away, so the button needs a pending state
+  // and the URL bar needs a ref to take focus once the row exists.
+  const [creating, setCreating] = useState(false)
+  const urlRef = useRef<HTMLInputElement | null>(null)
+  // The request "New request" just created, pinned to the TOP of the list so it isn't
+  // filed alphabetically into the middle of a long collection the moment it's born.
+  // It stays pinned while it's the open request (and follows its first-Send rename), and
+  // lets go as soon as you open something else — nothing reorders under your cursor.
+  const [pinnedFirst, setPinnedFirst] = useState<string | null>(null)
   // Inline rename of a saved request: the name being renamed + the edited value.
   const [renaming, setRenaming] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
   // The saved request pending delete-confirmation (null = no dialog open).
   const [deleting, setDeleting] = useState<string | null>(null)
-  // Filter text for the saved-requests sidebar (shown once the collection grows).
+  // Search text for the saved-requests sidebar. The box is always mounted once anything
+  // is saved — hiding it until the collection got big meant nobody knew it existed, and
+  // by the time you have 30 endpoints you're already scrolling to find them.
   const [filter, setFilter] = useState('')
+  const searchRef = useRef<HTMLInputElement | null>(null)
   // Modules (Swagger-style groups): the request being moved, the module header being
   // renamed, and which modules are folded shut (persisted per project).
   const [moving, setMoving] = useState<ApiRequestDef | null>(null)
@@ -2087,6 +2181,9 @@ function ApiTesting({ projectId }: { projectId: string }) {
   const collapsedKey = `qc.apiTest.modules.${projectId}`
   const [collapsed, setCollapsed] = useState<Set<string>>(() => loadCollapsedModules(projectId))
   const [autoGrouping, setAutoGrouping] = useState(false)
+  // Which face of the result column is showing. View state only — the response,
+  // its checks, its findings and its history are all already computed.
+  const [resultTab, setResultTab] = useState('response')
 
   useEffect(() => {
     try {
@@ -2113,6 +2210,15 @@ function ApiTesting({ projectId }: { projectId: string }) {
     queryFn: () => listApiRequests(projectId),
     enabled: !!projectId,
   })
+
+  // Just the count, for the tab badge — same queryKey as the Flows tab, so this shares
+  // one fetch with the workspace instead of adding a request.
+  const { data: flowsData } = useQuery({
+    queryKey: ['api-flows', projectId],
+    queryFn: () => listApiFlows(projectId),
+    enabled: !!projectId,
+  })
+  const flowCount = flowsData?.flows.length ?? 0
 
   // Named {{variable}} environments (values substituted server-side at send time).
   const { data: environments } = useQuery({
@@ -2377,22 +2483,83 @@ function ApiTesting({ projectId }: { projectId: string }) {
    * a NEW request (a different method+URL than anything already saved), so repeat
    * sends of the same call never pile up duplicates.
    */
-  const handleSend = () => {
+  /**
+   * "New request" — create the record NOW, don't wait for a Send.
+   *
+   * It used to only reset the draft: the collection stayed empty until you had typed a
+   * URL and sent it, so the button looked like it had done nothing, there was no row to
+   * name, move into a module, or come back to, and a half-built request was lost by the
+   * next click. The record is written blank (the server's PUT accepts an empty URL),
+   * selected — which switches the auto-save effect on, so every keystroke after this is
+   * persisted — and the URL bar takes focus. The placeholder name is upgraded to the
+   * derived `METHOD /path` on the first Send.
+   */
+  const newRequest = async () => {
+    const name = uniqueName(PLACEHOLDER_NAME, new Set((saved ?? []).map((s) => s.name)))
+    const blank = emptyDraft()
+    setDraft(blank)
+    setRes(null)
+    setAiResult(null)
+    setSelected(null)
+    setFilter('')
+    setCreating(true)
+    try {
+      await saveApiRequest(projectId, name, blank)
+      await queryClient.invalidateQueries({ queryKey: ['api-requests', projectId] })
+      setSelected(name)
+      setPinnedFirst(name)
+    } catch (e) {
+      // Nothing was written, so leave the draft blank and unselected — the old
+      // "saved on first Send" path still works as a fallback.
+      toast.error('Could not create the request', {
+        description: e instanceof Error ? e.message : undefined,
+      })
+    } finally {
+      setCreating(false)
+      urlRef.current?.focus()
+    }
+  }
+
+  /**
+   * Give a placeholder-named request its real name, once it has a URL to derive one
+   * from. Awaited before the send so the stored result lands under the final name (the
+   * rename endpoint carries the run history across, but only for what's on disk).
+   */
+  const upgradePlaceholderName = async (current: string): Promise<string> => {
+    const taken = new Set((saved ?? []).map((s) => s.name).filter((n) => n !== current))
+    const next = uniqueName(deriveName(draft), taken)
+    if (next === current) return current
+    try {
+      await renameApiRequest(projectId, current, next)
+      await queryClient.invalidateQueries({ queryKey: ['api-requests', projectId] })
+      setSelected(next)
+      // Follow the rename, so the row doesn't jump the instant you press Send.
+      setPinnedFirst((p) => (p === current ? next : p))
+      return next
+    } catch {
+      /* a name collision or a bad character is non-fatal — send under the old name */
+      return current
+    }
+  }
+
+  const handleSend = async () => {
     if (!draft.url) return
     setAiResult(null)
     const key = requestKey(draft)
     const dup = (saved ?? []).find((s) => requestKey(s) === key)
     let savedName: string
-    if (dup) {
+    if (selected) {
+      // The open request IS this draft (the auto-save effect keeps its file in sync),
+      // so never look for a duplicate here: `saved` can lag the draft by one debounce,
+      // and treating that as "not saved yet" created a SECOND record for the request
+      // already on screen. A placeholder name earns its real one now.
+      savedName = isPlaceholderName(selected) ? await upgradePlaceholderName(selected) : selected
+    } else if (dup) {
       // Same request already saved — keep it selected, don't duplicate.
       savedName = dup.name
       setSelected(dup.name)
     } else {
-      const taken = new Set((saved ?? []).map((s) => s.name))
-      const base = deriveName(draft)
-      let unique = base
-      let n = 2
-      while (taken.has(unique)) unique = `${base} (${n++})`.slice(0, 60)
+      const unique = uniqueName(deriveName(draft), new Set((saved ?? []).map((s) => s.name)))
       savedName = unique
       // Fire-and-forget: saving must never delay the actual send. Selecting it also
       // switches on the auto-save effect for subsequent edits.
@@ -2444,6 +2611,7 @@ function ApiTesting({ projectId }: { projectId: string }) {
     setSelected(item.name)
     setRes(null)
     setAiResult(null)
+    if (item.name !== pinnedFirst) setPinnedFirst(null)
   }
 
   const results = useMemo(
@@ -2522,17 +2690,18 @@ function ApiTesting({ projectId }: { projectId: string }) {
     typeof navigator !== 'undefined' && /Mac|iPhone|iPad|iPod/.test(navigator.platform)
   const sendHint = isMac ? '⌘↵' : 'Ctrl+↵'
 
-  // Saved-requests sidebar filter — matches name, method or URL.
+  // Saved-requests sidebar search. Every term must match somewhere in the request, so
+  // "post login" finds the POST /auth/login row without caring about word order; each
+  // term is tried against name, method, URL *and* module name, because "auth" is just as
+  // likely to be the folder you filed it under as a piece of the path.
   const filteredSaved = useMemo(() => {
     const all = saved ?? []
-    const q = filter.trim().toLowerCase()
-    if (!q) return all
-    return all.filter(
-      (s) =>
-        s.name.toLowerCase().includes(q) ||
-        s.method.toLowerCase().includes(q) ||
-        s.url.toLowerCase().includes(q),
-    )
+    const terms = filter.trim().toLowerCase().split(/\s+/).filter(Boolean)
+    if (!terms.length) return all
+    return all.filter((s) => {
+      const hay = `${s.name} ${s.method} ${s.url} ${s.group ?? ''}`.toLowerCase()
+      return terms.every((t) => hay.includes(t))
+    })
   }, [saved, filter])
 
   // Every module in use, for the move dialog's picker.
@@ -2542,7 +2711,9 @@ function ApiTesting({ projectId }: { projectId: string }) {
     return [...set].sort((a, b) => a.localeCompare(b))
   }, [saved])
 
-  // The sidebar list, folded into modules — named ones A→Z, ungrouped last.
+  // The sidebar list, folded into modules — named ones A→Z, ungrouped last. The pinned
+  // request (see `pinnedFirst`) is lifted to the top of its module, and its module to the
+  // top of the list, so a request you just created really is the first row you see.
   const sections = useMemo(() => {
     const map = new Map<string, ApiRequestDef[]>()
     for (const s of filteredSaved) {
@@ -2557,8 +2728,16 @@ function ApiTesting({ projectId }: { projectId: string }) {
       .map((group) => ({ group, items: map.get(group)! }))
     const loose = map.get(UNGROUPED)
     if (loose) out.push({ group: UNGROUPED, items: loose })
-    return out
-  }, [filteredSaved])
+    if (!pinnedFirst) return out
+    const holder = out.findIndex((sec) => sec.items.some((i) => i.name === pinnedFirst))
+    if (holder < 0) return out
+    const items = [
+      ...out[holder].items.filter((i) => i.name === pinnedFirst),
+      ...out[holder].items.filter((i) => i.name !== pinnedFirst),
+    ]
+    const section = { group: out[holder].group, items }
+    return [section, ...out.filter((_, i) => i !== holder)]
+  }, [filteredSaved, pinnedFirst])
 
   // Headers only earn their space once something is actually grouped.
   const showModules = modules.length > 0
@@ -2615,24 +2794,42 @@ function ApiTesting({ projectId }: { projectId: string }) {
       patch({ aiExpect: base ? `${base}\n${line}` : line })
     }
   }
+  // Result-column faces, with the counts the tabs and tiles both read from.
+  const issueCount = findings?.filter((f) => f.severity !== 'info').length ?? 0
+  const historyCount = history?.length ?? 0
+  const aiVerdict = aiResult?.ok ? (aiResult.verdict ?? null) : null
 
   return (
-    <div className="space-y-6">
-      <header className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+    <div className="space-y-5">
+      {/* Page header — what this page is, and the three ways a request gets in here. */}
+      <header className="flex flex-col gap-4 2xl:flex-row 2xl:items-center 2xl:justify-between">
         <div data-tour="header" className="flex items-start gap-3">
-          <span className="mt-0.5 flex size-11 shrink-0 items-center justify-center rounded-2xl bg-foreground text-background">
+          <span className="mt-0.5 flex size-10 shrink-0 items-center justify-center rounded-2xl bg-foreground text-background">
             <Zap className="size-5" />
           </span>
-          <div className="space-y-1">
-            <h1 className="text-3xl font-semibold tracking-tight">API Testing</h1>
-            <p className="max-w-2xl text-sm leading-6 text-muted-foreground">
-              Send HTTP requests to your app's API, assert on the response, and save reusable
-              requests per project. Requests are proxied through the portal server, so CORS and
-              localhost/staging URLs just work.
+          <div className="min-w-0">
+            <h1 className="text-2xl font-semibold tracking-tight">API Testing</h1>
+            <p className="max-w-3xl text-sm leading-6 text-muted-foreground">
+              {tab === 'flows' ? (
+                <>
+                  Chain saved requests into one scenario — log in, capture the token, then the steps
+                  that need it. Every step is graded by the same assertions it has on its own.
+                </>
+              ) : (
+                <>
+                  Build a request, <span className="font-medium text-foreground">Send</span> it, read
+                  the verdict. Requests are proxied through the portal server, so CORS and
+                  localhost/staging URLs just work.
+                </>
+              )}
             </p>
           </div>
         </div>
         <div data-tour="import" className="flex shrink-0 flex-wrap items-center gap-2">
+          {/* Import routes belong to the request builder; on the Flows tab they would
+              only add noise (a flow is assembled from what's already saved). */}
+          {tab === 'requests' && (
+            <>
           <Button
             size="sm"
             onClick={() => setScanOpen(true)}
@@ -2647,6 +2844,7 @@ function ApiTesting({ projectId }: { projectId: string }) {
             size="sm"
             onClick={() => setCurlOpen(true)}
             className="gap-1.5 rounded-full active:scale-[0.98]"
+            title="Paste a curl command to turn it into a request"
           >
             <TerminalSquare className="size-3.5" />
             Import cURL
@@ -2662,648 +2860,1008 @@ function ApiTesting({ projectId }: { projectId: string }) {
             <Clipboard className="size-3.5" />
             Copy as cURL
           </Button>
+          </>
+          )}
           <OpenFolderButton open={() => openApiTestsFolder(projectId)} label="API tests" />
         </div>
       </header>
 
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-[240px_1fr]">
-        {/* Saved collection */}
-        <aside className="space-y-2">
-          <div className="flex items-center justify-between px-1">
-            <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-              Saved requests
-            </span>
-            <Button
-              variant="ghost"
-              size="icon"
-              onClick={() => {
-                setDraft(emptyDraft())
-                setSelected(null)
-                setRes(null)
-                setAiResult(null)
-              }}
-              className="size-7 rounded-lg text-muted-foreground hover:text-foreground"
-              title="New request"
-            >
-              <Plus className="size-4" />
-            </Button>
-          </div>
-          {(saved ?? []).length > 4 && (
-            <div className="relative">
-              <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
-              <Input
-                value={filter}
-                onChange={(e) => setFilter(e.target.value)}
-                placeholder="Filter requests…"
-                className="h-8 rounded-lg pl-8 text-xs shadow-none"
-              />
+      {/* Page tabs. Two jobs live here and they need different room: ONE request with its
+          response, or a multi-step scenario with a live run. They used to share the page
+          (Flows was a card in the sidebar that opened a modal), which cramped both. */}
+      <div
+        data-tour="page-tabs"
+        className="flex w-fit items-center gap-1 rounded-full border border-border/60 bg-muted/60 p-1"
+      >
+        <PageTab
+          icon={Zap}
+          label="Requests"
+          count={(saved ?? []).length}
+          active={tab === 'requests'}
+          onClick={() => goTab('requests')}
+          tour="tab-requests"
+        />
+        <PageTab
+          icon={Route}
+          label="Flows"
+          count={flowCount}
+          active={tab === 'flows'}
+          onClick={() => goTab('flows')}
+          tour="tab-flows"
+        />
+      </div>
+
+      {tab === 'flows' && <ApiFlowsWorkspace projectId={projectId} saved={saved ?? []} />}
+
+      {/* The workspace: collection → request builder → result. Three columns on a wide
+          screen, and on a narrow one the result panel slides under the builder rather
+          than into the rail's column (hence the nested grid). Hidden — not unmounted —
+          on the Flows tab, so switching back keeps the response you were reading. */}
+      <div
+        className={cn(
+          'grid gap-5 lg:grid-cols-[minmax(228px,248px)_minmax(0,1fr)]',
+          tab === 'flows' && 'hidden',
+        )}
+      >
+        {/* ---------------------------------------------------------- 1. collection */}
+        <aside className="space-y-4 lg:sticky lg:top-4 lg:self-start">
+          <section className="space-y-2 rounded-2xl border border-border/60 bg-card p-3 shadow-none">
+            <div className="flex items-center justify-between gap-2 px-0.5">
+              <span className="inline-flex min-w-0 items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                <FolderTree className="size-3.5 shrink-0" />
+                <span className="truncate">Collection</span>
+                {(saved ?? []).length > 0 && (
+                  <span className="shrink-0 rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium tabular-nums">
+                    {(saved ?? []).length}
+                  </span>
+                )}
+              </span>
             </div>
-          )}
-          {/* One click to file everything loose under the module its URL path implies. */}
-          {autoGroupable.length > 0 && (
+
             <Button
               variant="outline"
               size="sm"
-              onClick={autoGroup}
-              disabled={autoGrouping}
+              onClick={newRequest}
+              disabled={creating}
               className="h-8 w-full gap-1.5 rounded-full text-xs active:scale-[0.98]"
-              title="Group ungrouped requests by the first path segment of their URL"
+              title="Add an empty request to the collection and start editing it"
             >
-              {autoGrouping ? (
+              {creating ? (
                 <Loader2 className="size-3.5 animate-spin" />
               ) : (
-                <FolderTree className="size-3.5" />
+                <Plus className="size-3.5" />
               )}
-              Auto-group {autoGroupable.length} by path
+              New request
             </Button>
-          )}
-          <div className="space-y-1">
-            {(saved ?? []).length === 0 && (
-              <p className="rounded-xl border border-dashed border-border/60 px-3 py-4 text-center text-xs text-muted-foreground">
-                No saved requests yet.
-              </p>
+
+            {/* Search. Always here once there's anything to search, with a clear button
+                inside the field — Escape also clears, so a dead end never traps you. */}
+            {(saved ?? []).length > 0 && (
+              <div className="space-y-1">
+                <div className="relative">
+                  <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+                  <Input
+                    ref={searchRef}
+                    type="search"
+                    value={filter}
+                    onChange={(e) => setFilter(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Escape') {
+                        e.preventDefault()
+                        if (filter) setFilter('')
+                        else searchRef.current?.blur()
+                      }
+                    }}
+                    placeholder="Search name, method, URL…"
+                    aria-label="Search saved requests"
+                    className="h-8 pl-8 pr-8 text-xs shadow-none [&::-webkit-search-cancel-button]:hidden"
+                  />
+                  {filter && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setFilter('')
+                        searchRef.current?.focus()
+                      }}
+                      className="absolute right-1.5 top-1/2 flex size-5 -translate-y-1/2 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                      aria-label="Clear search"
+                      title="Clear search (Esc)"
+                    >
+                      <X className="size-3" />
+                    </button>
+                  )}
+                </div>
+                {/* A count, so "nothing showing" reads as a search result and not a bug. */}
+                {filter.trim() && (
+                  <p className="px-1 text-[10px] text-muted-foreground tabular-nums">
+                    {filteredSaved.length} of {(saved ?? []).length} match
+                  </p>
+                )}
+              </div>
             )}
-            {(saved ?? []).length > 0 && filteredSaved.length === 0 && (
-              <p className="rounded-xl border border-dashed border-border/60 px-3 py-4 text-center text-xs text-muted-foreground">
-                No requests match “{filter.trim()}”.
-              </p>
+
+            {/* One click to file everything loose under the module its URL path implies.
+                Hidden while searching — it acts on the whole collection, not on the
+                filtered list, so offering it under "0 of 12 match" only misleads. */}
+            {autoGroupable.length > 0 && !filter.trim() && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={autoGroup}
+                disabled={autoGrouping}
+                className="h-8 w-full gap-1.5 rounded-full text-xs text-muted-foreground hover:text-foreground active:scale-[0.98]"
+                title="Group ungrouped requests by the first path segment of their URL"
+              >
+                {autoGrouping ? (
+                  <Loader2 className="size-3.5 animate-spin" />
+                ) : (
+                  <FolderTree className="size-3.5" />
+                )}
+                Auto-group {autoGroupable.length} by path
+              </Button>
             )}
-            {sections.map((section) => (
-              <div key={section.group || '__ungrouped__'} className="space-y-1">
-                {/* Module header — Swagger-style grouping; hidden until something is grouped. */}
-                {showModules && (
-                  <div className="flex items-center gap-1 px-1 pt-1">
-                    {renamingGroup === section.group ? (
-                      <>
-                        <Input
-                          autoFocus
-                          value={groupRenameValue}
-                          onChange={(e) => setGroupRenameValue(e.target.value)}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter') commitGroupRename(section.group)
-                            if (e.key === 'Escape') setRenamingGroup(null)
-                          }}
-                          maxLength={60}
-                          className="h-7 flex-1 rounded-md px-2 text-xs shadow-none"
-                        />
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          onClick={() => commitGroupRename(section.group)}
-                          disabled={groupRenameMut.isPending}
-                          className="size-6 shrink-0 rounded-md text-emerald-600 hover:text-emerald-700"
-                          aria-label="Confirm module rename"
-                        >
-                          {groupRenameMut.isPending ? (
-                            <Loader2 className="size-3.5 animate-spin" />
-                          ) : (
-                            <Check className="size-3.5" />
-                          )}
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          onClick={() => setRenamingGroup(null)}
-                          className="size-6 shrink-0 rounded-md text-muted-foreground hover:text-foreground"
-                          aria-label="Cancel module rename"
-                        >
-                          <X className="size-3.5" />
-                        </Button>
-                      </>
-                    ) : (
-                      <>
-                        <button
-                          type="button"
-                          onClick={() => toggleModule(section.group)}
-                          className="group/mod flex min-w-0 flex-1 items-center gap-1.5 rounded-lg py-1 text-left text-[11px] font-semibold uppercase tracking-wide text-muted-foreground transition-colors hover:text-foreground"
-                        >
-                          <ChevronRight
-                            className={cn(
-                              'size-3.5 shrink-0 transition-transform',
-                              !isCollapsed(section.group) && 'rotate-90',
-                            )}
+
+            <div className="-mx-1 max-h-[46vh] space-y-1 overflow-y-auto px-1 lg:max-h-[52vh]">
+              {/* First-run empty state: say what to do, not just that there's nothing. */}
+              {(saved ?? []).length === 0 && (
+                <div className="space-y-2 rounded-xl border border-dashed border-border/60 p-3 text-center">
+                  <p className="text-xs font-medium">No saved requests yet</p>
+                  <p className="text-[11px] leading-5 text-muted-foreground">
+                    <span className="font-medium text-foreground">New request</span> above adds an
+                    empty one you can fill in. Or start from something real:
+                  </p>
+                  <div className="flex flex-col gap-1.5">
+                    <Button
+                      size="sm"
+                      onClick={() => setScanOpen(true)}
+                      className="h-7 gap-1.5 rounded-full text-[11px] active:scale-[0.98]"
+                    >
+                      <Radar className="size-3" />
+                      Scan a page
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setCurlOpen(true)}
+                      className="h-7 gap-1.5 rounded-full text-[11px] active:scale-[0.98]"
+                    >
+                      <TerminalSquare className="size-3" />
+                      Import cURL
+                    </Button>
+                  </div>
+                </div>
+              )}
+              {(saved ?? []).length > 0 && filteredSaved.length === 0 && (
+                <div className="space-y-2 rounded-xl border border-dashed border-border/60 px-3 py-4 text-center">
+                  <p className="text-xs text-muted-foreground">
+                    No requests match “<span className="font-medium text-foreground">{filter.trim()}</span>”.
+                  </p>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => {
+                      setFilter('')
+                      searchRef.current?.focus()
+                    }}
+                    className="h-6 gap-1 rounded-full px-2 text-[11px] text-muted-foreground hover:text-foreground"
+                  >
+                    <X className="size-3" />
+                    Clear search
+                  </Button>
+                </div>
+              )}
+              {sections.map((section) => (
+                <div key={section.group || '__ungrouped__'} className="space-y-1">
+                  {/* Module header — Swagger-style grouping; hidden until something is grouped. */}
+                  {showModules && (
+                    <div className="flex items-center gap-1 px-0.5 pt-1">
+                      {renamingGroup === section.group ? (
+                        <>
+                          <Input
+                            autoFocus
+                            value={groupRenameValue}
+                            onChange={(e) => setGroupRenameValue(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') commitGroupRename(section.group)
+                              if (e.key === 'Escape') setRenamingGroup(null)
+                            }}
+                            maxLength={60}
+                            className="h-7 flex-1 px-2 text-xs shadow-none"
                           />
-                          <span className="min-w-0 truncate" title={moduleLabel(section.group)}>
-                            {moduleLabel(section.group)}
-                          </span>
-                          <span className="shrink-0 rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium tabular-nums">
-                            {section.items.length}
-                          </span>
-                        </button>
-                        {section.group && (
                           <Button
                             variant="ghost"
                             size="icon"
-                            onClick={() => {
-                              setRenamingGroup(section.group)
-                              setGroupRenameValue(section.group)
-                            }}
-                            className="size-6 shrink-0 rounded-md text-muted-foreground hover:text-foreground"
-                            aria-label={`Rename module ${section.group}`}
-                            title="Rename this module"
+                            onClick={() => commitGroupRename(section.group)}
+                            disabled={groupRenameMut.isPending}
+                            className="size-6 shrink-0 rounded-md text-emerald-600 hover:text-emerald-700"
+                            aria-label="Confirm module rename"
                           >
-                            <Pencil className="size-3" />
+                            {groupRenameMut.isPending ? (
+                              <Loader2 className="size-3.5 animate-spin" />
+                            ) : (
+                              <Check className="size-3.5" />
+                            )}
                           </Button>
-                        )}
-                      </>
-                    )}
-                  </div>
-                )}
-                {!isCollapsed(section.group) &&
-                  section.items.map((item) => {
-                    const isRenaming = renaming === item.name
-                    return (
-                      <div
-                        key={item.name}
-                        role={isRenaming ? undefined : 'button'}
-                        tabIndex={isRenaming ? undefined : 0}
-                        onClick={isRenaming ? undefined : () => loadItem(item)}
-                        onKeyDown={
-                          isRenaming
-                            ? undefined
-                            : (e) => {
-                                if (e.key === 'Enter' || e.key === ' ') {
-                                  e.preventDefault()
-                                  loadItem(item)
-                                }
-                              }
-                        }
-                        className={cn(
-                          'group flex items-center gap-2 rounded-xl border px-2.5 py-2 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
-                          !isRenaming && 'cursor-pointer',
-                          showModules && 'ml-2',
-                          selected === item.name
-                            ? 'border-primary/40 bg-primary/5'
-                            : 'border-transparent hover:border-border/60 hover:bg-muted/40',
-                        )}
-                      >
-                        {isRenaming ? (
-                          <>
-                            <Input
-                              autoFocus
-                              value={renameValue}
-                              onClick={(e) => e.stopPropagation()}
-                              onChange={(e) => setRenameValue(e.target.value)}
-                              onKeyDown={(e) => {
-                                if (e.key === 'Enter') commitRename(item.name)
-                                if (e.key === 'Escape') setRenaming(null)
-                              }}
-                              className="h-7 flex-1 rounded-md px-2 text-xs shadow-none"
-                            />
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              onClick={(e) => {
-                                e.stopPropagation()
-                                commitRename(item.name)
-                              }}
-                              disabled={renameMut.isPending}
-                              className="size-6 shrink-0 rounded-md text-emerald-600 hover:text-emerald-700"
-                              aria-label="Confirm rename"
-                            >
-                              {renameMut.isPending ? (
-                                <Loader2 className="size-3.5 animate-spin" />
-                              ) : (
-                                <Check className="size-3.5" />
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => setRenamingGroup(null)}
+                            className="size-6 shrink-0 rounded-md text-muted-foreground hover:text-foreground"
+                            aria-label="Cancel module rename"
+                          >
+                            <X className="size-3.5" />
+                          </Button>
+                        </>
+                      ) : (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => toggleModule(section.group)}
+                            className="group/mod flex min-w-0 flex-1 items-center gap-1.5 rounded-lg py-1 text-left text-[11px] font-semibold uppercase tracking-wide text-muted-foreground transition-colors hover:text-foreground"
+                          >
+                            <ChevronRight
+                              className={cn(
+                                'size-3.5 shrink-0 transition-transform',
+                                !isCollapsed(section.group) && 'rotate-90',
                               )}
-                            </Button>
+                            />
+                            <span className="min-w-0 truncate" title={moduleLabel(section.group)}>
+                              {moduleLabel(section.group)}
+                            </span>
+                            <span className="shrink-0 rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium tabular-nums">
+                              {section.items.length}
+                            </span>
+                          </button>
+                          {section.group && (
                             <Button
                               variant="ghost"
                               size="icon"
-                              onClick={(e) => {
-                                e.stopPropagation()
-                                setRenaming(null)
+                              onClick={() => {
+                                setRenamingGroup(section.group)
+                                setGroupRenameValue(section.group)
                               }}
                               className="size-6 shrink-0 rounded-md text-muted-foreground hover:text-foreground"
-                              aria-label="Cancel rename"
+                              aria-label={`Rename module ${section.group}`}
+                              title="Rename this module"
                             >
-                              <X className="size-3.5" />
+                              <Pencil className="size-3" />
                             </Button>
-                          </>
-                        ) : (
-                          <>
-                            <span className="flex min-w-0 flex-1 items-center gap-2">
-                              <span className={cn('shrink-0 font-mono text-[10px] font-bold', methodColor(item.method))}>
-                                {item.method}
+                          )}
+                        </>
+                      )}
+                    </div>
+                  )}
+                  {!isCollapsed(section.group) &&
+                    section.items.map((item) => {
+                      const isRenaming = renaming === item.name
+                      return (
+                        <div
+                          key={item.name}
+                          role={isRenaming ? undefined : 'button'}
+                          tabIndex={isRenaming ? undefined : 0}
+                          onClick={isRenaming ? undefined : () => loadItem(item)}
+                          onKeyDown={
+                            isRenaming
+                              ? undefined
+                              : (e) => {
+                                  if (e.key === 'Enter' || e.key === ' ') {
+                                    e.preventDefault()
+                                    loadItem(item)
+                                  }
+                                }
+                          }
+                          className={cn(
+                            'group flex items-center gap-1.5 rounded-xl border px-2 py-1.5 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+                            !isRenaming && 'cursor-pointer',
+                            showModules && 'ml-2',
+                            selected === item.name
+                              ? 'border-primary/40 bg-primary/5'
+                              : 'border-transparent hover:border-border/60 hover:bg-muted/40',
+                          )}
+                        >
+                          {isRenaming ? (
+                            <>
+                              <Input
+                                autoFocus
+                                value={renameValue}
+                                onClick={(e) => e.stopPropagation()}
+                                onChange={(e) => setRenameValue(e.target.value)}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter') commitRename(item.name)
+                                  if (e.key === 'Escape') setRenaming(null)
+                                }}
+                                className="h-7 flex-1 px-2 text-xs shadow-none"
+                              />
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                onClick={(e) => {
+                                  e.stopPropagation()
+                                  commitRename(item.name)
+                                }}
+                                disabled={renameMut.isPending}
+                                className="size-6 shrink-0 rounded-md text-emerald-600 hover:text-emerald-700"
+                                aria-label="Confirm rename"
+                              >
+                                {renameMut.isPending ? (
+                                  <Loader2 className="size-3.5 animate-spin" />
+                                ) : (
+                                  <Check className="size-3.5" />
+                                )}
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                onClick={(e) => {
+                                  e.stopPropagation()
+                                  setRenaming(null)
+                                }}
+                                className="size-6 shrink-0 rounded-md text-muted-foreground hover:text-foreground"
+                                aria-label="Cancel rename"
+                              >
+                                <X className="size-3.5" />
+                              </Button>
+                            </>
+                          ) : (
+                            <>
+                              <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+                                <span className="flex min-w-0 items-center gap-1.5">
+                                  <span
+                                    className={cn(
+                                      'shrink-0 font-mono text-[10px] font-bold',
+                                      methodColor(item.method),
+                                    )}
+                                  >
+                                    {item.method}
+                                  </span>
+                                  <span
+                                    className="min-w-0 truncate text-xs font-medium"
+                                    title={item.name}
+                                  >
+                                    {item.name}
+                                  </span>
+                                </span>
+                                {/* The URL is what tells two similar names apart — and a
+                                    freshly created record has none yet, which must read as
+                                    "not filled in", not as a blank line. */}
+                                <span
+                                  className={cn(
+                                    'min-w-0 truncate pl-0.5 text-[10px]',
+                                    item.url
+                                      ? 'font-mono text-muted-foreground/70'
+                                      : 'italic text-muted-foreground/60',
+                                  )}
+                                  title={item.url || undefined}
+                                >
+                                  {item.url ? item.url.replace(/^https?:\/\//, '') : 'no URL yet'}
+                                </span>
                               </span>
-                              <span className="min-w-0 truncate text-xs font-medium" title={item.name}>
-                                {item.name}
+                              <span className="flex shrink-0 items-center opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100">
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  onClick={(e) => {
+                                    e.stopPropagation()
+                                    setMoving(item)
+                                  }}
+                                  className="size-6 rounded-md text-muted-foreground hover:text-foreground"
+                                  aria-label={`Move ${item.name} to a module`}
+                                  title="Move to module"
+                                >
+                                  <FolderTree className="size-3.5" />
+                                </Button>
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  onClick={(e) => {
+                                    e.stopPropagation()
+                                    setRenaming(item.name)
+                                    setRenameValue(item.name)
+                                  }}
+                                  className="size-6 rounded-md text-muted-foreground hover:text-foreground"
+                                  aria-label={`Rename ${item.name}`}
+                                  title="Rename"
+                                >
+                                  <Pencil className="size-3.5" />
+                                </Button>
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  onClick={(e) => {
+                                    e.stopPropagation()
+                                    setDeleting(item.name)
+                                  }}
+                                  className="size-6 rounded-md text-muted-foreground hover:text-destructive"
+                                  aria-label={`Delete ${item.name}`}
+                                  title="Delete"
+                                >
+                                  <Trash2 className="size-3.5" />
+                                </Button>
                               </span>
-                            </span>
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              onClick={(e) => {
-                                e.stopPropagation()
-                                setMoving(item)
-                              }}
-                              className="size-6 shrink-0 rounded-md text-muted-foreground opacity-0 transition-opacity hover:text-foreground group-hover:opacity-100"
-                              aria-label={`Move ${item.name} to a module`}
-                              title="Move to module"
-                            >
-                              <FolderTree className="size-3.5" />
-                            </Button>
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              onClick={(e) => {
-                                e.stopPropagation()
-                                setRenaming(item.name)
-                                setRenameValue(item.name)
-                              }}
-                              className="size-6 shrink-0 rounded-md text-muted-foreground opacity-0 transition-opacity hover:text-foreground group-hover:opacity-100"
-                              aria-label={`Rename ${item.name}`}
-                            >
-                              <Pencil className="size-3.5" />
-                            </Button>
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              onClick={(e) => {
-                                e.stopPropagation()
-                                setDeleting(item.name)
-                              }}
-                              className="size-6 shrink-0 rounded-md text-muted-foreground opacity-0 transition-opacity hover:text-destructive group-hover:opacity-100"
-                              aria-label={`Delete ${item.name}`}
-                            >
-                              <Trash2 className="size-3.5" />
-                            </Button>
-                          </>
-                        )}
-                      </div>
-                    )
-                  })}
-              </div>
-            ))}
-          </div>
+                            </>
+                          )}
+                        </div>
+                      )
+                    })}
+                </div>
+              ))}
+            </div>
+          </section>
 
-          {/* Flows — multi-step scenarios built from the requests above (Postman's
-              "run collection"), plus the test accounts a login step uses. */}
-          <ApiFlowsCard projectId={projectId} saved={saved ?? []} />
+          {/* A pointer, not the feature: flows live in their own tab now, where the
+              steps list and a live run have the width they need. */}
+          <button
+            type="button"
+            onClick={() => goTab('flows')}
+            className="flex w-full items-center gap-2 rounded-2xl border border-border/60 bg-muted/40 px-3 py-2.5 text-left transition-all duration-200 hover:-translate-y-0.5 hover:border-border hover:shadow-sm active:scale-[0.99]"
+            title="Run several of these requests in order"
+          >
+            <Route className="size-4 shrink-0 text-muted-foreground" />
+            <span className="min-w-0 flex-1 leading-tight">
+              <span className="block text-xs font-medium">Flows</span>
+              <span className="block truncate text-[10px] text-muted-foreground">
+                {flowCount
+                  ? `${flowCount} scenario${flowCount === 1 ? '' : 's'}`
+                  : 'Chain these requests into a scenario'}
+              </span>
+            </span>
+            <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />
+          </button>
         </aside>
 
-        {/* Request builder + response */}
-        <div className="min-w-0 space-y-4">
-          {/* Environment bar — the active {{variable}} set for this request. */}
-          <div className="flex flex-wrap items-center gap-2 rounded-xl border border-border/60 bg-muted/30 px-3 py-2">
-            <span className="inline-flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
-              <Boxes className="size-3.5" />
-              Environment
-            </span>
-            {(environments?.environments.length ?? 0) > 0 ? (
-              <Select
-                value={activeEnv ?? '__none__'}
-                onValueChange={(v) => setActiveEnv.mutate(v === '__none__' ? null : v)}
-              >
-                <SelectTrigger className="h-8 w-[180px] rounded-lg text-xs shadow-none">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="__none__" className="text-xs">
-                    No environment
-                  </SelectItem>
-                  {environments!.environments.map((e) => (
-                    <SelectItem key={e.name} value={e.name} className="text-xs">
-                      {e.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            ) : (
-              <span className="text-xs text-muted-foreground">None yet</span>
-            )}
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => setManageEnvOpen(true)}
-              className="h-8 gap-1.5 rounded-full active:scale-[0.98]"
+        <div className="grid min-w-0 gap-5 2xl:grid-cols-[minmax(0,1fr)_minmax(400px,36%)] 2xl:items-start">
+          {/* ------------------------------------------------- 2. request builder */}
+          <div className="min-w-0 space-y-3">
+            {/* Send bar — method, URL and Send on one line: the one thing every visit
+                starts with, so nothing sits above it. */}
+            <div
+              data-tour="request"
+              className="space-y-2 rounded-2xl border border-border/60 bg-card p-3 shadow-none"
             >
-              <Pencil className="size-3.5" />
-              Manage
-            </Button>
-            <span className="ml-auto hidden items-center gap-1 text-[11px] text-muted-foreground sm:inline-flex">
-              Use <span className="font-mono">{'{{var}}'}</span> in the URL, params, headers or body.
-            </span>
-          </div>
-
-          {/* URL bar */}
-          <div data-tour="request" className="flex flex-col gap-2 sm:flex-row sm:items-center">
-            <div className="flex flex-1 items-center gap-2 rounded-xl border border-border/60 bg-card p-1.5 shadow-none">
-              <Select value={draft.method} onValueChange={(v) => patch({ method: v })}>
-                <SelectTrigger
-                  className={cn(
-                    'h-9 w-[110px] shrink-0 rounded-lg border-0 bg-muted/60 font-mono text-xs font-bold shadow-none',
-                    methodColor(draft.method),
-                  )}
-                >
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {METHODS.map((m) => (
-                    <SelectItem key={m} value={m} className={cn('font-mono text-xs font-bold', methodColor(m))}>
-                      {m}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              <Input
-                value={draft.url}
-                onChange={(e) => patch({ url: e.target.value })}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' && draft.url) handleSend()
-                }}
-                placeholder="https://api.example.com/v1/resource"
-                className="h-9 flex-1 rounded-lg border-0 font-mono text-xs shadow-none focus-visible:ring-0"
-              />
-            </div>
-            <Button
-              onClick={handleSend}
-              disabled={!draft.url || send.isPending}
-              title={`Send (${sendHint})`}
-              className="h-11 shrink-0 gap-2 rounded-full px-6 active:scale-[0.98] sm:h-12"
-            >
-              {send.isPending ? <Loader2 className="size-4 animate-spin" /> : <Send className="size-4" />}
-              Send
-              <kbd className="hidden rounded bg-primary-foreground/15 px-1.5 py-0.5 font-mono text-[10px] font-medium text-primary-foreground/80 sm:inline">
-                {sendHint}
-              </kbd>
-            </Button>
-          </div>
-
-          {/* Request state — makes the auto-save model obvious at a glance. */}
-          {isNewUnsaved ? (
-            <p className="flex items-center gap-1.5 px-1 text-[11px] text-muted-foreground">
-              <Info className="size-3 text-sky-500" />
-              New request — <span className="font-medium text-foreground">Send</span> to save it to
-              your collection.
-            </p>
-          ) : selected ? (
-            <p className="flex items-center gap-1.5 px-1 text-[11px] text-muted-foreground">
-              {isDirty ? (
-                <>
-                  <Loader2 className="size-3 animate-spin text-amber-500" />
-                  Saving changes to{' '}
-                  <span className="font-medium text-foreground">{selected}</span>…
-                </>
-              ) : (
-                <>
-                  <Check className="size-3 text-emerald-500" />
-                  <span className="font-medium text-foreground">{selected}</span> is saved — edits
-                  persist automatically.
-                </>
-              )}
-            </p>
-          ) : null}
-
-          {/* Request config tabs */}
-          <div data-tour="config" className="rounded-2xl border border-border/60 bg-card p-4 shadow-none">
-            <Tabs defaultValue="params">
-              <TabsList className="rounded-full">
-                <TabsTrigger value="params" className="rounded-full text-xs">
-                  Params
-                  {draft.query.filter((q) => q.enabled && q.key).length > 0 &&
-                    ` (${draft.query.filter((q) => q.enabled && q.key).length})`}
-                </TabsTrigger>
-                <TabsTrigger value="headers" className="rounded-full text-xs">
-                  Headers
-                  {draft.headers.filter((h) => h.enabled && h.key).length > 0 &&
-                    ` (${draft.headers.filter((h) => h.enabled && h.key).length})`}
-                </TabsTrigger>
-                <TabsTrigger value="body" className="rounded-full text-xs" disabled={bodyDisabled}>
-                  Body
-                </TabsTrigger>
-                <TabsTrigger value="assert" data-tour="tab-assert" className="rounded-full text-xs">
-                  Assertions
-                  {draft.assertions.filter((a) => a.enabled).length > 0 &&
-                    ` (${draft.assertions.filter((a) => a.enabled).length})`}
-                </TabsTrigger>
-                <TabsTrigger value="capture" data-tour="tab-capture" className="gap-1 rounded-full text-xs">
-                  <Variable className="size-3" />
-                  Capture
-                  {draft.captures.length > 0 && ` (${draft.captures.length})`}
-                </TabsTrigger>
-                <TabsTrigger value="ai" className="gap-1 rounded-full text-xs">
-                  <Sparkles className="size-3" />
-                  AI check
-                  {draft.aiExpect.trim() && ' •'}
-                </TabsTrigger>
-              </TabsList>
-              <TabsContent value="params" className="pt-4">
-                <KVEditor
-                  rows={draft.query}
-                  onChange={(query) => patch({ query })}
-                  keyPlaceholder="param"
-                  valuePlaceholder="value"
-                />
-              </TabsContent>
-              <TabsContent value="headers" className="pt-4">
-                <KVEditor
-                  rows={draft.headers}
-                  onChange={(headers) => patch({ headers })}
-                  keyPlaceholder="Header-Name"
-                  valuePlaceholder="value"
-                />
-              </TabsContent>
-              <TabsContent value="body" className="space-y-3 pt-4">
-                <div className="flex items-center gap-2">
-                  {(['none', 'json', 'text'] as ApiBodyMode[]).map((m) => (
-                    <button
-                      key={m}
-                      type="button"
-                      onClick={() => patch({ bodyMode: m })}
+              <div className="flex items-center justify-between gap-2 px-0.5">
+                <StepChip n={1}>Request</StepChip>
+                {/* Save state — the auto-save model is never a mystery. */}
+                {isNewUnsaved ? (
+                  <span className="inline-flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                    <Info className="size-3 shrink-0 text-sky-500" />
+                    New — Send saves it
+                  </span>
+                ) : selected ? (
+                  <span
+                    className="inline-flex min-w-0 items-center gap-1.5 text-[11px] text-muted-foreground"
+                    title={selected}
+                  >
+                    {isDirty ? (
+                      <>
+                        <Loader2 className="size-3 shrink-0 animate-spin text-amber-500" />
+                        Saving…
+                      </>
+                    ) : (
+                      <>
+                        <Check className="size-3 shrink-0 text-emerald-500" />
+                        <span className="max-w-[16ch] truncate font-medium text-foreground sm:max-w-[28ch]">
+                          {selected}
+                        </span>
+                        saved
+                      </>
+                    )}
+                  </span>
+                ) : null}
+              </div>
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                <div className="flex min-w-0 flex-1 items-center gap-2 rounded-full border border-border/60 bg-background p-1.5">
+                  <Select value={draft.method} onValueChange={(v) => patch({ method: v })}>
+                    <SelectTrigger
                       className={cn(
-                        'rounded-full px-3 py-1 text-xs font-medium transition-colors',
-                        draft.bodyMode === m
-                          ? 'bg-primary text-primary-foreground'
-                          : 'bg-muted text-muted-foreground hover:text-foreground',
+                        'h-9 w-[104px] shrink-0 border-0 bg-muted/60 font-mono text-xs font-bold shadow-none',
+                        methodColor(draft.method),
                       )}
                     >
-                      {m === 'none' ? 'None' : m === 'json' ? 'JSON' : 'Text'}
-                    </button>
-                  ))}
-                  {draft.bodyMode === 'json' && (
-                    <span className="ml-auto inline-flex items-center gap-1 text-[11px] text-muted-foreground">
-                      <FileJson className="size-3" />
-                      Content-Type set automatically
-                    </span>
-                  )}
-                </div>
-                {draft.bodyMode !== 'none' && (
-                  <Textarea
-                    value={draft.body}
-                    onChange={(e) => patch({ body: e.target.value })}
-                    placeholder={draft.bodyMode === 'json' ? '{\n  "key": "value"\n}' : 'Raw request body'}
-                    className="min-h-[180px] rounded-xl font-mono text-xs shadow-none"
-                    spellCheck={false}
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {METHODS.map((m) => (
+                        <SelectItem
+                          key={m}
+                          value={m}
+                          className={cn('font-mono text-xs font-bold', methodColor(m))}
+                        >
+                          {m}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <Input
+                    ref={urlRef}
+                    value={draft.url}
+                    onChange={(e) => patch({ url: e.target.value })}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && draft.url) handleSend()
+                    }}
+                    placeholder="https://api.example.com/v1/resource"
+                    className="h-9 min-w-[8rem] flex-1 border-0 font-mono text-xs shadow-none focus-visible:ring-0"
                   />
-                )}
-              </TabsContent>
-              <TabsContent value="assert" className="pt-4">
-                <AssertionEditor
-                  rows={draft.assertions}
-                  onChange={(assertions) => patch({ assertions })}
-                  results={results}
-                />
-              </TabsContent>
-              <TabsContent value="capture" className="pt-4">
-                <CaptureEditor
-                  rows={draft.captures}
-                  onChange={(captures) => patch({ captures })}
-                  activeEnv={activeEnv}
-                />
-              </TabsContent>
-              <TabsContent value="ai" className="space-y-3 pt-4">
-                <p className="text-xs text-muted-foreground">
-                  Describe in plain language what a correct response looks like — or quick-pick common
-                  criteria below. After you Send, AI reads the actual response and judges it against
-                  this, great for checks that are awkward to express as exact-match rules.
-                </p>
-                <div className="flex flex-wrap gap-1.5">
-                  {AI_CRITERIA.map((c) => {
-                    const active = hasCriterion(c.text)
-                    return (
-                      <button
-                        key={c.label}
-                        type="button"
-                        onClick={() => toggleCriterion(c.text)}
-                        title={c.text}
-                        className={cn(
-                          'inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-[11px] font-medium transition-colors active:scale-[0.98]',
-                          active
-                            ? 'border-primary/40 bg-primary/10 text-primary'
-                            : 'border-border/60 bg-muted/40 text-muted-foreground hover:border-border hover:text-foreground',
-                        )}
-                      >
-                        {active ? <Check className="size-3" /> : <Plus className="size-3" />}
-                        {c.label}
-                      </button>
-                    )
-                  })}
                 </div>
-                <Textarea
-                  value={draft.aiExpect}
-                  onChange={(e) => patch({ aiExpect: e.target.value })}
-                  placeholder={
-                    'e.g. Returns 200 with a JSON list of users. Each has id, name and email but NO password or token. The list is sorted by name.'
-                  }
-                  className="min-h-[120px] rounded-xl text-xs shadow-none"
-                  spellCheck={false}
-                />
-                <div className="flex items-center gap-2">
-                  <Button
-                    onClick={() => res && runAiCheck(res, draft.aiExpect)}
-                    disabled={!res || !res.ok || !draft.aiExpect.trim() || aiCheck.isPending}
-                    className="gap-1.5 rounded-full active:scale-[0.98]"
-                  >
-                    {aiCheck.isPending ? (
-                      <Loader2 className="size-4 animate-spin" />
-                    ) : (
-                      <Wand2 className="size-4" />
-                    )}
-                    {aiResult ? 'Re-run AI check' : 'Run AI check'}
-                  </Button>
-                  <span className="text-[11px] text-muted-foreground">
-                    {!res
-                      ? 'Send a request first.'
-                      : 'Runs automatically after each Send when an expectation is set.'}
-                  </span>
-                </div>
-                {aiResult && aiResult.ok && <AiCheckView result={aiResult} />}
-              </TabsContent>
-            </Tabs>
-          </div>
+                <Button
+                  onClick={handleSend}
+                  disabled={!draft.url || send.isPending}
+                  title={`Send (${sendHint})`}
+                  className="h-11 shrink-0 gap-2 rounded-full px-6 active:scale-[0.98]"
+                >
+                  {send.isPending ? (
+                    <Loader2 className="size-4 animate-spin" />
+                  ) : (
+                    <Send className="size-4" />
+                  )}
+                  Send
+                  <kbd className="hidden rounded bg-primary-foreground/15 px-1.5 py-0.5 font-mono text-[10px] font-medium text-primary-foreground/80 sm:inline">
+                    {sendHint}
+                  </kbd>
+                </Button>
+              </div>
 
-          {/* Response */}
-          <div data-tour="response" className="rounded-2xl border border-border/60 bg-card p-4 shadow-none">
-            <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-              <h2 className="flex items-center gap-2 text-sm font-semibold">
-                <ChevronRight className="size-4 text-muted-foreground" />
-                Response
-              </h2>
-              <div className="flex flex-wrap items-center gap-2">
-                {aiCheck.isPending && (
-                  <Badge variant="outline" className="gap-1 border-border/60 bg-muted/40 text-muted-foreground">
-                    <Loader2 className="size-3 animate-spin" />
-                    AI checking…
-                  </Badge>
-                )}
-                {!aiCheck.isPending && aiResult?.ok && aiResult.verdict && (
-                  <Badge
-                    variant="outline"
-                    className={cn(
-                      'gap-1 uppercase',
-                      aiResult.verdict === 'pass'
-                        ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
-                        : aiResult.verdict === 'fail'
-                          ? 'border-red-200 bg-red-50 text-red-700'
-                          : 'border-amber-200 bg-amber-50 text-amber-700',
-                    )}
-                    title="AI check verdict — see the AI check tab"
+              {/* Environment — the active {{variable}} set this send resolves against.
+                  It belongs with the URL, because that's what it rewrites. */}
+              <div className="flex flex-wrap items-center gap-2 rounded-xl bg-muted/40 px-2.5 py-1.5">
+                <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
+                  <Boxes className="size-3.5" />
+                  Environment
+                </span>
+                {(environments?.environments.length ?? 0) > 0 ? (
+                  <Select
+                    value={activeEnv ?? '__none__'}
+                    onValueChange={(v) => setActiveEnv.mutate(v === '__none__' ? null : v)}
                   >
-                    <Sparkles className="size-3" />
-                    AI: {aiResult.verdict}
-                  </Badge>
+                    <SelectTrigger className="h-7 w-[150px] border-border/60 bg-background text-xs shadow-none">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="__none__" className="text-xs">
+                        No environment
+                      </SelectItem>
+                      {environments!.environments.map((e) => (
+                        <SelectItem key={e.name} value={e.name} className="text-xs">
+                          {e.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                ) : (
+                  <span className="text-[11px] text-muted-foreground">None yet</span>
                 )}
-                {findings && highCount > 0 && (
-                  <Badge variant="outline" className="gap-1 border-red-200 bg-red-50 text-red-700">
-                    <ShieldAlert className="size-3" />
-                    {highCount} high issue{highCount === 1 ? '' : 's'}
-                  </Badge>
-                )}
-                {results && totalChecks > 0 && (
-                  <Badge
-                    variant="outline"
-                    className={cn(
-                      'gap-1',
-                      passCount === totalChecks
-                        ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
-                        : 'border-red-200 bg-red-50 text-red-700',
-                    )}
-                  >
-                    {passCount === totalChecks ? (
-                      <CheckCircle2 className="size-3" />
-                    ) : (
-                      <XCircle className="size-3" />
-                    )}
-                    {passCount}/{totalChecks} checks passed
-                  </Badge>
-                )}
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setManageEnvOpen(true)}
+                  className="h-7 gap-1.5 rounded-full text-[11px] active:scale-[0.98]"
+                >
+                  <Pencil className="size-3" />
+                  Manage
+                </Button>
+                <span className="ml-auto hidden items-center gap-1 text-[11px] text-muted-foreground lg:inline-flex">
+                  Use <span className="font-mono">{'{{var}}'}</span> in the URL, params, headers or
+                  body
+                </span>
               </div>
             </div>
+
+            {/* Request config tabs */}
+            <div
+              data-tour="config"
+              className="rounded-2xl border border-border/60 bg-card p-4 shadow-none"
+            >
+              <Tabs defaultValue="params">
+                <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
+                  <StepChip n={2}>Configure &amp; assert</StepChip>
+                </div>
+                <TabsList className="flex-wrap rounded-full">
+                  <TabsTrigger value="params" className="rounded-full text-xs">
+                    Params
+                    {draft.query.filter((q) => q.enabled && q.key).length > 0 &&
+                      ` (${draft.query.filter((q) => q.enabled && q.key).length})`}
+                  </TabsTrigger>
+                  <TabsTrigger value="headers" className="rounded-full text-xs">
+                    Headers
+                    {draft.headers.filter((h) => h.enabled && h.key).length > 0 &&
+                      ` (${draft.headers.filter((h) => h.enabled && h.key).length})`}
+                  </TabsTrigger>
+                  <TabsTrigger value="body" className="rounded-full text-xs" disabled={bodyDisabled}>
+                    Body
+                  </TabsTrigger>
+                  <TabsTrigger
+                    value="assert"
+                    data-tour="tab-assert"
+                    className="gap-1 rounded-full text-xs"
+                  >
+                    <ListChecks className="size-3" />
+                    Assertions
+                    {draft.assertions.filter((a) => a.enabled).length > 0 &&
+                      ` (${draft.assertions.filter((a) => a.enabled).length})`}
+                  </TabsTrigger>
+                  <TabsTrigger
+                    value="capture"
+                    data-tour="tab-capture"
+                    className="gap-1 rounded-full text-xs"
+                  >
+                    <Variable className="size-3" />
+                    Capture
+                    {draft.captures.length > 0 && ` (${draft.captures.length})`}
+                  </TabsTrigger>
+                  <TabsTrigger value="ai" className="gap-1 rounded-full text-xs">
+                    <Sparkles className="size-3" />
+                    AI check
+                    {draft.aiExpect.trim() && ' •'}
+                  </TabsTrigger>
+                </TabsList>
+                <TabsContent value="params" className="pt-4">
+                  <KVEditor
+                    rows={draft.query}
+                    onChange={(query) => patch({ query })}
+                    keyPlaceholder="param"
+                    valuePlaceholder="value"
+                  />
+                </TabsContent>
+                <TabsContent value="headers" className="pt-4">
+                  <KVEditor
+                    rows={draft.headers}
+                    onChange={(headers) => patch({ headers })}
+                    keyPlaceholder="Header-Name"
+                    valuePlaceholder="value"
+                  />
+                </TabsContent>
+                <TabsContent value="body" className="space-y-3 pt-4">
+                  <div className="flex items-center gap-2">
+                    {(['none', 'json', 'text'] as ApiBodyMode[]).map((m) => (
+                      <button
+                        key={m}
+                        type="button"
+                        onClick={() => patch({ bodyMode: m })}
+                        className={cn(
+                          'rounded-full px-3 py-1 text-xs font-medium transition-colors',
+                          draft.bodyMode === m
+                            ? 'bg-primary text-primary-foreground'
+                            : 'bg-muted text-muted-foreground hover:text-foreground',
+                        )}
+                      >
+                        {m === 'none' ? 'None' : m === 'json' ? 'JSON' : 'Text'}
+                      </button>
+                    ))}
+                    {draft.bodyMode === 'json' && (
+                      <span className="ml-auto inline-flex items-center gap-1 text-[11px] text-muted-foreground">
+                        <FileJson className="size-3" />
+                        Content-Type set automatically
+                      </span>
+                    )}
+                  </div>
+                  {draft.bodyMode !== 'none' && (
+                    <Textarea
+                      value={draft.body}
+                      onChange={(e) => patch({ body: e.target.value })}
+                      placeholder={
+                        draft.bodyMode === 'json' ? '{\n  "key": "value"\n}' : 'Raw request body'
+                      }
+                      className="min-h-[180px] font-mono text-xs shadow-none"
+                      spellCheck={false}
+                    />
+                  )}
+                </TabsContent>
+                <TabsContent value="assert" className="space-y-3 pt-4">
+                  <p className="text-xs text-muted-foreground">
+                    Each enabled check is graded on every Send. Results appear under{' '}
+                    <span className="font-medium text-foreground">Result → Checks</span>.
+                  </p>
+                  <AssertionEditor
+                    rows={draft.assertions}
+                    onChange={(assertions) => patch({ assertions })}
+                    results={results}
+                  />
+                </TabsContent>
+                <TabsContent value="capture" className="pt-4">
+                  <CaptureEditor
+                    rows={draft.captures}
+                    onChange={(captures) => patch({ captures })}
+                    activeEnv={activeEnv}
+                  />
+                </TabsContent>
+                <TabsContent value="ai" className="space-y-3 pt-4">
+                  <p className="text-xs text-muted-foreground">
+                    Describe in plain language what a correct response looks like — or quick-pick
+                    common criteria below. After you Send, AI reads the actual response and judges it
+                    against this, great for checks that are awkward to express as exact-match rules.
+                  </p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {AI_CRITERIA.map((c) => {
+                      const active = hasCriterion(c.text)
+                      return (
+                        <button
+                          key={c.label}
+                          type="button"
+                          onClick={() => toggleCriterion(c.text)}
+                          title={c.text}
+                          className={cn(
+                            'inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-[11px] font-medium transition-colors active:scale-[0.98]',
+                            active
+                              ? 'border-primary/40 bg-primary/10 text-primary'
+                              : 'border-border/60 bg-muted/40 text-muted-foreground hover:border-border hover:text-foreground',
+                          )}
+                        >
+                          {active ? <Check className="size-3" /> : <Plus className="size-3" />}
+                          {c.label}
+                        </button>
+                      )
+                    })}
+                  </div>
+                  <Textarea
+                    value={draft.aiExpect}
+                    onChange={(e) => patch({ aiExpect: e.target.value })}
+                    placeholder={
+                      'e.g. Returns 200 with a JSON list of users. Each has id, name and email but NO password or token. The list is sorted by name.'
+                    }
+                    className="min-h-[120px] text-xs shadow-none"
+                    spellCheck={false}
+                  />
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Button
+                      onClick={() => {
+                        if (!res) return
+                        setResultTab('ai')
+                        runAiCheck(res, draft.aiExpect)
+                      }}
+                      disabled={!res || !res.ok || !draft.aiExpect.trim() || aiCheck.isPending}
+                      className="gap-1.5 rounded-full active:scale-[0.98]"
+                    >
+                      {aiCheck.isPending ? (
+                        <Loader2 className="size-4 animate-spin" />
+                      ) : (
+                        <Wand2 className="size-4" />
+                      )}
+                      {aiResult ? 'Re-run AI check' : 'Run AI check'}
+                    </Button>
+                    <span className="text-[11px] text-muted-foreground">
+                      {!res
+                        ? 'Send a request first.'
+                        : 'Runs automatically after each Send when an expectation is set — the verdict lands in Result → AI.'}
+                    </span>
+                  </div>
+                </TabsContent>
+              </Tabs>
+            </div>
+          </div>
+
+          {/* --------------------------------------------------------- 3. result */}
+          <section
+            data-tour="response"
+            // Sticky only once it has its own column, and capped there so a long
+            // findings list scrolls inside the panel instead of making the whole page
+            // scroll past the request it belongs to.
+            className="min-w-0 space-y-3 rounded-2xl border border-border/60 bg-card p-4 shadow-none 2xl:sticky 2xl:top-4 2xl:max-h-[calc(100svh-5rem)] 2xl:overflow-y-auto"
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <StepChip n={3}>Result</StepChip>
+              {/* Status stays pinned beside the heading on every tab EXCEPT Response —
+                  there ResponseView prints a richer strip (size, content-type) two rows
+                  down, and the same 200/6 ms twice reads like a rendering bug. */}
+              {res && !send.isPending && resultTab !== 'response' && (
+                <span className="inline-flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                  <span
+                    className={cn(
+                      'rounded-full px-2 py-0.5 text-[11px] font-semibold tabular-nums',
+                      res.ok ? statusTone(res.status) : 'bg-red-100 text-red-700',
+                    )}
+                  >
+                    {res.ok ? `${res.status} ${res.statusText ?? ''}`.trim() : 'FAILED'}
+                  </span>
+                  <span className="inline-flex items-center gap-1">
+                    <Clock3 className="size-3" />
+                    {res.timeMs} ms
+                  </span>
+                </span>
+              )}
+            </div>
+
             {send.isPending ? (
-              <div className="flex items-center gap-2 py-8 text-sm text-muted-foreground">
+              <div className="flex items-center gap-2 py-10 text-sm text-muted-foreground">
                 <Loader2 className="size-4 animate-spin" />
                 Sending…
               </div>
             ) : res ? (
-              <div className="space-y-4">
-                <ResponseView res={res} />
-                {findings && (
-                  <div className="space-y-2 border-t border-border/60 pt-4">
-                    <h3 className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                      <ShieldAlert className="size-3.5" />
-                      QC scan — issues &amp; vulnerabilities
-                    </h3>
-                    <QcScanPanel findings={findings} />
+              <div className="space-y-3">
+                {/* The three questions a QC engineer actually has, as tiles that
+                    double as navigation into the tab that answers each. */}
+                {res.ok && (
+                  <div className="grid grid-cols-3 gap-2">
+                    <VerdictTile
+                      icon={ListChecks}
+                      label="Checks"
+                      value={totalChecks > 0 ? `${passCount}/${totalChecks}` : '—'}
+                      hint={
+                        totalChecks > 0
+                          ? 'Your assertions, graded against this response'
+                          : 'No assertions on this request yet'
+                      }
+                      tone={
+                        totalChecks === 0 ? 'idle' : passCount === totalChecks ? 'ok' : 'bad'
+                      }
+                      active={resultTab === 'checks'}
+                      onClick={() => setResultTab('checks')}
+                    />
+                    <VerdictTile
+                      icon={ShieldAlert}
+                      label="Issues"
+                      value={issueCount > 0 ? String(issueCount) : 'None'}
+                      hint="Automatic QC scan — security, correctness, performance"
+                      tone={highCount > 0 ? 'bad' : issueCount > 0 ? 'warn' : 'ok'}
+                      active={resultTab === 'issues'}
+                      onClick={() => setResultTab('issues')}
+                    />
+                    <VerdictTile
+                      icon={Sparkles}
+                      label="AI"
+                      value={
+                        aiCheck.isPending
+                          ? '…'
+                          : aiVerdict
+                            ? aiVerdict.toUpperCase()
+                            : draft.aiExpect.trim()
+                              ? 'Ready'
+                              : 'Off'
+                      }
+                      hint={
+                        draft.aiExpect.trim()
+                          ? 'AI verdict against your written expectation'
+                          : 'Write an expectation in Configure → AI check'
+                      }
+                      tone={
+                        aiVerdict === 'pass'
+                          ? 'ok'
+                          : aiVerdict === 'fail'
+                            ? 'bad'
+                            : aiVerdict
+                              ? 'warn'
+                              : 'idle'
+                      }
+                      active={resultTab === 'ai'}
+                      onClick={() => setResultTab('ai')}
+                    />
                   </div>
                 )}
+
+                <Tabs value={resultTab} onValueChange={setResultTab}>
+                  <TabsList className="flex-wrap rounded-full">
+                    <TabsTrigger value="response" className="rounded-full text-xs">
+                      Response
+                    </TabsTrigger>
+                    <TabsTrigger value="checks" className="rounded-full text-xs">
+                      Checks
+                    </TabsTrigger>
+                    <TabsTrigger value="issues" className="rounded-full text-xs">
+                      Issues
+                      {issueCount > 0 && ` (${issueCount})`}
+                    </TabsTrigger>
+                    <TabsTrigger value="ai" className="rounded-full text-xs">
+                      AI
+                    </TabsTrigger>
+                    <TabsTrigger value="history" className="rounded-full text-xs">
+                      Runs
+                      {historyCount > 0 && ` (${historyCount})`}
+                    </TabsTrigger>
+                  </TabsList>
+
+                  <TabsContent value="response" className="pt-3">
+                    <ResponseView res={res} />
+                  </TabsContent>
+
+                  <TabsContent value="checks" className="pt-3">
+                    {res.ok ? (
+                      <ChecksList results={results ?? []} />
+                    ) : (
+                      <p className="rounded-xl border border-dashed border-border/60 px-3 py-6 text-center text-xs text-muted-foreground">
+                        The request never reached the API, so there was nothing to check.
+                      </p>
+                    )}
+                  </TabsContent>
+
+                  <TabsContent value="issues" className="space-y-2 pt-3">
+                    {res.ok && findings ? (
+                      <>
+                        <p className="text-[11px] leading-5 text-muted-foreground">
+                          Heuristics run on every response — hints to investigate, not verdicts.
+                        </p>
+                        <QcScanPanel findings={findings} />
+                      </>
+                    ) : (
+                      <p className="rounded-xl border border-dashed border-border/60 px-3 py-6 text-center text-xs text-muted-foreground">
+                        No response to scan.
+                      </p>
+                    )}
+                  </TabsContent>
+
+                  <TabsContent value="ai" className="space-y-3 pt-3">
+                    {aiCheck.isPending ? (
+                      <p className="flex items-center gap-2 py-6 text-xs text-muted-foreground">
+                        <Loader2 className="size-3.5 animate-spin" />
+                        AI is reading the response…
+                      </p>
+                    ) : aiResult && aiResult.ok ? (
+                      <AiCheckView result={aiResult} />
+                    ) : !draft.aiExpect.trim() ? (
+                      <p className="rounded-xl border border-dashed border-border/60 px-3 py-6 text-center text-xs leading-5 text-muted-foreground">
+                        Describe what a correct response looks like in{' '}
+                        <span className="font-medium text-foreground">Configure → AI check</span>,
+                        and the verdict shows up here after each Send.
+                      </p>
+                    ) : (
+                      <p className="rounded-xl border border-dashed border-border/60 px-3 py-6 text-center text-xs leading-5 text-muted-foreground">
+                        An expectation is set — Send again, or use{' '}
+                        <span className="font-medium text-foreground">Run AI check</span>.
+                      </p>
+                    )}
+                  </TabsContent>
+
+                  <TabsContent value="history" className="pt-3">
+                    {selected && historyCount > 0 ? (
+                      <HistoryPanel
+                        items={history ?? []}
+                        onLoad={loadResult}
+                        onClear={() => clearHistory.mutate()}
+                        clearing={clearHistory.isPending}
+                      />
+                    ) : (
+                      <p className="rounded-xl border border-dashed border-border/60 px-3 py-6 text-center text-xs leading-5 text-muted-foreground">
+                        {selected
+                          ? 'No stored runs yet — every Send of this request is kept here as evidence.'
+                          : 'Save this request (just Send it) to start an evidence trail.'}
+                      </p>
+                    )}
+                  </TabsContent>
+                </Tabs>
               </div>
             ) : (
-              <p className="py-8 text-center text-sm text-muted-foreground">
-                Send a request to see the response, assertion results, and the QC scan here.
-              </p>
+              /* Nothing sent yet — spell out the loop instead of an empty box. */
+              <div className="space-y-3 py-2">
+                <ol className="space-y-2 text-xs text-muted-foreground">
+                  <li className="flex items-start gap-2">
+                    <span className="mt-px flex size-4 shrink-0 items-center justify-center rounded-full bg-muted text-[9px] font-bold text-foreground">
+                      1
+                    </span>
+                    Put a URL in the bar on the left — or import one from cURL / a page scan.
+                  </li>
+                  <li className="flex items-start gap-2">
+                    <span className="mt-px flex size-4 shrink-0 items-center justify-center rounded-full bg-muted text-[9px] font-bold text-foreground">
+                      2
+                    </span>
+                    Add assertions (and an AI expectation) so the result is a verdict, not a wall of
+                    JSON.
+                  </li>
+                  <li className="flex items-start gap-2">
+                    <span className="mt-px flex size-4 shrink-0 items-center justify-center rounded-full bg-muted text-[9px] font-bold text-foreground">
+                      3
+                    </span>
+                    Hit <span className="font-medium text-foreground">Send</span> ({sendHint}) — the
+                    response, your checks, the QC scan and the run history all land here.
+                  </li>
+                </ol>
+                <div className="flex flex-wrap gap-2 border-t border-border/60 pt-3 text-[11px] text-muted-foreground">
+                  <span className="inline-flex items-center gap-1.5">
+                    <ListChecks className="size-3.5" />
+                    Assertions
+                  </span>
+                  <span className="inline-flex items-center gap-1.5">
+                    <Bug className="size-3.5" />
+                    QC scan
+                  </span>
+                  <span className="inline-flex items-center gap-1.5">
+                    <Sparkles className="size-3.5" />
+                    AI check
+                  </span>
+                  <span className="inline-flex items-center gap-1.5">
+                    <HistoryIcon className="size-3.5" />
+                    Run history
+                  </span>
+                </div>
+              </div>
             )}
-          </div>
-
-          {/* Stored run history for the selected request — evidence across sends. */}
-          {selected && (history?.length ?? 0) > 0 && (
-            <HistoryPanel
-              items={history ?? []}
-              onLoad={loadResult}
-              onClear={() => clearHistory.mutate()}
-              clearing={clearHistory.isPending}
-            />
-          )}
+          </section>
         </div>
       </div>
 
@@ -3376,7 +3934,11 @@ function ApiTesting({ projectId }: { projectId: string }) {
               disabled={delMut.isPending}
               className="gap-1.5 rounded-full active:scale-[0.98]"
             >
-              {delMut.isPending ? <Loader2 className="size-4 animate-spin" /> : <Trash2 className="size-4" />}
+              {delMut.isPending ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : (
+                <Trash2 className="size-4" />
+              )}
               Delete
             </Button>
           </DialogFooter>

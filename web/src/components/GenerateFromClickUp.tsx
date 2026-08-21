@@ -1,12 +1,10 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
-  Check,
   FileText,
   Info,
   ListChecks,
   Loader2,
-  Minus,
   Search,
   Settings2,
   Ticket,
@@ -24,6 +22,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { CheckboxIndicator } from '@/components/ui/checkbox'
 import { ConfigureListDialog } from '@/components/ConfigureListDialog'
 import {
   clickupDocs,
@@ -91,15 +90,7 @@ function SourceRow({
         selected ? 'bg-primary/5 text-foreground' : 'hover:bg-muted text-foreground',
       )}
     >
-      <span
-        className={cn(
-          'flex size-4 shrink-0 items-center justify-center rounded-[5px] border transition-colors',
-          selected ? 'border-primary bg-primary text-primary-foreground' : 'border-muted-foreground/40',
-        )}
-        aria-hidden
-      >
-        {selected && <Check className="size-3" />}
-      </span>
+      <CheckboxIndicator checked={selected} />
       {icon}
       {children}
     </button>
@@ -123,19 +114,9 @@ function SelectAllBar({
       type="button"
       onClick={onToggle}
       aria-pressed={checked}
-      className="flex w-full items-center gap-2 rounded-md px-3 py-1.5 text-left text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
+      className="flex w-full items-center gap-2 rounded-xl px-3 py-1.5 text-left text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
     >
-      <span
-        className={cn(
-          'flex size-4 shrink-0 items-center justify-center rounded-[5px] border transition-colors',
-          checked || partial
-            ? 'border-primary bg-primary text-primary-foreground'
-            : 'border-muted-foreground/40',
-        )}
-        aria-hidden
-      >
-        {checked ? <Check className="size-3" /> : partial ? <Minus className="size-3" /> : null}
-      </span>
+      <CheckboxIndicator checked={checked} indeterminate={partial} />
       {checked ? 'Deselect all' : 'Select all'}
       <span className="text-muted-foreground/70">({count})</span>
     </button>
@@ -407,7 +388,7 @@ export function GenerateFromClickUp({
                 placeholder="Search docs by name…"
                 value={docQuery}
                 onChange={(e) => setDocQuery(e.target.value)}
-                className="h-11 rounded-full pl-9 shadow-none"
+                className="h-11 pl-9 shadow-none"
               />
             </div>
             {!!docs?.length && (
@@ -479,7 +460,7 @@ export function GenerateFromClickUp({
                 }
                 value={ticketQuery}
                 onChange={(e) => setTicketQuery(e.target.value)}
-                className="h-11 rounded-full pl-9 shadow-none"
+                className="h-11 pl-9 shadow-none"
               />
             </div>
             <p className="flex items-center gap-1.5 px-1 text-[11px] text-muted-foreground">

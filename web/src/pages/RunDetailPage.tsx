@@ -17,7 +17,6 @@ import {
   ArrowLeft,
   Ban,
   CalendarClock,
-  Check,
   CheckCircle2,
   ChevronDown,
   ChevronLeft,
@@ -56,6 +55,7 @@ import {
 import { Input } from '@/components/ui/input'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { ScrollArea } from '@/components/ui/scroll-area'
+import { CheckboxIndicator } from '@/components/ui/checkbox'
 import { OpenFolderButton } from '@/components/OpenFolderButton'
 import ContinueSessionPanel from '@/components/ContinueSessionPanel'
 import { GuideTour, type TourStep } from '@/components/GuideTour'
@@ -1281,23 +1281,6 @@ function OutcomeBreakdown({ data, total }: { data: OutcomeDatum[]; total: number
   )
 }
 
-/** A small square check control matching the app's selection style. */
-function CheckBox({ checked }: { checked: boolean }) {
-  return (
-    <span
-      className={cn(
-        'flex size-[18px] shrink-0 items-center justify-center rounded-[6px] border transition-colors',
-        checked
-          ? 'border-primary bg-primary text-primary-foreground'
-          : 'border-muted-foreground/40 bg-background',
-      )}
-      aria-hidden
-    >
-      {checked && <Check className="size-3" strokeWidth={3} />}
-    </span>
-  )
-}
-
 /** A compact issue row: the checkbox toggles selection; the title jumps
  *  (smooth-scrolls) down to the full issue in the report below. Any screenshots
  *  render as thumbnails that open a lightbox. */
@@ -1362,7 +1345,7 @@ function IssueCard({
           aria-label={checked ? 'Deselect issue' : 'Select issue'}
           className="shrink-0"
         >
-          <CheckBox checked={checked} />
+          <CheckboxIndicator size="lg" checked={checked} />
         </button>
         <button
           type="button"
@@ -1694,7 +1677,7 @@ function IssueClickupPanel({
             }
             className="inline-flex items-center gap-2 rounded-full px-2 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
           >
-            <CheckBox checked={allSelected} />
+            <CheckboxIndicator size="lg" checked={allSelected} />
             {allSelected ? 'Clear all' : someSelected ? 'Select all' : `Select all ${issues.length}`}
           </button>
           {totalScreens > 0 && (
@@ -1736,7 +1719,7 @@ function IssueClickupPanel({
               value={parentTask}
               onChange={(event) => setParentTask(event.target.value)}
               placeholder="https://app.clickup.com/t/86eut664j"
-              className="h-10 flex-1 rounded-full shadow-none"
+              className="h-10 flex-1 shadow-none"
             />
             <Button
               onClick={() => mutation.mutate()}

@@ -57,6 +57,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { CheckboxIndicator } from '@/components/ui/checkbox'
 import { ManageRulesDialog } from '@/components/ManageRulesDialog'
 import {
   cancelTestCaseJob,
@@ -524,7 +525,7 @@ function GenerateDialog({
                   value={allUrl}
                   onChange={(e) => setAllUrl(e.target.value)}
                   placeholder="https://staging.example.com/feature"
-                  className="h-11 rounded-full pl-9 shadow-none"
+                  className="h-11 pl-9 shadow-none"
                 />
               </div>
               <Button
@@ -690,7 +691,7 @@ function TicketRow({
           type="button"
           onClick={onToggleExpand}
           aria-label={isOpen ? 'Collapse subtasks' : 'Expand subtasks'}
-          className="flex size-5 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:text-foreground"
+          className="flex size-5 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:text-foreground"
         >
           {isOpen ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />}
         </button>
@@ -703,17 +704,7 @@ function TicketRow({
         aria-pressed={selected}
         className="flex min-w-0 flex-1 items-center gap-2.5 px-3 py-2 text-left text-sm text-foreground"
       >
-        <span
-          className={cn(
-            'flex size-4 shrink-0 items-center justify-center rounded-[5px] border transition-colors',
-            selected
-              ? 'border-primary bg-primary text-primary-foreground'
-              : 'border-muted-foreground/40',
-          )}
-          aria-hidden
-        >
-          {selected && <Check className="size-3" />}
-        </span>
+        <CheckboxIndicator checked={selected} />
         <Ticket className="size-3.5 shrink-0 text-muted-foreground" />
         <span className="flex min-w-0 flex-1 items-center gap-2">
           <span className="shrink-0 font-mono text-xs font-medium">
@@ -1020,7 +1011,7 @@ function TestCasePreviewDialog({
                       resetRow()
                     }}
                   >
-                    <SelectTrigger size="sm" className="h-7 w-44 rounded-full">
+                    <SelectTrigger size="sm" className="h-7 w-44 ">
                       <SelectValue placeholder="Pick a version" />
                     </SelectTrigger>
                     <SelectContent>
@@ -2130,11 +2121,11 @@ export default function TestCasePage() {
                   placeholder="Filter crawled tickets…"
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
-                  className="h-11 rounded-full pl-9 shadow-none"
+                  className="h-11 pl-9 shadow-none"
                 />
               </div>
               <Select value={tcFilter} onValueChange={(v) => setTcFilter(v as TcFilter)}>
-                <SelectTrigger size="sm" className="h-9 w-auto min-w-[10.5rem] gap-2 rounded-full" aria-label="Filter by test cases">
+                <SelectTrigger size="sm" className="h-9 w-auto min-w-[10.5rem] gap-2 " aria-label="Filter by test cases">
                   <ListChecks className="h-3.5 w-3.5 text-muted-foreground" />
                   <SelectValue />
                 </SelectTrigger>
@@ -2506,7 +2497,7 @@ export default function TestCasePage() {
             Model
           </div>
           <Select value={model} onValueChange={chooseModel} disabled={start.isPending}>
-            <SelectTrigger size="sm" className="h-9 w-auto min-w-[10rem] gap-2 rounded-full" aria-label="Test-case generation model">
+            <SelectTrigger size="sm" className="h-9 w-auto min-w-[10rem] gap-2 " aria-label="Test-case generation model">
               <SelectValue aria-label={modelInfo.label}>
                 <span className="text-xs font-medium">{modelInfo.label}</span>
               </SelectValue>

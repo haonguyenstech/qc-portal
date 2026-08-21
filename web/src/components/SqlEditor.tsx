@@ -409,7 +409,7 @@ export function SchemaBrowser({
           value={q}
           onChange={(e) => setQ(e.target.value)}
           placeholder="Search tables & columns…"
-          className="h-8 w-full rounded-xl border border-border/60 bg-background px-2.5 text-xs outline-none placeholder:text-muted-foreground/60 focus:border-border"
+          className="h-8 w-full rounded-full border border-border/60 bg-background px-3 text-xs outline-none placeholder:text-muted-foreground/60 focus:border-border"
         />
       </div>
       <div className="min-h-0 flex-1 overflow-auto p-1">

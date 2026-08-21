@@ -557,13 +557,13 @@ export default function NotesPage() {
           fixed notification bell and theme toggle sit (right-6 / right-[4.25rem]) and would
           cover the view-toggle pill. Same treatment as the Prototype header's pe-12. */}
       <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:pe-24">
-        <button type="button" onClick={openAddDialog} className="flex h-10 items-center justify-center gap-2 rounded-lg bg-foreground px-6 text-sm font-medium text-background transition-all hover:opacity-90 active:scale-[0.98] sm:w-64">
+        <button type="button" onClick={openAddDialog} className="flex h-10 items-center justify-center gap-2 rounded-full bg-foreground px-6 text-sm font-medium text-background transition-all hover:opacity-90 active:scale-[0.98] sm:w-64">
           <Edit3 className="size-4" />
           Add Note
         </button>
         <label className="relative block sm:w-52">
           <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-          <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search notes" className="h-10 w-full rounded-lg border border-border/70 bg-background pl-9 pr-3 text-sm outline-none transition-colors placeholder:text-muted-foreground focus:border-foreground" />
+          <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search notes" className="h-10 w-full rounded-full border border-border/70 bg-background pl-9 pr-3 text-sm outline-none transition-colors placeholder:text-muted-foreground focus:border-foreground" />
         </label>
         <div className="ml-auto flex rounded-lg border border-border/70 bg-card p-0.5">
           <button type="button" onClick={() => setView('grid')} aria-label="Grid view" className={cn('rounded-md p-2', view === 'grid' ? 'bg-foreground text-background' : 'text-muted-foreground hover:text-foreground')}><Grid2X2 className="size-4" /></button>
@@ -737,7 +737,7 @@ export default function NotesPage() {
                   value={newTitle}
                   onChange={(event) => setNewTitle(event.target.value)}
                   placeholder="e.g. Release ideas"
-                  className="rounded-xl border-border/70"
+                  className="border-border/70"
                 />
               </div>
               <div className="space-y-2">
@@ -801,7 +801,7 @@ export default function NotesPage() {
               editingLabel === name ? (
                 <div key={name} className="flex items-center gap-2 rounded-xl border border-primary/30 bg-primary/5 p-1.5 pl-3">
                   <span className={cn('size-2.5 shrink-0 rounded-full', color)} />
-                  <Input value={editingLabelName} onChange={(event) => setEditingLabelName(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') renameLabel(name); if (event.key === 'Escape') setEditingLabel(null) }} autoFocus aria-label={`Rename ${name}`} className="h-8 rounded-lg border-border/70 bg-background text-sm" />
+                  <Input value={editingLabelName} onChange={(event) => setEditingLabelName(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') renameLabel(name); if (event.key === 'Escape') setEditingLabel(null) }} autoFocus aria-label={`Rename ${name}`} className="h-8 border-border/70 bg-background text-sm" />
                   <Button type="button" size="sm" onClick={() => renameLabel(name)} disabled={!editingLabelName.trim()} className="h-8 rounded-full px-3.5 text-xs">Save</Button>
                   <button type="button" onClick={() => setEditingLabel(null)} className="px-1 text-xs font-medium text-muted-foreground hover:text-foreground">Cancel</button>
                 </div>
@@ -819,7 +819,7 @@ export default function NotesPage() {
             <div className="flex gap-2">
               <div className="relative min-w-0 flex-1">
                 <Plus className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-                <Input value={labelName} onChange={(event) => setLabelName(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); addLabel() } }} placeholder="New label…" className="h-9 rounded-lg border-border/70 bg-background pl-9 text-sm" />
+                <Input value={labelName} onChange={(event) => setLabelName(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); addLabel() } }} placeholder="New label…" className="h-9 border-border/70 bg-background pl-9 text-sm" />
               </div>
               <Button type="button" onClick={addLabel} disabled={!labelName.trim()} className="h-9 rounded-full px-4 text-sm">Add label</Button>
             </div>

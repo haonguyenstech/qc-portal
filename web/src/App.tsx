@@ -425,7 +425,7 @@ function NavFilter({
         }}
         placeholder="Search pages…"
         aria-label="Search pages"
-        className="h-9 w-full rounded-xl border border-sidebar-border/70 bg-muted/50 pl-8 pr-12 text-sm text-foreground outline-none transition-colors placeholder:text-muted-foreground/70 hover:border-border focus:border-border focus:bg-muted"
+        className="h-9 w-full rounded-full border border-sidebar-border/70 bg-muted/50 pl-8 pr-12 text-sm text-foreground outline-none transition-colors placeholder:text-muted-foreground/70 hover:border-border focus:border-border focus:bg-muted"
       />
       {value ? (
         <button
@@ -495,7 +495,7 @@ function ProjectSwitcher({ collapsed, onExpand }: { collapsed: boolean; onExpand
         onValueChange={setActiveProjectId}
         disabled={isLoading}
       >
-        <SelectTrigger className="h-auto! w-full gap-2 rounded-xl border-sidebar-border/70 bg-muted/50 py-2 pl-2 shadow-none transition-all duration-200 hover:border-border hover:bg-muted data-[state=open]:border-border data-[state=open]:bg-muted">
+        <SelectTrigger className="h-auto! w-full gap-2 border-sidebar-border/70 bg-muted/50 py-2 pl-2 shadow-none transition-all duration-200 hover:border-border hover:bg-muted data-[state=open]:border-border data-[state=open]:bg-muted">
           <span className="flex min-w-0 flex-1 items-center gap-2 text-left">
             <span className="relative flex size-7 shrink-0 items-center justify-center rounded-lg bg-foreground text-xs font-semibold text-background">
               {initial}
@@ -927,7 +927,7 @@ function SidebarToggle({ collapsed, onToggle }: { collapsed: boolean; onToggle: 
       type="button"
       onClick={onToggle}
       aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-      className="flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-all duration-200 hover:bg-muted hover:text-foreground active:scale-95"
+      className="flex size-8 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-all duration-200 hover:bg-muted hover:text-foreground active:scale-95"
     >
       <Icon className="size-4" />
     </button>
@@ -1231,9 +1231,15 @@ function AppShell() {
         <div
           className={cn(
             'mx-auto',
-            // The Prototype workspace (chat + live preview) and Chat (history rail +
-            // transcript) need the full width; every other page stays comfortably capped.
-            pathname === '/prototype' || pathname === '/chat' || pathname === '/notes' ? 'max-w-none' : 'max-w-6xl',
+            // The Prototype workspace (chat + live preview), Chat (history rail +
+            // transcript) and API Testing (collection rail + request builder + result
+            // panel) need the full width; every other page stays comfortably capped.
+            pathname === '/prototype' ||
+            pathname === '/chat' ||
+            pathname === '/notes' ||
+            pathname === '/api-testing'
+              ? 'max-w-none'
+              : 'max-w-6xl',
             // Chat is full-bleed: its shell has no outer border, so page padding would
             // just leave a gap around the rail and the transcript.
             pathname === '/chat' ? '' : 'px-4 py-4 sm:px-6 sm:py-6 lg:px-8 lg:py-8',

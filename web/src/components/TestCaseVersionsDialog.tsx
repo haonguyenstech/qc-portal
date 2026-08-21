@@ -122,7 +122,7 @@ function PreviewBody({
                   value={selected != null ? String(selected) : undefined}
                   onValueChange={(v) => setChosen(Number(v))}
                 >
-                  <SelectTrigger size="sm" className="h-7 w-52 rounded-full">
+                  <SelectTrigger size="sm" className="h-7 w-52 ">
                     <SelectValue placeholder="Pick a version" />
                   </SelectTrigger>
                   <SelectContent>

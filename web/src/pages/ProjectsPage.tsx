@@ -726,7 +726,7 @@ function ProjectCard({ project }: { project: Project }) {
                   type="button"
                   onClick={copyPath}
                   aria-label="Copy path"
-                  className="shrink-0 rounded-lg p-0.5 text-muted-foreground/50 opacity-0 transition-all duration-200 hover:bg-muted hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
+                  className="shrink-0 rounded-full p-0.5 text-muted-foreground/50 opacity-0 transition-all duration-200 hover:bg-muted hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
                 >
                   <Copy className="h-3 w-3" />
                 </button>
@@ -1701,7 +1701,7 @@ function AutomationRow(props: {
           onValueChange={props.onModel}
           disabled={!props.enabled || props.busy}
         >
-          <SelectTrigger className="h-8 w-[104px] rounded-full text-xs">
+          <SelectTrigger className="h-8 w-[104px] text-xs">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -2022,7 +2022,7 @@ export default function ProjectsPage() {
                     placeholder="Filter by name or path…"
                     value={query}
                     onChange={(e) => setQuery(e.target.value)}
-                    className="h-11 rounded-full pl-9 shadow-none"
+                    className="h-11 pl-9 shadow-none"
                   />
                 </div>
                 <p className="text-xs text-muted-foreground">

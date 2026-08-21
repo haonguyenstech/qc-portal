@@ -167,7 +167,7 @@ export function TicketTestCasePicker({
         >
           {/* data-[size=default]:h-11 — the base SelectTrigger pins h-9 via the same data
               selector, so a plain h-11 loses; match the ticket picker's 44px trigger. */}
-          <SelectTrigger className="w-full min-w-0 flex-1 rounded-xl border-border/60 shadow-none data-[size=default]:h-11">
+          <SelectTrigger className="w-full min-w-0 flex-1 border-border/60 shadow-none data-[size=default]:h-11">
             <SelectValue placeholder="Choose a test-case version" />
           </SelectTrigger>
           <SelectContent>
@@ -191,7 +191,7 @@ export function TicketTestCasePicker({
           type="button"
           variant="outline"
           size="icon"
-          className="size-11 shrink-0 rounded-xl shadow-none"
+          className="size-11 shrink-0 rounded-full shadow-none"
           onClick={() => setPreviewOpen(true)}
           disabled={value == null}
           title="Preview test cases"

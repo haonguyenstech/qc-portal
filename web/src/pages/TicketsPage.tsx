@@ -1356,7 +1356,7 @@ export default function TicketsPage() {
                   value={query}
                   autoComplete="off"
                   onChange={(e) => setQuery(e.target.value)}
-                  className="h-11 rounded-full pl-9 shadow-none"
+                  className="h-11 pl-9 shadow-none"
                 />
                 {isFetching && (
                   <Loader2 className="absolute right-3 top-1/2 size-4 -translate-y-1/2 animate-spin text-muted-foreground" />
@@ -1516,7 +1516,7 @@ export default function TicketsPage() {
               <Select value={crawlModel} onValueChange={chooseCrawlModel} disabled={crawl.isPending}>
                 <SelectTrigger
                   size="sm"
-                  className="h-9 w-auto min-w-[8.5rem] shrink-0 gap-2 rounded-full"
+                  className="h-9 w-auto min-w-[8.5rem] shrink-0 gap-2 "
                   aria-label="Crawl processing model"
                 >
                   <Sparkles className="size-3.5 shrink-0 text-primary" />

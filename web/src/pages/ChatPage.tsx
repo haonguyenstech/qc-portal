@@ -267,7 +267,7 @@ function ImageRefChip({ cited, onOpen }: { cited: string; onOpen: () => void }) 
       onClick={onOpen}
       title={`${cited} — click to view`}
       className={cn(
-        'mx-0.5 inline-flex max-w-full items-center gap-1 rounded-md border px-1.5 py-0.5 align-middle',
+        'mx-0.5 inline-flex max-w-full items-center gap-1 rounded-xl border px-1.5 py-0.5 align-middle',
         'font-mono text-[11px] leading-none transition-colors',
         'border-violet-500/30 bg-violet-500/5 text-violet-600 hover:border-violet-500/50',
         'hover:bg-violet-500/10 dark:text-violet-400',
@@ -817,7 +817,7 @@ function ComposerModePicker({
         size="sm"
         title={active.title}
         aria-label={`What this chat may do: ${active.label}`}
-        className={cn('w-fit rounded-full focus:ring-0!', active.pill)}
+        className={cn('w-fit focus:ring-0!', active.pill)}
       >
         <active.icon className="size-4" />
         <div className="hidden lg:flex">
@@ -3672,7 +3672,7 @@ function ChatHeader({
               type="button"
               onClick={onPin}
               aria-label={pinned ? 'Unstar this conversation' : 'Star this conversation'}
-              className="flex size-9 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+              className="flex size-9 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
             >
               <Star className={cn('size-4', pinned && 'fill-amber-400 text-amber-500')} />
             </button>
@@ -5116,7 +5116,7 @@ function ChatWorkspace({
                   <Select value={model} onValueChange={setModel}>
                     <SelectTrigger
                       size="sm"
-                      className="w-fit rounded-full focus:ring-0!"
+                      className="w-fit focus:ring-0!"
                       aria-label="Model"
                     >
                       <Sparkles className="size-4 text-muted-foreground" />
@@ -5151,7 +5151,7 @@ function ChatWorkspace({
                   <Select value={effort} onValueChange={(v) => setEffort(v as ChatEffort)}>
                     <SelectTrigger
                       size="sm"
-                      className="w-fit rounded-full focus:ring-0!"
+                      className="w-fit focus:ring-0!"
                       aria-label="Reasoning effort"
                     >
                       <Gauge className="size-4 text-muted-foreground" />

@@ -702,7 +702,7 @@ export function RunWorkflowBuilder({
                 onChange={(e) => setQuery(e.target.value)}
                 disabled={disabled}
                 placeholder="Search nodes…"
-                className="h-9 rounded-full pl-8 text-sm shadow-none"
+                className="h-9 pl-8 text-sm shadow-none"
               />
             </div>
           </div>

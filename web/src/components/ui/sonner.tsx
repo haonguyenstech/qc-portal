@@ -76,11 +76,11 @@ function Toaster({ ...props }: ToasterProps) {
           content: "!gap-0.5",
           icon: "qc-toast-icon !mr-0 mt-0.5 self-start",
           actionButton:
-            "!rounded-md !bg-primary !px-2.5 !py-1 !text-xs !font-medium !text-primary-foreground transition-opacity hover:!opacity-90 active:!scale-[0.98]",
+            "!rounded-full !bg-primary !px-2.5 !py-1 !text-xs !font-medium !text-primary-foreground transition-opacity hover:!opacity-90 active:!scale-[0.98]",
           cancelButton:
-            "!rounded-md !bg-muted !px-2.5 !py-1 !text-xs !font-medium !text-muted-foreground transition-colors hover:!bg-muted/70",
+            "!rounded-full !bg-muted !px-2.5 !py-1 !text-xs !font-medium !text-muted-foreground transition-colors hover:!bg-muted/70",
           closeButton:
-            "!rounded-md !border !border-border !bg-background !text-muted-foreground transition-colors hover:!bg-muted hover:!text-foreground",
+            "!rounded-full !border !border-border !bg-background !text-muted-foreground transition-colors hover:!bg-muted hover:!text-foreground",
         },
       }}
       style={

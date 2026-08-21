@@ -169,7 +169,7 @@ function NoteForm({
             onChange={(e) => setName(e.target.value)}
             disabled={!isNew} // renaming would orphan the file — create a new note instead
             placeholder="e.g. login-uses-otp"
-            className="rounded-xl"
+            
           />
           {!isNew && (
             <p className="text-[11px] text-muted-foreground">
@@ -187,7 +187,7 @@ function NoteForm({
             value={description}
             onChange={(e) => setDescription(e.target.value)}
             placeholder="What this fact is about — shown in MEMORY.md"
-            className="rounded-xl"
+            
           />
         </div>
 
@@ -201,7 +201,7 @@ function NoteForm({
             onChange={(e) => setContent(e.target.value)}
             spellCheck={false}
             placeholder={'The durable fact, in Markdown.\n\nKeep it small and specific — one idea per note.'}
-            className="min-h-[16rem] resize-y rounded-xl font-mono text-xs leading-relaxed"
+            className="min-h-[16rem] resize-y font-mono text-xs leading-relaxed"
           />
         </div>
       </div>
@@ -442,7 +442,7 @@ export function MemoryNotes({
             value={query}
             onChange={(e) => search(e.target.value)}
             placeholder="Search notes by name or description…"
-            className="rounded-full pl-9 pr-9"
+            className="pl-9 pr-9"
           />
           {query && (
             <button

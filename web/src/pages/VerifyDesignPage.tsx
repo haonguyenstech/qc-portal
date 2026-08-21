@@ -5,7 +5,6 @@ import { toast } from 'sonner'
 import {
   AlertTriangle,
   Ban,
-  Check,
   CheckCircle2,
   ChevronDown,
   ChevronRight,
@@ -42,6 +41,7 @@ import {
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
+import { CheckboxIndicator } from '@/components/ui/checkbox'
 import {
   Select,
   SelectContent,
@@ -639,7 +639,7 @@ function CrawledTicketPicker({
                 placeholder="Search crawled tickets…"
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                className="h-11 rounded-full pl-9 text-sm shadow-none"
+                className="h-11 pl-9 text-sm shadow-none"
               />
             </div>
           </div>
@@ -700,17 +700,7 @@ function CrawledTicketPicker({
                               isSel ? 'bg-primary/5' : 'hover:bg-muted',
                             )}
                           >
-                            <span
-                              className={cn(
-                                'flex size-4 shrink-0 items-center justify-center rounded-[5px] border transition-colors',
-                                isSel
-                                  ? 'border-primary bg-primary text-primary-foreground'
-                                  : 'border-muted-foreground/40',
-                              )}
-                              aria-hidden
-                            >
-                              {isSel && <Check className="size-3" />}
-                            </span>
+                            <CheckboxIndicator checked={isSel} />
                             <Ticket className="size-3.5 shrink-0 text-muted-foreground" />
                             <span className="flex min-w-0 flex-1 items-center gap-2">
                               <span className="shrink-0 font-mono text-xs font-medium">
@@ -1176,7 +1166,7 @@ export default function VerifyDesignPage() {
             <div className="space-y-1.5">
               <label className="text-xs font-medium text-muted-foreground">AI model</label>
               <Select value={model} onValueChange={chooseModel} disabled={start.isPending || isRunning}>
-                <SelectTrigger className="w-56 gap-2 rounded-full">
+                <SelectTrigger className="w-56 gap-2 ">
                   <Sparkles className="size-3.5 shrink-0 text-primary" />
                   <SelectValue>
                     <span className="text-sm font-medium">{modelInfo.label}</span>

@@ -522,7 +522,7 @@ function ConnectForm({
         <div className="space-y-1.5">
           <Label>Database type</Label>
           <Select value={kind} onValueChange={(v) => setKind(v as DbKind)}>
-            <SelectTrigger className="rounded-xl">
+            <SelectTrigger >
               <SelectValue placeholder="Choose a database" />
             </SelectTrigger>
             <SelectContent>
@@ -1326,7 +1326,7 @@ function QueryConsole({
           {databases.length > 1 && (
             <div className="ml-auto min-w-[12rem]">
               <Select value={selected.id} onValueChange={pickDatabase}>
-                <SelectTrigger className="h-9 rounded-full">
+                <SelectTrigger className="h-9 ">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -1373,7 +1373,7 @@ function QueryConsole({
               onChange={(e) => setQuestion(e.target.value)}
               placeholder="e.g. How many users signed up in the last 7 days? Which 10 orders are the largest?"
               rows={2}
-              className="resize-y rounded-2xl text-sm"
+              className="resize-y text-sm"
               onKeyDown={(e) => {
                 if ((e.metaKey || e.ctrlKey) && e.key === 'Enter' && question.trim() && !disabled && !busy) {
                   ask.mutate()

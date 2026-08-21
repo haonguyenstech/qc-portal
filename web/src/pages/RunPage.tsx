@@ -53,6 +53,7 @@ import {
 } from '@/components/ui/select'
 import { Badge } from '@/components/ui/badge'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { Checkbox } from '@/components/ui/checkbox'
 import {
   checkAppUrl,
   createRun,
@@ -1695,8 +1696,7 @@ export default function RunPage() {
                           no browser window
                         </span>
                       </span>
-                      <input
-                        type="checkbox"
+                      <Checkbox
                         checked={headless && !attachedBrowser}
                         disabled={!activeProject || attachedBrowser}
                         onChange={(e) => {
@@ -1707,7 +1707,6 @@ export default function RunPage() {
                             /* ignore quota / disabled storage */
                           }
                         }}
-                        className="size-4 accent-primary"
                       />
                     </label>
                     <p className="text-[11px] text-muted-foreground">

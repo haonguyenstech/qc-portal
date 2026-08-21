@@ -3,6 +3,78 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.11.19 — 2026-08-21
+
+**API Testing rebuilt: Flows get their own tab, the collection gets a search box, and a new request exists the moment you make it**
+
+### Added
+
+- **Flows is now a tab of the API Testing page, not a pop-up.** `Requests` and `Flows` sit side by
+  side at the top of `/api-testing`, and the flow you are editing lives on the page: the list of
+  flows on the left, and **1 Scenario → 2 Steps → 3 Result** across the rest of it. The tab is part
+  of the address (`…/api-testing?tab=flows`), so a scenario can be bookmarked or pasted to a
+  colleague and survives a reload. Run and Save sit next to the flow's name instead of in a dialog
+  footer a long step list scrolled away from, the flow can be **renamed** in place, and deleting one
+  asks first (a flow is a file, and its saved reports go with it). Switching back to Requests keeps
+  the response you were reading.
+- **Every saved run opens up.** A stored run used to be one line — *"0/2 passed"* from three days
+  ago, with no way to see what went wrong short of running it again. Click it and it unfolds into
+  the report that was already kept with the project: each step with its status, checks, timing, the
+  reason it failed (*"status: 401 — expected 2xx"*), which steps were skipped and why, and which
+  variables it captured — plus how long the whole run took, which account it ran as, and against
+  which environment. Five runs are listed with a **Show all** toggle.
+- **Build a flow from a cURL command.** *Add request* in a flow now has **Import cURL** beside the
+  list of saved requests. Paste what you copied from your browser's network tab and it becomes a
+  saved request **and** the next step in one click — no more leaving the flow, importing on the
+  Requests tab, sending it once to get it saved, and coming back to a half-built scenario.
+- **Search the collection.** A search box sits under *New request* whenever anything is saved. Terms
+  are combined, so `post login` finds `POST /auth/login` regardless of word order, and each term is
+  matched against the request's name, method, URL **and** the module it is filed under. It tells you
+  `3 of 12 match`, clears with the ✕ or Escape, and the same search now filters the step picker
+  inside a flow.
+
+### Changed
+
+- **`New request` creates the request immediately.** It used to only clear the form: nothing appeared
+  in the collection until you had typed a URL *and* sent it, so the button looked like it had done
+  nothing, there was no row to rename or file into a module, and a half-written request was lost on
+  the next click. Now the row appears at once — pinned to the **top** of the list so it isn't filed
+  alphabetically into the middle of a long collection — the URL bar takes focus, and from that moment
+  every keystroke is saved. It is called *New request* and shows *no URL yet* until you fill it in;
+  the first **Send** renames it to the usual `GET /api/orders` form.
+- **The API Testing page is a three-pane workspace.** Collection on the left, the request in the
+  middle, and the result on the right instead of stacked below it, with the panes numbered
+  **1 Request → 2 Configure & assert → 3 Result** and every hint in the UI pointing at those names.
+  The result pane leads with three tiles — **Checks**, **Issues**, **AI** — and clicking a tile opens
+  the tab that explains it (Response / Checks / Issues / AI / Runs), so *"did it pass?"* is never
+  several scrolls below the Send button. Three columns appear on wide screens; narrower ones drop the
+  result panel full-width underneath rather than squeezing the URL bar.
+- **"Run as" says who the flow is actually running as.** The card now states the resolved identity on
+  its header line — the account's username in green, *no account* when nothing is picked, and a red
+  **account missing** when the stored account has been deleted — with *Manage accounts* beside it. The
+  two pickers no longer stretch half a pane apart, and the placeholders you write in the login request
+  (`{{auth.username}}`, `{{auth.password}}`, `{{auth.otp}}`) are listed as chips instead of buried in
+  a paragraph.
+- **Pill buttons, pill inputs and one checkbox everywhere.** The rounded-full button, pill select and
+  large-radius menu shapes of the System-Style UI moved into the shared components, and every
+  hand-rolled tick box across the portal (run options, step toggles, test-case pickers, SQL editor,
+  notes) is now the same `Checkbox` — one look, real keyboard focus, and no more drifting sizes.
+
+### Fixed
+
+- **Saving a second request to an endpoint you already had silently did nothing.** The name it
+  generated for the copy — `GET api orders (2)` — contains characters a request file name may not, so
+  the server rejected it and the error was swallowed: no file, no warning. Names now dedupe as
+  `GET api orders 2`, which is accepted, and a failure is reported instead of dropped.
+- **A dialog no longer spills outside its own panel.** One long URL in the *Scan a page for its APIs*
+  list pushed every row — and the footer buttons with it — past the right edge of the white panel.
+  The fix is in the shared dialog, so every dialog in the portal is covered.
+- **Renaming a flow no longer discards unsaved steps.** The rename now takes your current draft with
+  it; previously renaming a flow you had just added two steps to came back with none.
+- **A deleted test account is now visible instead of blank.** When the account a flow was set to run
+  as no longer exists, the picker used to show an empty box; it now names it as *deleted* and says
+  the run will stop on an unresolved variable.
+
 ## 0.11.18 — 2026-08-18
 
 **Chat answers you can check — and a QC run that can hide its browser**

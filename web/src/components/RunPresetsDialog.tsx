@@ -271,7 +271,7 @@ export function RunPresetsDialog({
                     ? 'Name it — e.g. Signup → invite flow'
                     : 'Name it — e.g. Smoke test · staging'
               }
-              className="h-9 rounded-full shadow-none"
+              className="h-9 shadow-none"
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && canSave) {
                   e.preventDefault()
@@ -325,7 +325,7 @@ export function RunPresetsDialog({
                 onChange={(e) => setQuery(e.target.value)}
                 placeholder="Search templates…"
                 aria-label="Search templates"
-                className="h-9 rounded-full pl-8 text-sm shadow-none"
+                className="h-9 pl-8 text-sm shadow-none"
               />
             </div>
           )}
@@ -376,7 +376,7 @@ export function RunPresetsDialog({
                                   setEditingId(null)
                                 }
                               }}
-                              className="h-8 rounded-xl font-medium shadow-none"
+                              className="h-8 font-medium shadow-none"
                             />
                             <Button
                               type="button"
