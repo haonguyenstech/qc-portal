@@ -1,4 +1,4 @@
-import { Router } from 'express'
+import { Router, type Request, type Response } from 'express'
 import fs from 'node:fs'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
@@ -834,7 +834,15 @@ const ASSIST_CONTRACT = [
   `or {{otp.<label>}} instead); keep "note" to one short line saying what it changes and why.`,
 ].join('\n')
 
-apiTestsRouter.post('/assistant', async (req, res) => {
+/**
+ * One assistant turn. Registered through a wrapper below rather than passed to `.post`
+ * directly: Express 4 does NOT catch a rejected async handler, so a throw anywhere in
+ * here — a corrupt file read, a parse that didn't expect what the CLI printed — would
+ * leave the request with no response at all. `fetch` has no timeout, so the browser then
+ * shows a spinner that never stops and nothing anywhere says what happened. Every exit
+ * from this function must be a response.
+ */
+async function assistantTurn(req: Request, res: Response): Promise<unknown> {
   const project = resolveProject(req)
   if (!project) return res.status(400).json({ error: 'project not found' })
   const root = project.rootPath
@@ -1068,6 +1076,18 @@ apiTestsRouter.post('/assistant', async (req, res) => {
     ok: true,
     reply: str(parsed.reply, 20_000) || '(no answer)',
     proposals,
+  })
+}
+
+apiTestsRouter.post('/assistant', (req, res) => {
+  void assistantTurn(req, res).catch((err: unknown) => {
+    // Logged, because a failure here is a bug in this route and not the engineer's doing.
+    console.error('[api-assistant] turn failed:', err)
+    if (res.headersSent) return
+    res.status(500).json({
+      ok: false,
+      error: err instanceof Error ? err.message : 'the assistant failed',
+    })
   })
 })
 

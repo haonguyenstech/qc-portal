@@ -3,6 +3,33 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.11.21 — 2026-08-25
+
+**The API assistant tells you how long it has been thinking, and can be stopped**
+
+### Fixed
+
+- **"Ask AI" looked like it had hung, and closing the box seemed to be what fetched the
+  answer.** It hadn't hung and it wasn't: a turn on a real collection takes time — measured on
+  15 saved requests, 7 seconds for *"how many requests are saved"* and **58 seconds** for
+  *"pull the shared host and token out into variables"* — and the box showed one unchanging
+  *Reading your collection…* for all of it, with no way out but the ✕. The conversation lives
+  behind the button whether the box is open or not, so the answer that appeared on reopening
+  had simply landed while it was shut. The busy line now counts the **seconds elapsed**, has a
+  **Stop** button (your question stays in the transcript), and past 20 seconds says outright
+  that a full answer with proposals takes 30-90s and that you can close the box and come back.
+  If a slow answer is the problem rather than a confusing one, switching the model in the box's
+  header from Sonnet to Haiku takes the same question from about a minute to about seven
+  seconds.
+- **Two ways the box really could have spun forever, both closed.** A browser `fetch` has no
+  timeout of its own, so anything that stopped the server from replying would have spun the
+  panel for as long as the tab stayed open. Express does not catch a failure inside an async
+  route, so a single unexpected error anywhere in the assistant's turn left the request with no
+  reply at all — that now always comes back as an error you can read. And the page keeps its own
+  270-second deadline, deliberately longer than the 240 seconds the server itself allows, so a
+  slow-but-alive turn still gets to answer while one that is never coming back ends with a
+  message instead of a spinner.
+
 ## 0.11.20 — 2026-08-25
 
 **A run that can create the data a case needs, a chat that stops calling assumptions bugs, and tickets that finally have a history**

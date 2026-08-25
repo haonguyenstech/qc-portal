@@ -2878,14 +2878,26 @@ export interface ApiAssistResult {
  * `images` are base64 bytes (a pasted screenshot), `docs` are already-converted markdown
  * (the same `convertFileToMarkdown` pipeline Knowledge and Chat use).
  */
-export function askApiAssistant(body: {
-  projectId: string
-  messages: { role: 'user' | 'assistant'; text: string }[]
-  model?: string
-  docs?: { name: string; markdown: string }[]
-  images?: { mime: string; data: string }[]
-}): Promise<ApiAssistResult> {
-  return request('/api/api-tests/assistant', { method: 'POST', body: JSON.stringify(body) })
+export function askApiAssistant(
+  body: {
+    projectId: string
+    messages: { role: 'user' | 'assistant'; text: string }[]
+    model?: string
+    docs?: { name: string; markdown: string }[]
+    images?: { mime: string; data: string }[]
+  },
+  /**
+   * Lets the caller give up. A turn is one `claude -p` the server waits on for up to
+   * 240 s, and `fetch` on its own waits forever — so without a signal the panel's only
+   * honest options were "keep spinning" and "reload the page".
+   */
+  signal?: AbortSignal,
+): Promise<ApiAssistResult> {
+  return request('/api/api-tests/assistant', {
+    method: 'POST',
+    body: JSON.stringify(body),
+    signal,
+  })
 }
 
 /** List a saved request's stored run history (newest first, metadata only). */

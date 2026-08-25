@@ -312,6 +312,25 @@ by hand. The box answers questions **and proposes those edits**.
   turn** — the CLI takes a prompt, not bytes, so a screenshot has to be a real path it can
   `Read` — and are deleted in a `finally`. Don't make that dir persistent: it would put
   screenshots of a logged-in app under version control.
+- **A turn says how long it has been running, and can be stopped.** Reported as "loading
+  forever — I close the box and reopen it and then the answer is there", which is exactly what
+  the old spinner made a slow turn look like: one unchanging *Reading your collection…* and no
+  way out. Measured on a real collection of 15 requests: 6 s for "how many requests are saved",
+  **58 s** for "pull the shared host and token out into variables" — so the answer had simply
+  landed while the box was shut (the component stays mounted behind the button, which is why
+  reopening "worked"). The busy row now carries an **elapsed seconds** counter, a **Stop**
+  button (`AbortController`, and the question stays in the transcript), and past 20 s a line
+  saying a full answer takes 30-90 s and that the box can be closed without losing it. The
+  panel also aborts the turn when it unmounts.
+- **Two real ways a turn could hang forever, both closed.** `fetch` has no timeout, so
+  anything that stops the server from answering spins the panel for as long as the tab is
+  open. (1) **Express 4 does not catch a rejected async handler** — a throw anywhere in the
+  route left the request with no response at all, so the route body is now `assistantTurn()`
+  called through a `.catch` that answers 500 with the message. Never register it as a bare
+  `async` handler again. (2) The client has its own **270 s deadline**, deliberately ABOVE the
+  server's 240 s `ASSIST_TIMEOUT` so a slow-but-live turn still gets to answer; it only catches
+  a turn where no answer is coming (a restarted server, a dropped socket), and reports itself as
+  such rather than as a model failure.
 - **A reply that ignored the JSON contract is still shown** as plain text with no proposals,
   rather than thrown away as "the AI produced nothing".
 - Layout: the collapsed button sits at `bottom-16 right-5` so it stacks ABOVE App's

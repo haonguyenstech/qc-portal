@@ -65,6 +65,14 @@ const MAX_IMAGES = 4
 const MAX_DOCS = 4
 /** Kept in step with the server's `ASSIST_MAX_MESSAGES` — it replays the transcript. */
 const MAX_TURNS = 24
+/**
+ * Client-side deadline for one turn, ABOVE the server's own `ASSIST_TIMEOUT` (240 s) so a
+ * server that answers slowly still gets to answer — this only catches the case where no
+ * answer is coming at all (a restarted server, a dropped socket, a route that threw before
+ * it could reply). `fetch` has no timeout of its own, so without this the panel spins for
+ * as long as the tab is open.
+ */
+const CLIENT_TIMEOUT = 270_000
 
 const MD_CLASS = cn(
   'text-sm leading-relaxed',
@@ -320,6 +328,15 @@ export function ApiAssistantChat({
   const [docs, setDocs] = useState<StagedDoc[]>([])
   const [converting, setConverting] = useState(false)
   const [busy, setBusy] = useState(false)
+  // How long the turn has been running, in seconds. A turn is one `claude -p` and takes
+  // 10-90 s on a real collection (measured: 6 s for "how many requests", 58 s for "pull
+  // the host and token out into variables" on 15 requests). A spinner with one unchanging
+  // sentence under it reads as HUNG at 30 s, which is why the box was closed and reopened
+  // — and reopening only ever "worked" because the answer had landed in the meantime.
+  const [elapsed, setElapsed] = useState(0)
+  const abortRef = useRef<AbortController | null>(null)
+  // Set by the Stop button so the catch below can tell "I gave up" from "it timed out".
+  const stoppedRef = useRef(false)
   // Keyed by `${turnIndex}:${proposalIndex}` — a proposal is applied once, and the card
   // has to keep saying so after the transcript grows.
   const [applied, setApplied] = useState<Record<string, 'applying' | 'applied'>>({})
@@ -330,6 +347,22 @@ export function ApiAssistantChat({
     const el = scrollRef.current
     if (el) el.scrollTop = el.scrollHeight
   }, [turns, busy, open])
+
+  // Ticks only while a turn is in flight, and resets when it ends — a counter that keeps
+  // running is worse than none.
+  useEffect(() => {
+    if (!busy) {
+      setElapsed(0)
+      return
+    }
+    const started = Date.now()
+    const id = setInterval(() => setElapsed(Math.round((Date.now() - started) / 1000)), 1000)
+    return () => clearInterval(id)
+  }, [busy])
+
+  // Abort an in-flight turn if the panel is unmounted (leaving /api-testing) — otherwise
+  // the fetch outlives the page and its state update goes nowhere.
+  useEffect(() => () => abortRef.current?.abort(), [])
 
   const addImages = useCallback((files: File[]) => {
     for (const f of files) {
@@ -400,16 +433,27 @@ export function ApiAssistantChat({
     setImages([])
     setDocs([])
     setBusy(true)
+    // The server gives the CLI 240 s and then answers; this is the client's own floor
+    // under that, so a connection that dies silently (a restarted server, a proxy that
+    // dropped the socket) still ends the turn with something on screen instead of a
+    // spinner nobody can stop.
+    const ctrl = new AbortController()
+    abortRef.current = ctrl
+    stoppedRef.current = false
+    const deadline = setTimeout(() => ctrl.abort(), CLIENT_TIMEOUT)
     try {
-      const r = await askApiAssistant({
-        projectId,
-        model,
-        messages: history.slice(-MAX_TURNS).map((t) => ({ role: t.role, text: t.text })),
-        images: sendingImages.length
-          ? sendingImages.map((i) => ({ mime: i.mime, data: i.data }))
-          : undefined,
-        docs: sendingDocs.length ? sendingDocs : undefined,
-      })
+      const r = await askApiAssistant(
+        {
+          projectId,
+          model,
+          messages: history.slice(-MAX_TURNS).map((t) => ({ role: t.role, text: t.text })),
+          images: sendingImages.length
+            ? sendingImages.map((i) => ({ mime: i.mime, data: i.data }))
+            : undefined,
+          docs: sendingDocs.length ? sendingDocs : undefined,
+        },
+        ctrl.signal,
+      )
       if (!r.ok) {
         // The question stays in the transcript and the failure is shown as the answer —
         // losing what was asked because the model timed out is the worse outcome.
@@ -424,10 +468,29 @@ export function ApiAssistantChat({
         { role: 'assistant', text: r.reply ?? '', proposals: r.proposals ?? [] },
       ])
     } catch (err) {
-      setTurns([...history, { role: 'assistant', text: (err as Error).message }])
+      const aborted = (err as Error).name === 'AbortError'
+      setTurns([
+        ...history,
+        {
+          role: 'assistant',
+          text: aborted
+            ? stoppedRef.current
+              ? '_Stopped._'
+              : `_No answer after ${Math.round(CLIENT_TIMEOUT / 1000)}s — the turn was given up on. Try a narrower question, or Haiku._`
+            : (err as Error).message,
+        },
+      ])
     } finally {
+      clearTimeout(deadline)
+      abortRef.current = null
       setBusy(false)
     }
+  }
+
+  /** Give up on the turn in flight. The question stays in the transcript. */
+  const stop = () => {
+    stoppedRef.current = true
+    abortRef.current?.abort()
   }
 
   /**
@@ -633,10 +696,29 @@ export function ApiAssistantChat({
         )}
 
         {busy && (
-          <p className="flex items-center gap-2 text-xs text-muted-foreground">
-            <Loader2 className="size-3.5 animate-spin" />
-            Reading your collection…
-          </p>
+          <div className="space-y-1">
+            <p className="flex items-center gap-2 text-xs text-muted-foreground">
+              <Loader2 className="size-3.5 shrink-0 animate-spin" />
+              <span>
+                Reading your collection… <span className="tabular-nums">{elapsed}s</span>
+              </span>
+              <button
+                type="button"
+                onClick={stop}
+                className="ml-auto shrink-0 rounded-full border border-border/60 px-2 py-0.5 text-[11px] transition-colors hover:border-border hover:text-foreground"
+              >
+                Stop
+              </button>
+            </p>
+            {/* Said only once it IS slow: 20 s in, "this is normal" is information; at 2 s
+                it is noise. Without it the box looks broken and gets closed. */}
+            {elapsed >= 20 && (
+              <p className="pl-5 text-[11px] leading-relaxed text-muted-foreground/80">
+                A full answer with proposals takes 30-90s on {model}. You can close this box
+                and come back — the answer lands in the transcript either way.
+              </p>
+            )}
+          </div>
         )}
       </div>
 
