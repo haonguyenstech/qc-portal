@@ -652,6 +652,425 @@ apiTestsRouter.post('/ai-check', async (req, res) => {
   })
 })
 
+// ---------------------------------------------------------------- assistant (chat)
+
+/**
+ * "Ask AI" — a chat box that sets the page UP, rather than judging one response.
+ *
+ * The gap it fills: importing a dozen cURLs (or one page scan) leaves a collection of
+ * requests with hardcoded hosts and a pasted `Authorization: Bearer eyJ…` in every one.
+ * Turning that into something runnable — a `{{baseUrl}}`, a login request that captures
+ * `{{token}}`, a flow in the right order — is mechanical work the engineer currently does
+ * by hand, request by request. This endpoint reads the collection off disk and answers
+ * with PROPOSALS: bounded, typed, reviewable edits the browser applies through the same
+ * validated routes a human would have used (PUT /environments, PUT /:name, PUT /flows/:name).
+ *
+ * Three rules hold this together, and none may be relaxed:
+ *  1. **It never writes.** The turn runs with `--allowedTools Read` and this route touches
+ *     nothing but the attachment scratch dir. Every proposal is applied by the CLIENT, on a
+ *     click, through the existing routes — so all the existing validation, secret merging
+ *     and path guarding still runs, and nothing lands that the engineer didn't look at.
+ *  2. **No secret value ever reaches the prompt.** The context lists variable KEYS and the
+ *     values of non-secret vars only; accounts and authenticators are labels. The model can
+ *     say "use {{account.qa.password}}" — that's a token, resolved at send time.
+ *  3. **A proposal that names something that doesn't exist is dropped here**, not applied
+ *     and discovered later: a flow step pointing at a missing request would save a flow
+ *     that can only fail, and blaming the engineer for it.
+ */
+const ASSIST_MAX_MESSAGES = 24
+const ASSIST_MAX_TEXT = 6000
+const ASSIST_MAX_DOCS = 6
+const ASSIST_MAX_DOC_CHARS = 30_000
+const ASSIST_MAX_IMAGES = 4
+const ASSIST_MAX_IMAGE_BYTES = 8 * 1024 * 1024
+const ASSIST_MAX_PROPOSALS = 12
+const ASSIST_TIMEOUT = 240_000
+const ASSIST_IMAGE_EXT: Record<string, string> = {
+  'image/png': 'png',
+  'image/jpeg': 'jpg',
+  'image/webp': 'webp',
+  'image/gif': 'gif',
+}
+
+/** Where a pasted screenshot lands for the length of one turn. Emptied in `finally`. */
+function assistantScratchDir(root: string): string {
+  return path.join(collectionDir(root), '_assistant')
+}
+
+/**
+ * Write the turn's images so the CLI can Read them (it takes a prompt, not bytes — the
+ * same trick chat.ts uses). These are working files, not project content, so they are
+ * deleted as soon as the run ends; nothing accumulates in the repo.
+ */
+function saveAssistantImages(root: string, raw: unknown): string[] {
+  if (!Array.isArray(raw)) return []
+  const dir = assistantScratchDir(root)
+  const out: string[] = []
+  for (const item of raw.slice(0, ASSIST_MAX_IMAGES)) {
+    const r = (item ?? {}) as Record<string, unknown>
+    const mime = typeof r.mime === 'string' ? r.mime : ''
+    const data = typeof r.data === 'string' ? r.data : ''
+    const ext = ASSIST_IMAGE_EXT[mime]
+    if (!ext || !data) continue
+    const bytes = Buffer.from(data, 'base64')
+    if (!bytes.length || bytes.length > ASSIST_MAX_IMAGE_BYTES) continue
+    const abs = path.join(dir, `${randomUUID()}.${ext}`)
+    try {
+      fs.mkdirSync(dir, { recursive: true })
+      fs.writeFileSync(abs, bytes)
+      out.push(abs)
+    } catch {
+      continue // one unwritable screenshot must not lose the whole question
+    }
+  }
+  return out
+}
+
+/** One line per saved request — enough to reason about, small enough for 100 of them. */
+function assistantCollectionBlock(root: string): string {
+  const dir = collectionDir(root)
+  let names: string[] = []
+  try {
+    names = fs
+      .readdirSync(dir, { withFileTypes: true })
+      .filter((d) => d.isFile() && d.name.endsWith('.json') && !d.name.startsWith('_'))
+      .map((d) => d.name.replace(/\.json$/, ''))
+      .sort((a, b) => a.localeCompare(b))
+  } catch {
+    return '(the collection is empty — nothing has been imported yet)'
+  }
+  const lines: string[] = []
+  for (const name of names.slice(0, 120)) {
+    const def = readItem(root, name)
+    if (!def) continue
+    const headerKeys = def.headers
+      .filter((h) => h.key)
+      .map((h) => h.key)
+      .slice(0, 12)
+      .join(', ')
+    const caps = def.captures.map((c) => `${c.jsonPath}->{{${c.varName}}}`).join(', ')
+    lines.push(
+      [
+        `- "${name}" [${def.group || 'ungrouped'}] ${def.method} ${def.url}`,
+        headerKeys ? `    headers: ${headerKeys}` : '',
+        def.bodyMode === 'none' ? '' : `    body(${def.bodyMode}): ${def.body.slice(0, 400)}`,
+        `    assertions: ${def.assertions.length}${caps ? ` | captures: ${caps}` : ''}`,
+      ]
+        .filter(Boolean)
+        .join('\n'),
+    )
+  }
+  return lines.length ? lines.join('\n') : '(the collection is empty — nothing has been imported yet)'
+}
+
+/**
+ * Environments as the model may see them: keys always, values only when NOT secret.
+ * A secret is named and marked "set" — that's what lets the model say "reuse {{token}}"
+ * without the token ever leaving the store.
+ */
+function assistantEnvBlock(root: string): string {
+  const file = readEnvironments(root)
+  if (!file.environments.length) return '(no environments yet)'
+  return file.environments
+    .map((e) => {
+      const mark = e.name === file.active ? ' (ACTIVE)' : ''
+      const vars = e.variables.length
+        ? e.variables
+            .map((v) =>
+              v.secret
+                ? `    ${v.key} = (secret${v.value ? ', set' : ', empty'})`
+                : `    ${v.key} = ${v.value.slice(0, 200)}`,
+            )
+            .join('\n')
+        : '    (no variables)'
+      return `- "${e.name}"${mark}\n${vars}`
+    })
+    .join('\n')
+}
+
+function assistantFlowBlock(root: string): string {
+  const flows = readFlows(root)
+  if (!flows.length) return '(no flows yet)'
+  return flows
+    .map((f) => {
+      const steps = f.steps.map((s) => `"${s.requestName}"`).join(' -> ') || '(no steps)'
+      const setup = f.setup.map((h) => `"${h.requestName}"`).join(', ')
+      const teardown = f.teardown.map((h) => `"${h.requestName}"`).join(', ')
+      return [
+        `- "${f.name}": ${steps}`,
+        setup ? `    setup: ${setup}` : '',
+        teardown ? `    teardown: ${teardown}` : '',
+      ]
+        .filter(Boolean)
+        .join('\n')
+    })
+    .join('\n')
+}
+
+/** The proposal contract, told to the model once and validated on the way back. */
+const ASSIST_CONTRACT = [
+  `Reply with ONLY this JSON (no prose outside it, no code fences):`,
+  `{"reply":"markdown answer for the engineer","proposals":[ ... ]}`,
+  ``,
+  `"proposals" is optional and may be empty — include one ONLY when you are proposing a`,
+  `concrete change to this project's API testing setup. Each is one of:`,
+  ``,
+  `{"kind":"set-variables","env":"Staging","note":"why","vars":[{"key":"baseUrl","value":"https://api.stg.example.com","secret":false}]}`,
+  `   Creates the environment if it does not exist; upserts these variables into it.`,
+  `{"kind":"update-request","name":"<an EXISTING saved request>","note":"why","url":"{{baseUrl}}/v1/users","headers":[{"key":"Authorization","value":"Bearer {{token}}","enabled":true}],"bodyMode":"json","body":"{...}"}`,
+  `   Rewrites only the fields you include. Use it to replace hardcoded hosts/tokens with`,
+  `   {{variables}}. "headers" REPLACES the request's header list, so include every header`,
+  `   it should keep.`,
+  `{"kind":"add-captures","name":"<an EXISTING saved request>","note":"why","captures":[{"jsonPath":"data.access_token","varName":"token","secret":true}]}`,
+  `   After that request runs, store a value out of its JSON response as a {{variable}}.`,
+  `   This is how a login hands a token to every later request. Mark tokens/passwords secret.`,
+  `{"kind":"create-flow","name":"Booking happy path","note":"why","description":"...","steps":["Login","Create booking"],"setup":["Login"],"teardown":["Delete booking"]}`,
+  `   Every name in steps/setup/teardown MUST be a saved request listed above, spelled`,
+  `   exactly. "setup" runs once before step 1, "teardown" once after the last step (even`,
+  `   if the run stopped early) — put data creation in setup and cleanup in teardown.`,
+  ``,
+  `Rules: propose only what the engineer asked for or clearly needs; never invent a request`,
+  `name; never put a real password or token in a variable VALUE (use {{account.<label>.password}}`,
+  `or {{otp.<label>}} instead); keep "note" to one short line saying what it changes and why.`,
+].join('\n')
+
+apiTestsRouter.post('/assistant', async (req, res) => {
+  const project = resolveProject(req)
+  if (!project) return res.status(400).json({ error: 'project not found' })
+  const root = project.rootPath
+  const b = (req.body ?? {}) as Record<string, unknown>
+  const model =
+    typeof b.model === 'string' && CRAWL_SUMMARY_MODELS.has(b.model.trim())
+      ? b.model.trim()
+      : 'sonnet'
+
+  // The conversation. The client holds the transcript and replays it (bounded) because a
+  // one-shot `runClaude` has no session to resume — the same reason `/ai-check` is stateless.
+  const rawMessages = Array.isArray(b.messages) ? b.messages.slice(-ASSIST_MAX_MESSAGES) : []
+  const messages = rawMessages
+    .map((m) => {
+      const r = (m ?? {}) as Record<string, unknown>
+      const text = typeof r.text === 'string' ? r.text.trim().slice(0, ASSIST_MAX_TEXT) : ''
+      const role = r.role === 'assistant' ? 'assistant' : 'user'
+      return text ? { role, text } : null
+    })
+    .filter((m): m is { role: 'user' | 'assistant'; text: string } => m != null)
+  if (!messages.length || messages[messages.length - 1].role !== 'user') {
+    return res.status(400).json({ error: 'a question is required' })
+  }
+
+  const docs = (Array.isArray(b.docs) ? b.docs.slice(0, ASSIST_MAX_DOCS) : [])
+    .map((d) => {
+      const r = (d ?? {}) as Record<string, unknown>
+      const name = typeof r.name === 'string' ? r.name.slice(0, 200) : 'attachment'
+      const markdown = typeof r.markdown === 'string' ? r.markdown.slice(0, ASSIST_MAX_DOC_CHARS) : ''
+      return markdown.trim() ? { name, markdown } : null
+    })
+    .filter((d): d is { name: string; markdown: string } => d != null)
+
+  const images = saveAssistantImages(root, b.images)
+  const accounts = listApiAccounts(project.id)
+    .map((a) => a.label)
+    .slice(0, 20)
+  const totps = allCodes(project.id)
+    .map((c) => c.label)
+    .slice(0, 20)
+
+  const prompt = [
+    `You are the API-testing assistant inside QC Portal, helping a QC engineer wire up the`,
+    `API tests of ONE project. You answer questions AND propose concrete setup changes.`,
+    ``,
+    `Substitution the portal does at send time: {{var}} from the ACTIVE environment,`,
+    `{{account.<label>.username}} / {{account.<label>.password}} from the project's stored test`,
+    `accounts, and a live {{otp.<label>}} for each registered authenticator. Credentials are`,
+    `never stored in a request or an environment — only these tokens are.`,
+    ``,
+    `--- SAVED REQUESTS (the collection) ---`,
+    assistantCollectionBlock(root),
+    ``,
+    `--- ENVIRONMENTS (secret values are withheld from you on purpose) ---`,
+    assistantEnvBlock(root),
+    ``,
+    `--- FLOWS ---`,
+    assistantFlowBlock(root),
+    ``,
+    `--- ACCOUNTS available as {{account.<label>.…}} ---`,
+    accounts.length ? accounts.join(', ') : '(none registered)',
+    `--- AUTHENTICATORS available as {{otp.<label>}} ---`,
+    totps.length ? totps.join(', ') : '(none registered)',
+    ...(docs.length
+      ? [
+          ``,
+          `--- FILES THE ENGINEER ATTACHED (converted to text) ---`,
+          ...docs.map((d) => `### ${d.name}\n${d.markdown}`),
+        ]
+      : []),
+    ...(images.length
+      ? [
+          ``,
+          `--- SCREENSHOTS ATTACHED TO THIS MESSAGE ---`,
+          `Read each of these files before answering; they are what the engineer is looking at:`,
+          ...images.map((i) => `- ${i}`),
+        ]
+      : []),
+    ``,
+    `--- CONVERSATION (oldest first) ---`,
+    ...messages.map((m) => `${m.role === 'user' ? 'ENGINEER' : 'YOU'}: ${m.text}`),
+    ``,
+    ASSIST_CONTRACT,
+  ].join('\n')
+
+  let r: Awaited<ReturnType<typeof runClaude>>
+  try {
+    r = await runClaude(
+      [
+        '-p',
+        '--output-format',
+        'json',
+        '--model',
+        model,
+        // Read so a screenshot can actually be looked at; nothing that writes, because
+        // every change on this page goes through a proposal the engineer clicks.
+        '--allowedTools',
+        'Read',
+        '--strict-mcp-config',
+      ],
+      ASSIST_TIMEOUT,
+      { cwd: root, usageSource: 'api-assistant', model, input: prompt },
+    )
+  } finally {
+    // The screenshots were scratch for this one turn. Leaving them would grow the repo
+    // and put a screenshot of a logged-in app under version control.
+    for (const abs of images) {
+      try {
+        fs.rmSync(abs, { force: true })
+      } catch {
+        /* best effort */
+      }
+    }
+  }
+
+  const { text } = parseClaudeJsonResult(r.stdout)
+  const parsed = extractJsonObject(text)
+  if (!parsed) {
+    // A model that ignored the JSON contract still said something useful — show it rather
+    // than throwing the whole turn away, and only fail when there is nothing at all.
+    const fallback = (text ?? '').trim()
+    if (!fallback) {
+      return res.json({
+        ok: false,
+        error: r.timedOut ? 'The assistant timed out.' : 'The assistant returned nothing.',
+      })
+    }
+    return res.json({ ok: true, reply: fallback.slice(0, 20_000), proposals: [] })
+  }
+
+  const known = new Set(
+    (() => {
+      try {
+        return fs
+          .readdirSync(collectionDir(root), { withFileTypes: true })
+          .filter((d) => d.isFile() && d.name.endsWith('.json') && !d.name.startsWith('_'))
+          .map((d) => d.name.replace(/\.json$/, ''))
+      } catch {
+        return []
+      }
+    })(),
+  )
+
+  const str = (v: unknown, max: number) => (typeof v === 'string' ? v.slice(0, max) : '')
+  const proposals: Record<string, unknown>[] = []
+  for (const raw of (Array.isArray(parsed.proposals) ? parsed.proposals : []).slice(
+    0,
+    ASSIST_MAX_PROPOSALS,
+  )) {
+    const p = (raw ?? {}) as Record<string, unknown>
+    const note = str(p.note, 300)
+    if (p.kind === 'set-variables') {
+      const env = str(p.env, 40).trim()
+      const vars = (Array.isArray(p.vars) ? p.vars : [])
+        .slice(0, MAX_VARS)
+        .map((v) => {
+          const rv = (v ?? {}) as Record<string, unknown>
+          const key = str(rv.key, 100).trim()
+          if (!VAR_KEY_RE.test(key)) return null
+          return {
+            key,
+            value: str(rv.value, MAX_VAR_VALUE),
+            secret: rv.secret === true,
+          }
+        })
+        .filter((v): v is { key: string; value: string; secret: boolean } => v != null)
+      if (ENV_NAME_RE.test(env) && vars.length) proposals.push({ kind: 'set-variables', env, note, vars })
+      continue
+    }
+    if (p.kind === 'update-request') {
+      const name = str(p.name, 60).trim()
+      if (!known.has(name)) continue // named a request that isn't there — see rule 3
+      const out: Record<string, unknown> = { kind: 'update-request', name, note }
+      if (typeof p.url === 'string') out.url = str(p.url, 2000)
+      if (p.bodyMode === 'none' || p.bodyMode === 'json' || p.bodyMode === 'text') {
+        out.bodyMode = p.bodyMode
+      }
+      if (typeof p.body === 'string') out.body = str(p.body, 100_000)
+      if (Array.isArray(p.headers)) {
+        out.headers = p.headers
+          .slice(0, 50)
+          .map((h) => {
+            const rh = (h ?? {}) as Record<string, unknown>
+            const key = str(rh.key, 200).trim()
+            return key ? { key, value: str(rh.value, 4000), enabled: rh.enabled !== false } : null
+          })
+          .filter(Boolean)
+      }
+      if (out.url != null || out.headers != null || out.body != null) proposals.push(out)
+      continue
+    }
+    if (p.kind === 'add-captures') {
+      const name = str(p.name, 60).trim()
+      if (!known.has(name)) continue
+      const captures = (Array.isArray(p.captures) ? p.captures : [])
+        .slice(0, 20)
+        .map((c) => {
+          const rc = (c ?? {}) as Record<string, unknown>
+          const jsonPath = str(rc.jsonPath, 200).trim()
+          const varName = str(rc.varName, 100).trim()
+          if (!jsonPath || !VAR_KEY_RE.test(varName)) return null
+          return { jsonPath, varName, secret: rc.secret === true }
+        })
+        .filter((c): c is { jsonPath: string; varName: string; secret: boolean } => c != null)
+      if (captures.length) proposals.push({ kind: 'add-captures', name, note, captures })
+      continue
+    }
+    if (p.kind === 'create-flow') {
+      const name = str(p.name, 60).trim()
+      if (!NAME_RE.test(name)) continue
+      const list = (v: unknown, cap: number) =>
+        (Array.isArray(v) ? v : [])
+          .map((x) => str(x, 60).trim())
+          .filter((x) => known.has(x))
+          .slice(0, cap)
+      const steps = list(p.steps, MAX_STEPS)
+      if (!steps.length) continue // a flow with no runnable step is not a proposal
+      proposals.push({
+        kind: 'create-flow',
+        name,
+        note,
+        description: str(p.description, 500),
+        steps,
+        setup: list(p.setup, MAX_HOOKS),
+        teardown: list(p.teardown, MAX_HOOKS),
+      })
+    }
+  }
+
+  return res.json({
+    ok: true,
+    reply: str(parsed.reply, 20_000) || '(no answer)',
+    proposals,
+  })
+})
+
 // ---------------------------------------------------------------- page scan (routes)
 // "Scan a page for its APIs" — open a headed Chrome (logged-in profile) at a page
 // URL and record the XHR/fetch traffic, so the engineer can import the detected
@@ -875,12 +1294,39 @@ apiTestsRouter.delete('/accounts/:label', (req, res) => {
 // would leave two copies to drift apart. What the server owns is the flow DEFINITION
 // and the saved REPORT.
 
+/**
+ * A pre-request / post-request hook: another SAVED REQUEST run around a step (or around
+ * the whole flow). It is deliberately the same shape as a step and references a request
+ * by name for the same reason — a flow that had to inline its setup call would be a
+ * second copy of a request the collection already holds, free to drift from it.
+ *
+ * This is what "set up the data before, clean it up after" means here: no scripting
+ * language, just the calls that create and remove the row the step is about, with their
+ * own assertions and captures (a `POST /patients` hook captures `{{patient_id}}` for the
+ * step that follows it).
+ */
+interface ApiFlowHook {
+  id: string
+  requestName: string
+  enabled: boolean
+  /**
+   * Keep going when this hook fails. Off by default and it matters most on a `before`
+   * hook: a step whose setup call failed is not a failing step, it is an untested one,
+   * so by default the step is not sent at all.
+   */
+  continueOnFail: boolean
+}
+
 interface ApiFlowStep {
   id: string
   requestName: string
   enabled: boolean
   /** Keep going even when this step fails (a soft/optional check). */
   continueOnFail: boolean
+  /** Requests run right BEFORE this step — the data it needs. */
+  before: ApiFlowHook[]
+  /** Requests run right AFTER it, whether it passed, failed or was never sent. */
+  after: ApiFlowHook[]
 }
 
 interface ApiFlow {
@@ -897,14 +1343,39 @@ interface ApiFlow {
    * `{{auth.password}}` / `{{auth.otp}}`.
    */
   auth: { accountLabel: string; totpLabel: string }
+  /** Run ONCE before the first step (log in, seed the fixtures the whole flow shares). */
+  setup: ApiFlowHook[]
   steps: ApiFlowStep[]
+  /** Run ONCE after the last step — always, even when the run stopped at a failure. */
+  teardown: ApiFlowHook[]
   savedAt?: string
 }
 
 const FLOWS_FILE = '_flows.json'
 const MAX_FLOWS = 30
 const MAX_STEPS = 40
+const MAX_HOOKS = 10 // per list: step.before, step.after, flow.setup, flow.teardown
+const MAX_RUN_ROWS = 240 // a stored run is steps PLUS their hooks, in execution order
 const MAX_FLOW_RUNS = 20
+
+function toHooks(v: unknown, prefix: string): ApiFlowHook[] {
+  if (!Array.isArray(v)) return []
+  const out: ApiFlowHook[] = []
+  for (const [i, raw] of v.slice(0, MAX_HOOKS * 2).entries()) {
+    if (!raw || typeof raw !== 'object') continue
+    const r = raw as Record<string, unknown>
+    const requestName = typeof r.requestName === 'string' ? r.requestName.trim() : ''
+    if (!requestName) continue
+    out.push({
+      id: typeof r.id === 'string' && r.id ? r.id.slice(0, 40) : `${prefix}${i}`,
+      requestName: requestName.slice(0, 60),
+      enabled: r.enabled !== false,
+      continueOnFail: r.continueOnFail === true,
+    })
+    if (out.length >= MAX_HOOKS) break
+  }
+  return out
+}
 
 function toFlowStep(v: unknown, i: number): ApiFlowStep | null {
   if (!v || typeof v !== 'object') return null
@@ -916,6 +1387,10 @@ function toFlowStep(v: unknown, i: number): ApiFlowStep | null {
     requestName: requestName.slice(0, 60),
     enabled: r.enabled !== false,
     continueOnFail: r.continueOnFail === true,
+    // Absent on every flow written before hooks existed — an empty list, never undefined,
+    // so the runner and the editor never have to guard for it.
+    before: toHooks(r.before, `b${i}_`),
+    after: toHooks(r.after, `a${i}_`),
   }
 }
 
@@ -938,7 +1413,9 @@ function toFlow(name: string, v: unknown): ApiFlow {
       accountLabel: authLabel(rawAuth.accountLabel),
       totpLabel: authLabel(rawAuth.totpLabel),
     },
+    setup: toHooks(r.setup, 'su'),
     steps: steps.slice(0, MAX_STEPS),
+    teardown: toHooks(r.teardown, 'td'),
     savedAt: typeof r.savedAt === 'string' ? r.savedAt : undefined,
   }
 }
@@ -1037,6 +1514,16 @@ apiTestsRouter.delete('/flows/:name', (req, res) => {
 // --- flow run reports (evidence a scenario passed, kept with the project) ---
 
 interface FlowRunStepRecord {
+  /**
+   * Where this row sat in the run. The stored `steps` array is the FLAT execution order
+   * — flow setup, then each step with its before/after hooks around it, then teardown —
+   * because that order IS the evidence: "the cleanup ran even though step 3 failed" is
+   * only readable if the cleanup is in the list. Rows written before hooks existed have
+   * no `phase` and read as 'step', which is what they were.
+   */
+  phase: 'setup' | 'before' | 'step' | 'after' | 'teardown'
+  /** For a before/after row: the `requestName` of the step it belongs to. */
+  parent: string
   requestName: string
   method: string
   url: string
@@ -1068,10 +1555,15 @@ function flowRunsDirFor(root: string, name: string): string | null {
   return target
 }
 
+const RUN_PHASES = ['setup', 'before', 'step', 'after', 'teardown'] as const
+type RunPhase = (typeof RUN_PHASES)[number]
+
 function toFlowRunStep(v: unknown): FlowRunStepRecord {
   const r = (v && typeof v === 'object' ? v : {}) as Record<string, unknown>
   const outcome = r.outcome
   return {
+    phase: RUN_PHASES.includes(r.phase as RunPhase) ? (r.phase as RunPhase) : 'step',
+    parent: typeof r.parent === 'string' ? r.parent.slice(0, 60) : '',
     requestName: typeof r.requestName === 'string' ? r.requestName.slice(0, 60) : '',
     method: typeof r.method === 'string' ? r.method.slice(0, 10) : '',
     url: typeof r.url === 'string' ? r.url.slice(0, 2000) : '',
@@ -1105,7 +1597,10 @@ apiTestsRouter.post('/flows/:name/runs', (req, res) => {
   const dir = flowRunsDirFor(project.rootPath, req.params.name)
   if (!dir) return res.status(400).json({ error: 'invalid flow name' })
   const b = (req.body ?? {}) as Record<string, unknown>
-  const steps = Array.isArray(b.steps) ? b.steps.slice(0, MAX_STEPS).map(toFlowRunStep) : []
+  const steps = Array.isArray(b.steps) ? b.steps.slice(0, MAX_RUN_ROWS).map(toFlowRunStep) : []
+  // The verdict is about the STEPS. A hook row is evidence of what ran around them, but
+  // counting a two-hook step as three passes would make every summary meaningless.
+  const graded = steps.filter((s) => s.phase === 'step')
   const record: FlowRunRecord = {
     id: randomUUID(),
     at: new Date().toISOString(),
@@ -1114,10 +1609,10 @@ apiTestsRouter.post('/flows/:name/runs', (req, res) => {
     account: typeof b.account === 'string' && b.account ? b.account.slice(0, 60) : null,
     totalMs: num(b.totalMs),
     summary: {
-      passed: steps.filter((s) => s.outcome === 'pass').length,
-      failed: steps.filter((s) => s.outcome === 'fail' || s.outcome === 'error').length,
-      skipped: steps.filter((s) => s.outcome === 'skipped').length,
-      total: steps.length,
+      passed: graded.filter((s) => s.outcome === 'pass').length,
+      failed: graded.filter((s) => s.outcome === 'fail' || s.outcome === 'error').length,
+      skipped: graded.filter((s) => s.outcome === 'skipped').length,
+      total: graded.length,
     },
     steps,
   }

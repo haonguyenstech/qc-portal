@@ -44,6 +44,21 @@ export type TestTarget = 'web' | 'web-mobile' | 'app-mobile'
 /** What a run tests: one ticket's acceptance criteria, or an end-to-end flow. */
 export type RunKind = 'ticket' | 'flow'
 
+/**
+ * What a run is allowed to do to the data on the environment under test.
+ *
+ * `readonly` — never commit a mutating action: drive up to the enable-state and stop.
+ * The historical (and still default) behavior.
+ *
+ * `seed` — the engineer authorizes the run to CREATE the test data a case needs (and
+ * edit/clean up what it created itself). Still never destructive to data it didn't
+ * create. This exists because a read-only run has to mark every "do X, then check the
+ * result" case Blocked, which is why the same suite driven by hand in `/chat` — where
+ * the engineer simply says "create an appointment and check the notification" — grades
+ * far more cases than the same suite on `/qc-run`.
+ */
+export type RunDataPolicy = 'readonly' | 'seed'
+
 export interface RunSummary {
   id: string
   projectId: string
@@ -148,6 +163,10 @@ export interface CreateRunBody {
   // project's .mcp.json says (the previous behavior); true/false overrides it for THIS
   // run only, via a per-run MCP config (see playwrightRunMode.ts).
   headless?: boolean
+  // What the run may do to the environment's data. Omitted = 'readonly' (the previous
+  // behavior); 'seed' means the engineer authorized this run to create the data its
+  // cases need instead of marking them Blocked. See RunDataPolicy.
+  dataPolicy?: RunDataPolicy
   // Advanced mode: a single run that covers a connected feature spanning several
   // tickets. `ticketId` is the lead ticket; `relatedTickets` are the rest, and
   // `workflowSteps` is the ordered end-to-end flow Claude should exercise.

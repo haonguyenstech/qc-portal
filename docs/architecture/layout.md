@@ -99,6 +99,11 @@ server/src/
                     when the portal was launched with a stale PATH; never spawn with a bare
                     { ...process.env }
   clickup.ts        ClickUp ticket lookup + crawl
+  ticketActivity.ts a ticket's activity log — ClickUp exposes no task history (404 /history,
+                    403 TIS_027 for time_in_status, no MCP tool), so the portal accumulates one:
+                    each crawl diffs the ticket.json it is about to overwrite against the fresh
+                    detail + comments and prepends a dated entry to activity.md. First crawl = a
+                    baseline that says so; an unchanged crawl writes no entry
   folderPicker.ts   native OS dialogs: pickFolderNative (choose-folder picker, used by skill
                     import) + revealFolderNative (open a folder in Finder/Explorer/xdg-open)
   contextPointer.ts managed CLAUDE.md pointer block linking Overview docs + Knowledge + Memory
@@ -114,6 +119,17 @@ server/src/
                     MEMORY.md index) — shared by routes/memory.ts + learn.ts
   knowledgeStore.ts storage primitives for testing/knowledge docs (provenance marker) — shared
                     by routes/knowledge.ts + learn.ts
+  knowledgeImages.ts the ONE knowledge upload the browser can't convert: an image (diagram, ERD,
+                    annotated screen) has no text to extract, so the picture is saved under
+                    testing/knowledge/assets/ and a vision pass (sonnet, Read-only, no MCP) writes
+                    the doc describing it. The image is KEPT and embedded as assets/<file> — a
+                    diagram flattened to prose can no longer be checked against the picture. A
+                    blank/irrelevant image comes back as the NOT_USABLE sentinel → 422, and any
+                    path that leaves without a doc deletes the image it saved
+  flowFromTestcases.ts reads an UPLOADED test-case document and drafts the E2E flow that executes
+                    it (Run form, advanced mode) — validated JSON, ≤20 steps, no tools
+  runTestcaseDocs.ts stores that document under testing/test-cases/ so the run can Read it in full;
+                    server-generated file names, refuses oversize rather than truncating
   totp.ts           authenticator (TOTP) codes for accounts with REAL 2FA — RFC 6238 over
                     node:crypto + a per-project seed store beside the DB (data/totp/<id>.json,
                     0600, NOT in the project repo); see "Authenticator (2FA) codes" below
@@ -139,9 +155,12 @@ server/src/
                     answers" in chat.md for why silence beats a false alarm here
   answerAudit.ts    runAnswerAudit(): the PAID half — an independent cheap model re-reads the
                     project and rates one stored chat answer's checkable claims
-                    supported/wrong/unverified. ON DEMAND ONLY (a button), because it costs
-                    30-90 s; read tools with the write tools explicitly denied; never throws,
-                    and a timeout comes back as `skipped`, never as a clean verdict
+                    supported/wrong/unsupported/unverified. ON DEMAND ONLY (a button),
+                    because it costs 30-90 s; read tools with the write tools explicitly
+                    denied; never throws, and a timeout comes back as `skipped`, never as a
+                    clean verdict. `unsupported` is DEFECT CLAIMS ONLY — the answer called
+                    something a bug and nothing in the project requires the behaviour it is
+                    measured against; it counts as an issue (see "the defect bar" in chat.md)
   notesStore.ts     storage primitives for the /notes workspace — ONE JSON document per
                     project at testing/notes/notes.json (notes + labels), written through a
                     temp file + rename so a crash can't leave a half-written file; caps

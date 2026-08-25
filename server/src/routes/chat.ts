@@ -167,6 +167,17 @@ interface ChatMessage {
    * `GET /api/chat/images/:name`.
    */
   images?: string[]
+  /**
+   * Documents attached with THIS message — `{file}` under testing/chats/files/, `{name}`
+   * the engineer's own file name, shown as a chip in the transcript and served back by
+   * `GET /api/chat/files/:file`.
+   *
+   * These are written to disk and READ by the model, exactly like a pasted image. They
+   * used to be converted to markdown in the browser and pasted into the prompt itself,
+   * which the client then cut at `MAX_PROMPT` — a 90 KB spec reached the model as its
+   * first half, and nothing on screen said so.
+   */
+  files?: { file: string; name: string }[]
   /** Follow-up prompts the model proposed with this answer (see SUGGEST_BLOCK). */
   suggestions?: string[]
   /** The `+` menu action this message was sent with — badged in the transcript. */
@@ -337,6 +348,8 @@ interface TempChat {
   chat: Chat
   /** Image files written for this conversation — removed with it. */
   images: string[]
+  /** Attached documents written for this conversation — removed with it. */
+  files: string[]
   /** Last touched (ms); drives TTL eviction. */
   at: number
 }
@@ -358,6 +371,13 @@ function discardTemp(key: string): void {
       fs.rmSync(path.join(imageDir(root), file), { force: true })
     } catch {
       /* best effort — an undeletable preview must not fail the request */
+    }
+  }
+  for (const file of t.files) {
+    try {
+      fs.rmSync(path.join(docDir(root), file), { force: true })
+    } catch {
+      /* best effort — same reason as the images above */
     }
   }
 }
@@ -484,6 +504,12 @@ const FACTS_BLOCK =
   `- **Count, don't estimate.** A number of cases, issues, rows or files is the result of ` +
   `counting the whole file (grep -c, wc -l, or reading it all) — never extrapolated from ` +
   `the first rows, and never carried over from a previous turn's count.\n` +
+  `- **A crawled ticket file is a snapshot, not the ticket.** testing/tickets/** was ` +
+  `downloaded whenever someone last crawled it. For a ticket's CURRENT status, assignee, ` +
+  `priority or newest comments — and for anything phrased as now / still / latest / what ` +
+  `changed — query the tracker's MCP (ClickUp / Jira / Azure) in this turn and answer from ` +
+  `that, naming the snapshot's date if you also quote the file. If you cannot reach the ` +
+  `tracker, say the answer is a snapshot rather than presenting it as current.\n` +
   `- **Never infer a fact from a name.** A ticket's title is not its requirement, a folder ` +
   `name is not its contents, and how projects like this usually work says nothing about ` +
   `this one. If you did not read it, you do not know it.\n` +
@@ -497,6 +523,72 @@ const FACTS_BLOCK =
   `from general knowledge, and never present a guess in the same voice as a finding.\n` +
   `None of this means hedge everything: when you HAVE read it, answer plainly and commit ` +
   `to it. The rule is about what you name, not how confidently you say it.`
+
+/**
+ * THE DEFECT BAR — what has to be true before this page calls something a bug.
+ *
+ * Reported from the field, and the reason this block exists as its own thing rather than a
+ * line inside FACTS_BLOCK: chat listed defects that were not defects, and withdrew them the
+ * moment the engineer asked how they had been established. Nothing above catches that.
+ * FACTS_BLOCK governs what the model NAMES — a path, an id, a count — and every one of
+ * those bogus findings named real files correctly. `answerCheck.ts` checks that cited paths
+ * exist, and they did. The wrongness was not in the evidence; it was in the JUDGEMENT laid
+ * over it.
+ *
+ * The mechanism is always the same, and it is worth naming so the rules can target it: a
+ * defect is a contradiction between an EXPECTED behaviour and an ACTUAL one, and the model
+ * reliably grounds the actual half in the project while supplying the expected half from
+ * how software like this generally behaves. "There is no rate limit on login", "the email
+ * field is not validated", "there is no loading state" — all true observations, none of
+ * them a defect unless THIS project said otherwise. That is exactly why the finding
+ * evaporates when challenged: there was never a source behind the half that made it a bug.
+ *
+ * So the rules below do three things a general plea for accuracy does not: they require the
+ * expected half to have a named project source, they give the model a concrete self-test
+ * (would you withdraw this if asked "where does it say that?") to run BEFORE writing, and
+ * they provide somewhere else to put a genuine observation that fails the bar — because a
+ * model with a real concern and no legitimate place to put it will file it as a bug.
+ *
+ * A withdrawn bug is more expensive than a missed one: it is triaged, assigned, argued
+ * about with the dev team, and it spends the QC engineer's credibility. Suppressing a
+ * suggestion costs a line of prose. The bar is set accordingly.
+ */
+const DEFECTS_BLOCK =
+  `\n\n--- CALLING SOMETHING A BUG ---\n` +
+  `Only when the engineer's question calls for it. A defect claim is held to a higher bar ` +
+  `than anything else you write, because a bug you withdraw when challenged has already ` +
+  `cost a triage, an argument with the developers, and the engineer's credibility:\n` +
+  `- **A bug is a CONTRADICTION between two things you have in hand.** EXPECTED — what ` +
+  `THIS project says should happen: an acceptance criterion, a spec or knowledge doc, a ` +
+  `written test case's expected result, a stated rule in the code or config. ACTUAL — what ` +
+  `really happens: a run's output, a screenshot, a report, a log, code you read. Both ` +
+  `halves come from something you opened in THIS turn, and you must be able to name where ` +
+  `each one came from.\n` +
+  `- **No source for the EXPECTED half, no bug.** "It should lock the account after five ` +
+  `attempts", "this endpoint ought to validate the email", "there should be a loading ` +
+  `state" — that is how such products usually behave, i.e. general knowledge, not this ` +
+  `project's requirement. A missing best practice is not a defect. Put it under a separate ` +
+  `heading such as Suggestions or Worth confirming, worded as a question, and never in the ` +
+  `same list as findings.\n` +
+  `- **Run the retraction test on every finding BEFORE you write it.** Ask yourself the two ` +
+  `questions the engineer will ask: "where does it say it should do that?" and "did you ` +
+  `actually see this happen?". If your honest answer is "that is how it normally works", ` +
+  `"I assumed it from the code" or "I did not run it", the finding does not go in the ` +
+  `defect list. Anything you would take back under challenge must not be filed in the ` +
+  `first place.\n` +
+  `- **Do not read a defect out of an absence.** A test case you could not find, a field ` +
+  `missing from a file, a handler grep did not hit — that is something you did not find, ` +
+  `which is a gap in your search at least as often as a gap in the product. Say what you ` +
+  `looked for and where. Only call it missing when the project states it should exist AND ` +
+  `you checked the place it would live.\n` +
+  `- **Write each defect so it could be filed as it stands:** what was done, what happened ` +
+  `(with the path/screenshot that shows it), what was expected (with the source that says ` +
+  `so), and how certain you are. If one of those lines would be empty, it is not a bug yet ` +
+  `— say what would settle it.\n` +
+  `- **Zero defects is a real answer, and a short list beats a padded one.** Never round a ` +
+  `list up to look thorough: three findings that hold up are worth more than eight of which ` +
+  `five evaporate. "I checked X, Y and Z against the acceptance criteria and found nothing ` +
+  `that contradicts them" is a complete, useful reply.`
 
 /**
  * Follow-up suggestions — "what would I usefully ask next?", the same idea as the
@@ -563,6 +655,15 @@ const IMAGE_EXT: Record<string, string> = {
 }
 const MAX_IMAGES = 4
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024
+/** Documents attached with the paperclip. A spec, its appendix, and a couple of notes. */
+const MAX_DOCS = 4
+/**
+ * One attached document, as markdown. Generous on purpose: this is the escape hatch the
+ * `MAX_PROMPT` 413 points at ("attach it as a file"), so it has to be able to hold what a
+ * message cannot. The file is READ by the model from disk, never inlined into the prompt,
+ * so its size costs prompt characters only in the one line that names its path.
+ */
+const MAX_DOC_BYTES = 4 * 1024 * 1024
 
 function chatDir(root: string): string {
   return path.join(testingDirFor(root), 'chats')
@@ -570,6 +671,10 @@ function chatDir(root: string): string {
 
 function imageDir(root: string): string {
   return path.join(chatDir(root), 'images')
+}
+
+function docDir(root: string): string {
+  return path.join(chatDir(root), 'files')
 }
 
 function slugify(name: string): string {
@@ -669,7 +774,12 @@ function loadChat(root: string, slug: string): Chat | null {
  * whether a turn touches the project folder at all — so this is the ONLY place a chat is
  * saved from, and `writeChat` is never called directly by a route.
  */
-function saveChat(root: string, chat: Chat, newImages: string[] = []): void {
+function saveChat(
+  root: string,
+  chat: Chat,
+  newImages: string[] = [],
+  newFiles: string[] = [],
+): void {
   if (!chat.temporary) {
     writeChat(root, chat)
     return
@@ -679,6 +789,7 @@ function saveChat(root: string, chat: Chat, newImages: string[] = []): void {
   temp.set(key, {
     chat,
     images: [...(existing?.images ?? []), ...newImages],
+    files: [...(existing?.files ?? []), ...newFiles],
     at: Date.now(),
   })
   sweepTemp()
@@ -944,6 +1055,45 @@ function saveImages(root: string, raw: unknown): { file: string; abs: string }[]
 }
 
 /**
+ * Save the documents attached with a message and return their on-disk file names.
+ *
+ * Same contract as `saveImages`, and for the same reason: the CLI takes a prompt, not a
+ * file, so an attachment has to become a real path the model can Read. It arrives already
+ * converted to markdown by the browser (the shared `docConvert` pipeline the Knowledge page
+ * uses), so what lands here is text.
+ *
+ * The stored name is generated server-side (timestamp + index + a slug of the original) —
+ * the engineer's own file name is kept only as a LABEL on the message, never used to build
+ * a path. That is the same path-traversal rule the images follow.
+ */
+function saveDocs(root: string, raw: unknown): { file: string; abs: string; name: string }[] {
+  if (!Array.isArray(raw) || !raw.length) return []
+  const dir = docDir(root)
+  const out: { file: string; abs: string; name: string }[] = []
+  const stamp = new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14)
+  for (const item of raw.slice(0, MAX_DOCS)) {
+    const o = (item ?? {}) as Record<string, unknown>
+    const markdown = typeof o.markdown === 'string' ? o.markdown : ''
+    if (!markdown.trim()) continue
+    const bytes = Buffer.from(markdown, 'utf8')
+    if (bytes.length > MAX_DOC_BYTES) continue
+    // Label only — shown on the message chip. Never joined into a path.
+    const name = (typeof o.name === 'string' ? o.name : '').replace(/[\r\n]+/g, ' ').trim().slice(0, 120)
+    const base = slugify(name.replace(/\.[^.]+$/, '')) || 'document'
+    const file = `${stamp}-${out.length + 1}-${base}.md`
+    const abs = path.join(dir, file)
+    try {
+      fs.mkdirSync(dir, { recursive: true })
+      fs.writeFileSync(abs, markdown, 'utf8')
+    } catch {
+      continue // one unwritable attachment must not lose the whole question
+    }
+    out.push({ file, abs, name: name || file })
+  }
+  return out
+}
+
+/**
  * `@`-mentions — the project artifacts a message is ABOUT — and `/`-picks, the SKILL it
  * should be answered with.
  *
@@ -988,17 +1138,71 @@ function ticketDirFor(root: string, folder: string): string | null {
   return abs
 }
 
-/** The ticket's display id (ABC-123) if it crawled with one, else the folder's leaf. */
-function ticketLabel(dir: string, folder: string): string {
+/**
+ * What the crawl stored about a tagged ticket: its display id, the tracker it came from
+ * and the id to re-query it by, and WHEN the snapshot on disk was taken.
+ *
+ * The last two exist because the files are a snapshot, not the ticket. Measured on a real
+ * ticket: `ticket.md` said status `ready to test` while ClickUp said `re-open` — the
+ * engineer asking "what's the status" wants the second answer, and the model can only get
+ * it if it's told the files are dated and which MCP server holds the live record.
+ */
+interface TicketMeta {
+  label: string
+  /** The tracker's own task id — what the MCP tool takes. */
+  taskId: string
+  /** Absent on folders crawled before `source` was stored — then we must not guess. */
+  source: 'clickup' | 'jira' | 'azure' | ''
+  /** ISO time the snapshot was written, or '' when it can't be determined. */
+  crawledAt: string
+}
+
+function ticketMeta(dir: string, folder: string): TicketMeta {
+  const leaf = folder.split(/[\\/]/).pop() || folder
+  const meta: TicketMeta = { label: leaf, taskId: leaf, source: '', crawledAt: '' }
+  const file = path.join(dir, 'ticket.json')
   try {
-    const j = JSON.parse(fs.readFileSync(path.join(dir, 'ticket.json'), 'utf8')) as {
-      displayId?: unknown
-    }
-    if (typeof j.displayId === 'string' && j.displayId.trim()) return j.displayId.trim()
+    const j = JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, unknown>
+    if (typeof j.displayId === 'string' && j.displayId.trim()) meta.label = j.displayId.trim()
+    if (typeof j.id === 'string' && j.id.trim()) meta.taskId = j.id.trim()
+    if (j.source === 'jira' || j.source === 'azure' || j.source === 'clickup') meta.source = j.source
   } catch {
     /* no ticket.json, or unreadable — the folder name is a fine label */
   }
-  return folder.split(/[\\/]/).pop() || folder
+  try {
+    // The file's own mtime, not a field inside it: it is written on every crawl and
+    // cannot drift from the content the way a stored timestamp could.
+    meta.crawledAt = fs.statSync(file).mtime.toISOString()
+  } catch {
+    /* never crawled through this path */
+  }
+  return meta
+}
+
+/**
+ * How to ask THIS tracker for the ticket's live state.
+ *
+ * Folders crawled before `source` was stored don't say which tracker they came from, and
+ * naming the wrong MCP server is worse than naming none — the model would call ClickUp
+ * for a Jira issue, get nothing, and report the ticket as missing. So an unknown source
+ * asks for the project's tracker generically and lets tool discovery settle it.
+ */
+function liveLookupHint(meta: TicketMeta): string {
+  if (meta.source === 'clickup') {
+    return (
+      `live state via the ClickUp MCP — mcp__clickup__get_task with task_id "${meta.taskId}" ` +
+      `(and mcp__clickup__get_task_comments for the thread)`
+    )
+  }
+  if (meta.source === 'jira' || meta.source === 'azure') {
+    const server = meta.source === 'jira' ? 'Jira' : 'Azure DevOps'
+    return `live state via the ${server} MCP server ("${meta.source}") for id "${meta.taskId}"`
+  }
+  return (
+    `live state via whichever ticket MCP this project has configured (ClickUp / Jira / Azure) ` +
+    `for id "${meta.taskId}" — this folder predates the portal recording its tracker, so check ` +
+    `which server is available rather than assuming one`
+  )
 }
 
 /**
@@ -1061,6 +1265,8 @@ function resolveMentions(
   const skillLines: string[] = []
   const resolved: { kind: string; label: string }[] = []
   const seen = new Set<string>()
+  /** A ticket was tagged → the block carries the snapshot-vs-live rule. */
+  let liveTickets = false
   for (const item of raw.slice(0, MAX_MENTIONS)) {
     const m = (item ?? {}) as Partial<Mention>
 
@@ -1102,17 +1308,25 @@ function resolveMentions(
     seen.add(key)
     const dir = ticketDirFor(root, m.folder)
     if (!dir) continue
-    const label = ticketLabel(dir, m.folder)
+    const meta = ticketMeta(dir, m.folder)
+    const label = meta.label
 
     if (m.kind === 'ticket') {
-      const files = ['ticket.md', 'comments.md', 'summary.md'].filter((f) =>
+      // activity.md is what changed between crawls (ticketActivity.ts) — the closest
+      // thing to a ClickUp activity log that exists, and the file a question like
+      // "what happened to this ticket" needs. Without it listed, the model reads the
+      // other three, finds no history, and reports that none exists (measured).
+      const files = ['ticket.md', 'comments.md', 'activity.md', 'summary.md'].filter((f) =>
         fs.existsSync(path.join(dir, f)),
       )
       if (!files.length) continue
       lines.push(
         `- TICKET ${label} — read ${files.map((f) => path.join(dir, f)).join(', ')}` +
-          ` (its attachments, if any, are in ${path.join(dir, 'attachments')})`,
+          ` (its attachments, if any, are in ${path.join(dir, 'attachments')}).` +
+          ` These files are a SNAPSHOT${meta.crawledAt ? ` crawled ${meta.crawledAt}` : ''}; ` +
+          `${liveLookupHint(meta)}.`,
       )
+      liveTickets = true
       resolved.push({ kind: 'ticket', label })
       continue
     }
@@ -1152,7 +1366,28 @@ function resolveMentions(
       `\n\n--- TAGGED WITH @ IN THIS MESSAGE ---\n` +
         `The user tagged these project artifacts; they are what the question is about. Go to them ` +
         `BEFORE answering — Read every file listed, and follow the instructions given for a tagged ` +
-        `database — and don't guess at their contents:\n${lines.join('\n')}\n`,
+        `database — and don't guess at their contents:\n${lines.join('\n')}\n` +
+        // A crawled ticket is a photograph of the ticket, taken whenever someone last
+        // pressed Crawl. Answering "what's the status" from it is wrong exactly when it
+        // matters — measured on a real ticket whose file said `ready to test` while
+        // ClickUp said `re-open`. The files stay the source for the REQUIREMENT (they're
+        // free to read and complete); the tracker is the source for the STATE.
+        (liveTickets
+          ? `\nA crawled ticket folder is a snapshot from crawl time, not the live ticket. So:\n` +
+            `- Anything about the ticket's CURRENT state — status, assignee, priority, due date, ` +
+            `whether it is still open, the newest comments, "what changed / activity / recently" — ` +
+            `must come from the tracker's MCP in THIS turn, using the id named above. Look the tool ` +
+            `up if it isn't loaded yet, and prefer one call that answers the question over several.\n` +
+            `- The files remain the source for the ticket's CONTENT — description, acceptance ` +
+            `criteria, attachments, and activity.md (what the portal saw change between crawls, ` +
+            `which is the only change history that exists: the tracker's API exposes none).\n` +
+            `- When the two disagree, the LIVE value wins and you say both, with the snapshot's ` +
+            `date — a QC engineer needs to know their crawl is stale, and re-crawling on /tickets ` +
+            `is what fixes it.\n` +
+            `- If the MCP call fails or the server isn't configured, answer from the snapshot and ` +
+            `say plainly that it is a snapshot of that date, not the live ticket. Never present ` +
+            `snapshot state as current, and never guess at a status you could not fetch.\n`
+          : ''),
     )
   }
   if (!blocks.length) return { block: '', resolved: [] }
@@ -1164,6 +1399,23 @@ function resolveMentions(
  * them. Absolute, because `cwd` is the project root but the files live under testing/ —
  * a relative path would be one more thing to get wrong.
  */
+/**
+ * How the model is told about the attached documents: absolute paths plus an instruction
+ * to Read them. Nothing is inlined — a 200 KB spec costs one line of prompt here, which is
+ * the whole point of writing it to disk instead of pasting it into the message.
+ */
+function docPromptBlock(docs: { abs: string; name: string }[]): string {
+  if (!docs.length) return ''
+  const list = docs.map((d) => `- ${d.name} → ${d.abs}`).join('\n')
+  return (
+    `\n\n---\n` +
+    `The user attached ${docs.length === 1 ? 'this file' : 'these files'} to the chat, converted ` +
+    `to markdown. Open ${docs.length === 1 ? 'it' : 'each of them'} with the Read tool BEFORE ` +
+    `answering, and read ${docs.length === 1 ? 'it' : 'them'} in FULL — the content is on disk, ` +
+    `not in this message:\n${list}\n`
+  )
+}
+
 function imagePromptBlock(images: { abs: string }[]): string {
   if (!images.length) return ''
   const list = images.map((i) => `- ${i.abs}`).join('\n')
@@ -1309,6 +1561,8 @@ interface TurnSpec {
   injected: ContextBlock[]
   /** Images already written to disk by `saveImages`. */
   images: { file: string; abs: string }[]
+  /** Attached documents already written to disk by `saveDocs`. */
+  docs: { file: string; abs: string; name: string }[]
   action: ChatAction | null
   model: string
   tools: ChatTools
@@ -1457,6 +1711,26 @@ chatRouter.get('/images/:name', (req, res) => {
 })
 
 /**
+ * GET /api/chat/files/:name — a document attached to a message, so the transcript's chip
+ * can open what was actually sent. Same name-guard as the images above; markdown is served
+ * as text/plain so the browser shows it instead of downloading it.
+ */
+chatRouter.get('/files/:name', (req, res) => {
+  const project = resolveProject(req)
+  if (!project) return res.status(400).json({ error: 'project not found' })
+  const name = req.params.name
+  if (!/^[\w-]{1,120}\.md$/.test(name)) {
+    return res.status(400).json({ error: 'invalid file name' })
+  }
+  const dir = docDir(project.rootPath)
+  const abs = path.resolve(dir, name)
+  if (abs !== path.join(dir, name) || !fs.existsSync(abs)) {
+    return res.status(404).json({ error: 'file not found' })
+  }
+  res.type('text/plain; charset=utf-8').sendFile(abs)
+})
+
+/**
  * POST /api/chat/stream — send a message and stream the reply (Server-Sent Events).
  * Body: { projectId, prompt, slug?, model?, tools?, effort?, images?: [{mime, data}],
  *         mentions?: [{kind:'ticket'|'testcase', folder, version?} | {kind:'skill', skill}] }.
@@ -1473,7 +1747,10 @@ chatRouter.post('/stream', async (req, res) => {
   const b = (req.body ?? {}) as Record<string, unknown>
   const typed = typeof b.prompt === 'string' ? b.prompt.trim() : ''
   const hasImages = Array.isArray(b.images) && b.images.length > 0
-  if (!typed && !hasImages) return res.status(400).json({ error: 'prompt is required' })
+  const hasDocs = Array.isArray(b.attachments) && b.attachments.length > 0
+  if (!typed && !hasImages && !hasDocs) {
+    return res.status(400).json({ error: 'prompt is required' })
+  }
   // REFUSE rather than truncate. A silently cut question is answered confidently against
   // half the requirement, and nothing on screen says why — the same reasoning docReview.ts
   // uses for its 413.
@@ -1483,6 +1760,29 @@ chatRouter.post('/stream', async (req, res) => {
         `That message is ${Math.round(typed.length / 1000)} KB — the limit is ` +
         `${Math.round(MAX_PROMPT / 1000)} KB. Attach it as a file with the paperclip, or split it.`,
     })
+  }
+  // Same rule as the prompt: REFUSE rather than quietly drop. `saveDocs` skips anything
+  // oversized, and a silently missing attachment is answered "I can't see the file" — or
+  // worse, answered from the other three as if that were all of them.
+  if (hasDocs) {
+    const list = b.attachments as unknown[]
+    if (list.length > MAX_DOCS) {
+      return res.status(413).json({
+        error: `You can attach up to ${MAX_DOCS} files to one message — this has ${list.length}.`,
+      })
+    }
+    for (const item of list) {
+      const o = (item ?? {}) as Record<string, unknown>
+      const md = typeof o.markdown === 'string' ? o.markdown : ''
+      const label = (typeof o.name === 'string' && o.name.trim()) || 'that file'
+      if (Buffer.byteLength(md, 'utf8') > MAX_DOC_BYTES) {
+        return res.status(413).json({
+          error:
+            `${label} is ${Math.round(Buffer.byteLength(md, 'utf8') / 1024 / 1024)} MB of text — ` +
+            `the limit for one attachment is ${MAX_DOC_BYTES / 1024 / 1024} MB. Split it.`,
+        })
+      }
+    }
   }
   const slug = typeof b.slug === 'string' ? b.slug : ''
   const existing = slug ? loadChat(root, slug) : null
@@ -1497,9 +1797,17 @@ chatRouter.post('/stream', async (req, res) => {
   // files (see saveImages / imagePromptBlock) — the CLI takes a prompt, not image bytes.
   // The stored prompt keeps the user's own words, so the transcript reads naturally.
   const images = saveImages(root, b.images)
+  // Attached documents take the same route as the images: written to disk here, and READ
+  // by the model from `docPromptBlock`'s paths. They are deliberately NOT pasted into the
+  // prompt — that is what used to cut a long spec in half against `MAX_PROMPT`.
+  const docs = saveDocs(root, b.attachments)
   // An image on its own is a legitimate message ("what's wrong with this?"), so give it a
   // prompt rather than rejecting it — with nothing said, describing it is the useful reply.
-  const prompt = typed || 'Take a look at the attached screenshot.'
+  const prompt =
+    typed ||
+    (hasImages
+      ? 'Take a look at the attached screenshot.'
+      : 'Take a look at the attached file.')
   const mentions = resolveMentions(root, project.id, b.mentions)
   // The `+` menu action applies to THIS message only (see ChatAction): it changes the
   // instructions, the allowed tools and the time budget, and nothing about the conversation.
@@ -1533,6 +1841,7 @@ chatRouter.post('/stream', async (req, res) => {
   }
   add('Tagged items and picked skills', mentions.block)
   add('Attached images', imagePromptBlock(images))
+  add('Attached files', docPromptBlock(docs))
   if (action) add(`Action: ${action}`, ACTION_BLOCKS[action])
   // Deliberately NOT recorded: it is a fixed instruction, byte-identical on
   // every turn, and it asks for the follow-up chips the reader can already see.
@@ -1542,6 +1851,9 @@ chatRouter.post('/stream', async (req, res) => {
   // suggestions block below — see FACTS_BLOCK. It goes AFTER the action block so an
   // action's own output contract is read first and these rules qualify it.
   add('Accuracy rules', FACTS_BLOCK, false)
+  // The defect bar (see DEFECTS_BLOCK) — right after the accuracy rules it builds on, and
+  // unrecorded for the same reason: fixed text, identical on every turn.
+  add('Defect rules', DEFECTS_BLOCK, false)
   add('Follow-up suggestions', SUGGEST_BLOCK, false)
 
   // Say what a tag resolved to. A silent drop (renamed folder, test cases deleted since)
@@ -1574,6 +1886,7 @@ chatRouter.post('/stream', async (req, res) => {
     promptForClaude,
     injected,
     images,
+    docs,
     action,
     model,
     tools,
@@ -1631,7 +1944,12 @@ chatRouter.post('/stream', async (req, res) => {
     // temporary conversation so they are deleted with it, and is the documented single
     // accessor for saving a chat either way.
     try {
-      saveChat(root, chat, spec.images.map((i) => i.file))
+      saveChat(
+        root,
+        chat,
+        spec.images.map((i) => i.file),
+        spec.docs.map((d) => d.file),
+      )
     } catch (err) {
       return res.status(500).json({
         error: `The message could not be queued: ${err instanceof Error ? err.message : String(err)}`,
@@ -1679,7 +1997,7 @@ chatRouter.post('/stream', async (req, res) => {
   // says why. dsh states the rule for its job registry as "a throw leaves
   // nothing registered"; the `finally` below is the other half of it.
   try {
-    saveChat(root, chat, turn.images)
+    saveChat(root, chat, turn.images, spec.docs.map((d) => d.file))
   } catch (err) {
     return res.status(500).json({
       error: `The conversation could not be saved: ${err instanceof Error ? err.message : String(err)}`,
@@ -1956,6 +2274,7 @@ chatRouter.post('/stream', async (req, res) => {
           text: s.prompt,
           at,
           images: s.images.length ? s.images.map((i) => i.file) : undefined,
+          files: s.docs.length ? s.docs.map((d) => ({ file: d.file, name: d.name })) : undefined,
           action: s.action ?? undefined,
           // What the portal added on top of these words — see ContextBlock. Copied,
           // because a lapsed-session retry prepends to this list and a shared reference

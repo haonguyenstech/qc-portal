@@ -20,7 +20,7 @@ import {
   updateRun,
 } from './db.js'
 import * as hub from './hub.js'
-import type { CreateRunBody, LogEvent, Project, RunSummary } from './types.js'
+import type { CreateRunBody, LogEvent, Project, RunDataPolicy, RunSummary } from './types.js'
 
 const active = new Map<string, RunHandle>()
 
@@ -376,6 +376,7 @@ function spawnRun(
     deviceId?: string
     kind?: 'ticket' | 'flow'
     headless?: boolean
+    dataPolicy?: RunDataPolicy
   },
   resumeSessionId?: string,
 ): void {
@@ -446,6 +447,9 @@ function spawnRun(
       testTarget: body.testTarget,
       deviceId: body.deviceId,
       kind: body.kind,
+      // Not stored on the row: a resume only ever says "continue where you left off",
+      // and the kept session already carries the policy it was started under.
+      dataPolicy: body.dataPolicy,
       // Read off the row, not recomputed, so a resumed run keeps writing into the
       // folder it already created (and a legacy row stays untokened).
       outDirSuffix: runRow?.outDirToken

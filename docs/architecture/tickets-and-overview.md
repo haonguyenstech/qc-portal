@@ -25,6 +25,34 @@ map lives in `crawl.ts` and is re-imported by `routes/clickup.ts`). Notable beha
   removes its nested subtask folders too. `fillTestcases.ts` uses `findCrawledTicketDir` (crawl.ts) to
   locate a possibly-nested ticket folder. `/testcases` renders these as an expandable **parent→subtask
   tree** (see that section).
+- **A ticket's activity log is BUILT BY THE PORTAL, not fetched** (`server/src/ticketActivity.ts` →
+  `testing/tickets/<folder>/activity.md`). Reported as "chat can't read a ticket's activity log", and
+  the reason was that nothing produced one. Measured against the live workspace: ClickUp's public API
+  has **no task history endpoint** (`/task/<id>/history` and `/task/<id>/activity` are 404), the one
+  thing that comes close — `/task/<id>/time_in_status` — is plan-gated (`403 TIS_027`), and the
+  configured ClickUp MCP exposes 28 tools of which none returns history. So the log is **accumulated
+  instead**: every crawl reads the `ticket.json` it is about to overwrite, diffs it against the fresh
+  detail + comments, and prepends a dated entry — status / priority / due date / title / list changes,
+  assignees and tags added or removed, custom fields set, cleared or changed, attachments added or
+  removed, and new comments (matched **by comment id**, never by count, so an edited or deleted
+  comment can't hide behind an unchanged total). Three rules keep it honest: the first crawl writes a
+  **baseline** entry that says the history before it isn't recorded; a crawl that changed nothing
+  writes **no entry** (only the `Last checked:` line moves, which is how you tell a stale snapshot
+  from a fresh one); and a **description edit reports only that it changed and by how many characters**
+  — pasting the old requirement text into a log is how a superseded acceptance criterion gets quoted
+  back later as the current one. Newest first, capped at 200 entries / 256 KB, and best-effort: a log
+  failure never fails a crawl whose ticket files are already on disk. `routes/chat.ts` lists
+  `activity.md` in the `@`-mention block, which is what makes "what changed on this ticket" answerable
+  — before it, the model read the other three files, found no history, and correctly reported that
+  none existed.
+- **`safeSegment('')` returns the literal `'ticket'`, so empty path segments must be dropped BEFORE
+  sanitizing** — `crawlOneTicket` filtered them afterwards, where the fallback string is truthy and
+  survives. Every crawl without an explicit `relDir` (i.e. every single-ticket crawl through
+  `POST /api/clickup/crawl`, since 0.9.16) therefore filed itself under
+  `testing/tickets/ticket/` instead of its own `<displayId>/` folder, each crawl overwriting the
+  previous one's files whatever ticket it was for. The flat-layout fallback the comment describes was
+  unreachable. Fixed by filtering empties first; verified by crawling a ticket and watching it land in
+  `testing/tickets/86eut664j/`.
 - **Status grouping** — `buildTree()` sorts top-level tickets by ClickUp `status` (stable within a
   status), and `groupByStatus()` folds them into runs rendered under sticky, color-tinted status
   headers. Subtask order is left untouched.

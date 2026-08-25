@@ -237,3 +237,35 @@ export function graphFromPreset(
   }))
   return { nodes, edges }
 }
+
+/**
+ * Build a canvas from steps the AI drafted out of an uploaded test-case document
+ * (`POST /api/ai/flow-from-testcases`) — the same plain top-to-bottom chain a saved
+ * template rebuilds as. The fields arrive already separated, so this does NOT go
+ * through `stepText`/`parseStepLine`: round-tripping them through one string only
+ * creates a way for a title containing " — URL: " to be re-split wrongly.
+ */
+export function graphFromDraft(
+  steps: { step?: string; title?: string; url?: string; expected?: string }[],
+): { nodes: WorkflowNode[]; edges: WorkflowEdge[] } {
+  const nodes = steps
+    .filter((s) => (s.title ?? '').trim())
+    .slice(0, MAX_WORKFLOW_STEPS)
+    .map<WorkflowNode>((s, i) => ({
+      id: nextNodeId(),
+      step: isStepKind(s.step) ? s.step : 'custom',
+      title: (s.title ?? '').trim(),
+      ...((s.url ?? '').trim() ? { url: (s.url ?? '').trim() } : {}),
+      ...((s.expected ?? '').trim() ? { expected: (s.expected ?? '').trim() } : {}),
+      x: 0,
+      y: i * (NODE_HEIGHT + NODE_GAP_Y),
+    }))
+  const edges = nodes.slice(1).map<WorkflowEdge>((n, i) => ({
+    id: edgeId(nodes[i].id, n.id),
+    source: nodes[i].id,
+    target: n.id,
+    sourceHandle: 'bottom',
+    targetHandle: 'top',
+  }))
+  return { nodes, edges }
+}

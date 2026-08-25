@@ -5,6 +5,7 @@ import { toast } from 'sonner'
 import {
   AlertCircle,
   AlertTriangle,
+  Braces,
   Bug,
   Boxes,
   CheckCircle2,
@@ -65,9 +66,11 @@ import { cn } from '@/lib/utils'
 import { toCurl } from '@/lib/curl'
 import { CurlImportDialog } from '@/components/CurlImportDialog'
 import { deriveName, emptyDraft, uniqueName, type ApiDraft } from '@/lib/apiDraft'
+import { formatJsonBody, prettyJsonOrRaw } from '@/lib/apiJson'
 import { scanResponse, type ApiFinding, type Severity } from '@/lib/apiChecks'
 import { evaluateAssertions, getJsonPath, type AssertionResult } from '@/lib/apiAssert'
 import { ApiFlowsWorkspace } from '@/components/ApiFlowPanel'
+import { ApiAssistantChat } from '@/components/ApiAssistantChat'
 import {
   aiCheckApi,
   captureApiVariable,
@@ -872,13 +875,7 @@ function scanToDraft(r: ScanRequest): Draft {
   const isJson = (r.requestContentType ?? '').includes('json')
   const bodyMode: ApiBodyMode = r.hasBody ? (isJson ? 'json' : 'text') : 'none'
   let body = r.bodyPreview ?? ''
-  if (bodyMode === 'json' && body) {
-    try {
-      body = JSON.stringify(JSON.parse(body), null, 2)
-    } catch {
-      /* leave the raw body */
-    }
-  }
+  if (bodyMode === 'json' && body) body = prettyJsonOrRaw(body)
   return {
     method: r.method,
     url: base,
@@ -2205,6 +2202,29 @@ function ApiTesting({ projectId }: { projectId: string }) {
 
   const patch = (p: Partial<Draft>) => setDraft((d) => ({ ...d, ...p }))
 
+  /**
+   * Beautify (indent 2) / minify (indent 0) the JSON body, Postman-style. A body that
+   * doesn't parse is left EXACTLY as typed and the parser's message — which carries the
+   * position — is shown, because a formatter that quietly rewrites or drops a body you
+   * were half-way through typing is worse than one that says where it broke.
+   */
+  const reformatBody = (indent: 0 | 2) => {
+    // Also the guard for the keyboard shortcut, which fires from anywhere on the page.
+    if (draft.bodyMode !== 'json' || !draft.body.trim()) return
+    const r = formatJsonBody(draft.body, indent)
+    if (!r.ok) {
+      toast.error(indent === 0 ? 'Could not minify the body' : 'Could not beautify the body', {
+        description: r.message,
+      })
+      return
+    }
+    if (r.text === draft.body) {
+      toast.success(indent === 0 ? 'Already minified' : 'Already formatted')
+      return
+    }
+    patch({ body: r.text })
+  }
+
   const { data: saved } = useQuery({
     queryKey: ['api-requests', projectId],
     queryFn: () => listApiRequests(projectId),
@@ -2521,6 +2541,35 @@ function ApiTesting({ projectId }: { projectId: string }) {
   }
 
   /**
+   * "Import cURL" — write the request to the collection NOW, the same way "New request"
+   * does. It used to only load the draft into the builder, so an imported request wasn't
+   * in the collection until it had been SENT: pasting five cURLs to build a suite saved
+   * none of them, and anything the API refused (a 401, an endpoint that's down) was lost
+   * on the next import even though the request itself was perfectly good. Selecting the
+   * new record is also what arms the auto-save effect, so edits after the import persist.
+   *
+   * A JSON body arrives from cURL as one long line — beautify it on the way in, which is
+   * the same treatment the page scan already gives its imports.
+   *
+   * Throws on a write failure so `CurlImportDialog` keeps the pasted command on screen.
+   */
+  const importCurlDraft = async (d: ApiDraft) => {
+    const imported: ApiDraft =
+      d.bodyMode === 'json' && d.body ? { ...d, body: prettyJsonOrRaw(d.body) } : d
+    setDraft(imported)
+    setRes(null)
+    setAiResult(null)
+    setSelected(null)
+    setFilter('')
+    const name = uniqueName(deriveName(imported), new Set((saved ?? []).map((s) => s.name)))
+    await saveApiRequest(projectId, name, imported)
+    await queryClient.invalidateQueries({ queryKey: ['api-requests', projectId] })
+    setSelected(name)
+    setPinnedFirst(name)
+    toast.success(`Saved as “${name}”`)
+  }
+
+  /**
    * Give a placeholder-named request its real name, once it has a URL to derive one
    * from. Awaited before the send so the stored result lands under the final name (the
    * rename endpoint carries the run history across, but only for what's on disk).
@@ -2579,14 +2628,24 @@ function ApiTesting({ projectId }: { projectId: string }) {
   // Send from anywhere with ⌘/Ctrl+Enter — the guard inside handleSend covers an
   // empty URL. A ref keeps the listener stable while always calling the latest closure.
   const handleSendRef = useRef(handleSend)
+  const reformatRef = useRef(reformatBody)
   useEffect(() => {
     handleSendRef.current = handleSend
+    reformatRef.current = reformatBody
   })
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
         e.preventDefault()
         handleSendRef.current()
+        return
+      }
+      // ⌘/Ctrl+Shift+F — beautify the JSON body without leaving the editor. `e.key` is
+      // upper-case while Shift is held, and Alt is excluded so it can't shadow a
+      // browser/OS combo the engineer meant for something else.
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && !e.altKey && e.key.toLowerCase() === 'f') {
+        e.preventDefault()
+        reformatRef.current(2)
       }
     }
     window.addEventListener('keydown', onKey)
@@ -3527,10 +3586,29 @@ function ApiTesting({ projectId }: { projectId: string }) {
                       </button>
                     ))}
                     {draft.bodyMode === 'json' && (
-                      <span className="ml-auto inline-flex items-center gap-1 text-[11px] text-muted-foreground">
-                        <FileJson className="size-3" />
-                        Content-Type set automatically
-                      </span>
+                      <div className="ml-auto flex items-center gap-1">
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          className="h-7 rounded-full px-2.5 text-[11px]"
+                          disabled={!draft.body.trim()}
+                          onClick={() => reformatBody(2)}
+                        >
+                          <Braces className="size-3.5" />
+                          Beautify
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          className="h-7 rounded-full px-2.5 text-[11px]"
+                          disabled={!draft.body.trim()}
+                          onClick={() => reformatBody(0)}
+                        >
+                          Minify
+                        </Button>
+                      </div>
                     )}
                   </div>
                   {draft.bodyMode !== 'none' && (
@@ -3543,6 +3621,16 @@ function ApiTesting({ projectId }: { projectId: string }) {
                       className="min-h-[180px] font-mono text-xs shadow-none"
                       spellCheck={false}
                     />
+                  )}
+                  {draft.bodyMode === 'json' && (
+                    <p className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                      <FileJson className="size-3 shrink-0" />
+                      Content-Type is set automatically. Beautify re-indents the body
+                      (⌘/Ctrl+Shift+F) and keeps <code className="whitespace-nowrap">
+                        {'{{variables}}'}
+                      </code>{' '}
+                      exactly as typed, even where they stand in for a number.
+                    </p>
                   )}
                 </TabsContent>
                 <TabsContent value="assert" className="space-y-3 pt-4">
@@ -3868,12 +3956,7 @@ function ApiTesting({ projectId }: { projectId: string }) {
       <CurlImportDialog
         open={curlOpen}
         onOpenChange={setCurlOpen}
-        onImport={(d) => {
-          setDraft(d)
-          setSelected(null)
-          setRes(null)
-          setAiResult(null)
-        }}
+        onImport={importCurlDraft}
       />
 
       <ScanPageDialog
@@ -3944,6 +4027,16 @@ function ApiTesting({ projectId }: { projectId: string }) {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* The assistant. Docked (fixed-position) rather than a fourth column, and mounted
+          outside the tab branches on purpose: the question "wire these imports up" is the
+          same question on Requests and on Flows, and closing the box must not lose the
+          conversation. */}
+      <ApiAssistantChat
+        projectId={projectId}
+        saved={saved ?? []}
+        onFlowCreated={() => goTab('flows')}
+      />
     </div>
   )
 }

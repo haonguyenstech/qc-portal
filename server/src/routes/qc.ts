@@ -20,6 +20,7 @@ import {
   startRun,
 } from '../runManager.js'
 import { revealFolderNative } from '../folderPicker.js'
+import { RUN_DOC_MAX_BYTES, saveRunTestcaseDoc } from '../runTestcaseDocs.js'
 import { CRAWL_SUMMARY_MODELS } from '../claudeExec.js'
 import type { RunDetail, RunSummary } from '../types.js'
 
@@ -67,6 +68,44 @@ qcRouter.post('/check-url', async (req, res) => {
     res.json({ ok: false, error })
   } finally {
     clearTimeout(timer)
+  }
+})
+
+/**
+ * Store a test-case document the engineer uploaded on the Run form, so the run it
+ * starts can execute it (see runTestcaseDocs.ts and docs/architecture/runs.md).
+ * The browser converts docx/pdf/xlsx/csv to Markdown itself (lib/docConvert.ts) —
+ * what arrives here is always text, and the on-disk name is generated server-side.
+ */
+qcRouter.post('/testcase-doc', (req, res) => {
+  const { projectId, name, markdown } = req.body ?? {}
+  if (typeof projectId !== 'string' || !projectId.trim()) {
+    return res.status(400).json({ error: 'projectId is required' })
+  }
+  const project = getProject(projectId.trim())
+  if (!project) return res.status(404).json({ error: 'Project not found' })
+  if (typeof markdown !== 'string' || !markdown.trim()) {
+    return res.status(400).json({ error: 'The document has no text.' })
+  }
+  const bytes = Buffer.byteLength(markdown, 'utf8')
+  if (bytes > RUN_DOC_MAX_BYTES) {
+    // Refuse rather than truncate: a clipped test-case document runs a subset of
+    // the cases and reports as if it ran all of them.
+    return res.status(413).json({
+      error: `That document is too large (${Math.round(bytes / 1024)} KB, limit ${
+        RUN_DOC_MAX_BYTES / 1024 / 1024
+      } MB). Split it and attach the part this run should cover.`,
+    })
+  }
+  try {
+    const saved = saveRunTestcaseDoc(
+      project.rootPath,
+      typeof name === 'string' ? name : '',
+      markdown,
+    )
+    return res.status(201).json({ file: saved.file, relPath: saved.relPath, bytes: saved.bytes })
+  } catch (err) {
+    return res.status(500).json({ error: (err as Error).message })
   }
 })
 
@@ -201,6 +240,7 @@ qcRouter.post('/run', (req, res) => {
     deviceId,
     kind,
     headless,
+    dataPolicy,
   } = req.body ?? {}
   if (typeof projectId !== 'string' || !projectId.trim()) {
     return res.status(400).json({ error: 'projectId is required' })
@@ -260,6 +300,10 @@ qcRouter.post('/run', (req, res) => {
   // than a boolean means "don't override the project's .mcp.json" — the old behavior.
   const headlessClean =
     target === 'web' && typeof headless === 'boolean' ? headless : undefined
+  // What the run may do to the environment's data. Only the explicit opt-in unlocks
+  // creating test data; anything else (missing, unknown, a stray string) stays
+  // read-only, so a malformed body can never authorize a mutation.
+  const dataPolicyClean: 'readonly' | 'seed' = dataPolicy === 'seed' ? 'seed' : 'readonly'
   try {
     const summary = startRun({
       projectId: projectId.trim(),
@@ -274,6 +318,7 @@ qcRouter.post('/run', (req, res) => {
       deviceId: deviceClean,
       kind: runKind,
       headless: headlessClean,
+      dataPolicy: dataPolicyClean,
     })
     return res.status(201).json({ runId: summary.id, ...summary })
   } catch (err) {

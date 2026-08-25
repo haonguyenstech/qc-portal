@@ -31,6 +31,7 @@ import {
   resumeTestcaseJob,
   startTestcaseJob,
 } from '../testcaseJobs.js'
+import { flowFromTestcases } from '../flowFromTestcases.js'
 import { verifyDesign } from '../verifyDesign.js'
 import { cancelVerifyJob, getVerifyJob, listVerifyJobs, startVerifyJob } from '../verifyJobs.js'
 import { spawnEnv } from '../toolPath.js'
@@ -755,6 +756,55 @@ aiRouter.post('/testcases', async (req, res) => {
     const status = (err as { status?: number }).status ?? 500
     res.status(status).json({ error: (err as Error).message })
   }
+})
+
+/**
+ * Read an UPLOADED test-case document and draft the E2E flow that executes it —
+ * the Run form's advanced mode (`/qc-run?mode=advanced`) turning a regression sheet
+ * into canvas steps. Body:
+ *   { projectId, fileName, markdown, appUrl?, testTarget?, projectName? }
+ * Returns { flowName, steps, summary, caseCount }. Drafts only; the run still
+ * carries the document itself as its acceptance source (see runTestcaseDocs.ts).
+ */
+aiRouter.post('/flow-from-testcases', async (req, res) => {
+  const project = resolveProject(req)
+  if (!project) return res.status(400).json({ error: 'project not found' })
+
+  const markdown = typeof req.body?.markdown === 'string' ? req.body.markdown : ''
+  if (!markdown.trim()) return res.status(400).json({ error: 'markdown is required' })
+  const fileName =
+    typeof req.body?.fileName === 'string' && req.body.fileName.trim()
+      ? req.body.fileName.trim().slice(0, 200)
+      : 'test cases'
+  const testTarget =
+    req.body?.testTarget === 'web-mobile'
+      ? ('web-mobile' as const)
+      : req.body?.testTarget === 'app-mobile'
+        ? ('app-mobile' as const)
+        : ('web' as const)
+
+  // The browser gives up on a request it started; killing the child stops a
+  // planning pass nobody is waiting for from burning tokens.
+  const controller = new AbortController()
+  req.on('aborted', () => controller.abort())
+
+  const result = await flowFromTestcases({
+    rootPath: project.rootPath,
+    projectName:
+      typeof req.body?.projectName === 'string' && req.body.projectName.trim()
+        ? req.body.projectName.trim()
+        : project.name || 'this project',
+    fileName,
+    markdown,
+    appUrl: typeof req.body?.appUrl === 'string' ? req.body.appUrl : undefined,
+    target: testTarget,
+    signal: controller.signal,
+  })
+  if (!result.ok) {
+    if (controller.signal.aborted) return
+    return res.status(result.status).json({ error: result.error })
+  }
+  res.json(result.draft)
 })
 
 /**

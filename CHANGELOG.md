@@ -3,6 +3,152 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.11.20 — 2026-08-25
+
+**A run that can create the data a case needs, a chat that stops calling assumptions bugs, and tickets that finally have a history**
+
+### Added
+
+- **"Allow test-data creation" on the Run form.** The measured reason a suite came back *"64 of 120
+  Blocked"* while the same ticket driven by hand in Chat graded most of it: every one of those rows
+  said *"would require mutating shared DEV data"* — and on `/qc-run` nothing could ever say
+  otherwise, because the run always ended with *do not commit any mutating action*. In Chat you just
+  say "create an appointment and check the notification", which **is** being told. The checkbox
+  (off by default, per run) authorizes exactly that: create the data a case needs, verify the
+  result, list what was created in the report — and it may **not** report a case as Blocked for
+  "would require mutating" or "no existing instance found". Still forbidden either way: touching a
+  record the run didn't create, bulk actions, notifying real people, changing shared settings. Left
+  off, the run now also has to **search before it concludes nothing exists**, and to name the cases
+  that were Blocked *only* by the policy — so you can see what a re-run with the box ticked would
+  recover.
+- **Run test cases you already have — no ticket, no canvas.** Advanced mode takes an uploaded
+  test-case document (docx/pdf/xlsx/csv/md) and makes it the run's acceptance source: it is written
+  into the project under `testing/test-cases/` and the run is told to read it **in full**, execute
+  every case and report a result for every case. Optionally **Analyze & build the flow** drafts the
+  canvas from it. A document plus a Start URL is a runnable flow on its own, with no steps at all —
+  and an oversize sheet is refused rather than quietly cut, because a suite cut in half runs a
+  subset and reports as though it ran everything.
+- **A ticket now has an activity log.** ClickUp exposes no task history to read (its history and
+  activity endpoints are 404, `time_in_status` is plan-gated, and no MCP tool returns it), so the
+  portal **accumulates** one: every crawl diffs the snapshot it is about to overwrite and prepends a
+  dated entry to `activity.md` — status, priority, due date, title, list, assignees, tags, custom
+  fields, attachments, and new comments matched by comment id (so an edited or deleted comment
+  can't hide behind an unchanged count). A crawl that changed nothing writes nothing; the first
+  crawl says outright that the history before it isn't recorded; a description edit reports only
+  that it changed and by how much, never the old text. `@ticket` in Chat reads it, so *"what changed
+  on this ticket"* is finally answerable.
+- **Turn a diagram into Knowledge.** The Knowledge tab now takes an **image** — a flow diagram, an
+  ERD, a state machine, an annotated screen. Most projects document their logic as a picture, and a
+  picture has no text to extract, so the model is shown it and writes the doc: every label, arrow,
+  branch, state and rule as written, a note where the image is unreadable, and a *"what this means
+  for testing"* section. The picture is **kept** and embedded in the doc, since a diagram flattened
+  into prose can no longer be checked against the diagram. A blank or irrelevant image is refused
+  rather than saved as a document that says there was nothing to document.
+- **Pre-request and post-request hooks in API flows.** Each step can set data up before it and clean
+  up after it, and the flow itself has `setup` / `teardown`. Three rules are what make them worth
+  having: a step whose setup failed is **not sent** (it is untested, not failing), a cleanup runs
+  **whatever happened** to its step, and teardown runs **even when the run aborted** — otherwise the
+  run that failed is exactly the one that leaves its rows behind. A cleanup that fails downgrades a
+  step that otherwise passed, because data left on a shared environment is a real finding. The
+  stored report lists hooks in execution order, indented and tagged, and counts only real steps in
+  the verdict.
+- **Ask AI on the API Testing page.** After a page scan or a stack of pasted cURLs you have a
+  collection where every request repeats the same host and the same pasted bearer token. The docked
+  box answers questions **and proposes the edits** — pull the host into `{{baseUrl}}`, capture the
+  token off the login response, build a flow in the right order — and **never writes anything
+  itself**: each proposal is applied by a click, through the same validation the manual UI uses, so
+  a hallucinated URL cannot land in fourteen requests without someone reading it first. Attach a
+  screenshot or a spec like you would in Chat.
+- **Attach documents in Chat.** The paperclip's file now takes the same road as a pasted image: it
+  is written into the project and the model is told to read it in full. Previously the converted
+  markdown was appended to the prompt and the whole thing cut at the length limit — so a spec over
+  ~48 KB reached the model as its first half, with nothing on screen saying so, and the answer was
+  judged wrong for a reason nobody could see. Up to 4 files, refused (never trimmed) past the cap,
+  and the chips come back when the conversation is reopened.
+- **The Chat rail folds — the whole thing, and each group.** Same gesture as the app sidebar, kept
+  across visits. Folded, the rail keeps a strip with unfold / search / New chat / Temporary chat and
+  the pulsing dot when something is still answering; its search icon unfolds *and* focuses the box.
+  Every group ("Starred", "Today", …) folds too and remembers it, shows its count while folded, and
+  is force-opened by a search — a search that hides its own hits is a bug, not a preference.
+- **Beautify / Minify on an API request body** (⌘/Ctrl+Shift+F), and imported bodies arrive
+  formatted. It tolerates `{{variables}}` where JSON wants a value — `"limit": {{page_size}}` is
+  exactly the body this page edits most — and never rewrites a body it can't parse: you get the
+  parser's message and your text, untouched.
+
+### Changed
+
+- **Chat has a bar to clear before it calls something a bug.** Reported from the field: chat listed
+  defects that weren't defects and withdrew them the moment it was asked how they were established.
+  Those answers cited real files correctly — the wrongness was in the judgement laid over correct
+  evidence. A defect is a contradiction between an *expected* behaviour and an *actual* one, and the
+  actual half was grounded in the project while the expected half came from how software like this
+  generally behaves. Now both halves must come from something opened in this turn with the source of
+  the *expected* half nameable, there is a self-test to run before writing ("where does it say it
+  should do that?", "did you actually see this happen?"), and there is **somewhere else to put it**
+  — a *Worth confirming* list, phrased as a question for the BA — because a model with a real
+  concern and no legitimate place for it files it as a bug. Zero defects is stated to be a real
+  answer.
+- **Fact-check gained a fourth verdict: `unsupported`** — *"called a bug, but nothing requires it"*.
+  The audit used to be told to skip judgement calls, so it stepped over precisely the claims above.
+  It now checks both halves of every defect claim on disk and grades the leap as an **issue** (amber,
+  not red — the observation may be perfectly sound and only the leap failed) rather than burying it
+  behind a green headline.
+- **The Run form no longer remembers which ticket you picked.** Opening `/qc-run` while the portal
+  was running ticket A found A pre-checked, so an engineer who came to run B queued A twice. That
+  was patched by pruning "busy" tickets, and it kept coming back — every new source of busy was one
+  more thing the prune had to know about. Which ticket to run is a decision made per visit; the URL,
+  notes, skill, app name and device are what get restored.
+- **A big suite is now covered in waves.** Phases 4→5→6 as one pass over 120 cases means an
+  exhausted budget costs *every* remaining area its evidence at once (the "Not Tested" rows all said
+  "no evidence captured" — never reached, not judged). Past ~40 cases the run groups by feature
+  area, covers every area once before going back for depth, announces the plan and each finished
+  wave, and says when it notices the budget won't reach the rest — so the gap arrives as a named
+  list instead of as a third of the report.
+- **Mobile runs have recipes.** The prompt told a mobile run to use Maestro and not Playwright, then
+  handed it a skill whose entire capture procedure was browser calls. `maestro-recipes.md` is the
+  mobile counterpart: device discipline, `inspect_screen` as the content inventory, permissions,
+  rotation and offline cases, what a device cannot tell you — and the trap that made mobile evidence
+  vanish, that Maestro's `take_screenshot` **takes no path and returns the image inline**, so a run
+  reaching for it saved nothing and graded every case "no evidence captured".
+- **The Run form's model picker has "Best (your default)"** — send no model and use whatever your own
+  `claude` uses, the way Chat and the Terminal already do. Part of the quality gap against Chat was
+  simply that runs always pinned Sonnet. The stored default stays Sonnet; switching is one click.
+- **"Import cURL" saves the request immediately**, like *New request* already did. Pasting five
+  cURLs to build a suite used to save none of them until each had been sent, and anything the API
+  refused was lost on the next import even though the request itself was fine. A write failure keeps
+  the pasted command on screen instead of closing over it.
+- **The cURL dialog's buttons stay on screen.** A real "Copy as cURL" (25+ headers and a body) grew
+  the textarea past 1100px and pushed Import below the fold; on a short window — a laptop, or
+  Windows at 125/150% scaling — the dialog itself became the scroller with nothing saying to scroll.
+  Measured from 900px down to 340px of viewport height.
+- **Screenshots and evidence open bigger.** The lightbox fills the window (up to 1800px), and
+  clicking the image switches between fit-to-window and **1:1 pixels**, so small text in a capture
+  is readable instead of merely visible. Evidence previews grew with it.
+- **The sidebar logo goes to the project Overview**, not to the Run form — a "home" that is one of
+  the pages you navigate away from isn't a home.
+
+### Fixed
+
+- **Every single-ticket crawl was overwriting the previous one.** A crawl with no explicit
+  sub-folder filed itself under `testing/tickets/ticket/` instead of its own `<id>/` folder — the
+  empty path segment was filtered *after* sanitizing, where the `'ticket'` fallback had already
+  replaced it and survived. So crawling ticket B replaced ticket A's files on disk, whatever ticket
+  it was for, and had done since 0.9.16. Verified by crawling a ticket and watching it land in its
+  own folder.
+- **A tagged ticket in Chat is labelled as a snapshot, and its live state is read from the
+  tracker.** The crawled folder is only as fresh as the last time someone pressed Crawl. Measured on
+  a real ticket: the file said `ready to test` while ClickUp said `re-open`, and the model happily
+  answered from the file. The files now answer the ticket's **content**, the tracker's MCP answers
+  its **state** (status, assignee, priority, due date, newest comments, anything phrased as *now* /
+  *still* / *what changed*), the live value wins, and both are reported when they disagree. Applies
+  to a ticket named without tagging it too; a missing or failed MCP is answered from the snapshot
+  **labelled as one**, never as current.
+- **The Chat composer opens at about six lines and grows as you type.** It was one line tall
+  forever: a QC question carries a ticket id, a URL and two or three steps, and the third line
+  scrolled out of sight *while it was being typed*.
+- **AI-captured Knowledge docs no longer print their provenance comment** across the top of the
+  preview.
+
 ## 0.11.19 — 2026-08-21
 
 **API Testing rebuilt: Flows get their own tab, the collection gets a search box, and a new request exists the moment you make it**

@@ -12,6 +12,7 @@ import {
   FileSpreadsheet,
   FileText,
   FileType,
+  Image as ImageIcon,
   Info,
   Loader2,
   Sparkles,
@@ -33,13 +34,21 @@ import {
 import {
   deleteKnowledgeDoc,
   getKnowledgeDoc,
+  knowledgeAssetUrl,
+  knowledgeDocFromImage,
   listKnowledge,
   openKnowledgeFolder,
   saveKnowledgeDoc,
   type KnowledgeDoc,
 } from '@/lib/api'
 import { OpenFolderButton } from '@/components/OpenFolderButton'
-import { convertFileToMarkdown, KNOWLEDGE_ACCEPT } from '@/lib/docConvert'
+import {
+  convertFileToMarkdown,
+  fileToBase64,
+  imageMimeOf,
+  KNOWLEDGE_ACCEPT,
+  KNOWLEDGE_IMAGE_ACCEPT,
+} from '@/lib/docConvert'
 
 function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`
@@ -76,6 +85,12 @@ const FILE_KINDS: (FileKind & { ext: string[] })[] = [
     Icon: FileCode,
     color: 'text-violet-600 dark:text-violet-400',
   },
+  {
+    ext: ['png', 'jpg', 'jpeg', 'webp', 'gif'],
+    label: 'Image / diagram',
+    Icon: ImageIcon,
+    color: 'text-amber-600 dark:text-amber-400',
+  },
 ]
 
 const DEFAULT_KIND: FileKind = { label: 'Doc', Icon: FileText, color: 'text-muted-foreground' }
@@ -89,7 +104,12 @@ function kindOf(filename: string): FileKind {
 }
 
 /** Per-file status while a batch of uploads is being converted + saved. */
-type UploadItem = { name: string; status: 'converting' | 'done' | 'error'; error?: string }
+type UploadItem = {
+  name: string
+  /** `analyzing` is the image path — a real AI call, not a browser conversion. */
+  status: 'converting' | 'analyzing' | 'done' | 'error'
+  error?: string
+}
 
 // Mirrors the Overview intro markdown styling so doc previews render consistently.
 const MD_CLASS = cn(
@@ -107,6 +127,8 @@ const MD_CLASS = cn(
   '[&_blockquote]:border-l-2 [&_blockquote]:border-primary/40 [&_blockquote]:pl-3 [&_blockquote]:text-muted-foreground [&_blockquote]:italic',
   '[&_table]:my-3 [&_table]:w-full [&_table]:text-left [&_th]:border [&_th]:bg-muted/50 [&_th]:px-2 [&_th]:py-1 [&_th]:text-xs [&_th]:font-semibold [&_td]:border [&_td]:px-2 [&_td]:py-1 [&_td]:text-xs',
   '[&_hr]:my-5 [&_hr]:border-border',
+  // A doc generated from a diagram embeds the picture — give it room and a frame.
+  '[&_img]:my-3 [&_img]:max-w-full [&_img]:rounded-xl [&_img]:border [&_img]:border-border/60 [&_img]:bg-muted/30',
 )
 
 function PreviewDialog({
@@ -123,6 +145,13 @@ function PreviewDialog({
     queryFn: () => getKnowledgeDoc(doc!.name, projectId),
     enabled: !!doc,
   })
+
+  // An AI-captured doc carries its provenance as a leading HTML comment. react-markdown
+  // renders raw HTML as literal TEXT (no rehype-raw here), so the marker was printing as
+  // "<!-- qc-portal:source: … -->" across the top of every AI doc. The `source` field
+  // beside it already carries that information — the AI badge is drawn from it — so the
+  // preview drops the marker instead of showing it.
+  const body = (data?.content ?? '').replace(/^<!--\s*qc-portal:source:[\s\S]*?-->\s*\n?/, '')
 
   return (
     <Dialog open={!!doc} onOpenChange={onOpenChange}>
@@ -143,7 +172,31 @@ function PreviewDialog({
             </p>
           ) : (
             <div className={MD_CLASS}>
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{data?.content ?? ''}</ReactMarkdown>
+              <ReactMarkdown
+                remarkPlugins={[remarkGfm]}
+                // A doc written from an uploaded image embeds it as `assets/<file>`,
+                // which is relative to testing/knowledge/ on disk and means nothing to
+                // the browser. Point it at the route that serves that folder; every
+                // other kind of URL is left exactly as the document wrote it.
+                urlTransform={(url) =>
+                  url.startsWith('assets/')
+                    ? knowledgeAssetUrl(projectId, url.slice('assets/'.length))
+                    : url
+                }
+                components={{
+                  // The whole reason to keep the picture is to be able to CHECK the
+                  // description against it, so make it openable at full size instead of
+                  // capping it at the dialog's width.
+                  img: ({ src, alt }) =>
+                    typeof src === 'string' ? (
+                      <a href={src} target="_blank" rel="noreferrer" title="Open the image full size">
+                        <img src={src} alt={alt ?? ''} />
+                      </a>
+                    ) : null,
+                }}
+              >
+                {body}
+              </ReactMarkdown>
             </div>
           )}
         </div>
@@ -195,6 +248,26 @@ export function KnowledgeDocs({
     for (let i = 0; i < list.length; i++) {
       const file = list[i]
       try {
+        // An image is the one upload with no text to extract: it goes to the server
+        // whole and a vision pass writes the doc. Everything else is converted here in
+        // the browser and never leaves the machine.
+        const mime = imageMimeOf(file)
+        if (mime) {
+          setUploads((prev) =>
+            prev.map((u, idx) => (idx === i ? { ...u, status: 'analyzing' } : u)),
+          )
+          await knowledgeDocFromImage({
+            projectId,
+            name: file.name.replace(/\.[^./\\]+$/, ''),
+            fileName: file.name,
+            mime,
+            data: await fileToBase64(file),
+            projectName,
+          })
+          ok++
+          setUploads((prev) => prev.map((u, idx) => (idx === i ? { ...u, status: 'done' } : u)))
+          continue
+        }
         const { name, markdown } = await convertFileToMarkdown(file)
         await saveKnowledgeDoc(name, markdown, projectId)
         ok++
@@ -212,7 +285,9 @@ export function KnowledgeDocs({
     setBusy(false)
     if (ok > 0) {
       toast.success(`Added ${ok} document${ok === 1 ? '' : 's'}`, {
-        description: 'Converted to Markdown for AI knowledge.',
+        description: list.some((f) => imageMimeOf(f))
+          ? 'Stored as Markdown for AI knowledge — an image is described by AI and kept alongside its doc.'
+          : 'Converted to Markdown for AI knowledge.',
       })
       queryClient.invalidateQueries({ queryKey: ['knowledge', projectId] })
     }
@@ -243,8 +318,9 @@ export function KnowledgeDocs({
         <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
         <div className="space-y-1 leading-relaxed">
           <p>
-            Upload docs (.docx), PDFs, Markdown, or spreadsheets to supplement{' '}
-            {projectName}&apos;s AI knowledge.
+            Upload docs (.docx), PDFs, Markdown, spreadsheets — or an{' '}
+            <span className="font-medium text-foreground">image of a diagram</span> (logic flow,
+            ERD, state machine, annotated screen) to supplement {projectName}&apos;s AI knowledge.
           </p>
           <p>
             Each is converted to Markdown and stored under{' '}
@@ -258,7 +334,7 @@ export function KnowledgeDocs({
         ref={inputRef}
         type="file"
         multiple
-        accept={KNOWLEDGE_ACCEPT}
+        accept={`${KNOWLEDGE_ACCEPT},${KNOWLEDGE_IMAGE_ACCEPT}`}
         className="hidden"
         onChange={(e) => e.target.files && handleFiles(e.target.files)}
       />
@@ -291,7 +367,8 @@ export function KnowledgeDocs({
           {busy ? 'Converting…' : 'Drop files here or click to upload'}
         </span>
         <span className="text-[11px] text-muted-foreground">
-          Converted to Markdown in your browser — nothing leaves your machine.
+          Docs are converted to Markdown in your browser. An image (diagram, ERD, screenshot) is
+          described by AI and kept next to its doc.
         </span>
         <span className="mt-1 flex flex-wrap items-center justify-center gap-1.5">
           {ACCEPT_PILLS.map(({ label, Icon, color }) => (
@@ -317,7 +394,9 @@ export function KnowledgeDocs({
                 <CheckCircle2 className="size-3.5 text-emerald-600 dark:text-emerald-400" />
               )}
               {busy
-                ? `Converting ${uploads.filter((u) => u.status !== 'converting').length}/${uploads.length}…`
+                ? uploads.some((u) => u.status === 'analyzing')
+                  ? 'Reading the image with AI…'
+                  : `Converting ${uploads.filter((u) => u.status === 'done' || u.status === 'error').length}/${uploads.length}…`
                 : `Processed ${uploads.length} file${uploads.length === 1 ? '' : 's'}`}
             </span>
             {!busy && (
@@ -347,7 +426,12 @@ export function KnowledgeDocs({
                       </div>
                     )}
                   </div>
-                  {u.status === 'converting' && (
+                  {u.status === 'analyzing' && (
+                    <span className="shrink-0 text-[11px] font-medium text-muted-foreground">
+                      describing the diagram…
+                    </span>
+                  )}
+                  {(u.status === 'converting' || u.status === 'analyzing') && (
                     <Loader2 className="size-4 shrink-0 animate-spin text-muted-foreground" />
                   )}
                   {u.status === 'done' && (

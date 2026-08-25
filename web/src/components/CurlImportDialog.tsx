@@ -73,8 +73,16 @@ export function CurlImportDialog({
 
   return (
     <Dialog open={open} onOpenChange={(v) => !working && onOpenChange(v)}>
-      <DialogContent className="max-h-[85vh] overflow-y-auto rounded-3xl sm:max-w-3xl">
-        <DialogHeader>
+      {/* A COLUMN, not the default grid, and it never scrolls itself: the header and the
+          footer are pinned and only the textarea scrolls. Capping the textarea alone was not
+          enough — on a short window (a laptop, or Windows at 125/150% display scaling, where
+          the viewport is ~500 CSS px) the header + a 3-line description + the floor height of
+          the textarea + an error line still added up past 85vh, and the whole dialog became
+          the scroller, which puts Cancel/Import below its clipped edge with nothing saying to
+          scroll. With `overflow-hidden` + `shrink-0` on the two ends, the buttons are on
+          screen at every window size and every paste length. */}
+      <DialogContent className="flex max-h-[85vh] flex-col overflow-hidden rounded-3xl sm:max-w-3xl">
+        <DialogHeader className="shrink-0">
           <DialogTitle className="flex items-center gap-2">
             <TerminalSquare className="size-4 text-primary" />
             {title}
@@ -94,18 +102,25 @@ export function CurlImportDialog({
           // The shadcn Textarea is `field-sizing-content`, so it grows to fit whatever is
           // pasted. A real browser "Copy as cURL" (25 headers + a body) grew it past 1100px,
           // which pushed Cancel/Import below the fold and the ✕ above it — the dialog is
-          // centred with translate-y-[-50%] and doesn't scroll. Cap it and scroll inside.
-          className="max-h-[45vh] min-h-[160px] overflow-y-auto font-mono text-xs shadow-none"
+          // centred with translate-y-[-50%] and doesn't scroll. So it grows, but it is the
+          // ONLY thing here that may: `min-h-0` lets the flex column shrink it (its
+          // content-sized height is the flex basis) and `overflow-y-auto` scrolls the rest.
+          // `min-h-40` is the floor when there is room for it, never a claim on space the
+          // footer needs.
+          // `basis-auto` keeps the content-sized height as the flex basis, so it still GROWS
+          // with the paste (up to 55vh); `min-h-24` is the floor it may shrink to when the
+          // window is too short for that — the footer's space is never negotiable.
+          className="min-h-24 flex-1 basis-auto overflow-y-auto font-mono text-xs shadow-none sm:max-h-[55vh]"
           spellCheck={false}
           autoFocus
         />
         {error && (
-          <p className="flex items-start gap-1.5 text-xs text-destructive">
+          <p className="flex shrink-0 items-start gap-1.5 text-xs text-destructive">
             <AlertCircle className="mt-px size-3.5 shrink-0" />
             {error}
           </p>
         )}
-        <DialogFooter>
+        <DialogFooter className="shrink-0">
           <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={working}>
             Cancel
           </Button>

@@ -36,6 +36,32 @@ The page is a three-pane workspace, not a vertical stack, and `/api-testing` is 
     `NAME_RE = /^[\w .-]{1,60}$/`, which has no parenthesis. The old create-on-send path built
     `base (2)` and swallowed the `invalid request name` error, so saving a SECOND request to an
     endpoint already in the collection silently wrote nothing. Verified before/after.
+- **"Import cURL" writes the request immediately too — same rule as "New request".** It used
+  to only load the parsed draft into the builder, so an imported request was NOT in the
+  collection until it had been SENT: pasting five cURLs to build a suite saved none of them,
+  and anything the API refused (a 401, an endpoint that's down) was lost on the next import
+  even though the request itself was fine. `importCurlDraft` PUTs it under
+  `uniqueName(deriveName(draft), …)`, awaits the `['api-requests']` invalidation, then selects
+  and pins it — selecting is what arms the auto-save effect, so edits after the import persist.
+  It **throws** on a write failure, which is what makes `CurlImportDialog` keep the pasted
+  command on screen instead of closing over it. The Flows tab's `AddStepPicker` already
+  behaved this way; the two paths now differ only in what they do after saving.
+- **A JSON body is beautified on the way in, and beautify/minify are buttons on the Body tab.**
+  `lib/apiJson.ts` (`formatJsonBody(text, 0 | 2)`, `prettyJsonOrRaw`) is the single formatter,
+  used by the Body tab's `Beautify` / `Minify` buttons (⌘/Ctrl+Shift+F for beautify), by both
+  cURL imports and by `scanToDraft`. cURL and the page scan both hand over a body as ONE long
+  line, which is unreadable and un-editable in a ~360px pane.
+  - **It tolerates `{{variables}}` where JSON wants a value.** `"limit": {{page_size}}` is not
+    valid JSON, so a formatter that only tried `JSON.parse` would refuse exactly the bodies this
+    page edits most. `maskVars` walks the text tracking in-string state and swaps only the tokens
+    that are NOT already inside a string for a `"__QCVAR_n__"` placeholder, formats, then puts the
+    raw tokens back verbatim. A body that literally contains `__QCVAR` is not masked at all (the
+    round-trip would be ambiguous) and just reports the parse error — safe, not silent.
+  - **An unparseable body is never rewritten.** The parser's message (it carries the position)
+    goes into the error toast and the textarea is left exactly as typed; a formatter that
+    "fixes" a body you're half-way through typing loses work. An already-formatted body toasts
+    `Already formatted` rather than looking inert.
+
 - **The collection search box is always mounted** once anything is saved — it used to appear
   only past four requests, which meant nobody knew it existed until they already had too many
   to scroll. Terms are ANDed and each is matched against name, method, URL *and* module name
@@ -120,6 +146,63 @@ saved requests, run in sequence with each step's `captures` feeding the next ste
   + `lib/apiDraft.ts` (`ApiDraft`, `emptyDraft`, `deriveName`, `uniqueName`) were extracted out of
   `ApiTestingPage.tsx` for it — importing the page from `ApiFlowPanel.tsx` would have been an
   import cycle, and a second copy of the naming rules is how the two sides drift apart.
+  Its panel is a **flex column that never scrolls itself** — header and footer `shrink-0`, the
+  textarea the only thing that grows (`flex-1 basis-auto`, capped at 55vh) and the only thing that
+  scrolls. The shadcn Textarea is `field-sizing-content`, so a real "Copy as cURL" (25+ headers and
+  a body) used to grow it past 1100px and push Cancel/Import below the fold. Capping the textarea
+  alone fixed that case but not the one behind it: on a short window — a laptop, or Windows at
+  125/150% display scaling, where the viewport is ~500 CSS px — header + a wrapped description +
+  the textarea's floor + an error line still passed 85vh, the whole dialog became the scroller, and
+  the buttons sat below its clipped edge with nothing on screen saying to scroll. Measured on the
+  page from 900px down to 340px of viewport height: the footer stays on screen and the dialog
+  itself never scrolls. Don't put `overflow-y-auto` back on `DialogContent`.
+- **Pre-request / post-request hooks — how a step gets the data it needs.** A step used to
+  be able to test only what already existed on the environment, so "verify a claim appears
+  in the list" needed a claim someone had created by hand, and re-running the scenario
+  needed it created again. Each step now carries `before` and `after` lists, and the flow
+  carries `setup` (once, before step 1) and `teardown` (once, after the last step). A hook is
+  **another saved request** — same `{ id, requestName, enabled, continueOnFail }` shape as a
+  step, referenced by name for the same reason: the setup call is a request the collection
+  already holds, and inlining it would be a second copy free to drift.
+  - **Three rules make hooks worth having rather than just more steps**, and each one is a
+    measured failure mode of doing it with steps:
+    1. a step whose `before` hook failed is **not sent at all** — it is not a failing step,
+       it is an untested one, and sending it reports a failure that says nothing about the
+       product;
+    2. an `after` hook runs **whatever happened** to its step (passed, failed, never sent).
+       That is the entire difference between a cleanup and a last step;
+    3. `teardown` runs **even when `stopOnFail` aborted the run** — otherwise the run that
+       failed is exactly the one that leaves its rows behind, and the next run starts dirty.
+    A hard `after`/`teardown` failure **downgrades a step that had otherwise passed**: data
+    left on a shared environment is a real finding, and a silent pass hides it. `soft`
+    (`continueOnFail`) is the per-hook opt-out, and it is the flag to reach for on a
+    `DELETE` that legitimately 404s when the case never got as far as creating anything.
+  - **One send path, one grading path.** `runUnit(requestName)` in `ApiFlowPanel.tsx` sends a
+    saved request, grades it with `lib/apiAssert.ts` (or the implicit 2xx), and applies its
+    captures — steps and hooks both go through it, so a setup call can never grade
+    differently from the step it sets up, and a `POST /patients` hook hands `{{patient_id}}`
+    forward exactly the way a step does. The auth pre-flight scan (`{{auth.username}}` with
+    no account picked) walks `usedNames`, hooks included — a login moved into `setup` is the
+    likeliest thing in the flow to need the account.
+  - **The stored report is the flat EXECUTION ORDER**, with `phase`
+    (`setup`/`before`/`step`/`after`/`teardown`) and `parent` on each row: "the cleanup ran
+    even though step 3 failed" is only readable when the cleanup is *in* the list.
+    `PastRunRow` indents non-`step` rows, tags them with their phase and numbers only real
+    steps (numbering hooks made a 3-step scenario read as an 8-step one). The server's
+    `summary` counts **`phase === 'step'` rows only** — a two-hook step counted as three
+    passes makes every verdict meaningless. Rows and flows written before hooks existed have
+    no `phase` and read as `step`, and `toHooks` returns `[]` for a missing list, so the
+    runner and the editor never guard for `undefined`. Caps: 10 hooks per list, 240 rows per
+    stored run.
+  - **The UI keeps the step vocabulary and only changes placement.** `HookList` reuses the
+    step row (method, name, URL, live verdict, `soft`, remove) indented inside the step it
+    belongs to; `HookShell` frames the two flow-level lists above and below the step list —
+    *where they run* — and states its count while collapsed, because a run that quietly
+    creates and deletes data is worse than one with no setup at all. Every step shows a
+    one-line drawer toggle even with no hooks (`Set up / clean up data for this step`) —
+    that line is the feature's only discoverability. There is **one** inline picker with a
+    target (`AddTarget`), not one per list: two open pickers is how a click lands in the
+    wrong list.
 - **Steps reference a saved request by NAME, never a copy** — editing the request updates every flow,
   and `POST /:name/rename` rewrites the matching `requestName` in every flow (otherwise a rename
   silently empties a step). A deleted request leaves the step in place, flagged `missing`, and fails
@@ -186,3 +269,53 @@ saved requests, run in sequence with each step's `captures` feeding the next ste
   button) — which it still is. If you ever put the editor back in a dialog, all of that comes
   back with it. The accounts dialog is now opened from the page, so nothing is stacked.
 
+
+## The API assistant (the "Ask AI" box on the page)
+
+`ApiAssistantChat.tsx` + `POST /api/api-tests/assistant`. A docked chat box on `/api-testing`
+(both tabs), for the work that follows an import: a page scan or a stack of pasted cURLs leaves
+a collection where every request repeats the same host and the same pasted
+`Authorization: Bearer eyJ…`, and turning that into something runnable — one `{{baseUrl}}`, a
+login request that CAPTURES the token, a flow in the right order — was done request by request
+by hand. The box answers questions **and proposes those edits**.
+
+- **It never writes. Not once.** The turn runs `claude -p --allowedTools Read --strict-mcp-config`
+  and the route touches nothing but its own scratch dir; the answer carries typed **proposals**
+  and every proposal is applied *by the browser*, on a click, through the same client functions
+  the manual UI uses (`saveApiEnvironments`, `saveApiRequest`, `saveApiFlow`). That is not a
+  detail of taste: it means a proposal cannot land without passing the existing validation, the
+  environments PUT's empty-secret merge, and `projectScope` path guarding — and cannot land at
+  all until a human has read it. **Do not add a server-side "apply" route.** It would duplicate
+  all of that and remove the review step, which is the only thing standing between a hallucinated
+  URL and 14 rewritten requests.
+- **Four proposal kinds**, each validated on the way back out of the model:
+  `set-variables` (upsert into an environment, creating it if new), `update-request` (rewrite only
+  the fields present — the parameterize case), `add-captures` (`data.token` → `{{token}}`, the
+  chaining case), `create-flow` (steps + `setup`/`teardown` hooks). Kinds are bounded by the same
+  constants the manual routes use (`MAX_VARS`, `MAX_STEPS`, `MAX_HOOKS`, `VAR_KEY_RE`, `NAME_RE`).
+- **A proposal that names a request which isn't in the collection is dropped server-side**, and a
+  `create-flow` with no surviving step is dropped whole. A flow whose step points at a missing
+  request saves fine and then can only fail, at which point the failure looks like the engineer's.
+  Cheaper to refuse it here.
+- **No secret value ever reaches the prompt.** The context block lists variable KEYS with the
+  values of non-secret vars only (a secret is named and marked `set`/`empty`); accounts and
+  authenticators are LABELS. That is enough for the model to answer "send
+  `{{account.qa.password}}`" — a token the server resolves at send time — and the prompt says so,
+  plus "never put a real password or token in a variable value".
+- **Stateless, like `/ai-check`**: there is no session to `--resume` from a one-shot `runClaude`,
+  so the page holds the transcript and replays the last `ASSIST_MAX_MESSAGES` turns. The server
+  re-reads the collection / environments / flows off disk each turn, which is why "wire these up"
+  works as a whole question.
+- **Attachments** mirror the Chat page. Documents are converted to markdown in the BROWSER
+  (`convertFileToMarkdown`, the Knowledge pipeline) and inlined in the prompt. Images go up as
+  base64 and are written under `testing/api-tests/_assistant/` **only for the length of the
+  turn** — the CLI takes a prompt, not bytes, so a screenshot has to be a real path it can
+  `Read` — and are deleted in a `finally`. Don't make that dir persistent: it would put
+  screenshots of a logged-in app under version control.
+- **A reply that ignored the JSON contract is still shown** as plain text with no proposals,
+  rather than thrown away as "the AI produced nothing".
+- Layout: the collapsed button sits at `bottom-16 right-5` so it stacks ABOVE App's
+  `RouteGuideTour` button (`bottom-5 right-5`) instead of on top of it, and the open panel is
+  `z-50` because that tour button is a later sibling at `z-40` and would otherwise paint over it.
+  The box is mounted outside the tab branches: "wire these imports up" is the same question on
+  Requests and on Flows, and closing it must not lose the conversation.

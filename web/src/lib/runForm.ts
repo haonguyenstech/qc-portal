@@ -1,8 +1,11 @@
 // Remember the last run-form inputs per project so the QC engineer doesn't
 // retype the same URL / skill / notes every time. Stored in localStorage.
+//
+// The TICKET is deliberately not part of this: which ticket to run is a decision
+// the engineer makes each visit, and remembering it meant /qc-run pre-checked the
+// ticket the portal was already running. Reusable inputs only.
 
 export interface LastInputs {
-  ticketId: string
   appUrl: string
   skill: string
   instructions: string
@@ -17,7 +20,6 @@ export function loadLastInputs(projectId: string): LastInputs | null {
     const v = JSON.parse(raw)
     if (!v || typeof v !== 'object') return null
     return {
-      ticketId: typeof v.ticketId === 'string' ? v.ticketId : '',
       appUrl: typeof v.appUrl === 'string' ? v.appUrl : '',
       skill: typeof v.skill === 'string' ? v.skill : '',
       instructions: typeof v.instructions === 'string' ? v.instructions : '',

@@ -18,6 +18,16 @@ import { GROUNDING_CHECK_MODEL } from './config.js'
 // worth paying for. The chat turn itself is untouched, so nothing here can slow an answer
 // down; it runs after, against the stored transcript.
 //
+// What it is sharpened for, on top of plain facts: DEFECT CLAIMS. Reported from the field —
+// chat listed bugs that were not bugs and withdrew them as soon as the engineer asked how
+// they had been established. Those answers cite real files correctly, so neither the prompt
+// rules nor the citation check touches them: the invented half is the EXPECTED behaviour the
+// observation is measured against, supplied from how software like this usually works rather
+// than from anything this project asked for. `DEFECTS_BLOCK` in routes/chat.ts stops the
+// answering model writing them; this is the independent pass that catches the ones it still
+// writes, which is why a defect gets its own `unsupported` verdict here instead of being
+// waved through as an opinion.
+//
 // Best-effort like every other AI pass here: it NEVER throws, and a timeout / unparseable
 // reply comes back as a `skipped` reason rather than as "no problems found". Those two must
 // never be confused — "the check didn't run" read as "the answer is clean" would make this
@@ -44,7 +54,7 @@ const MAX_EVIDENCE_CHARS = 300
 const TIMEOUT_MS = 300_000
 const BUDGET_USD = '0.50'
 
-export type AuditStatus = 'supported' | 'wrong' | 'unverified'
+export type AuditStatus = 'supported' | 'wrong' | 'unsupported' | 'unverified'
 
 export interface AuditClaim {
   /** The claim as the ANSWER made it, quoted or closely paraphrased. */
@@ -52,6 +62,16 @@ export interface AuditClaim {
   status: AuditStatus
   /** The file+line that backs it, or — for `wrong` — what the project actually says. */
   evidence?: string
+  /**
+   * This claim says something in the product is broken / missing / incorrect.
+   *
+   * Flagged because a defect claim is judged differently from a fact: a fact is checked
+   * against the file it names, a defect is checked against whether the project ever stated
+   * the behaviour it is being measured against (see `unsupported`). The UI needs to know
+   * which kind it is looking at to word the verdict — "the project contradicts this" and
+   * "nothing here says it should work that way" are not the same finding.
+   */
+  defect?: boolean
 }
 
 export interface AuditResult {
@@ -59,7 +79,8 @@ export interface AuditResult {
   /** Which model audited — a haiku verdict and an opus one are not the same evidence. */
   model: string
   /**
-   * `clean` — every checkable claim held up. `issues` — at least one is wrong.
+   * `clean` — every checkable claim held up. `issues` — at least one is wrong or is a
+   * defect the project never asked for.
    * `unverified` — nothing could be confirmed either way. `none` — the answer made no
    * checkable claim about the project (an opinion, or general advice), which is a normal
    * and honest outcome, not a failure.
@@ -91,21 +112,42 @@ function buildPrompt(question: string, answer: string): string {
     `1. Pick out the load-bearing, CHECKABLE claims about this project — ticket ids, titles, ` +
     `statuses, acceptance criteria; test-case ids, steps, expected results; counts of cases, ` +
     `issues, files or rows; a run's verdict; file paths; what specific code does. Up to ` +
-    `${MAX_CLAIMS}, most important first. IGNORE opinions, advice, judgement calls, general ` +
+    `${MAX_CLAIMS}, most important first. IGNORE pure opinions, style advice, general ` +
     `knowledge, and anything about the world outside this folder — those are not yours to rate.\n` +
+    `   EVERY DEFECT CLAIM COUNTS AS CHECKABLE and must be picked out: any statement that ` +
+    `something in this product is a bug, is broken, is missing, is wrong, fails, or does not ` +
+    `meet a requirement. Set "defect":true on those. They are the reason this check exists — ` +
+    `answers here have listed defects that were withdrawn as soon as anyone asked how they ` +
+    `were established — so never skip one as a judgement call.\n` +
     `2. VERIFY each one against the real files, with Read / Grep / Glob. Do not accept a ` +
     `claim because it is plausible or because the answer sounds sure. A count must be ` +
     `counted. An id must be matched character for character.\n` +
-    `3. Judge each claim:\n` +
-    `   - "supported" — you found it. Cite the path (and line/row) where.\n` +
+    `3. A DEFECT claim has TWO halves and only holds up if BOTH are on disk: the EXPECTED ` +
+    `behaviour it is measured against (an acceptance criterion, a spec or knowledge doc, a ` +
+    `test case's expected result, a stated rule in the code) and the OBSERVED behaviour (a ` +
+    `run output, screenshot, report, log, or the code itself). Go and find each half. If the ` +
+    `expected half rests on how software like this usually behaves rather than on something ` +
+    `this project states, the finding is not established, however sensible it sounds — that ` +
+    `is "unsupported", and it is the single most useful thing you can report.\n` +
+    `4. Judge each claim:\n` +
+    `   - "supported" — you found it. Cite the path (and line/row) where. For a defect, cite ` +
+    `BOTH halves: where the expectation is written and where the failure is shown.\n` +
     `   - "wrong" — the project says something else. Evidence MUST state what it actually ` +
-    `says, with the path. Reserve this for a real contradiction, not a wording difference.\n` +
+    `says, with the path. Reserve this for a real contradiction, not a wording difference. ` +
+    `For a defect, use this when the project shows the behaviour is correct as it is.\n` +
+    `   - "unsupported" — DEFECT CLAIMS ONLY: the observation may well be true, but nothing ` +
+    `in this project requires the behaviour it is being called a bug against. Evidence says ` +
+    `what you searched for the requirement in (tickets, test cases, knowledge docs, specs) ` +
+    `and that it is not there.\n` +
     `   - "unverified" — you could not find evidence either way. Evidence says where you ` +
     `looked. This is an honest verdict; do not use "supported" to avoid it, and do not use ` +
     `"wrong" for something you merely couldn't find.\n\n` +
     `Reply with JSON and NOTHING else — no prose, no code fence:\n` +
     `{"claims":[{"claim":"the answer's claim, quoted or closely paraphrased, one sentence",` +
-    `"status":"supported|wrong|unverified","evidence":"path:line — what it says"}]}\n` +
+    `"status":"supported|wrong|unsupported|unverified","defect":true,` +
+    `"evidence":"path:line — what it says"}]}\n` +
+    `"defect" is optional and only true for a claim that something is broken/missing/wrong; ` +
+    `"unsupported" is only valid on a claim marked "defect":true.\n` +
     `If the answer made no checkable claim about this project, reply exactly {"claims":[]}.`
   )
 }
@@ -115,7 +157,9 @@ function str(v: unknown, cap: number): string {
 }
 
 function pickStatus(v: unknown): AuditStatus | null {
-  return v === 'supported' || v === 'wrong' || v === 'unverified' ? v : null
+  return v === 'supported' || v === 'wrong' || v === 'unsupported' || v === 'unverified'
+    ? v
+    : null
 }
 
 /**
@@ -143,15 +187,26 @@ function parseClaims(text: string): AuditClaim[] | null {
     const status = pickStatus(o.status)
     if (!claim || !status) continue
     const evidence = str(o.evidence, MAX_EVIDENCE_CHARS)
-    out.push({ claim, status, ...(evidence ? { evidence } : {}) })
+    // `unsupported` only means anything about a defect claim, and a model that reached for
+    // it has plainly judged one — so the flag is inferred rather than the verdict dropped.
+    const defect = o.defect === true || status === 'unsupported'
+    out.push({ claim, status, ...(evidence ? { evidence } : {}), ...(defect ? { defect: true } : {}) })
   }
   return out
 }
 
-/** `issues` if anything is wrong, else `clean` if anything held up, else `unverified`. */
+/**
+ * `issues` if anything is wrong OR is an unsupported defect, else `clean` if anything held
+ * up, else `unverified`.
+ *
+ * `unsupported` counts as an issue on purpose: a bug the project never asked for is the
+ * failure this audit was sharpened to catch, and grading it as a soft "couldn't confirm"
+ * would hide it behind a green headline — which is how those findings reached a ticket in
+ * the first place.
+ */
 function verdictFor(claims: AuditClaim[]): AuditResult['verdict'] {
   if (!claims.length) return 'none'
-  if (claims.some((c) => c.status === 'wrong')) return 'issues'
+  if (claims.some((c) => c.status === 'wrong' || c.status === 'unsupported')) return 'issues'
   return claims.some((c) => c.status === 'supported') ? 'clean' : 'unverified'
 }
 

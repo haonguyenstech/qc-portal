@@ -3,7 +3,7 @@ import type { ChildProcess } from 'node:child_process'
 import { CLAUDE_BIN } from './config.js'
 import { usageFromResultObject } from './claudeExec.js'
 import { recordUsage } from './db.js'
-import type { LogEvent, Phase } from './types.js'
+import type { LogEvent, Phase, RunDataPolicy } from './types.js'
 import { spawnEnv } from './toolPath.js'
 
 export interface RunHandle {
@@ -104,6 +104,27 @@ function now() {
 }
 
 /**
+ * Mobile runs get sent to the skill's Maestro recipes explicitly.
+ *
+ * The skill's own capture recipes are Playwright-shaped (`browser_evaluate` with a
+ * `filename` is what puts a content inventory on disk), and this prompt has just
+ * forbidden Playwright — so without a pointer the run improvises against a file that
+ * describes the wrong tool. Worse, Maestro's `take_screenshot` returns the image inline
+ * and takes no path, so a run that reaches for it saves NOTHING: every mobile case then
+ * grades as "no evidence captured" (⛔/◻️) and no issue can carry a picture.
+ * `maestro-recipes.md` is the file that says to screenshot via `run` +
+ * `- takeScreenshot: { path }` instead.
+ */
+const MOBILE_RECIPES_HINT =
+  `Read maestro-recipes.md in the skill folder BEFORE your first device call and follow it — ` +
+  `it holds the real Maestro tool names and the two things that decide whether this run has ` +
+  `evidence at all: screenshots must be written to a FILE via run + "- takeScreenshot: { path: ` +
+  `<absolute path> }" (take_screenshot alone saves nothing to disk), and each screen's content ` +
+  `inventory comes from inspect_screen, which you then Write into evidence/<screen>.md yourself. ` +
+  `Wherever the skill or playwright-recipes.md names a browser_* tool, use the Maestro equivalent ` +
+  `from that file instead.`
+
+/**
  * Launch the qc-testing skill head-less and stream normalized events.
  *
  * Uses `--output-format stream-json` so we get newline-delimited JSON we can
@@ -123,6 +144,7 @@ export function runQc(
     workflowSteps?: string[] // advanced mode: ordered end-to-end flow to exercise
     kind?: 'ticket' | 'flow' // 'flow' = no ticket exists; ticketId is just the report slug
     testTarget?: 'web' | 'web-mobile' | 'app-mobile' // desktop browser (default), web app on device, or native app on device
+    dataPolicy?: RunDataPolicy // what the run may do to the environment's data; default 'readonly'
     deviceId?: string // mobile targets: the Maestro device_id to drive (several booted devices → the engineer picks); omitted = whatever list_devices reports
     // Mandatory tail of this run's output folder name ("web-3f9a12c4"), supplied by
     // runManager. Two runs of the same ticket — classically one on web and one on a
@@ -185,8 +207,16 @@ export function runQc(
     if (isFlow) {
       lines.push(
         `There is NO ticket for this run — do NOT look for one in testing/tickets/ and do not ` +
-          `treat the name below as a ticket id. The acceptance criteria are the flow's own steps, ` +
-          `listed further down; test exactly those, in order.`,
+          `treat the name below as a ticket id. ` +
+          // A flow can be driven by canvas steps, by an uploaded test-case document
+          // (cited in the engineer's instructions further down), or by both. Promising
+          // steps that aren't there sends the model looking for a list that never
+          // arrives — the same wasted hunt "ClickUp ticket: <slug>" used to cause.
+          (steps.length
+            ? `The acceptance criteria are the flow's own steps, listed further down; test ` +
+              `exactly those, in order.`
+            : `The acceptance criteria are the test cases the QC engineer supplied in the ` +
+              `instructions further down — read the file they name and test exactly those cases.`),
         `Flow name (write the report under this slug): ${opts.ticketId}`,
       )
     } else if (multiTicket) {
@@ -216,6 +246,7 @@ export function runQc(
           `not installed${appName ? ` (or no app matching "${appName}" is present)` : ''}, stop and ` +
           `report that as a blocker rather than trying to install it. Perform ` +
           `ALL interaction and verification on the device, capturing mobile screenshots as evidence.`,
+        MOBILE_RECIPES_HINT,
       )
     } else {
       lines.push(`App URL: ${opts.appUrl}`)
@@ -230,6 +261,7 @@ export function runQc(
             `connected:false. If nothing is available, stop and report that as a blocker. Open the App URL ` +
             `in the device's mobile browser and perform ALL interaction and verification on that device, ` +
             `capturing mobile screenshots as evidence. Test the responsive/mobile experience.`,
+          MOBILE_RECIPES_HINT,
         )
       }
     }
@@ -287,6 +319,28 @@ export function runQc(
           `before you exercise the app. Read only; never modify the code.`,
         ``,
         `Follow the skill literally and in order through all 7 phases.`,
+        ``,
+        // COVERAGE — the second-biggest source of ungraded cases after the data policy.
+        // A large suite (measured: 120 cases) captured in ONE Phase-4 pass runs out of
+        // budget mid-way, so whole feature areas reach Phase 5 with nothing on disk and
+        // come back "◻️ Not Tested — no evidence captured". Working in waves means an
+        // exhausted budget costs the LAST area's depth instead of every area's evidence.
+        `COVERAGE — when the test-case file has more than ~40 cases, do NOT capture the whole ` +
+          `suite before analyzing any of it. Group the cases by feature area, then work one area ` +
+          `at a time: capture that area's evidence (Phase 4), immediately fan out its subagents ` +
+          `(Phase 5), record the verdicts, and only then move to the next area. Cover EVERY area ` +
+          `at least once before going back for depth anywhere — a shallow pass over all of them ` +
+          `beats a thorough pass over the first three and nothing for the rest.`,
+        `Announce the wave plan (the areas and their case ranges) before the first capture, and ` +
+          `after each wave print one line — "Wave 3/8 — Lab Order (No-91–No-97) graded". If you can ` +
+          `see the budget will not stretch to every area, say so at that point and name the areas ` +
+          `you are dropping, so the engineer can re-run just those instead of discovering the gap ` +
+          `in the report.`,
+        `"◻️ Not Tested — no evidence captured" is a failure of the RUN, not a verdict on the ` +
+          `product: never use it as a shrug. Every case must either be graded from evidence you ` +
+          `captured this run, or carry a reason a QC engineer could act on (the state it needed, ` +
+          `the account it needed, the screen that wasn't in scope). Reporting an honest gap is ` +
+          `right; reporting a gap you didn't have to leave is not.`,
         ``,
         // OUTPUT FOLDER — the portal owns the tail of the name. The skill lets the
         // model name the folder `<ticket-id>-<slug>`, so two runs of the same ticket
@@ -350,7 +404,55 @@ export function runQc(
     } else {
       lines.push(`Follow the skill literally and in order.`)
     }
-    lines.push(`Do not commit any mutating action on the shared environment.`)
+    // DATA POLICY — the single biggest driver of a run's Blocked count.
+    //
+    // A read-only run cannot exercise any case shaped "do X, then check what X produced",
+    // so every trigger/creation case comes back ⛔ Blocked — measured at 64 of 120 cases
+    // (53%) on a notification ticket, all of them with the same reason ("would require
+    // mutating shared DEV data"). The same suite driven by hand in /chat grades those
+    // cases, for one reason only: there the engineer SAYS "create an appointment and check
+    // the notification", which is the "unless the user said so" escape the skill already
+    // has. So the escape becomes an explicit per-run choice instead of something only a
+    // chat conversation can express — and when it is off, the wording is unchanged.
+    if (opts.dataPolicy === 'seed') {
+      lines.push(
+        ``,
+        `TEST DATA — the QC engineer has AUTHORIZED this run to create the test data it needs. ` +
+          `You MAY perform the create/submit actions a case requires (create an appointment, submit ` +
+          `a request, add a note, send a message, upload a file) in order to reach a state and then ` +
+          `verify the result. That authorization is the "unless the user said so" case in the ` +
+          `skill's safety rules — it applies to data YOU create for this test run.`,
+        `Still forbidden, with no exceptions: deleting, voiding, cancelling, approving, rejecting, ` +
+          `signing, closing or otherwise mutating a record you did NOT create in this run; bulk or ` +
+          `batch actions; anything that emails/notifies a real person outside the test accounts; ` +
+          `changing settings, roles, permissions or configuration that other users share; and any ` +
+          `change to the application code or database. When in doubt about a record's origin, treat ` +
+          `it as someone else's and stop at the enable-state.`,
+        `Work with the test accounts from testing/environments.md, prefer obviously-synthetic values ` +
+          `(a "QC <date>" name, a far-future date) so your rows are identifiable, and list every ` +
+          `record you created in the report under a "Test data created" heading so it can be cleaned ` +
+          `up later. Do NOT try to delete your own rows afterwards unless the case is about deletion.`,
+        `Because of this, a case may NOT be reported ⛔ Blocked for the reason "would require ` +
+          `mutating shared data" or "no existing instance found" — that data is now yours to create. ` +
+          `Blocked is reserved for a case you genuinely cannot reach: a screen outside the given URL, ` +
+          `a role you have no account for, a broken environment, or an external system you can't ` +
+          `drive. If creating the data fails, that is a ❌ Failed (or a real blocker) with the error ` +
+          `captured — not a silent skip.`,
+      )
+    } else {
+      lines.push(
+        ``,
+        `TEST DATA — READ-ONLY run: do not commit any mutating action on the shared environment. ` +
+          `Drive up to the point the final action would commit, capture that, and stop. A case that ` +
+          `needs data you would have to create is ⛔ Blocked with the state it needed named exactly.`,
+        `Before you settle for Blocked, LOOK for an existing record in the state the case needs — ` +
+          `search, filter, sort and page through the list rather than concluding from the first ` +
+          `screen that nothing exists. "No existing instance found" is only an honest Blocked after ` +
+          `you actually searched for one, and the report must say which search you ran.`,
+        `Say so in the report's QC notes: name the cases that only Blocked because of this policy, ` +
+          `so the engineer can re-run with "Allow test-data creation" turned on and get them graded.`,
+      )
+    }
 
     // Authenticator-app 2FA: how to obtain the REAL current code instead of a fixed
     // OTP that no longer exists on production-like environments. Built by totp.ts;

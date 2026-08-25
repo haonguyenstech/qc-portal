@@ -15,6 +15,7 @@ import {
   Clock,
   Compass,
   Cpu,
+  DatabaseZap,
   Eye,
   EyeOff,
   Gauge,
@@ -31,6 +32,7 @@ import {
   Search,
   Smartphone,
   Settings2,
+  ShieldCheck,
   Sparkles,
   TabletSmartphone,
   Ticket,
@@ -57,17 +59,16 @@ import { Checkbox } from '@/components/ui/checkbox'
 import {
   checkAppUrl,
   createRun,
+  uploadRunTestcaseDoc,
   listCrawledTickets,
   listMcp,
   listRuns,
   listSkills,
-  listTestCaseJobs,
   runMcpTest,
   type CrawledTicket,
   type TestCaseFormat,
 } from '@/lib/api'
 import { cn } from '@/lib/utils'
-import { busyTicketIds, type BusyReason } from '@/lib/busyTickets'
 import { deviceNameHint, devicesFromDetection, isUnnamed } from '@/lib/devices'
 import { TEST_TARGET_META } from '@/lib/testTarget'
 import type { TestTarget } from '@/lib/types'
@@ -86,11 +87,13 @@ import { TestCaseVersionsDialog } from '@/components/TestCaseVersionsDialog'
 import { testcaseRelPath } from '@/lib/testcases'
 import { McpRequiredNotice } from '@/components/McpRequiredNotice'
 import { RunWorkflowBuilder } from '@/components/RunWorkflowBuilder'
+import { RunTestcaseImport, type TestcaseDoc } from '@/components/RunTestcaseImport'
 import {
   DEFAULT_FLOW_NAME,
   flowEntryUrl,
   flowSlug,
   invalidStepUrls,
+  graphFromDraft,
   graphFromPreset,
   workflowStepEntries,
   type WorkflowEdge,
@@ -111,6 +114,18 @@ type QcModel = {
   description: string
 }
 const QC_MODELS: QcModel[] = [
+  {
+    // Terminal / Chat parity: send NO --model and the CLI uses the engineer's own
+    // configured default. /chat has defaulted to this for a while and its answers are
+    // visibly stronger than a run's on the same suite — part of that gap was simply
+    // that a run always pinned Sonnet while chat ran on whatever the engineer uses.
+    value: 'default',
+    label: 'Best (your default)',
+    tag: 'same as Chat / Terminal',
+    icon: Sparkles,
+    description:
+      'Whatever model your own `claude` uses — the same one Chat and the Terminal answer with. Pick this when a run should be as strong as testing the ticket by hand in Chat.',
+  },
   {
     value: 'haiku',
     label: 'Haiku',
@@ -203,23 +218,20 @@ function loadRunHeadless(): boolean {
   }
 }
 
-// Bug-tagged tickets, persisted per project so a "Mark bug" survives a reload.
-const BUG_TICKETS_KEY = 'qc.bugTickets.'
-function loadBugTickets(projectId: string): string[] {
+// May the run CREATE the test data a case needs, or only look?
+//
+// A read-only run has to mark every "do X, then check what X produced" case ⛔ Blocked
+// (measured: 64 of 120 cases on a notification ticket, all for that one reason), which
+// is why the same suite driven by hand in /chat grades far more of it — there the
+// engineer just says "create an appointment and check the notification". This is that
+// sentence, made explicit and per run. Default OFF: authorizing writes on a shared
+// environment is the engineer's call, never a default we take on their behalf.
+const RUN_DATA_POLICY_KEY = 'qc.runDataPolicy'
+function loadRunDataPolicy(): boolean {
   try {
-    const raw = localStorage.getItem(BUG_TICKETS_KEY + projectId)
-    const arr = raw ? JSON.parse(raw) : []
-    return Array.isArray(arr) ? arr.filter((x): x is string => typeof x === 'string') : []
+    return localStorage.getItem(RUN_DATA_POLICY_KEY) === 'seed'
   } catch {
-    return []
-  }
-}
-function saveBugTickets(projectId: string, ids: string[]): void {
-  try {
-    if (ids.length) localStorage.setItem(BUG_TICKETS_KEY + projectId, JSON.stringify(ids))
-    else localStorage.removeItem(BUG_TICKETS_KEY + projectId)
-  } catch {
-    /* ignore quota / disabled storage */
+    return false
   }
 }
 
@@ -741,6 +753,8 @@ export default function RunPage() {
   const [testTarget, setTestTarget] = useState<TestTarget>(loadTestTarget)
   // Web target only: run the browser with no visible window (see RUN_HEADLESS_KEY).
   const [headless, setHeadless] = useState<boolean>(loadRunHeadless)
+  // May the run create test data to reach a state? (see RUN_DATA_POLICY_KEY)
+  const [seedData, setSeedData] = useState<boolean>(loadRunDataPolicy)
   // Maestro device_id the mobile run must drive ('' = let the run pick). Restored
   // per project below, and only sent when the picker confirms it's still booted.
   const [deviceId, setDeviceId] = useState('')
@@ -765,6 +779,15 @@ export default function RunPage() {
   // walk of the graph rather than the order the cards were created in.
   const [wfEdges, setWfEdges] = useState<WorkflowEdge[]>([])
   const [flowName, setFlowName] = useState(DEFAULT_FLOW_NAME)
+  // A test-case document the engineer uploaded to run AS the acceptance source —
+  // an E2E/regression pass with no ticket behind it. Held here (not in the import
+  // panel) because it is submitted with the run: it is written into the project at
+  // submit time, so a document attached and then abandoned never touches disk.
+  const [tcDoc, setTcDoc] = useState<TestcaseDoc | null>(null)
+  // Where a document-driven run opens when no canvas step names a URL. The advanced
+  // mode has no shared App URL field — the canvas is normally the only source — so
+  // running a document with no steps needs this one fallback.
+  const [tcStartUrl, setTcStartUrl] = useState('')
   const [testcaseVersion, setTestcaseVersion] = useState<number | null>(null)
   const [testcaseFormat, setTestcaseFormat] = useState<TestCaseFormat | null>(null)
   const [submitting, setSubmitting] = useState(false)
@@ -876,8 +899,6 @@ export default function RunPage() {
       }
     }
     setBugTickets(next)
-    // Persist immediately so the tag survives a page reload.
-    if (activeProject) saveBugTickets(activeProject.id, [...next])
   }
 
   // Reset the chosen test-case version whenever the ticket changes (render-phase
@@ -895,15 +916,17 @@ export default function RunPage() {
   })
 
   // Restore the last inputs for this project when it changes.
+  //
+  // The TICKET SELECTION is deliberately NOT restored — see "The Run form never
+  // remembers which ticket you picked" in docs/architecture/runs.md. Which ticket to
+  // run is a decision per visit, not a setting; remembering it kept pre-checking the
+  // ticket the portal was already busy with. Only the reusable inputs (URL, skill,
+  // notes, app name, device) come back.
   useEffect(() => {
     if (!activeProject) return
     const saved = loadLastInputs(activeProject.id)
-    // Restore persisted bug tags, and keep those tickets selected (a bug ticket is
-    // only in the run because it was tagged) alongside the last lead ticket.
-    const savedBugs = loadBugTickets(activeProject.id)
-    setBugTickets(new Set(savedBugs))
-    const lead = saved?.ticketId ? [saved.ticketId] : []
-    setSimpleTickets([...new Set([...lead, ...savedBugs])].slice(0, MAX_QUEUE_TICKETS))
+    setBugTickets(new Set())
+    setSimpleTickets([])
     setAppUrl(saved?.appUrl ?? '')
     setAppName(loadAppName(activeProject.id))
     setDeviceId(loadRunDevice(activeProject.id))
@@ -913,62 +936,6 @@ export default function RunPage() {
     setSkill(activeProject.defaultSkill || saved?.skill || '')
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeProject?.id])
-
-  // Test-case generation jobs, for the same reason as `recentRuns` below: a ticket the
-  // portal is still writing test cases for must not be pre-selected here.
-  const { data: testcaseJobs } = useQuery({
-    queryKey: ['testcase-jobs', activeProject?.id],
-    queryFn: () => listTestCaseJobs(activeProject!.id).then((r) => r.jobs),
-    enabled: !!activeProject,
-  })
-
-  // Everything the portal is already working on, by ticket id — see busyTickets.ts.
-  const busyTickets = useMemo(
-    () =>
-      busyTicketIds({
-        projectId: activeProject?.id,
-        runs: recentRuns,
-        jobs: testcaseJobs,
-        crawled: crawledTickets,
-      }),
-    [activeProject?.id, recentRuns, testcaseJobs, crawledTickets],
-  )
-
-  // Don't auto-select a ticket the portal is already busy with: the last-inputs restore
-  // above re-selects the previous lead (and bug) tickets, but if one of them has an
-  // in-flight QC run OR a test-case generation still working through it, the engineer
-  // came here to run a DIFFERENT ticket — so drop it from the selection.
-  //
-  // It prunes ONCE per project, and only after both lists have loaded: latching on the
-  // first render would mean a cached-but-stale runs list (or jobs arriving a beat later)
-  // silently skipped the prune. Only the AUTO-restored selection is pruned — a ticket
-  // the engineer then picks by hand is left alone, so re-running a busy ticket on
-  // purpose still works.
-  const prunedRunningRef = useRef<string | null>(null)
-  const [prunedBusy, setPrunedBusy] = useState<{ id: string; reason: BusyReason }[]>([])
-  useEffect(() => {
-    if (!activeProject || !recentRuns || !testcaseJobs) return
-    if (prunedRunningRef.current === activeProject.id) return
-    prunedRunningRef.current = activeProject.id
-    if (!busyTickets.size) return
-    setSimpleTickets((sel) => {
-      const dropped = sel.filter((id) => busyTickets.has(id))
-      // Say WHICH tickets were left out; a selection that silently empties itself reads
-      // as the form losing the engineer's input.
-      if (dropped.length) {
-        setPrunedBusy(dropped.map((id) => ({ id, reason: busyTickets.get(id)! })))
-      }
-      return sel.filter((id) => !busyTickets.has(id))
-    })
-    setBugTickets((prev) =>
-      [...prev].some((id) => busyTickets.has(id))
-        ? new Set([...prev].filter((id) => !busyTickets.has(id)))
-        : prev,
-    )
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeProject?.id, recentRuns, testcaseJobs])
-
-  const shownPrunedBusy = prunedBusy.filter((t) => !simpleTickets.includes(t.id))
 
   // app-mobile drives a native app already installed on the device — there's no URL,
   // so the URL field is hidden and never required/validated in that mode.
@@ -1102,11 +1069,23 @@ export default function RunPage() {
   // An E2E flow walks several pages, so the App URL is a per-STEP setting on the
   // canvas rather than a field on this form. The run record still takes one URL —
   // the first step that names one, i.e. where the flow opens.
-  const flowUrl = mode === 'advanced' && !isAppTarget ? flowEntryUrl(wfNodes, wfEdges) : ''
+  const stepEntryUrl = mode === 'advanced' && !isAppTarget ? flowEntryUrl(wfNodes, wfEdges) : ''
+  // …unless the run is driven by an uploaded test-case document with no steps on the
+  // canvas, which has no step to carry a URL. Then the import panel's own field is
+  // the entry point. A step URL always wins — the canvas is still the source of truth.
+  const docStartUrl =
+    mode === 'advanced' && !isAppTarget && tcDoc ? tcStartUrl.trim() : ''
+  const flowUrl = stepEntryUrl || docStartUrl
   const badStepUrls = mode === 'advanced' && !isAppTarget ? invalidStepUrls(wfNodes) : []
+  const docStartUrlInvalid = !!docStartUrl && !isValidHttpUrl(docStartUrl)
+  // The flow's entry point is missing and only the import panel can supply it.
+  const needsDocStartUrl =
+    mode === 'advanced' && !isAppTarget && !!tcDoc && !stepEntryUrl
   // The tickets driving this submit: in simple mode each one becomes its own
-  // sequential run; an E2E flow is always exactly one run.
-  const runTickets = mode === 'advanced' ? (cleanSteps.length ? [flowId] : []) : simpleTickets
+  // sequential run; an E2E flow is always exactly one run — and an attached
+  // test-case document is a runnable flow on its own, with or without steps.
+  const runTickets =
+    mode === 'advanced' ? (cleanSteps.length || tcDoc ? [flowId] : []) : simpleTickets
   const leadTicket = runTickets[0] ?? ''
   // A ticket runs as a feature (verified against its test cases) UNLESS the user
   // tagged it a bug — bug runs reproduce the issue and need no test cases.
@@ -1145,7 +1124,9 @@ export default function RunPage() {
   // The shared App URL field is hidden in multi and E2E mode, so its validity is
   // irrelevant there — an E2E flow is graded on its own step URLs instead.
   const sharedUrlInvalid =
-    mode === 'advanced' ? badStepUrls.length > 0 : !multiUrl && appUrlInvalid
+    mode === 'advanced'
+      ? badStepUrls.length > 0 || docStartUrlInvalid
+      : !multiUrl && appUrlInvalid
   const canSubmit =
     !submitting &&
     !!leadTicket &&
@@ -1164,7 +1145,11 @@ export default function RunPage() {
       : mode === 'simple' && testcaseVersion != null
         ? `v${testcaseVersion}`
         : mode === 'advanced'
-          ? `${cleanSteps.length} step${cleanSteps.length === 1 ? '' : 's'}`
+          ? cleanSteps.length
+            ? `${cleanSteps.length} step${cleanSteps.length === 1 ? '' : 's'}`
+            : tcDoc
+              ? 'Uploaded test cases'
+              : '0 steps'
           : 'Optional'
   const readyChecks = [
     { label: 'Project', ok: !!activeProject, value: activeProject?.name ?? 'Select one' },
@@ -1221,9 +1206,17 @@ export default function RunPage() {
         })
         return
       }
+      if (docStartUrlInvalid) {
+        toast.error('Invalid Start URL', {
+          description: 'Enter a full http:// or https:// address for the uploaded test cases.',
+        })
+        return
+      }
       if (!flowUrl) {
         toast.error('App URL required', {
-          description: 'Give the step that opens the app its App URL — that is where the run starts.',
+          description: tcDoc
+            ? 'Set the Start URL on the uploaded test cases — that is where the run opens.'
+            : 'Give the step that opens the app its App URL — that is where the run starts.',
         })
         return
       }
@@ -1298,16 +1291,44 @@ export default function RunPage() {
             appUrl: isAppTarget ? appName.trim() : multiUrl ? urlFor(ticket) : appUrl.trim(),
             skill: skill || undefined,
             instructions: finalInstructions || undefined,
-            model,
+            // 'default' = pin nothing, so the CLI uses the engineer's own model.
+            model: model === 'default' ? undefined : model,
             testTarget,
             deviceId: pinnedDevice,
             // Only the desktop-browser target launches a browser to hide — and an
             // attached QC browser is a window nobody can hide, so don't claim otherwise.
             headless: testTarget === 'web' && !attachedBrowser ? headless : undefined,
+            dataPolicy: seedData ? 'seed' : 'readonly',
           })
         }
       } else {
-        const finalInstructions = [base, tcLine].filter(Boolean).join('\n\n')
+        // An uploaded test-case document is stored in the project FIRST, then cited
+        // by path: the Claude CLI takes a prompt, not bytes, and a 200-case sheet
+        // folded into the prompt would be cut at its length limit — silently running
+        // a subset of the cases and reporting as if it ran all of them. Uploading
+        // here (not when the file was picked) means a document attached and then
+        // abandoned never lands on disk.
+        let docLine = ''
+        if (tcDoc) {
+          const saved = await uploadRunTestcaseDoc({
+            projectId: activeProject.id,
+            name: tcDoc.name,
+            markdown: tcDoc.markdown,
+          })
+          docLine =
+            `ACCEPTANCE SOURCE — the QC engineer uploaded the test cases for this run: ` +
+            `${saved.relPath} (from "${tcDoc.name}"). There is NO ticket; that file IS the ` +
+            `acceptance criteria. Read it IN FULL with the Read tool before you start testing, ` +
+            `and execute EVERY case in it, in the order it lists them. The flow steps above, if ` +
+            `any, are a summary of the same document — they do not replace it and must not narrow ` +
+            `it. Report a result for every case using that file's own case ids and titles, and ` +
+            `mark a case Blocked or Not Tested (never Passed) when you could not execute it. Cite ` +
+            `this path as the Acceptance source in the report.`
+        }
+        // The acceptance source leads: the server caps instructions at 4000 chars, and
+        // a long note from the engineer must not be what pushes the run's own test-case
+        // file out of the prompt.
+        const finalInstructions = [docLine, base, tcLine].filter(Boolean).join('\n\n')
         await createRun({
           projectId: activeProject.id,
           ticketId: leadTicket,
@@ -1315,25 +1336,19 @@ export default function RunPage() {
           appUrl: isAppTarget ? appName.trim() : flowUrl,
           skill: skill || undefined,
           instructions: finalInstructions || undefined,
-          model,
+          model: model === 'default' ? undefined : model,
           relatedTickets: runTickets.length > 1 ? runTickets.slice(1) : undefined,
           workflowSteps: cleanSteps.length ? cleanSteps : undefined,
           testTarget,
           deviceId: pinnedDevice,
           headless: testTarget === 'web' && !attachedBrowser ? headless : undefined,
+          dataPolicy: seedData ? 'seed' : 'readonly',
           // No ticket exists here — `ticketId` is the flow name's slug.
           kind: 'flow',
         })
       }
       saveLastInputs(activeProject.id, {
-        // An E2E flow's id is a flow name, not a ticket — storing it here would
-        // seed single-ticket mode with a ticket that doesn't exist, so keep the
-        // last real one.
-        ticketId:
-          mode === 'advanced'
-            ? (loadLastInputs(activeProject.id)?.ticketId ?? '')
-            : leadTicket,
-        // Likewise the URL: an E2E flow's entry point belongs to its canvas, not
+        // An E2E flow's entry point belongs to its canvas, not
         // to single-ticket mode's shared field.
         appUrl: mode === 'advanced' ? (loadLastInputs(activeProject.id)?.appUrl ?? '') : appUrl.trim(),
         skill,
@@ -1350,7 +1365,11 @@ export default function RunPage() {
         {
           description:
             mode === 'advanced'
-              ? `Walking ${cleanSteps.length} step${cleanSteps.length === 1 ? '' : 's'} end to end — tracking on the Running page.`
+              ? cleanSteps.length
+                ? `Walking ${cleanSteps.length} step${cleanSteps.length === 1 ? '' : 's'} end to end${
+                    tcDoc ? `, against ${tcDoc.name}` : ''
+                  } — tracking on the Running page.`
+                : `Executing the test cases in ${tcDoc?.name ?? 'the uploaded document'} — tracking on the Running page.`
               : mode === 'simple' && runTickets.length > 1
                 ? 'Runs execute one at a time, in order — tracking on the Running page.'
                 : 'Tracking progress on the Running page.',
@@ -1555,28 +1574,6 @@ export default function RunPage() {
                     projectId={activeProject?.id}
                   />
 
-                  {/* Why the ticket you last ran isn't pre-selected. Drops away for a
-                      ticket the engineer then picks anyway — the note explains an absence,
-                      so it has nothing left to say once the ticket is in the queue. */}
-                  {shownPrunedBusy.length > 0 && (
-                    <div className="flex items-start gap-2 rounded-2xl border border-amber-200 bg-amber-50/60 px-3 py-2 text-xs leading-relaxed text-amber-800 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-200">
-                      <Loader2 className="mt-0.5 size-3.5 shrink-0 animate-spin" />
-                      <span>
-                        <span className="font-medium">Not pre-selected:</span>{' '}
-                        {shownPrunedBusy.map((t, i) => (
-                          <span key={t.id}>
-                            {i > 0 ? ', ' : ''}
-                            <span className="font-mono">{t.id}</span>
-                            {t.reason === 'run'
-                              ? ' (a run is still in progress)'
-                              : ' (its test cases are still being generated)'}
-                          </span>
-                        ))}
-                        . Pick it anyway if you meant to queue it again.
-                      </span>
-                    </div>
-                  )}
-
                   {simpleTickets.length > 1 && (
                     <div className="flex items-start gap-2 rounded-2xl border border-border/60 bg-muted/60 px-3 py-2 text-xs leading-relaxed text-muted-foreground">
                       <ListOrdered className="mt-0.5 size-3.5 shrink-0 text-primary" />
@@ -1607,16 +1604,39 @@ export default function RunPage() {
                   )}
                 </div>
               ) : (
-                <RunWorkflowBuilder
-                  nodes={wfNodes}
-                  edges={wfEdges}
-                  onChange={setWfNodes}
-                  onEdgesChange={setWfEdges}
-                  flowName={flowName}
-                  onFlowNameChange={setFlowName}
-                  disabled={!activeProject}
-                  urls={!isAppTarget}
-                />
+                <div className="space-y-3">
+                  {/* Already have the cases written down? Attach them — the run
+                      executes the document itself, and can draft the canvas from it. */}
+                  <RunTestcaseImport
+                    projectId={activeProject?.id ?? ''}
+                    projectName={activeProject?.name}
+                    doc={tcDoc}
+                    onDoc={setTcDoc}
+                    onFlow={(result) => {
+                      const graph = graphFromDraft(result.steps)
+                      setWfNodes(graph.nodes)
+                      setWfEdges(graph.edges)
+                      if (result.flowName.trim()) setFlowName(result.flowName.trim())
+                    }}
+                    stepCount={wfNodes.length}
+                    startUrl={tcStartUrl}
+                    onStartUrl={setTcStartUrl}
+                    needsStartUrl={needsDocStartUrl}
+                    testTarget={testTarget}
+                    urls={!isAppTarget}
+                    disabled={!activeProject}
+                  />
+                  <RunWorkflowBuilder
+                    nodes={wfNodes}
+                    edges={wfEdges}
+                    onChange={setWfNodes}
+                    onEdgesChange={setWfEdges}
+                    flowName={flowName}
+                    onFlowNameChange={setFlowName}
+                    disabled={!activeProject}
+                    urls={!isAppTarget}
+                  />
+                </div>
               )}
             </section>
 
@@ -1736,6 +1756,57 @@ export default function RunPage() {
                     — connect it and boot a device first.
                   </p>
                 )}
+                {/* Test data — the control that decides how much of a suite can actually
+                    be GRADED. Read-only (the default) means every "do X, then check what
+                    X produced" case comes back Blocked, which is the single largest
+                    Blocked bucket we've measured. Ticking this is the same permission the
+                    engineer grants in /chat by saying "create an appointment and check
+                    the notification", so the run stops reporting those cases as blocked
+                    and starts testing them. Never on by default: it authorizes writes on
+                    a shared environment. */}
+                <div className="space-y-1.5">
+                  <label
+                    className={cn(
+                      'flex items-center justify-between gap-3 rounded-xl border px-3 py-2.5 transition-colors',
+                      seedData
+                        ? 'border-amber-300/70 bg-amber-50/60 dark:border-amber-500/30 dark:bg-amber-500/10'
+                        : 'border-border/60 bg-muted/60 hover:border-border',
+                      activeProject ? 'cursor-pointer' : 'cursor-not-allowed opacity-60',
+                    )}
+                  >
+                    <span className="flex items-center gap-2">
+                      {seedData ? (
+                        <DatabaseZap className="size-3.5 text-amber-600 dark:text-amber-400" />
+                      ) : (
+                        <ShieldCheck className="size-3.5 text-muted-foreground" />
+                      )}
+                      <span className="text-xs font-medium">Allow test-data creation</span>
+                      <span className="text-[11px] text-muted-foreground">
+                        fewer blocked cases
+                      </span>
+                    </span>
+                    <Checkbox
+                      checked={seedData}
+                      disabled={!activeProject}
+                      onChange={(e) => {
+                        setSeedData(e.target.checked)
+                        try {
+                          localStorage.setItem(
+                            RUN_DATA_POLICY_KEY,
+                            e.target.checked ? 'seed' : 'readonly',
+                          )
+                        } catch {
+                          /* ignore quota / disabled storage */
+                        }
+                      }}
+                    />
+                  </label>
+                  <p className="text-[11px] text-muted-foreground">
+                    {seedData
+                      ? 'The run may create the records a case needs (book an appointment, submit a request) and then verify the result — so trigger cases get graded instead of Blocked. It still never deletes, voids, approves or edits a record it did not create, and lists everything it created in the report.'
+                      : 'Read-only: the run drives up to the final action and stops, so every case that needs data it would have to create comes back ⛔ Blocked. Tick this when the environment is safe to write to.'}
+                  </p>
+                </div>
               </div>
 
               {/* Which booted device drives the run. Only for the Maestro targets, and

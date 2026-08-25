@@ -220,8 +220,65 @@ export function createRun(body: {
    * whatever the project's Playwright MCP entry says (the MCP page's own checkbox).
    */
   headless?: boolean
+  /**
+   * What the run may do to the environment's data. 'readonly' (the default) never
+   * commits a mutating action, which means every "do X, then check the result" case
+   * comes back Blocked; 'seed' authorizes the run to create the data its cases need.
+   */
+  dataPolicy?: 'readonly' | 'seed'
 }): Promise<{ runId: string } & RunSummary> {
   return request('/api/qc/run', { method: 'POST', body: JSON.stringify(body) })
+}
+
+/**
+ * A test-case document uploaded on the Run form and stored in the project, so the
+ * run can execute it. Converted to Markdown in the browser (lib/docConvert.ts)
+ * before it is sent — the server only ever receives text.
+ */
+export interface RunTestcaseDoc {
+  /** File name under testing/test-cases/. */
+  file: string
+  /** Project-relative path — what the run prompt tells Claude to read. */
+  relPath: string
+  bytes: number
+}
+
+export function uploadRunTestcaseDoc(body: {
+  projectId: string
+  name: string
+  markdown: string
+}): Promise<RunTestcaseDoc> {
+  return request('/api/qc/testcase-doc', { method: 'POST', body: JSON.stringify(body) })
+}
+
+/** One AI-drafted step of an E2E flow read out of an uploaded test-case document. */
+export interface FlowStepDraft {
+  step: string
+  title: string
+  url?: string
+  expected?: string
+}
+
+export interface FlowDraft {
+  flowName: string
+  steps: FlowStepDraft[]
+  summary: string
+  caseCount: number
+}
+
+/**
+ * Read an uploaded test-case document and draft the E2E flow that executes it.
+ * Costs a real Claude call (~20-60s), so it is only ever run on an explicit click.
+ */
+export function flowFromTestcases(body: {
+  projectId: string
+  fileName: string
+  markdown: string
+  appUrl?: string
+  testTarget?: 'web' | 'web-mobile' | 'app-mobile'
+  projectName?: string
+}): Promise<FlowDraft> {
+  return request('/api/ai/flow-from-testcases', { method: 'POST', body: JSON.stringify(body) })
 }
 
 /** Server-side reachability probe for the run form's App URL (browser fetch would hit CORS). */
@@ -1492,6 +1549,32 @@ export function saveKnowledgeDoc(
   )
 }
 
+/**
+ * Upload an IMAGE (diagram, ERD, annotated screenshot) as knowledge: the server stores
+ * the picture under testing/knowledge/assets/ and a vision pass writes the Markdown doc
+ * describing it. The one upload the browser can't convert itself — an image has no text
+ * to extract — so this costs a real Claude call (~20-60s).
+ */
+export function knowledgeDocFromImage(body: {
+  projectId: string
+  /** Doc name to write (defaults to the file name server-side). */
+  name: string
+  fileName: string
+  /** image/png | image/jpeg | image/webp | image/gif */
+  mime: string
+  /** base64, no data: prefix. */
+  data: string
+  instructions?: string
+  projectName?: string
+}): Promise<KnowledgeDoc & { asset: string }> {
+  return request('/api/knowledge/from-image', { method: 'POST', body: JSON.stringify(body) })
+}
+
+/** URL of an image stored beside the knowledge docs (what `assets/…` in a doc resolves to). */
+export function knowledgeAssetUrl(projectId: string, file: string): string {
+  return `/api/knowledge/assets/${encodeURIComponent(file)}?projectId=${encodeURIComponent(projectId)}`
+}
+
 /** Delete a stored knowledge doc. */
 export function deleteKnowledgeDoc(name: string, projectId: string): Promise<{ ok: true }> {
   return request(
@@ -2543,12 +2626,29 @@ export function deleteApiAccount(projectId: string, label: string): Promise<{ ok
 
 // ---- API flows (run a collection of saved requests as one scenario) ----
 
+/**
+ * A pre-request / post-request hook: another saved request run around a step, or around
+ * the whole flow. Same shape as a step and referenced by name for the same reason — the
+ * setup call is a request the collection already holds.
+ */
+export interface ApiFlowHook {
+  id: string
+  requestName: string
+  enabled: boolean
+  /** Keep going when the hook fails instead of leaving its step untested. */
+  continueOnFail: boolean
+}
+
 export interface ApiFlowStep {
   id: string
   /** The saved request this step runs — flows reference requests, never copy them. */
   requestName: string
   enabled: boolean
   continueOnFail: boolean
+  /** Requests run right before this step — the data it needs. */
+  before: ApiFlowHook[]
+  /** Requests run right after it, whether it passed, failed, or was never sent. */
+  after: ApiFlowHook[]
 }
 
 export interface ApiFlow {
@@ -2557,7 +2657,11 @@ export interface ApiFlow {
   stopOnFail: boolean
   /** Which account / authenticator the flow runs as — LABELS only, never credentials. */
   auth: { accountLabel: string; totpLabel: string }
+  /** Once before the first step. */
+  setup: ApiFlowHook[]
   steps: ApiFlowStep[]
+  /** Once after the last step — always, even when the run stopped early. */
+  teardown: ApiFlowHook[]
   savedAt?: string
 }
 
@@ -2572,7 +2676,9 @@ export function saveApiFlow(
     description: string
     stopOnFail: boolean
     auth: { accountLabel: string; totpLabel: string }
+    setup: ApiFlowHook[]
     steps: ApiFlowStep[]
+    teardown: ApiFlowHook[]
   },
 ): Promise<{ flow: ApiFlow }> {
   return request(
@@ -2599,8 +2705,17 @@ export function deleteApiFlow(projectId: string, name: string): Promise<{ ok: tr
   )
 }
 
-/** One step's verdict in a saved flow report — verdicts only, never response bodies. */
+/** One row's verdict in a saved flow report — verdicts only, never response bodies. */
 export interface ApiFlowRunStep {
+  /**
+   * Where this row sat in the run. The array is the flat EXECUTION ORDER (flow setup,
+   * each step wrapped in its before/after hooks, teardown) — "the cleanup ran even
+   * though step 3 failed" is only readable when the cleanup is in the list. Reports
+   * written before hooks existed carry no phase and read as 'step'.
+   */
+  phase?: 'setup' | 'before' | 'step' | 'after' | 'teardown'
+  /** For a before/after row: the request name of the step it belongs to. */
+  parent?: string
   requestName: string
   method: string
   url: string
@@ -2707,6 +2822,70 @@ export function aiCheckApi(body: {
   model?: string
 }): Promise<AiCheckResult> {
   return request('/api/api-tests/ai-check', { method: 'POST', body: JSON.stringify(body) })
+}
+
+/**
+ * One reviewable change the API-testing assistant proposes. It is a PROPOSAL, not an
+ * edit: the server never writes anything for the assistant, and each kind is applied by
+ * the page through the same route a human click would have used, so the existing
+ * validation (and secret merging) still runs. See routes/apiTests.ts `/assistant`.
+ */
+export type ApiAssistProposal =
+  | {
+      kind: 'set-variables'
+      env: string
+      note: string
+      vars: { key: string; value: string; secret: boolean }[]
+    }
+  | {
+      kind: 'update-request'
+      name: string
+      note: string
+      /** Only the fields the assistant wants changed are present. */
+      url?: string
+      headers?: ApiKV[]
+      bodyMode?: ApiBodyMode
+      body?: string
+    }
+  | {
+      kind: 'add-captures'
+      name: string
+      note: string
+      captures: { jsonPath: string; varName: string; secret: boolean }[]
+    }
+  | {
+      kind: 'create-flow'
+      name: string
+      note: string
+      description: string
+      steps: string[]
+      setup: string[]
+      teardown: string[]
+    }
+
+export interface ApiAssistResult {
+  ok: boolean
+  reply?: string
+  proposals?: ApiAssistProposal[]
+  error?: string
+}
+
+/**
+ * Ask the API-testing assistant. Stateless like `aiCheckApi`: the page holds the
+ * transcript and replays it, and the server reads the collection/environments/flows off
+ * disk itself, so the question can be as short as "wire these up".
+ *
+ * `images` are base64 bytes (a pasted screenshot), `docs` are already-converted markdown
+ * (the same `convertFileToMarkdown` pipeline Knowledge and Chat use).
+ */
+export function askApiAssistant(body: {
+  projectId: string
+  messages: { role: 'user' | 'assistant'; text: string }[]
+  model?: string
+  docs?: { name: string; markdown: string }[]
+  images?: { mime: string; data: string }[]
+}): Promise<ApiAssistResult> {
+  return request('/api/api-tests/assistant', { method: 'POST', body: JSON.stringify(body) })
 }
 
 /** List a saved request's stored run history (newest first, metadata only). */
@@ -3238,6 +3417,12 @@ export interface ChatMessage {
   error?: boolean
   /** Images pasted with this message — file names, shown via `chatImageUrl`. */
   images?: string[]
+  /**
+   * Documents attached with this message. `file` is the server-generated name under
+   * testing/chats/files (opened with `chatFileUrl`); `name` is the engineer's own file
+   * name, which is what the chip shows.
+   */
+  files?: { file: string; name: string }[]
   /** Follow-up prompts proposed with this answer, offered as one-click chips. */
   suggestions?: string[]
   /** The `+` menu action this message was sent with (badged in the transcript). */
@@ -3285,15 +3470,23 @@ export interface ChatFeedback {
 /**
  * ONE CHECKED CLAIM from a fact check — see ChatAudit.
  *
- * `wrong` is the only one that means the answer is defective. `unverified` is an honest
- * outcome and is shown as such: the auditor looked and could not confirm it either way,
- * which is different from (and much more common than) a contradiction.
+ * `wrong` and `unsupported` are the two that mean the answer is defective. `unverified` is
+ * an honest outcome and is shown as such: the auditor looked and could not confirm it
+ * either way, which is different from (and much more common than) a contradiction.
+ *
+ * `unsupported` exists for one specific failure and only appears on a `defect` claim: the
+ * answer called something a bug, the observation may even be true, but nothing in the
+ * project states the behaviour it is being measured against. That is the shape of every
+ * finding that gets withdrawn the moment someone asks "where does it say it should do
+ * that?", so it is graded as an issue, not as a shrug.
  */
 export interface AuditClaim {
   claim: string
-  status: 'supported' | 'wrong' | 'unverified'
+  status: 'supported' | 'wrong' | 'unsupported' | 'unverified'
   /** Where it was confirmed — or, for `wrong`, what the project actually says. */
   evidence?: string
+  /** This claim says something in the product is broken/missing/wrong. */
+  defect?: boolean
 }
 
 /**
@@ -3386,6 +3579,16 @@ export interface ChatToolCall {
 export interface ChatImageUpload {
   mime: string
   data: string
+}
+
+/**
+ * An attached document on its way to the server: the engineer's file name plus the
+ * markdown the browser converted it to (`lib/docConvert`). The server writes it to disk
+ * and has Claude Read it — the text never travels inside the prompt.
+ */
+export interface ChatDocUpload {
+  name: string
+  markdown: string
 }
 
 /**
@@ -3532,6 +3735,11 @@ export function deleteChat(projectId: string, slug: string): Promise<{ ok: true 
 /** Src for an image pasted into a message (served from testing/chats/images). */
 export function chatImageUrl(projectId: string, name: string): string {
   return `/api/chat/images/${encodeURIComponent(name)}?projectId=${encodeURIComponent(projectId)}`
+}
+
+/** Src for a document attached to a message (served from testing/chats/files). */
+export function chatFileUrl(projectId: string, name: string): string {
+  return `/api/chat/files/${encodeURIComponent(name)}?projectId=${encodeURIComponent(projectId)}`
 }
 
 /** Reveal the project's testing/chats folder in the OS file explorer. */
@@ -3725,6 +3933,13 @@ export async function streamChat(
     action?: ChatAction
     /** Pasted screenshots; the server writes them and tells Claude to Read them. */
     images?: ChatImageUpload[]
+    /**
+     * Documents attached with the paperclip, already converted to markdown in the browser.
+     * Sent as their own field — NOT pasted into `prompt` — because the prompt is capped at
+     * 48 KB and a long spec would silently lose its tail. The server writes each one under
+     * testing/chats/files and tells Claude to Read it.
+     */
+    attachments?: ChatDocUpload[]
     /** `@`-tagged tickets / test cases the question is about. */
     mentions?: ChatMention[]
   },

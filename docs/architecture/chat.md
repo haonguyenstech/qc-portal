@@ -267,12 +267,49 @@ does this endpoint validate?").
   sides (4 images, 8 MB, png/jpeg/webp/gif) — the client copy only exists so the engineer hears why
   before waiting on a turn. **An image with no text is a valid message**; the server supplies the
   wording rather than 400-ing.
+- **Attached documents** — the paperclip converts a file to markdown in the browser (the shared
+  `docConvert` pipeline the Knowledge page uses) and then it takes **the same road as a pasted
+  image**: `saveDocs` writes it under `testing/chats/files/` (name generated server-side from
+  timestamp + index + a slug of the original — the engineer's file name is a LABEL only, never
+  joined into a path), `docPromptBlock` names the ABSOLUTE paths in the prompt and tells the model
+  to Read them in full, and the user message stores `{file, name}` in `ChatMessage.files` so a
+  reopened transcript still shows the chips (served back by `GET /files/:name`, guarded like the
+  images route). It did **not** always work this way: the markdown used to be appended to the
+  prompt in the browser and the whole thing cut with `.slice(0, MAX_PROMPT)` — so a spec over 48 KB
+  reached the model as its **first half**, with nothing on screen saying so, and the answer was
+  judged wrong for a reason nobody could see. That is also why the `MAX_PROMPT` 413 says "attach it
+  as a file with the paperclip": the escape hatch has to actually be one. Caps are mirrored on both
+  sides (`MAX_DOCS` = 4, `MAX_DOC_BYTES` = 4 MB of markdown each) and both sides **refuse rather
+  than drop** — the client says it at the paperclip, the server 413s naming the file. **An
+  attachment with no text is a valid message**, like an image; the server supplies the wording.
+- **The whole rail folds too, and it is the app sidebar's control** — `PanelLeftClose` /
+  `PanelLeftOpen` with a right-side tooltip, kept in `localStorage` under
+  `qc.chat.railFolded`. Same gesture one panel over, because on a laptop the sidebar and the
+  18rem rail together take half the width of the answer being read, and the rail is the one
+  you don't need while reading. Folded it keeps a **12-unit strip**, not nothing: unfold,
+  search, New chat, Temporary chat, and — when any conversation is still answering — the
+  pulsing dot, which is then the only place on the page that says so. Two details: the
+  strip's top row is `h-14 border-b` like the search row it replaces, so folding doesn't
+  shift the seam that runs across the page into the chat header; and the strip's search icon
+  **unfolds AND focuses the box** (`requestAnimationFrame` → `searchRef`), since an unfold
+  that makes you click again costs the step the fold was meant to save.
+- **Every rail GROUP folds, and the fold is remembered.** The header is a button (whole row is
+  the hit target — a 12px chevron alone is a miss half the time) with a `ChevronDown` that
+  rotates `-90` when closed, and the fold is kept in `localStorage` under
+  `qc.chat.railCollapsed` as a list of group LABELS. Component state alone would not do: the
+  rail unmounts on every trip to another page, so a fold you have to redo each time you come
+  back is worse than none. Labels are a fixed set ("Starred" / "Today" / …), so nothing goes
+  stale when conversations move between buckets overnight. Two details are load-bearing: the
+  item **count** shows only while folded (open, the rows are the count), and **a search
+  force-opens every group** — a search that hides its own hits is a bug, not a preference, and
+  the remembered fold comes back when the box is cleared.
 - **UI is a port of shadcnuikit's "AI Chat v2"** (bordered shell, w-72 rail with search + Today /
   Yesterday / 7 Days Ago groups + footer nav + New Chat, centered column, gradient
   greeting, tinted composer well with a hint strip). It deliberately uses the reference's **small
   radii** rather than the portal's rounded-3xl house style. Every mock control is wired to something
-  real: the paperclip converts a spec through the shared in-browser `docConvert` and appends it to
-  the prompt (the file never reaches the server) or stages an image (see above — that one does), the
+  real: the paperclip converts a spec through the shared in-browser `docConvert` and sends it as an
+  attachment the server writes to disk, or stages an image (see both above — they take the same
+  road), the
   mic slot became the **permission picker** (`ComposerModePicker` — with three modes a toggle
   button would make "the mode I want" a guessing game of how many clicks). It is deliberately
   the SAME shadcn `Select` as the model and effort pickers beside it, label over hint per row:
@@ -307,13 +344,29 @@ does this endpoint validate?").
   typed, then cached): one row per crawled ticket, plus a `@<id>/testcases` row when it has versions.
   ↑/↓ + Enter/Tab pick, Escape closes — while the menu is open **Enter means "pick", not "send"**.
   Only the REFERENCE travels (`mentions: [{kind, folder, version?}]`); `resolveMentions`
-  (routes/chat.ts) turns each into absolute file paths — `ticket.md`/`comments.md`/`summary.md`, or the
+  (routes/chat.ts) turns each into absolute file paths — `ticket.md`/`comments.md`/`activity.md`
+  (what changed between crawls, see `docs/architecture/tickets-and-overview.md`)/`summary.md`, or the
   version `listTestcaseVersions` reports (newest when no version is given) — and the model Reads them.
   Nothing is inlined, so five tags cost a few prompt lines instead of 200 KB of ticket text. The
   `@ABC-123` token stays in the message text and **deleting it is how you untag**: send filters
   mentions to those whose token is still in the text. An unresolvable tag (renamed folder, deleted
   cases) is dropped and reported in a `log` frame — a silent drop reads as the model ignoring the tag.
   Folder guarding is **per path segment**, since a subtask folder legitimately contains `/`.
+  - **A tagged ticket is a SNAPSHOT, and the block says so.** The crawled folder was
+    downloaded whenever someone last pressed Crawl, so the mention line carries the snapshot's
+    date (`ticket.json`'s mtime — written every crawl, so it can't drift from the content) and
+    the id + MCP server to re-query: `ticket.json` now stores `source` (`clickup`/`jira`/`azure`),
+    because a task id alone doesn't say which tracker owns it. The block then splits the two
+    sources of truth: the **files** answer the ticket's CONTENT (description, acceptance criteria,
+    attachments, `activity.md`), the **tracker's MCP** answers its STATE — status, assignee,
+    priority, due date, newest comments, and anything phrased as now / still / latest / what
+    changed — with the live value winning and BOTH reported when they disagree, so a stale crawl
+    is visible instead of silently answered from. Measured on a real ticket: the file said
+    `ready to test` while ClickUp said `re-open`, and the model happily answered from the file.
+    The same rule (minus the ids) is one bullet in `FACTS_BLOCK`, so it also applies to a question
+    that names a ticket without tagging it — verified: an untagged "what status is 86eut664j in?"
+    now calls `mcp__clickup__get_task_status` instead of reading a file. A failed or missing MCP
+    is answered from the snapshot **labelled as one**, never as current.
   - **`@db/<tag>` tags a connected DATABASE**, which is two questions, not one: STRUCTURE is
     answered by Reading the `testing/knowledge/db-map-<tag>.md` doc connect/sync already writes,
     and DATA by curling the portal's **own** `POST /api/database/query` (`databaseMentionLine`,
@@ -327,6 +380,22 @@ does this endpoint validate?").
     Database rows are built and budgeted **separately from the ticket rows** in
     `mentionOptions`: a project has one or two databases against hundreds of tickets, so one
     shared 8-row list would push the database off the menu permanently.
+  - **The button row is deliberately short, because its height is the input's.** The three
+    pills share `COMPOSER_PILL` (`h-7 px-2.5 text-xs`, 3.5 icons — both the height and the
+    icon size need `!`, the base `SelectTrigger` sets `data-[size=sm]:h-8` and
+    `[&_svg:not([class*='size-'])]:size-4` and wins on specificity otherwise), the round
+    buttons on the right are `size-8` rather than `size-9`, and the row is `px-3 py-2` rather
+    than `p-3`. The row is ~32px of controls; every pixel of chrome around them is a pixel the
+    textarea above doesn't get, which is the whole reason the shape is pinned here.
+  - **The textarea opens at ~6 lines and grows with the content.** `min-h-38` (152px) is the
+    floor, `field-sizing-content` grows it, `max-h-[26rem]` (~19 lines) is the ceiling and then
+    it scrolls. It used to be `min-h-[52px]` with no growth at all, so the box was one line tall
+    forever: a QC question carries a ticket id, a URL and two or three steps, and the third
+    line scrolled out of sight *while it was being typed*. `max-h-48` was dead code — nothing
+    ever grew into it. Where a browser doesn't support `field-sizing`, the box simply stays at
+    the taller floor. `ComposerPaint` needs no change with it (`absolute inset-0`, same `p-4`
+    and `text-sm`) — but that is exactly why the two layers must keep identical padding and
+    font metrics.
   - **A picked tag renders as a CHIP, painted behind the textarea** (`ComposerPaint` +
     `paintSegments`) — a `<textarea>` can't hold an element, so a tag used to read as plain
     text with a spellcheck squiggle through it, indistinguishable from typing. Same overlay
@@ -723,10 +792,12 @@ does this endpoint validate?").
     project. That costs 30-90 s and real money, so it is the **SearchCheck button** beside
     Copy and the 👍/👎, not something every question pays for. It runs against the **stored**
     transcript after the fact, so nothing in it can slow an answer down. It rates each
-    checkable claim `supported` / `wrong` / `unverified`, with a path (or, for `wrong`, what
-    the project actually says), and is told to ignore opinions, advice and anything outside the
-    folder — those are not its to rate. `unverified` is a first-class verdict: an auditor that
-    must choose between "confirmed" and "contradicted" will invent one.
+    checkable claim `supported` / `wrong` / `unsupported` / `unverified`, with a path (or, for
+    `wrong`, what the project actually says), and is told to ignore pure opinions, style advice
+    and anything outside the folder — those are not its to rate. `unverified` is a first-class
+    verdict: an auditor that must choose between "confirmed" and "contradicted" will invent one.
+    **A defect claim is explicitly NOT an opinion here** — see the defect bar below for why it
+    gets its own `unsupported` verdict rather than being waved through as a judgement call.
     - The auditor runs with the read tools and **the write tools explicitly denied** — a pass
       whose job is to check the project has no business changing it, and would then be
       checking its own edit. `--strict-mcp-config`, no session persistence, capped budget.
@@ -761,6 +832,53 @@ does this endpoint validate?").
   guarded by `writableEnded`**, not `req.on('close')` — the latter fires as soon as the request
   BODY has been read on Node 18+, which aborted every audit the instant it started and then
   returned nothing at all, so the request hung until the client gave up.
+- **THE DEFECT BAR — what has to be true before chat calls something a bug** (`DEFECTS_BLOCK`
+  in `routes/chat.ts`, plus the `unsupported` verdict in `answerAudit.ts`). Reported from the
+  field: chat listed defects that were not defects, and withdrew them as soon as the engineer
+  asked how they had been established. **None of the three layers above touches that**, and
+  the reason is worth stating, because it decides the shape of the fix: those answers named
+  real files and cited them correctly — `FACTS_BLOCK` governs what the model NAMES and
+  `answerCheck.ts` only asks whether a cited path exists, and both were satisfied. The
+  wrongness was in the **judgement laid over** correct evidence.
+  - **The mechanism, which is always the same.** A defect is a contradiction between an
+    EXPECTED behaviour and an ACTUAL one. The model reliably grounds the *actual* half in the
+    project and supplies the *expected* half from how software like this generally behaves.
+    "There is no rate limit on login", "the email field isn't validated", "there's no loading
+    state" are true observations and none of them is a defect unless **this** project said
+    otherwise — which is exactly why the finding evaporates when challenged: nothing was ever
+    behind the half that made it a bug. A withdrawn bug costs more than a missed one (it is
+    triaged, assigned, argued about with the devs, and it spends the QC engineer's
+    credibility); suppressing a suggestion costs a line of prose. The bar is set accordingly.
+  - **`DEFECTS_BLOCK` — on every turn, free**, appended right after `FACTS_BLOCK` and
+    unrecorded for the same reason. It does three things a general plea for accuracy does not:
+    (1) requires **both halves** to come from something opened in this turn, with the source of
+    the *expected* half nameable — no source, no bug; (2) gives a concrete self-test to run
+    **before writing** — "where does it say it should do that?" / "did you actually see this
+    happen?", and if the honest answer is "that's how it normally works" or "I assumed it from
+    the code", the finding is dropped; (3) provides **somewhere else to put it** — a separate
+    *Suggestions* / *Worth confirming* list, worded as a question — because a model with a real
+    concern and no legitimate place for it will file it as a bug. It also forbids reading a
+    defect out of an absence (a grep that missed is a gap in the search at least as often as a
+    gap in the product), requires each finding to be **filable as it stands** (did / happened +
+    evidence / expected + source / confidence), and says outright that **zero defects is a real
+    answer** and a short list beats a padded one.
+  - **`unsupported` — the audit's matching verdict.** The audit used to be told to skip
+    judgement calls, so it stepped over precisely the claims this complaint is about. It now
+    picks out every defect claim (`AuditClaim.defect`) and checks **both halves on disk**; when
+    the observation may be true but nothing in the project requires the behaviour it is
+    measured against, that is `unsupported` — graded as an **issue**, not as a soft "couldn't
+    confirm", because burying it behind a green headline is how those findings reached a ticket
+    in the first place. Drawn amber (not red) and labelled *"Called a bug, but nothing requires
+    it"*: the observation itself may be perfectly sound and only the leap failed.
+  **Verified both halves.** Same question to the same project before and after: the answer now
+  opens with "I did not run the app this turn — every ACTUAL below is code I read", gives each
+  finding an *Expected* line citing a ticket AC at `path:line`, an *Actual* line citing the
+  code at `path:line`, the concrete failure and a confidence — and moves four items that would
+  previously have been listed as bugs into **"Worth confirming (not defects — no source in this
+  project says otherwise)"**, each phrased as a question for the BA. And the audit, run on a
+  planted answer with three defect claims, returned `unsupported` for "no rate limiting on the
+  submit endpoint" (evidence: the ACs it searched and where), and `wrong` for the two that the
+  project actually contradicts — verdict `issues`, 88 s on `haiku`.
 - **Each turn is signed — `RowAvatar` + `RowName`** — the assistant's mark is the portal's solid
   chip (`bg-foreground text-background` + Sparkles) on the left with **"AI Assistant"** over the
   bubble; the user gets a quiet outlined chip on the right under **"Me"**. The avatar is

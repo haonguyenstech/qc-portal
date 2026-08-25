@@ -371,7 +371,7 @@ function EvidenceReport({
       </div>
 
       <Dialog open={!!active} onOpenChange={(open) => !open && setActive(null)}>
-        <DialogContent className="max-h-[88vh] max-w-4xl overflow-auto">
+        <DialogContent className="max-h-[92vh] w-[95vw] overflow-auto sm:max-w-[1400px]">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2 font-mono text-sm">
               {active && fileKindIcon(active.kind)}
@@ -1448,6 +1448,11 @@ function ScreenshotLightbox({
 }) {
   const index = path ? shots.indexOf(path) : -1
   const canStep = index >= 0 && shots.length > 1
+  // Fit-to-window by default (the whole screen in one glance); clicking the image
+  // switches to 1:1 pixels so small text in the capture is readable. Reset on every
+  // new image so stepping through the gallery doesn't inherit the previous zoom.
+  const [zoomed, setZoomed] = useState(false)
+  useEffect(() => setZoomed(false), [path])
   // Wrap around: the last screenshot's "next" is the first one. Stepping off the
   // end into a dead button reads as the viewer having broken.
   const step = (delta: number) => {
@@ -1472,7 +1477,7 @@ function ScreenshotLightbox({
 
   return (
     <Dialog open={!!path} onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="flex max-h-[92vh] w-[95vw] flex-col gap-0 overflow-hidden p-0 sm:max-w-5xl">
+      <DialogContent className="flex h-[95vh] max-h-[95vh] w-[97vw] flex-col gap-0 overflow-hidden p-0 sm:max-w-[1800px]">
         <DialogHeader className="shrink-0 space-y-0 border-b border-border/60 bg-muted/30 px-5 py-3">
           <DialogTitle className="flex min-w-0 items-center gap-2 pr-8 text-sm">
             <ImageIcon className="size-4 shrink-0 text-muted-foreground" />
@@ -1498,11 +1503,20 @@ function ScreenshotLightbox({
         </DialogHeader>
         <div className="relative min-h-0 flex-1 overflow-auto bg-muted/20 p-4">
           {path && (
-            <img
-              src={src}
-              alt={name || 'Screenshot'}
-              className="mx-auto h-auto max-w-full rounded-lg"
-            />
+            <div className={cn('flex min-h-full w-full items-center justify-center', zoomed && 'w-max')}>
+              <img
+                src={src}
+                alt={name || 'Screenshot'}
+                onClick={() => setZoomed((z) => !z)}
+                title={zoomed ? 'Click to fit to window' : 'Click to view at full size'}
+                className={cn(
+                  'rounded-lg',
+                  zoomed
+                    ? 'h-auto w-auto max-w-none cursor-zoom-out'
+                    : 'max-h-full max-w-full object-contain cursor-zoom-in',
+                )}
+              />
+            </div>
           )}
           {canStep && (
             <>
@@ -1912,7 +1926,7 @@ function FilePreview({ projectId, slug, file }: { projectId: string; slug: strin
         <img
           src={url}
           alt={file.path}
-          className="max-h-[70vh] w-full rounded-2xl border border-border/60 bg-muted/30 object-contain shadow-none"
+          className="max-h-[80vh] w-full rounded-2xl border border-border/60 bg-muted/30 object-contain shadow-none"
         />
       </a>
     )

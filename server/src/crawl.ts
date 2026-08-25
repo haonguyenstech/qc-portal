@@ -5,6 +5,11 @@ import * as clickup from './clickup.js'
 import * as jira from './jira.js'
 import * as azure from './azure.js'
 import type { TaskAttachment, TaskComment, TaskDetail } from './clickup.js'
+import {
+  ACTIVITY_FILE,
+  readStoredTicket,
+  recordTicketActivity,
+} from './ticketActivity.js'
 import { CRAWL_SUMMARY_MODELS, parseClaudeJsonResult, runClaude } from './claudeExec.js'
 
 // Core single-ticket crawl: download a ticket's detail + comments + attachments
@@ -215,8 +220,14 @@ export async function crawlOneTicket(opts: {
   // sanitized independently so no segment can be a separator, "..", or a dotfile.
   // Absent/empty → the classic flat <displayId>/ folder.
   const baseDir = ticketsDirFor(opts.rootPath)
+  // Drop empty segments BEFORE sanitizing, not after: `safeSegment('')` returns the
+  // literal fallback 'ticket', which is truthy — so filtering afterwards could never
+  // remove it, and a crawl with no relDir (every single-ticket crawl) filed itself
+  // under testing/tickets/ticket/ instead of its own <displayId>/ folder. Each crawl
+  // then overwrote the previous one's files, whatever ticket it was for.
   const relSegments = (opts.relDir ?? '')
     .split(/[/\\]+/)
+    .filter((s) => s.trim())
     .map((s) => safeSegment(s))
     .filter(Boolean)
   const relDir = relSegments.length ? relSegments.join(path.sep) : safeSegment(detail.displayId)
@@ -228,16 +239,55 @@ export async function crawlOneTicket(opts: {
   fs.mkdirSync(dir, { recursive: true })
 
   const written: { path: string; bytes: number }[] = []
+  /** Size of a file the crawl wrote indirectly (the activity log). 0 when absent. */
+  const statBytes = (file: string): number => {
+    try {
+      return fs.statSync(file).size
+    } catch {
+      return 0
+    }
+  }
   const writeFile = (name: string, content: string | Buffer) => {
     const buf = typeof content === 'string' ? Buffer.from(content, 'utf8') : content
     fs.writeFileSync(path.join(dir, name), buf)
     written.push({ path: name, bytes: buf.byteLength })
   }
 
+  // The activity log is a DIFF against the snapshot this crawl is about to overwrite,
+  // so the previous ticket.json has to be read before writeFile touches it.
+  const previous = readStoredTicket(dir)
+
   writeFile('ticket.md', ticketMarkdown(detail, ticketKind))
   writeFile('comments.md', commentsMarkdown(detail.displayId, comments))
-  writeFile('ticket.json', JSON.stringify({ ...detail, ticketKind, comments }, null, 2))
+  // `source` is stored so a later reader knows WHICH tracker to re-query for live state:
+  // chat's @-mention block names that tracker's MCP server (routes/chat.ts), and a ticket
+  // id alone doesn't say whether it belongs to ClickUp, Jira or Azure.
+  writeFile(
+    'ticket.json',
+    JSON.stringify({ ...detail, ticketKind, source: opts.source ?? 'clickup', comments }, null, 2),
+  )
   onLog({ level: 'info', text: `${detail.displayId} — ${comments.length} comment(s), 3 base files` })
+
+  // ClickUp exposes no task history (see ticketActivity.ts), so the portal accumulates
+  // one: every re-crawl appends what changed since the last one. Best-effort — the
+  // ticket files are already on disk and a log failure must not fail the crawl.
+  const activity = recordTicketActivity({
+    dir,
+    displayId: detail.displayId,
+    prev: previous,
+    detail,
+    comments,
+    ticketKind,
+  })
+  written.push({ path: ACTIVITY_FILE, bytes: statBytes(path.join(dir, ACTIVITY_FILE)) })
+  onLog({
+    level: 'info',
+    text: activity.baseline
+      ? `${ACTIVITY_FILE} started — this crawl is the baseline (ClickUp has no history to import)`
+      : activity.changes
+        ? `${ACTIVITY_FILE} — ${activity.changes} change(s) since the last crawl`
+        : `${ACTIVITY_FILE} — nothing changed since the last crawl`,
+  })
 
   // Attachments → <dir>/attachments/. Failures are collected, not fatal.
   const attachmentErrors: string[] = []

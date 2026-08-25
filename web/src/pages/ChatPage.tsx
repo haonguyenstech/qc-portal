@@ -40,6 +40,8 @@ import {
   MoreHorizontal,
   NotebookPen,
   Paperclip,
+  PanelLeftClose,
+  PanelLeftOpen,
   PenLine,
   Plus,
   Search,
@@ -799,6 +801,14 @@ const modeMeta = (t: ChatTools) => CHAT_MODES.find((m) => m.value === t) ?? CHAT
  * version is the per-mode TINT on the trigger: "what is this turn allowed to do" is the one
  * composer setting worth seeing without reading it.
  */
+/**
+ * The three composer pills (model, effort, what-it-may-do) share one size. Every pixel of
+ * chrome under the textarea is a pixel the input box above it doesn't get, so these are
+ * deliberately smaller than a default `size="sm"` trigger — the `!` suffixes beat
+ * shadcn's own `data-[size=sm]:h-8` and its `[&_svg:not([class*='size-'])]:size-4`.
+ */
+const COMPOSER_PILL = "h-7! w-fit gap-1.5 px-2.5 text-xs focus:ring-0! [&_svg]:size-3.5!"
+
 function ComposerModePicker({
   tools,
   onPick,
@@ -817,7 +827,7 @@ function ComposerModePicker({
         size="sm"
         title={active.title}
         aria-label={`What this chat may do: ${active.label}`}
-        className={cn('w-fit focus:ring-0!', active.pill)}
+        className={cn(COMPOSER_PILL, active.pill)}
       >
         <active.icon className="size-4" />
         <div className="hidden lg:flex">
@@ -1231,6 +1241,50 @@ function railTitle(name: string): string {
   return name.charAt(0).toUpperCase() + name.slice(1)
 }
 
+/**
+ * Which history groups the engineer has collapsed.
+ *
+ * Kept in localStorage rather than component state alone: the rail unmounts on every trip
+ * to another page, and a fold you have to redo each time you come back is worse than no
+ * fold at all. Stored by group LABEL — the labels are a fixed set ("Starred", "Today", …),
+ * so nothing here goes stale when conversations move between buckets overnight.
+ */
+const COLLAPSED_KEY = 'qc.chat.railCollapsed'
+
+function readCollapsedGroups(): string[] {
+  try {
+    const raw = JSON.parse(localStorage.getItem(COLLAPSED_KEY) ?? '[]') as unknown
+    return Array.isArray(raw) ? raw.filter((x): x is string => typeof x === 'string') : []
+  } catch {
+    return []
+  }
+}
+
+function writeCollapsedGroups(labels: string[]) {
+  try {
+    localStorage.setItem(COLLAPSED_KEY, JSON.stringify(labels))
+  } catch {
+    /* private mode / quota — the fold just doesn't survive the page */
+  }
+}
+
+/**
+ * Whether the whole history rail is folded away, persisted like the app sidebar's own
+ * collapse (`qc.sidebar.collapsed`) and for the same reason: on a laptop the 18rem rail and
+ * the sidebar together eat half the width of the answer you are reading, and the rail is the
+ * one of the two you don't need while reading. Folded it keeps a narrow strip — the engineer
+ * must be able to get back without hunting, and a rail that vanishes entirely reads as a bug.
+ */
+const RAIL_KEY = 'qc.chat.railFolded'
+
+function readRailFolded(): boolean {
+  try {
+    return localStorage.getItem(RAIL_KEY) === '1'
+  } catch {
+    return false
+  }
+}
+
 // ------------------------------------------------------------------ history rail
 
 /**
@@ -1473,6 +1527,32 @@ function TemporaryNotice({ live, onEnd }: { live: boolean; onEnd: () => void }) 
   )
 }
 
+/**
+ * Fold / unfold the whole conversation list. The same control the app sidebar uses
+ * (`PanelLeftClose` / `PanelLeftOpen` + a right-side tooltip), because it does the same
+ * thing one panel over — a second vocabulary for "hide this rail" on one screen is a cost
+ * with no upside.
+ */
+function RailFoldButton({ folded, onToggle }: { folded: boolean; onToggle: () => void }) {
+  const Icon = folded ? PanelLeftOpen : PanelLeftClose
+  const label = folded ? 'Show conversation list' : 'Hide conversation list'
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          type="button"
+          onClick={onToggle}
+          aria-label={label}
+          className="flex size-8 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-all duration-200 hover:bg-muted hover:text-foreground active:scale-95"
+        >
+          <Icon className="size-4" />
+        </button>
+      </TooltipTrigger>
+      <TooltipContent side="right">{label}</TooltipContent>
+    </Tooltip>
+  )
+}
+
 function ChatRail({
   chats,
   activeSlug,
@@ -1512,6 +1592,110 @@ function ChatRail({
     ].filter((g) => g.items.length)
   }, [chats, q])
 
+  const [collapsed, setCollapsed] = useState<string[]>(readCollapsedGroups)
+  const toggleGroup = (label: string) =>
+    setCollapsed((prev) => {
+      const next = prev.includes(label) ? prev.filter((l) => l !== label) : [...prev, label]
+      writeCollapsedGroups(next)
+      return next
+    })
+  // A search that hides its own hits is a bug, not a preference: while there's a query every
+  // group is open, and the remembered fold comes back the moment the box is cleared.
+  const searching = !!q.trim()
+
+  const [folded, setFolded] = useState<boolean>(readRailFolded)
+  const searchRef = useRef<HTMLInputElement | null>(null)
+  const setRailFolded = (next: boolean) => {
+    setFolded(next)
+    try {
+      localStorage.setItem(RAIL_KEY, next ? '1' : '0')
+    } catch {
+      /* storage unavailable — the fold just doesn't survive the page */
+    }
+  }
+  // Unfolding to search has to land the cursor in the box: the icon in the strip IS the
+  // search field as far as the reader is concerned, and an unfold that leaves them to click
+  // again is the collapse costing them a step instead of saving one.
+  const unfoldAndSearch = () => {
+    setRailFolded(false)
+    requestAnimationFrame(() => searchRef.current?.focus())
+  }
+
+  if (folded) {
+    return (
+      <div className="hidden md:flex">
+        <div className="flex h-full w-12 flex-col items-center border-e">
+          {/* h-14 + border-b, exactly like the expanded rail's search row and the chat header
+              beside it — folding must not move the seam that runs across the page. */}
+          <div className="flex h-14 w-full shrink-0 items-center justify-center border-b">
+            <RailFoldButton folded onToggle={() => setRailFolded(false)} />
+          </div>
+          <div className="flex w-full flex-col items-center gap-1 py-3">
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  type="button"
+                  onClick={unfoldAndSearch}
+                  aria-label="Search chats"
+                  className="flex size-9 items-center justify-center rounded-xl text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                >
+                  <Search className="size-4" />
+                </button>
+              </TooltipTrigger>
+              <TooltipContent side="right">Search chats</TooltipContent>
+            </Tooltip>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  type="button"
+                  onClick={onNew}
+                  aria-label="New chat"
+                  className="flex size-9 items-center justify-center rounded-xl text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                >
+                  <Plus className="size-4" />
+                </button>
+              </TooltipTrigger>
+              <TooltipContent side="right">New chat</TooltipContent>
+            </Tooltip>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  type="button"
+                  onClick={onNewTemporary}
+                  aria-label="Temporary chat"
+                  className="flex size-9 items-center justify-center rounded-xl text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                >
+                  <MessageSquareDashed className="size-4" />
+                </button>
+              </TooltipTrigger>
+              <TooltipContent side="right">Temporary chat</TooltipContent>
+            </Tooltip>
+          </div>
+          {/* An answer being written while the rail is folded still has to be visible — that
+              dot is the only place the page says a conversation you can't see is running. */}
+          {chats.some((c) => c.running) && (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  type="button"
+                  onClick={() => setRailFolded(false)}
+                  aria-label="A conversation is still answering"
+                  className="flex size-9 items-center justify-center rounded-xl"
+                >
+                  <span className="qc-pulse size-2 rounded-full bg-emerald-500" />
+                </button>
+              </TooltipTrigger>
+              <TooltipContent side="right">
+                {chats.filter((c) => c.running).length} conversation(s) still answering — open the
+                list
+              </TooltipContent>
+            </Tooltip>
+          )}
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="hidden md:flex">
       <div className="flex h-full flex-col border-e lg:w-72">
@@ -1526,11 +1710,13 @@ function ChatRail({
             {/* Flat search field: the Input base adds a ring + shadow on focus, which reads
                 as a white pill lifting off the rail. Kill all three on focus. */}
             <Input
+              ref={searchRef}
               value={q}
               onChange={(e) => setQ(e.target.value)}
               placeholder="Search chats..."
               className="h-8 border-transparent bg-transparent px-0 text-sm shadow-none focus-visible:border-transparent focus-visible:shadow-none focus-visible:ring-0"
             />
+            <RailFoldButton folded={false} onToggle={() => setRailFolded(true)} />
           </div>
         </div>
 
@@ -1540,92 +1726,113 @@ function ChatRail({
               {q.trim() ? 'No conversation matches that.' : 'No conversations yet.'}
             </p>
           ) : (
-            groups.map((group) => (
-              <div key={group.label}>
-                {/* px-3 = the rows' own padding, so label, row text and the search field all
-                    start on one text column. */}
-                <h3 className="mb-2 px-3 text-xs text-muted-foreground">{group.label}</h3>
-                <div className="space-y-0.5">
-                  {group.items.map((c) => {
-                    const active = c.slug === activeSlug
-                    return (
-                      /**
-                       * Two lines, and the "…" sits ON the row rather than beside it.
-                       *
-                       * A one-line row of bare text said only the name — not when it was last
-                       * worked on, not which one is open — and the menu button shared the
-                       * row's width, so every title truncated 36px early even when nothing
-                       * was hovered. Now the button owns the full row (`pe-10` keeps the text
-                       * clear of the menu) and the second line carries the time, or
-                       * "Answering…" while a reply is still being written.
-                       */
-                      <div key={c.slug} className="group relative">
-                        {active && (
-                          <span
-                            className="absolute inset-y-2 left-0 w-0.5 rounded-full bg-primary"
-                            aria-hidden
-                          />
-                        )}
-                        <button
-                          type="button"
-                          onClick={() => onSelect(c.slug)}
-                          title={c.preview || c.name}
-                          className={cn(
-                            'w-full min-w-0 rounded-xl px-3 py-2 pe-10 text-start transition-colors hover:bg-muted',
-                            active && 'bg-muted',
-                          )}
-                        >
-                          <div className="flex min-w-0 items-center gap-1.5">
-                            {/* The star stays on the row itself, not only in the group header:
-                                once a search filters the list the group is off screen, and
-                                "why is this one first?" needs an answer on the row. */}
-                            {c.pinned && (
-                              <Star className="size-3 shrink-0 fill-amber-400 text-amber-500" />
-                            )}
+            groups.map((group) => {
+              const open = searching || !collapsed.includes(group.label)
+              return (
+                <div key={group.label}>
+                  {/* px-3 = the rows' own padding, so label, row text and the search field
+                      all start on one text column. The whole header is the hit target — a
+                      12px chevron on its own is a miss half the time. */}
+                  <button
+                    type="button"
+                    onClick={() => toggleGroup(group.label)}
+                    aria-expanded={open}
+                    title={open ? `Collapse ${group.label}` : `Expand ${group.label}`}
+                    className="mb-2 flex w-full items-center gap-1.5 rounded-lg px-3 py-0.5 text-xs text-muted-foreground transition-colors hover:text-foreground"
+                  >
+                    <ChevronDown
+                      className={cn('size-3 shrink-0 transition-transform', !open && '-rotate-90')}
+                      aria-hidden
+                    />
+                    <span className="truncate">{group.label}</span>
+                    {/* The count shows only while folded: open, the rows themselves are the
+                        count, and a number beside every header is noise. */}
+                    {!open && (
+                      <span className="tabular-nums opacity-70">{group.items.length}</span>
+                    )}
+                  </button>
+                  <div className={cn('space-y-0.5', !open && 'hidden')}>
+                    {group.items.map((c) => {
+                      const active = c.slug === activeSlug
+                      return (
+                        /**
+                         * Two lines, and the "…" sits ON the row rather than beside it.
+                         *
+                         * A one-line row of bare text said only the name — not when it was last
+                         * worked on, not which one is open — and the menu button shared the
+                         * row's width, so every title truncated 36px early even when nothing
+                         * was hovered. Now the button owns the full row (`pe-10` keeps the text
+                         * clear of the menu) and the second line carries the time, or
+                         * "Answering…" while a reply is still being written.
+                         */
+                        <div key={c.slug} className="group relative">
+                          {active && (
                             <span
-                              className={cn(
-                                'min-w-0 flex-1 truncate text-sm',
-                                active && 'font-medium',
-                              )}
-                            >
-                              {railTitle(c.name)}
-                            </span>
-                          </div>
-                          <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[11px] text-muted-foreground">
-                            {/* Still generating — the answer keeps being written even when
-                                you leave the page, so the rail has to say which one. */}
-                            {c.running ? (
-                              <>
-                                <span className="qc-pulse size-1.5 shrink-0 rounded-full bg-emerald-500" />
-                                <span className="truncate text-emerald-600 dark:text-emerald-400">
-                                  Answering…
-                                </span>
-                              </>
-                            ) : (
-                              <time
-                                dateTime={c.updatedAt}
-                                title={new Date(c.updatedAt).toLocaleString()}
-                                className="tabular-nums"
-                              >
-                                {railTime(c.updatedAt)}
-                              </time>
+                              className="absolute inset-y-2 left-0 w-0.5 rounded-full bg-primary"
+                              aria-hidden
+                            />
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => onSelect(c.slug)}
+                            title={c.preview || c.name}
+                            className={cn(
+                              'w-full min-w-0 rounded-xl px-3 py-2 pe-10 text-start transition-colors hover:bg-muted',
+                              active && 'bg-muted',
                             )}
+                          >
+                            <div className="flex min-w-0 items-center gap-1.5">
+                              {/* The star stays on the row itself, not only in the group header:
+                                  once a search filters the list the group is off screen, and
+                                  "why is this one first?" needs an answer on the row. */}
+                              {c.pinned && (
+                                <Star className="size-3 shrink-0 fill-amber-400 text-amber-500" />
+                              )}
+                              <span
+                                className={cn(
+                                  'min-w-0 flex-1 truncate text-sm',
+                                  active && 'font-medium',
+                                )}
+                              >
+                                {railTitle(c.name)}
+                              </span>
+                            </div>
+                            <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[11px] text-muted-foreground">
+                              {/* Still generating — the answer keeps being written even when
+                                  you leave the page, so the rail has to say which one. */}
+                              {c.running ? (
+                                <>
+                                  <span className="qc-pulse size-1.5 shrink-0 rounded-full bg-emerald-500" />
+                                  <span className="truncate text-emerald-600 dark:text-emerald-400">
+                                    Answering…
+                                  </span>
+                                </>
+                              ) : (
+                                <time
+                                  dateTime={c.updatedAt}
+                                  title={new Date(c.updatedAt).toLocaleString()}
+                                  className="tabular-nums"
+                                >
+                                  {railTime(c.updatedAt)}
+                                </time>
+                              )}
+                            </div>
+                          </button>
+                          <div className="absolute right-0.5 top-1.5">
+                            <RowMenu
+                              pinned={!!c.pinned}
+                              onPin={() => onPin(c.slug, !c.pinned)}
+                              onRename={() => onRename(c.slug, c.name)}
+                              onDelete={() => onDelete(c.slug)}
+                            />
                           </div>
-                        </button>
-                        <div className="absolute right-0.5 top-1.5">
-                          <RowMenu
-                            pinned={!!c.pinned}
-                            onPin={() => onPin(c.slug, !c.pinned)}
-                            onRename={() => onRename(c.slug, c.name)}
-                            onDelete={() => onDelete(c.slug)}
-                          />
                         </div>
-                      </div>
-                    )
-                  })}
+                      )
+                    })}
+                  </div>
                 </div>
-              </div>
-            ))
+              )
+            })
           )}
         </div>
 
@@ -2993,6 +3200,13 @@ const CLAIM_LOOK: Record<
 > = {
   supported: { icon: CircleCheck, tone: 'text-emerald-600 dark:text-emerald-500', label: 'Confirmed' },
   wrong: { icon: TriangleAlert, tone: 'text-destructive', label: 'Contradicted' },
+  // A defect claim whose EXPECTED half rests on nothing this project says. The observation
+  // may well be right — only the jump to "this is a bug" isn't — so it is amber, not red.
+  unsupported: {
+    icon: ShieldAlert,
+    tone: 'text-amber-600 dark:text-amber-500',
+    label: 'Called a bug, but nothing requires it',
+  },
   unverified: { icon: CircleHelp, tone: 'text-muted-foreground', label: 'Not confirmed' },
 }
 
@@ -3001,6 +3215,7 @@ function auditHeadline(audit: ChatAudit): { text: string; tone: string } {
   const wrong = audit.claims.filter((c) => c.status === 'wrong').length
   const ok = audit.claims.filter((c) => c.status === 'supported').length
   const open = audit.claims.filter((c) => c.status === 'unverified').length
+  const loose = audit.claims.filter((c) => c.status === 'unsupported').length
   if (audit.skipped) {
     return { text: `The check did not finish — ${audit.skipped}. Nothing was verified.`, tone: 'border-border/60' }
   }
@@ -3011,9 +3226,18 @@ function auditHeadline(audit: ChatAudit): { text: string; tone: string } {
     }
   }
   if (audit.verdict === 'issues') {
+    // Two different failures share this verdict, and they lead the sentence differently: a
+    // contradiction means the answer is wrong, an unsupported defect means it called
+    // something a bug that nothing in the project asks for. Amber when only the latter.
+    const parts: string[] = []
+    if (wrong) parts.push(`${wrong} claim${wrong === 1 ? '' : 's'} the project contradicts`)
+    if (loose)
+      parts.push(`${loose} "bug${loose === 1 ? '' : 's'}" nothing in the project requires`)
+    if (ok) parts.push(`${ok} confirmed`)
+    if (open) parts.push(`${open} not confirmed`)
     return {
-      text: `${wrong} claim${wrong === 1 ? '' : 's'} the project contradicts${ok ? `, ${ok} confirmed` : ''}${open ? `, ${open} not confirmed` : ''}.`,
-      tone: 'border-destructive/40',
+      text: `${parts.join(', ')}.`,
+      tone: wrong ? 'border-destructive/40' : 'border-amber-500/40',
     }
   }
   if (audit.verdict === 'clean') {
@@ -3115,10 +3339,9 @@ function useAnswerAudit(projectId?: string, slug?: string, index?: number) {
         return
       }
       const wrong = r.audit.claims.filter((c) => c.status === 'wrong').length
-      if (wrong) {
-        toast.warning(`${wrong} claim${wrong === 1 ? '' : 's'} the project contradicts`, {
-          description: 'Opened below the answer.',
-        })
+      const loose = r.audit.claims.filter((c) => c.status === 'unsupported').length
+      if (wrong || loose) {
+        toast.warning(auditHeadline(r.audit).text, { description: 'Opened below the answer.' })
       } else if (r.audit.verdict === 'clean') {
         toast.success('Checked — nothing contradicted', {
           description: `${r.audit.claims.length} claim(s) re-read against the files.`,
@@ -5080,11 +5303,18 @@ function ChatWorkspace({
                 // text-transparent: the glyphs come from ComposerPaint underneath. The
                 // caret and a translucent selection are what's left visible here, so the
                 // painted text still reads through a selection.
-                className="relative max-h-48 min-h-[52px] w-full resize-none border-none bg-transparent p-4 text-sm text-transparent caret-foreground shadow-none outline-none selection:bg-primary/25 placeholder:text-muted-foreground"
+                // Opens at ~6 lines (min-h-38 = 152px) and GROWS with the content
+                // (`field-sizing-content`) up to ~19 lines, then scrolls. A one-line box
+                // was the complaint: the questions asked here are paragraphs with a path
+                // and a ticket id in them. ComposerPaint underneath must keep identical
+                // padding and font metrics or the caret drifts off the glyphs.
+                className="relative max-h-[26rem] min-h-38 w-full resize-none border-none bg-transparent p-4 text-sm text-transparent caret-foreground shadow-none outline-none field-sizing-content selection:bg-primary/25 placeholder:text-muted-foreground"
               />
               </div>
 
-              <div className="flex items-center justify-between gap-2 p-3">
+              {/* px-3 py-2, not p-3: every pixel of chrome here is a pixel the input box
+                  above doesn't get. Same reason the buttons are size-8. */}
+              <div className="flex items-center justify-between gap-2 px-3 py-2">
                 <div className="flex items-center gap-2">
                   {/* Lives outside the menu: the menu unmounts on click, and an <input> that
                       unmounts in the same tick never opens its picker. */}
@@ -5116,7 +5346,7 @@ function ChatWorkspace({
                   <Select value={model} onValueChange={setModel}>
                     <SelectTrigger
                       size="sm"
-                      className="w-fit focus:ring-0!"
+                      className={COMPOSER_PILL}
                       aria-label="Model"
                     >
                       <Sparkles className="size-4 text-muted-foreground" />
@@ -5151,7 +5381,7 @@ function ChatWorkspace({
                   <Select value={effort} onValueChange={(v) => setEffort(v as ChatEffort)}>
                     <SelectTrigger
                       size="sm"
-                      className="w-fit focus:ring-0!"
+                      className={COMPOSER_PILL}
                       aria-label="Reasoning effort"
                     >
                       <Gauge className="size-4 text-muted-foreground" />
@@ -5197,7 +5427,7 @@ function ChatWorkspace({
                           aria-pressed={isTemporary}
                           aria-label={isTemporary ? 'Temporary chat' : 'Saved to history'}
                           className={cn(
-                            'size-9 rounded-full',
+                            'size-8 rounded-full',
                             isTemporary &&
                               'border-violet-500/40 bg-violet-500/15 text-violet-600 hover:bg-violet-500/25 disabled:opacity-100 dark:text-violet-400',
                           )}
@@ -5229,7 +5459,7 @@ function ChatWorkspace({
                           variant="destructive"
                           onClick={() => stop()}
                           aria-label="Stop generating"
-                          className="size-9 rounded-full"
+                          className="size-8 rounded-full"
                         >
                           <Square className="size-4" />
                         </Button>
@@ -5252,7 +5482,7 @@ function ChatWorkspace({
                         queued.length >= MAX_QUEUED
                       }
                       aria-label={streaming ? 'Send — waits for the current reply' : 'Send'}
-                      className="size-9 rounded-full"
+                      className="size-8 rounded-full"
                     >
                       <ArrowUp className="size-4" />
                     </Button>

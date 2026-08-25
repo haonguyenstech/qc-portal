@@ -21,6 +21,35 @@ path-guarded filenames — mirrors `routes/templates.ts`, no DB). Routes: `GET /
 list), `GET /:name` (full md for preview), `PUT /:name` (save converted md), `DELETE /:name`, `POST /open`.
 Scanned/image-only PDFs yield no text and surface a clear error (no OCR).
 
+**Images are the one upload that goes to the server** (`server/src/knowledgeImages.ts`, `POST
+/api/knowledge/from-image`). Most projects document their logic as a **picture** — a flow diagram,
+an ERD, a state machine, an annotated screen — and a picture has no text to extract, so the browser
+conversion above cannot help: the model has to SEE it. The image is written to
+`testing/knowledge/assets/<slug>-<stamp>.<ext>` **first** (Read takes a path, not bytes), then one
+`sonnet` pass with `--allowedTools Read` and `--strict-mcp-config` writes the Markdown doc — every
+label, arrow, branch, state, entity and rule as written, an explicit note where the image is
+unreadable, and a closing "What this means for testing" section. Stamped `ai · image · <date>`, so
+it carries the same reviewable **AI** badge as auto-capture.
+
+- **The image is kept, not consumed.** The doc ends with `![…](assets/<file>)`. A diagram flattened
+  into prose can no longer be checked against the diagram — and the same relative path works for
+  both readers: the preview resolves it through `GET /api/knowledge/assets/:file` (strict name
+  pattern, resolved inside the assets folder), and a QC run, whose cwd is the project root, can
+  `Read` the picture from the doc's own folder.
+- **A blank or irrelevant image must not become knowledge.** `projectContext.ts` packs this folder
+  into every later prompt, so "the uploaded file renders as a blank white image" would be read as a
+  project fact from then on — measured: without a refusal protocol the model politely wrote a
+  692-character document saying there was nothing to document, and it was saved. The prompt now has
+  the model answer `NOT_USABLE: <what it is>` instead, which the route turns into a 422 (a
+  suspiciously short answer is rejected under it as a backstop). **Every path that leaves without a
+  written doc deletes the image it saved**, so a failed upload leaves nothing in the engineer's repo.
+- **Deleting a doc deletes its images** (`deleteDocAssets`, scoped to `assets/`), and re-uploading
+  under an existing name drops the replaced doc's images — otherwise each removed diagram would
+  leave its picture behind with nothing pointing at it.
+- The preview strips the provenance marker before rendering: `react-markdown` runs without
+  `rehype-raw`, so the `<!-- qc-portal:source: … -->` comment was printing as literal text across the
+  top of every AI-captured doc. The `source` field beside it already carries that information.
+
 **Memory** — small, **in-portal-authored** markdown notes, one durable fact each (decisions, gotchas,
 conventions). Unlike Knowledge (uploaded + converted docs), notes are written directly in the portal
 (name + one-line description + body). Stored by `routes/memory.ts` under `<root>/testing/memory/<name>.md`

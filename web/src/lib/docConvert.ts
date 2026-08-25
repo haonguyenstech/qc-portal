@@ -10,6 +10,40 @@
 
 export const KNOWLEDGE_ACCEPT = '.md,.markdown,.txt,.pdf,.docx,.csv,.xlsx,.xls'
 
+/**
+ * Images the Knowledge tab accepts. They do NOT go through `convertFileToMarkdown` —
+ * there is no text in a diagram to extract, so the file is sent to the server and a
+ * vision pass writes the doc (`POST /api/knowledge/from-image`). Kept next to the
+ * document list so both accept strings are read together.
+ */
+export const KNOWLEDGE_IMAGE_ACCEPT = '.png,.jpg,.jpeg,.webp,.gif'
+
+const IMAGE_MIME: Record<string, string> = {
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  webp: 'image/webp',
+  gif: 'image/gif',
+}
+
+/** The mime the server accepts for this file, or '' when it isn't a supported image. */
+export function imageMimeOf(file: File): string {
+  const ext = file.name.toLowerCase().match(/\.([^./\\]+)$/)?.[1] ?? ''
+  return IMAGE_MIME[ext] ?? (Object.values(IMAGE_MIME).includes(file.type) ? file.type : '')
+}
+
+/** Read a file as base64 with no `data:` prefix — what the image upload route takes. */
+export async function fileToBase64(file: File): Promise<string> {
+  const buf = new Uint8Array(await file.arrayBuffer())
+  let binary = ''
+  // Chunked: String.fromCharCode(...huge) blows the argument limit on a multi-MB image.
+  const CHUNK = 0x8000
+  for (let i = 0; i < buf.length; i += CHUNK) {
+    binary += String.fromCharCode(...buf.subarray(i, i + CHUNK))
+  }
+  return btoa(binary)
+}
+
 /** Max input file size we'll try to convert (raw bytes, before extraction). */
 export const MAX_FILE_BYTES = 25 * 1024 * 1024 // 25 MB
 

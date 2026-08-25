@@ -1101,7 +1101,7 @@ function AppShell() {
         {/* Brand + collapse toggle */}
         {collapsed ? (
           <div className="flex shrink-0 flex-col items-center gap-2 px-3 py-5">
-            <NavLink to="/qc-run" end aria-label="QC Portal home" className="group">
+            <NavLink to="/overview" aria-label="QC Portal home — project overview" className="group">
               <span className="flex h-10 w-10 items-center justify-center rounded-2xl bg-gradient-to-br from-primary to-primary/75 text-primary-foreground shadow-sm ring-1 ring-inset ring-white/15 transition-all duration-200 group-hover:-translate-y-0.5 group-hover:shadow-md group-active:scale-95">
                 <AppLogo className="h-6 w-6" />
               </span>
@@ -1111,9 +1111,9 @@ function AppShell() {
         ) : (
           <div className="flex shrink-0 items-center gap-2.5 py-5 pl-4 pr-2">
             <NavLink
-              to="/qc-run"
+              to="/overview"
               end
-              aria-label="QC Portal home"
+              aria-label="QC Portal home — project overview"
               className="group flex min-w-0 flex-1 items-center gap-2.5"
             >
               <span className="relative flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br from-primary to-primary/75 text-primary-foreground shadow-sm ring-1 ring-inset ring-white/15 transition-all duration-200 group-hover:-translate-y-0.5 group-hover:shadow-md">

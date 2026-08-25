@@ -1,6 +1,6 @@
 ---
 name: qc-testing
-description: Deep QC / acceptance testing of a feature against its ClickUp ticket (and its generated manual test cases) on whatever app URL the QC provides in chat. Use when asked to "test", "QC", "verify ACs", "check the page", compare UI vs design, validate a ticket, or verify a reported bug. Drives the app with Playwright as a user would, collects evidence (screenshots + a text content inventory of every label / placeholder / button / heading / option), checks each Acceptance Criterion AND the full UI/content checklist, fans the analysis out across one subagent per AC, and writes a table Pass/Fail report plus a separate issues log (with a screenshot for every bug) into a per-ticket folder under testing/test-result/.
+description: Deep QC / acceptance testing of a feature against its ClickUp ticket (and its generated manual test cases) on whatever app URL the QC provides in chat. Use when asked to "test", "QC", "verify ACs", "check the page", compare UI vs design, validate a ticket, or verify a reported bug. Drives the app as a user would — Playwright on the desktop web, Maestro on a mobile device — collects evidence (screenshots + a text content inventory of every label / placeholder / button / heading / option), checks each Acceptance Criterion AND the full UI/content checklist, fans the analysis out across one subagent per AC, and writes a table Pass/Fail report plus a separate issues log (with a screenshot for every bug) into a per-ticket folder under testing/test-result/.
 ---
 
 # Deep QC Acceptance Testing
@@ -32,6 +32,9 @@ steps. When unsure, prefer collecting more evidence over guessing.
 >   heart of "deep" testing. Read it during Phase 2 (build the scenario matrix) and Phase 4.
 > - `playwright-recipes.md` — exact, copy-paste Playwright tool sequences with the **real** tool
 >   parameter names. Read it before your first browser call.
+> - `maestro-recipes.md` — the same thing for a **mobile device** (Maestro MCP): the real tool
+>   names, how to get evidence onto disk, and what a device can't tell you. Read it **instead of**
+>   `playwright-recipes.md` when the run's target is a device.
 > - `subagents.md` — how to fan out one analysis subagent per AC, with prompt templates.
 > - `templates.md` — the report.md + issues.md formats. The report's first three sections are a
 >   fixed contract — the Portal parses them.
@@ -171,6 +174,10 @@ needs and whether that data is reachable on the QC-provided environment:
 - **Reachable** — find it / create the minimal data to reach it (non-destructively), then test.
 - **Not present and not creatable without a mutation** → mark the row **Blocked — data not
   available** and say what state was needed. Do **not** infer a Pass from a different record.
+  But look before you settle for it: search, filter, sort and page the list for a record in that
+  state — "none exists" is only honest after you actually searched, and the report says which
+  search you ran. And if the brief authorized test-data creation, this row is **not** Blocked:
+  create the data and test it.
 - If a whole AC depends on data only the QC can seed, ask the QC for it (one short question)
   before reporting the AC Blocked.
 A scenario tested against the wrong data state is worse than an honest Blocked.
@@ -248,8 +255,17 @@ longer looks like that — a false Pass with a real screenshot attached.
 
 ## Phase 4 — Collect evidence (main agent + browser only)
 
-Follow `playwright-recipes.md` exactly — it carries the real tool parameter names, and a wrong
-one is a wasted turn. In short:
+**Pick your recipe file by target, and read it before the first call.** A desktop browser run
+follows `playwright-recipes.md`; a run driving a **mobile device** (the web app on a device, or a
+native app) follows `maestro-recipes.md` and uses Maestro's tools instead of every `browser_*`
+tool named below. The two differ in one way that decides whether the run has evidence at all: on
+the web, one tool call writes a screenshot or an inventory straight to disk; on a device you take
+the screenshot through a `run` command with a `path`, and you `Write` the inventory from
+`inspect_screen` yourself. Everything else in this phase — the Capture Plan, both artifacts per
+state, reuse over re-shoot — is the same.
+
+Follow the recipe file exactly — it carries the real tool parameter names, and a wrong
+one is a wasted turn. In short (web wording; the Maestro equivalents are in `maestro-recipes.md`):
 
 1. **Log in once** (recipe R1) using the URLs/accounts from `testing/environments.md`, else the
    login section of the project `CLAUDE.md`. Never copy credentials or an OTP into any saved file
@@ -284,12 +300,36 @@ one is a wasted turn. In short:
    action (submit signature, delete, complete/close, send) unless the user explicitly asked.
    Drive up to the point the button *enables*, screenshot that, then stop. Mark such rows
    **⚠️ Passed-with-issue** and say exactly what was not committed.
+   **Unless the run's brief authorizes test-data creation** (the Portal's "Allow test-data
+   creation" — the brief then says so in a TEST DATA block). Then *create* what a case needs and
+   verify the result: those cases are tested, not Blocked. Still never delete, void, approve,
+   reject, sign or edit a record you did not create in this run, never act in bulk, and list what
+   you created in the report.
 7. 🐞 **Every suspected bug gets a screenshot immediately**, saved as `ISSUE-<area>.png`. A bug
    with no screenshot does not count as logged.
 8. Check the console for errors on the main flows (recipe R10).
 
 Do not analyze deeply yet — in this phase you are a camera + a transcriber. Collect complete
 evidence for every matrix row before moving on.
+
+### Large suites (more than ~40 cases): capture in WAVES, don't capture everything first
+
+Phases 4 → 5 → 6 as written are one pass over the whole suite. That works up to a few dozen
+cases. Past that, a single capture pass runs out of budget somewhere in the middle, and every
+area behind that point reaches Phase 5 with nothing on disk — which is how a report ends up
+saying "◻️ Not Tested — no evidence captured" for a third of the suite. Those cases weren't
+judged; they were never reached.
+
+So for a big suite, group the cases by **feature area** (the grouping is usually already in the
+test-case file's suite column) and run the loop per area: capture that area's states → fan out its
+subagents → record the verdicts → next area. Announce the plan first ("8 areas, No-01–No-120") and
+one line per finished wave. **Cover every area once before going back for depth anywhere** — a
+shallow pass over all eight beats a thorough pass over the first three. If the budget clearly
+won't reach the last areas, say so *when you notice*, and name them, so the QC engineer can re-run
+exactly those instead of finding the hole in the report.
+
+The order of work inside a wave, and every rule about what to capture, is unchanged — you're
+slicing the same phases by area instead of by phase.
 
 ## Phase 5 — Analyze (fan out one subagent per AC)
 
@@ -385,7 +425,9 @@ Using the formats in `templates.md`:
   disabled/covered/invisible checks and turns a real bug into a false Pass (recipe R6).
 - **Reproducible.** Every issue has numbered steps to reproduce.
 - **Don't mutate shared data** unless told; stop at the enable-state and mark
-  Passed-with-issue.
+  Passed-with-issue. When the brief *does* tell you (a TEST DATA block authorizing creation),
+  create only what your cases need, never touch a record you didn't create, and list what you
+  created in the report.
 - **One browser, one driver.** Only the main agent uses Playwright. Subagents analyze files.
 
 ## Tooling quick reference
@@ -398,5 +440,11 @@ Using the formats in `templates.md`:
   `target`), `browser_press_key`, `browser_take_screenshot` (`filename` = an absolute path inside
   the run's `screenshots/`), `browser_console_messages`. Exact usage in
   `playwright-recipes.md` — check the parameter table there before your first call.
+- **Mobile device (Maestro MCP):** `list_devices` (gives the `device_id` every other call
+  needs), `inspect_screen` (the view hierarchy — your content inventory), `run` (`device_id` +
+  inline `yaml`: `launchApp` / `openLink` / `tapOn` / `inputText` / `scrollUntilVisible` /
+  `extendedWaitUntil` / `assertVisible` / `takeScreenshot: { path }`), `cheat_sheet` for any
+  command not covered. Exact usage in `maestro-recipes.md` — and note that the `take_screenshot`
+  *tool* saves nothing to disk; the `takeScreenshot` *command* with a `path` is what does.
 - **Subagents:** Agent tool, `subagent_type: general-purpose`, one per AC (or per AC-group),
   launched in parallel.
