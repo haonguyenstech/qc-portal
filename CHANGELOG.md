@@ -3,6 +3,80 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.11.22 — 2026-08-26
+
+**A Performance page: how slow, why slow, and does it hold under load — with the client report to hand over**
+
+### Added
+
+- **Performance (`/performance`) — two tools, because "is this slow?" is two questions.**
+  **Page load** drives a real Chrome and reports what the user actually waits for (TTFB, first
+  paint, DOM ready, load, LCP) plus every request the page made — and, most useful of all,
+  **which API the page calls more than once per load**, with the milliseconds those repeat calls
+  cost. That is the answer to "the orders screen feels slow" far more often than a slow endpoint
+  is. **API load test** runs `k6` and answers the other half: do those response times survive N
+  users at once. Neither tab is a lesser version of the other, so both are here.
+- **A verdict, not just a table.** Every run is graded Healthy / Needs attention / Poor against
+  the public Core Web Vitals bands (LCP 2.5s/4s, FCP 1.8s/3s, TTFB 0.8s/1.8s) — numbers you can
+  quote in a ticket without arguing about them — or, for a load test, against **your own**
+  threshold, because k6 already passed or failed on it and a second opinion beside k6's would
+  just be confusing. Findings name what to chase, not only what happened.
+- **The report leaves the page.** Copy as Markdown for a ticket, download the raw JSON, or export
+  **PDF** and **Word**. Charts, tables and the verdict all travel; the PDF and the Word file are
+  built from the same report the screen shows, so they cannot disagree with it. An optional
+  running footer goes on every page.
+- **Response time, throughput, errors and virtual users ACROSS the run.** k6's end-of-test
+  summary is a single set of aggregates, so it cannot tell "slow" from "getting slower" — the
+  question a load test exists to answer. The run now samples itself into slices, and the report
+  draws each one. A **Stability over the run** verdict compares the start of the hold with its
+  end, so a system that degrades under sustained load is reported as degrading, not merely slow.
+- **"Where the time goes."** An average request, split into waiting on the server, receiving the
+  response, sending it, connection setup, and time the load generator spent queueing against
+  itself. Which phase dominates decides what to chase — and the last one means the numbers
+  understate the system rather than describing it.
+- **More of what k6 measured:** exact failed-request counts, peak throughput alongside the
+  average (each under its own name), iterations and how long one took, peak virtual users,
+  dropped iterations, and per-endpoint requests/second, failures, p90 and p99.
+- **Fill a load-test endpoint from somewhere you already have it** — **Paste cURL** (straight
+  from the browser's network tab) or **From API Testing**, which picks any number of saved
+  requests at once. `{{variables}}` survive the trip: they stay as `{{token}}` in the form and
+  are resolved on the server when the run starts, so a bearer token never reaches the browser
+  or its storage.
+- **Page behind a login?** A sign-in window opens a real Chrome on the audit's own profile;
+  closing it is what saves the session. An audit that gets redirected away from the URL you
+  asked for **refuses to grade the page it landed on** instead of quietly reporting the login
+  screen's numbers.
+- **The NFR report — the deliverable, not the readout.** The run report answers "how did that
+  run go?". This one answers what a client asks at the end of a phase: *did the system meet the
+  non-functional requirements we agreed?* Requirements are judged across one **or more** runs and
+  reported PASS / FAILED / MIXED / PERFORMANCE RISK / PENDING, in the section order of a real
+  signed-off client report, exportable to PDF and Word.
+  - **A requirement nobody tested is PENDING** — never Pass, never Failed — and the final
+    assessment names which ones, so an untested requirement cannot pass by silence.
+  - Its **data limitations ship with it**: throughput is an average over the run, percentiles are
+    per request rather than per user journey, and a 2xx is a timing result and not proof the
+    response was correct.
+- **The NFR report fills its own cover in.** Eight of its nine fields — system, phase, environment,
+  load origin, tester, test date, systems in scope, objective — are worked out from the selected
+  runs, the project and this machine, and the requirements themselves are read from the thresholds
+  the runs were configured with (*"fail if p95 over 2000ms"* **is** an acceptance criterion; typing
+  it twice only lets the two copies disagree). Nothing is written into your fields: a suggestion is
+  a fallback, so what you type always wins and clearing a field returns to it.
+
+### Changed
+
+- **API Testing — Duplicate a saved request** from its row, next to Move / Rename / Delete. An
+  imported cURL is usually 90% of the *next* request, and until now the only ways to get that
+  second one were to import it again or to edit the first and lose it. The copy carries the whole
+  definition and keeps the original's module.
+- **API Testing — one saved request, different data and different checks in each flow.** A flow
+  step (or a login hook) can now override the body, headers, query and assertions of the request
+  it references, so `POST /auth/login` no longer has to exist twice — once with the right
+  credentials and once with the wrong ones — as two copies that drift apart the moment the
+  endpoint changes. Nothing about an override is invisible: the step is marked, the drawer says
+  what differs, and the stored report records it, so two runs of "the same" request that disagree
+  are explainable later.
+
 ## 0.11.21 — 2026-08-25
 
 **The API assistant tells you how long it has been thinking, and can be stopped**

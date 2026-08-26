@@ -20,7 +20,22 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
   })
   if (!res.ok) {
     const text = await res.text().catch(() => '')
-    throw new Error(text || `${res.status} ${res.statusText}`)
+    // Unwrap the `{ "error": "…" }` envelope every route answers a failure with.
+    // Without this the raw JSON reaches the `toast.error` description at ~90 call
+    // sites, so a message written FOR a QC engineer — "Unknown variable(s):
+    // {{token}} — define them in…" — is read as `{"error":"Unknown variable(s)…"}`.
+    // Anything that is not that envelope is passed through untouched.
+    let message = text
+    try {
+      const parsed: unknown = JSON.parse(text)
+      const inner = (parsed as { error?: unknown } | null)?.error
+      if (parsed && typeof parsed === 'object' && typeof inner === 'string' && inner.trim()) {
+        message = inner
+      }
+    } catch {
+      /* not JSON — the body IS the message */
+    }
+    throw new Error(message || `${res.status} ${res.statusText}`)
   }
   if (res.status === 204) return undefined as T
   const ct = res.headers.get('content-type') ?? ''
@@ -2631,12 +2646,32 @@ export function deleteApiAccount(projectId: string, label: string): Promise<{ ok
  * the whole flow. Same shape as a step and referenced by name for the same reason — the
  * setup call is a request the collection already holds.
  */
+/**
+ * What one step (or hook) of ONE flow sends and expects, instead of what its saved
+ * request says — so the same `POST /auth/login` can be the happy path in one flow and
+ * the 401 in another without being duplicated in the collection.
+ *
+ * `bodyMode: ''` = keep the request's body (`'none'` = send no body, which is a
+ * different thing). Headers/query are merged over the request's by key. `assertionMode`
+ * decides what grades the step: the request's checks, only these, or both.
+ */
+export interface ApiFlowOverride {
+  bodyMode: '' | ApiBodyMode
+  body: string
+  headers: ApiKV[]
+  query: ApiKV[]
+  assertionMode: 'inherit' | 'replace' | 'append'
+  assertions: ApiAssertion[]
+}
+
 export interface ApiFlowHook {
   id: string
   requestName: string
   enabled: boolean
   /** Keep going when the hook fails instead of leaving its step untested. */
   continueOnFail: boolean
+  /** This flow's own data / checks for this call. `null` (or absent) = the request as saved. */
+  override?: ApiFlowOverride | null
 }
 
 export interface ApiFlowStep {
@@ -2649,6 +2684,8 @@ export interface ApiFlowStep {
   before: ApiFlowHook[]
   /** Requests run right after it, whether it passed, failed, or was never sent. */
   after: ApiFlowHook[]
+  /** This flow's own data / checks for this step. `null` (or absent) = the request as saved. */
+  override?: ApiFlowOverride | null
 }
 
 export interface ApiFlow {
@@ -2725,6 +2762,8 @@ export interface ApiFlowRunStep {
   checks: { passed: number; total: number }
   detail: string
   captured: string[]
+  /** This row ran with the flow's own body/checks, not the saved request's as-is. */
+  overridden?: boolean
 }
 
 export interface ApiFlowRun {
@@ -4007,4 +4046,373 @@ export function cancelQueuedChat(
       `?projectId=${encodeURIComponent(projectId)}`,
     { method: 'DELETE' },
   )
+}
+
+// ---- Performance testing (k6 load tests + browser page-load audits) ----
+
+/** avg/min/med/max/p90/p95/p99 for one k6 trend metric, in ms (or bytes). */
+export interface TrendStats {
+  avg: number
+  min: number
+  med: number
+  max: number
+  p90: number
+  p95: number
+  p99: number
+}
+
+/** Per-endpoint results from a k6 run — "how long does THIS call take?". */
+export interface LoadEndpointResult {
+  name: string
+  method: string
+  url: string
+  calls: number
+  okRate: number
+  duration: TrendStats
+  /** Time to first byte — the server's own think time. */
+  waiting: TrendStats
+  avgBytes: number
+}
+
+/**
+ * Where a request's time went, averaged over the run. `http_req_duration` is the
+ * SUM of these, and which phase dominates decides what to chase: `waiting` is the
+ * server thinking, `connecting`/`tlsHandshaking` is connection setup, `receiving`
+ * is payload size, `blocked` is the load generator queueing against itself.
+ */
+export interface RequestPhases {
+  blocked: TrendStats
+  connecting: TrendStats
+  tlsHandshaking: TrendStats
+  sending: TrendStats
+  waiting: TrendStats
+  receiving: TrendStats
+}
+
+/**
+ * One slice of the run's timeline.
+ *
+ * k6's summary is a single set of aggregates for the whole run, so the script
+ * buckets its own samples into fixed custom metrics — that is the only reason
+ * "did it degrade as load arrived?" can be answered at all. A slice with no
+ * requests is absent, not zero.
+ */
+export interface LoadTimeBucket {
+  atSeconds: number
+  requests: number
+  rps: number
+  failRate: number
+  avgMs: number
+  p95Ms: number
+  maxMs: number
+  vus: number
+}
+
+export interface LoadTestResult {
+  completed: boolean
+  exitCode: number
+  thresholdsPassed: boolean
+  durationMs: number
+  requests: number
+  requestsPerSecond: number
+  failRate: number
+  /** Whole requests that failed — counted by k6, not derived from the rate. */
+  failedRequests: number
+  checksPassed: number
+  checksFailed: number
+  overall: TrendStats
+  waiting: TrendStats
+  phases: RequestPhases
+  /** One full pass through every endpoint = one iteration. */
+  iterations: number
+  iterationDuration: TrendStats
+  /** Iterations k6 could not start — the generator, not the system, gave out. */
+  droppedIterations: number
+  vusMax: number
+  dataReceived: number
+  dataSent: number
+  bucketSeconds: number
+  buckets: LoadTimeBucket[]
+  endpoints: LoadEndpointResult[]
+}
+
+/** Browser timings for a single navigation, in ms from navigation start. */
+export interface PageLoadMetrics {
+  ttfbMs: number
+  domContentLoadedMs: number
+  loadMs: number
+  fcpMs: number
+  lcpMs: number
+  transferBytes: number
+  requestCount: number
+}
+
+export interface AuditRequest {
+  method: string
+  url: string
+  resourceType: string
+  status: number | null
+  count: number
+  /** count / runs — 2 means "called twice on every page load". */
+  perLoad: number
+  avgMs: number
+  maxMs: number
+  avgWaitMs: number
+  avgBytes: number
+  api: boolean
+}
+
+/** An API endpoint the page called more than once per load. */
+export interface DuplicateEndpoint {
+  method: string
+  endpoint: string
+  count: number
+  perLoad: number
+  urls: string[]
+  avgMs: number
+  totalMsPerLoad: number
+}
+
+export interface PageAuditResult {
+  url: string
+  runs: number
+  /** Where the browser actually ended up — a login redirect shows up here. */
+  finalUrl: string
+  /** True when the browser ended on a different path than the requested URL. */
+  redirected: boolean
+  perRun: PageLoadMetrics[]
+  average: PageLoadMetrics
+  requests: AuditRequest[]
+  duplicates: DuplicateEndpoint[]
+  totals: {
+    requestCount: number
+    apiCount: number
+    apiEndpointCount: number
+    transferBytes: number
+    slowestApiMs: number
+  }
+}
+
+export type PerfJobKind = 'load' | 'page'
+export type PerfJobStatus = 'running' | 'done' | 'error' | 'cancelled'
+
+export interface PerfLogLine {
+  time: string
+  level: 'info' | 'success' | 'error'
+  text: string
+}
+
+/** The echoed-back load config. Headers and bodies are stripped server-side. */
+export interface PublicLoadConfig {
+  name: string
+  vus: number
+  duration: string
+  rampUp: string
+  thresholdP95Ms: number
+  thresholdErrorRate: number
+  endpoints: { name: string; method: string; url: string }[]
+}
+
+export interface PublicPageConfig {
+  url: string
+  runs: number
+  settleMs: number
+  headed: boolean
+  useProfile: boolean
+}
+
+export interface PerfJob {
+  id: string
+  projectId: string
+  kind: PerfJobKind
+  label: string
+  status: PerfJobStatus
+  progress: string
+  logs: PerfLogLine[]
+  loadConfig: PublicLoadConfig | null
+  pageConfig: PublicPageConfig | null
+  loadResult: LoadTestResult | null
+  pageResult: PageAuditResult | null
+  error: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+/** One endpoint in a load test, as the form holds it (headers included). */
+export interface LoadEndpointInput {
+  name: string
+  method: string
+  url: string
+  headers: Record<string, string>
+  body: string
+}
+
+export interface LoadTestInput {
+  name: string
+  vus: number
+  duration: string
+  rampUp: string
+  sleepSeconds: number
+  thresholdP95Ms: number
+  thresholdErrorRate: number
+  insecureSkipTLSVerify: boolean
+  endpoints: LoadEndpointInput[]
+}
+
+export interface PerfAvailability {
+  k6: { ok: boolean; version?: string; error?: string; installHint: string }
+  browser: { ok: boolean; error?: string }
+}
+
+/** What the NFR report can fill in without asking — see `suggestMeta`. */
+export interface NfrReportContext {
+  /** This machine's git identity, or '' when git is absent or unconfigured. */
+  tester: string
+  host: string
+  platform: string
+}
+
+/**
+ * Machine + identity facts for the NFR report's cover.
+ *
+ * Answered by the local server about the local machine, for a report the same
+ * person downloads — nothing here is sent anywhere.
+ */
+export function getReportContext(projectId: string): Promise<NfrReportContext> {
+  return request(`/api/performance/report-context?projectId=${encodeURIComponent(projectId)}`)
+}
+
+/** Is k6 installed, and can a browser audit run, on this machine? */
+export function getPerfAvailable(): Promise<PerfAvailability> {
+  return request('/api/performance/available')
+}
+
+/** The k6 script this config generates — shown so it can be run from a terminal too. */
+export function previewK6Script(input: LoadTestInput): Promise<{ script: string }> {
+  return request('/api/performance/script', { method: 'POST', body: JSON.stringify(input) })
+}
+
+/** Start a k6 load test in the background. */
+export function startLoadTest(
+  projectId: string,
+  input: LoadTestInput,
+): Promise<{ jobId: string; job: PerfJob }> {
+  return request(`/api/performance/load-tests?projectId=${encodeURIComponent(projectId)}`, {
+    method: 'POST',
+    body: JSON.stringify(input),
+  })
+}
+
+/** Start a browser page-load audit in the background. */
+export function startPageAudit(
+  projectId: string,
+  input: { url: string; runs: number; settleMs: number; headed: boolean; useProfile: boolean },
+): Promise<{ jobId: string; job: PerfJob }> {
+  return request(`/api/performance/page-audits?projectId=${encodeURIComponent(projectId)}`, {
+    method: 'POST',
+    body: JSON.stringify(input),
+  })
+}
+
+/** Poll one performance job's log + result. */
+export function getPerfJob(id: string): Promise<{ job: PerfJob }> {
+  return request(`/api/performance/jobs/${encodeURIComponent(id)}`)
+}
+
+/** This project's performance jobs, newest first. */
+export function listPerfJobs(projectId: string): Promise<{ jobs: PerfJob[] }> {
+  return request(`/api/performance/jobs?projectId=${encodeURIComponent(projectId)}`)
+}
+
+/** Stop a running performance job. */
+/**
+ * Convert a report to PDF or Word. The HTML is built in the browser (that is where
+ * the verdict and the charts live) and the server only converts it — printing
+ * needs a real Chrome and .docx needs a zip writer, neither of which a page has.
+ * Returns the file itself, so the caller can hand it straight to a download.
+ */
+export async function exportReportFile(
+  format: 'pdf' | 'docx',
+  html: string,
+  fileName: string,
+  /** Running footer, printed on EVERY page. One line of plain text. */
+  footer = '',
+): Promise<Blob> {
+  const res = await fetch(`/api/performance/report/${format}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ html, fileName, footer }),
+  })
+  if (!res.ok) {
+    // The failure path answers with JSON even though the success path is binary.
+    const text = await res.text().catch(() => '')
+    let message = text || `${res.status} ${res.statusText}`
+    try {
+      const parsed = JSON.parse(text) as { error?: string }
+      if (parsed.error) message = parsed.error
+    } catch {
+      /* not JSON — show what came back */
+    }
+    throw new Error(message)
+  }
+  return res.blob()
+}
+
+/**
+ * The sign-in window: a real Chrome on the SAME profile the audit uses. Needed
+ * because the token lives in localStorage, which is per origin and per profile —
+ * so being logged in anywhere else (your own Chrome, another origin) does nothing.
+ */
+export interface AuthSessionStatus {
+  active: boolean
+  url: string | null
+  startedAt: string | null
+  currentUrl: string | null
+  origin: string | null
+}
+
+export function getAuthSession(): Promise<{ session: AuthSessionStatus }> {
+  return request('/api/performance/auth-session')
+}
+
+export function openAuthSession(url: string): Promise<{ session: AuthSessionStatus }> {
+  return request('/api/performance/auth-session', {
+    method: 'POST',
+    body: JSON.stringify({ url }),
+  })
+}
+
+/** Closing is what saves the session and frees the profile for the audit. */
+export function closeAuthSession(): Promise<{
+  closed: boolean
+  finalUrl: string | null
+  origin: string | null
+  session: AuthSessionStatus
+}> {
+  return request('/api/performance/auth-session/close', { method: 'POST' })
+}
+
+/**
+ * Forget the saved login for one origin inside the audit's profile. Needed before
+ * a real "sign in again": with the stale token still there the app skips its own
+ * login screen, so nothing gets refreshed.
+ */
+export function clearAuthSession(url: string): Promise<{
+  origin: string
+  cookieDomains: number
+  storageCleared: boolean
+}> {
+  return request('/api/performance/auth-session/clear', {
+    method: 'POST',
+    body: JSON.stringify({ url }),
+  })
+}
+
+export function cancelPerfJob(id: string): Promise<{ job: PerfJob }> {
+  return request(`/api/performance/jobs/${encodeURIComponent(id)}/cancel`, { method: 'POST' })
+}
+
+/** Drop a run from Recent runs for good — cancels it first if it is still going. */
+export function deletePerfJob(id: string): Promise<{ deleted: boolean }> {
+  return request(`/api/performance/jobs/${encodeURIComponent(id)}`, { method: 'DELETE' })
 }

@@ -15,6 +15,7 @@ import {
   FileCog,
   FileText,
   FolderGit2,
+  Gauge,
   History,
   Loader2,
   Layout,
@@ -60,6 +61,7 @@ import CrawlJobWatcher from '@/components/CrawlJobWatcher'
 import VerifyJobWatcher from '@/components/VerifyJobWatcher'
 import SourceJobWatcher from '@/components/SourceJobWatcher'
 import DatabaseJobWatcher from '@/components/DatabaseJobWatcher'
+import PerfJobWatcher from '@/components/PerfJobWatcher'
 import RunPage from '@/pages/RunPage'
 import RunningPage from '@/pages/RunningPage'
 import HistoryPage from '@/pages/HistoryPage'
@@ -68,6 +70,7 @@ import SkillsPage from '@/pages/SkillsPage'
 import TicketsPage from '@/pages/TicketsPage'
 import TestCasePage from '@/pages/TestCasePage'
 import ApiTestingPage from '@/pages/ApiTestingPage'
+import PerformancePage from '@/pages/PerformancePage'
 import PrototypePage from '@/pages/PrototypePage'
 import ChatPage from '@/pages/ChatPage'
 import AiLabsPage from '@/pages/AiLabsPage'
@@ -176,6 +179,7 @@ const navGroups: { label: string; items: NavItemDef[] }[] = [
       { to: '/history', label: 'History', icon: History, end: false },
       { to: '/verify', label: 'Design Check', icon: ScanSearch, end: false },
       { to: '/api-testing', label: 'API Testing', icon: Zap, end: false },
+      { to: '/performance', label: 'Performance', icon: Gauge, end: false },
     ],
   },
   {
@@ -1262,6 +1266,7 @@ function AppShell() {
             <Route path="/testcases" element={<TestCasePage />} />
             <Route path="/verify" element={<VerifyDesignPage />} />
             <Route path="/api-testing" element={<ApiTestingPage />} />
+            <Route path="/performance" element={<PerformancePage />} />
             <Route path="/chat" element={<ChatPage />} />
             <Route path="/prototype" element={<PrototypePage />} />
              <Route path="/terminal" element={<TerminalPage />} />
@@ -1305,6 +1310,7 @@ function App() {
       <VerifyJobWatcher />
       <SourceJobWatcher />
       <DatabaseJobWatcher />
+      <PerfJobWatcher />
       <Routes>
         <Route path="/ai-labs" element={<AiLabsPage />} />
         <Route path="/ai-labs/:id" element={<AiLabDetailPage />} />

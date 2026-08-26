@@ -106,6 +106,20 @@ server/src/
   playwrightRunMode.ts  per-RUN headless/headed browser choice (a per-run MCP config; never
                     rewrites the project's .mcp.json)
   autoAgent.ts      Auto Agent (shared Claude credential) status
+  k6.ts pageAudit.ts perfJobs.ts   Performance page: k6 load tests + browser page-load
+                    audits (+ their shared job registry). The generated k6 script and its
+                    summary live BESIDE THE DB, never in a repo, and credentials reach k6
+                    through the environment so they never touch that file. k6's summary
+                    has NO time series, so the script buckets its own samples into a fixed
+                    metric set (`timeBuckets`, shared by the generator and the parser) —
+                    that is the only reason "did it degrade under load?" can be answered.
+  authSession.ts reportExport.ts    Performance page: the "sign in first" window (a headed
+                    Chrome on the audit's own profile — closing it is what saves the session)
+                    and report export (the CLIENT's report HTML → PDF via headless Chrome,
+                    → .docx via html-to-docx with each chart FIGURE — svg plus its
+                    legend — rasterised first; an optional running footer goes on
+                    EVERY page via Chrome's displayHeaderFooter / html-to-docx's
+                    4th argument, and is stripped to plain text first).
   crawl.ts crawlJobs.ts            ticket crawling (+ in-memory job registry)
   testcaseGen.ts testcaseJobs.ts   test-case generation (+ in-memory job registry)
   sourceRepo.ts sourceJobs.ts sourceMap.ts   Source Code page: clone/sync + AI source map
@@ -121,7 +135,8 @@ server/src/
   totp.ts apiAccounts.ts   2FA seeds + API login accounts — stored BESIDE THE DB, never in a repo
   clickup.ts folderPicker.ts projectScope.ts toolPath.ts mobileDevices.ts
   routes/           projects, qc, files, skills, mcp, clickup, source, ai, templates,
-                    knowledge, memory, notes, database, diagrams, prototype, chat, version
+                    knowledge, memory, notes, database, diagrams, prototype, chat,
+                    performance, version
 
 web/src/
   App.tsx           two branches: `/ai-labs` renders BARE, everything else via AppShell; the job
@@ -131,6 +146,19 @@ web/src/
   lib/  api.ts (ALL backend calls) types.ts project-context.tsx notifications.tsx theme.ts
         testRules.ts highlight.ts apiAssert.ts devices.ts sql-complete.ts noteHtml.ts
         utils.ts useRunStream.ts useXtermSession.ts
+        perfReport.ts perfCharts.ts perfReportHtml.ts  (Performance: verdict bands, derived
+        metrics (peak RPS, drift, phase shares) + MEASUREMENT_NOTES, the SVG charts —
+        bars, lines and stacks, ONE y axis each — and the printable report. ONE source
+        for screen, Markdown, PDF and Word)
+        loadEndpoint.ts  (Performance: a pasted cURL or a saved API Testing request →
+        one load-test endpoint. Query rows fold into the URL; {{variables}} survive
+        encoding and are resolved SERVER-SIDE at run start, never in the browser)
+        nfrReport.ts nfrReportHtml.ts  (Performance: the NFR deliverable — requirements
+        judged across one or MORE runs, PASS/FAILED/MIXED/PERFORMANCE RISK/PENDING,
+        rendered in the client report format. Paired with components/NfrReportPanel.tsx.
+        8 of the 9 cover fields and the requirements themselves are DERIVED from the
+        runs/project/machine — always as a fallback (`resolveMeta`), never written
+        over what was typed, and `classifyEnvironment` never guesses "Production")
 ```
 
 Four module-level rules that bite mid-edit, so they stay here:
@@ -168,7 +196,8 @@ commit when the behaviour changes.
 | `/instructions`, Knowledge, Memory, grounding check, auto-learn, TOTP/2FA codes, how project context reaches the model | `instructions-context.md` |
 | `/tickets` (crawl), `/overview` (overview documents), `/diagrams` | `tickets-and-overview.md` |
 | `/testcases`, background jobs, notifications/watchers, spec upload | `testcase-generation.md` |
-| `/api-testing` — saved requests, flows, "Run as" accounts, assertions | `api-testing.md` |
+| `/api-testing` — saved requests, flows, per-step data/check overrides, "Run as" accounts, assertions | `api-testing.md` |
+| `/performance` — k6 load tests, browser page-load audits, duplicate-API detection, the NFR report | `performance.md` |
 | `/qc-run` — the E2E flow canvas, run output folders (`runs.outDirToken`), busy-ticket pruning, mobile device picking, filing issues to ClickUp | `runs.md` |
 | `/verify` (Design Check) or project templates (`testing/templates`, bundled template sync) | `design-check-and-templates.md` |
 | `/prototype` — builds, revisions, decisions ledger, design system, comment mode | `prototype.md` |
@@ -287,4 +316,5 @@ holds the actionable recipe; `web/src/pages/McpPage.tsx` is the canonical implem
 | `QC_BROWSER_PORT` | `19222` | CDP port for the QC browser (deliberately not 9222 — that's the engineer's own Chrome) |
 | `QC_BROWSER_PROFILE_DIR` | `~/.pw-agent-profile-qc` | QC browser profile; separate from the self-launch one because Chrome won't open a profile twice |
 | `QC_BROWSER_PATH` | _(unset)_ | explicit browser executable, when neither Edge nor Chrome is where we look |
+| `QC_K6_BIN` | `k6` | path to the k6 binary, for an install that isn't on PATH (Performance › API load test) |
 | `IMGBB_API_KEY` | _(unset)_ | free imgbb API key (api.imgbb.com); when set, issue screenshots upload to imgbb and their URLs are embedded in the ClickUp comment — a workaround for a workspace that has hit ClickUp's "Over allocated storage" limit (`GBUSED_005`) |

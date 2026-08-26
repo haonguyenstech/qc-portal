@@ -46,6 +46,22 @@ The page is a three-pane workspace, not a vertical stack, and `/api-testing` is 
   It **throws** on a write failure, which is what makes `CurlImportDialog` keep the pasted
   command on screen instead of closing over it. The Flows tab's `AddStepPicker` already
   behaved this way; the two paths now differ only in what they do after saving.
+- **"Duplicate" is a row action, next to Move / Rename / Delete.** An imported cURL (or a
+  page-scan import) is usually 90% of the *next* request — same host, same headers, same
+  pasted `Authorization` — and the only ways to get that second one were to re-import or to
+  edit the original and lose it. `duplicateRequest(item)` writes the whole definition (query,
+  headers, body, assertions, AI expectation, captures) under a new name, **keeping the
+  original's module**, then selects and pins the copy.
+  - **The name strips one existing `copy` suffix before appending**: `X` → `X copy` → `X copy 2`,
+    not `X copy copy copy`. The suffix rules and the 60-char file-name cap stay in
+    `uniqueName` (`lib/apiDraft.ts`), so a duplicate can't produce a name the server refuses.
+  - **`selected` is cleared in the same batch as the new draft**, exactly as the cURL import
+    does. The auto-save effect writes `draft` → `selected`, so setting the copy's draft while
+    the ORIGINAL was still selected would have saved the copy straight over it. Verified on
+    the page: editing the copy's URL changed only the copy's file.
+  - It is the honest answer when a flow needs a genuinely DIFFERENT request; when it needs
+    the same one with other data, the per-step override in the flows section is the answer,
+    and duplicating is what that section exists to avoid.
 - **A JSON body is beautified on the way in, and beautify/minify are buttons on the Body tab.**
   `lib/apiJson.ts` (`formatJsonBody(text, 0 | 2)`, `prettyJsonOrRaw`) is the single formatter,
   used by the Body tab's `Beautify` / `Minify` buttons (⌘/Ctrl+Shift+F for beautify), by both
@@ -203,6 +219,47 @@ saved requests, run in sequence with each step's `captures` feeding the next ste
     that line is the feature's only discoverability. There is **one** inline picker with a
     target (`AddTarget`), not one per list: two open pickers is how a click lands in the
     wrong list.
+- **Per-step overrides — one saved request, a different data set and different checks in
+  each flow ("dynamic requests").** Reported as: *"I have to duplicate a request to run it
+  in several flows, because each flow needs its own body and its own assertions."* Steps
+  reference a request by name (see below), which is what makes editing the request update
+  every flow — and also what forced `POST /auth/login` to exist twice: once with the right
+  credentials for the happy path, once with the wrong ones for the 401. Two copies of one
+  endpoint that drift the moment the endpoint changes. A step (and a hook — a login is
+  usually flow `setup`) now carries an optional `override`, stored in the FLOW, never in the
+  request:
+  - `bodyMode`/`body` — **`''` means "the request's body", which is NOT `'none'`** ("send no
+    body"). The runner depends on that distinction, so it is not a boolean. Switching to
+    "own body" seeds the textarea from the request (pretty-printed), so one differing field
+    is an edit and not a retype.
+  - `headers`/`query` — **merged over the request's by key** (case-insensitive; a row with an
+    empty key is ignored). A step that needs one different header must not have to restate
+    the other twelve.
+  - `assertionMode` + `assertions` — `inherit` the request's checks, `replace` them (the
+    negative path), or `append` on top. Switching to `replace` **seeds a copy of the
+    request's checks**, because the usual edit is "the same checks, a different expected
+    status". `replace` with zero rows falls back to the implicit 2xx, and the panel says so
+    in amber rather than looking armed.
+  - **An override is `null` when nothing is set**, both in memory and on disk: `_flows.json`
+    is versioned with the project, and an empty override block on every step of every flow
+    would bury the real diff. `ovr()` / `hasOverride()` / `tidyOverride()` in
+    `ApiFlowPanel.tsx` are that boundary; the runner reads `null` as "send it as saved".
+  - **One merge point, `effectiveUnit(req, override)`** — it produces the body, headers,
+    query AND assertions together, so a step can never be SENT with its override and GRADED
+    without it. It also feeds the auth pre-flight scan (`usedUnits`, not just names): the
+    credentials a step sends may exist ONLY in its override, and scanning the saved requests
+    alone would clear a run that is about to send `{{auth.password}}` literally.
+  - **Nothing about an override may be invisible.** The step/hook row carries a `custom`
+    pill, the drawer's one-line toggle prints what differs (`own body · 2 checks instead`),
+    a step with an override opens its drawer by default, and the stored report marks the row
+    `overridden` — two runs of "the same" request that disagree are otherwise unexplainable
+    once the flow has been edited.
+  - **`AssertionEditor` and `KVEditor` moved out of `ApiTestingPage.tsx`** into
+    `components/ApiAssertionEditor.tsx` / `components/ApiKvEditor.tsx` for this: the panel
+    cannot import the page (the page imports the panel — an import cycle), and a second copy
+    of the type labels, presets and which-field-does-this-type-need rules is how the builder
+    and the flow editor start disagreeing about the same check. Same reasoning that moved
+    `CurlImportDialog`.
 - **Steps reference a saved request by NAME, never a copy** — editing the request updates every flow,
   and `POST /:name/rename` rewrites the matching `requestName` in every flow (otherwise a rename
   silently empties a step). A deleted request leaves the step in place, flagged `missing`, and fails
@@ -338,3 +395,24 @@ by hand. The box answers questions **and proposes those edits**.
   `z-50` because that tour button is a later sibling at `z-40` and would otherwise paint over it.
   The box is mounted outside the tab branches: "wire these imports up" is the same question on
   Requests and on Flows, and closing it must not lose the conversation.
+
+## Saved requests are borrowed by the Performance page
+
+`components/SavedRequestPicker.tsx` (multi-select, read-only) and `lib/curl.ts`'s
+`parseCurl` are both reused by `/performance?tab=load` to fill a load-test endpoint —
+see `performance.md`, "Filling an endpoint from somewhere else". Nothing is written
+back to the collection, so a request cannot be damaged by being borrowed.
+
+The traffic also goes the other way: the Send bar's **Load test** button
+(`goLoadTest`) hands the request the engineer currently has open to
+`/performance?tab=load`. It sends the DRAFT, not the saved record — the saved copy
+lags by an auto-save debounce, and a load test that hits a stale URL is worse than
+no button — and it travels through sessionStorage rather than the URL, because
+headers routinely carry a bearer token. The mechanics live in
+`lib/loadEndpoint.ts` (`stashLoadEndpoint` / `takeLoadEndpoint`); see
+`performance.md`, "Getting an endpoint into the load form".
+
+Two exports here are load-bearing for that: `resolveSendVars` and `substituteVars` in
+`routes/apiTests.ts` are **exported** so the performance route resolves `{{variables}}`
+the same way a send does. Keep them exported, and keep them the only definition — a
+second copy is how the two sides drift into disagreeing about what `{{token}}` means.

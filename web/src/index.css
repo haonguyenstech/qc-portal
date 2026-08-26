@@ -802,3 +802,92 @@
   pointer-events: none;
   color: var(--muted-foreground);
 }
+
+/* ---------------------------------------------------------------- charts
+   Performance report charts (`lib/perfCharts.ts`) draw with these roles, so the
+   same SVG string renders in the app AND inside the exported HTML/PDF/DOCX,
+   which declares the light values inline. The two series hues are the validated
+   categorical slots 1 and 2, stepped per mode; status hues are the fixed
+   good/warning/critical steps, and every bar carries a text value beside it so
+   nothing depends on colour alone. */
+.viz-root {
+  --viz-series-1: #2a78d6;
+  --viz-series-2: #eb6834;
+  --viz-series-3: #a24bd8;
+  --viz-series-4: #00a08a;
+  --viz-series-5: #a37500;
+  --viz-good: #0ca30c;
+  --viz-warn: #fab219;
+  --viz-bad: #d03b3b;
+}
+.dark .viz-root {
+  --viz-series-1: #3987e5;
+  --viz-series-2: #d95926;
+  --viz-series-3: #a86ce0;
+  --viz-series-4: #12998b;
+  --viz-series-5: #9c7a10;
+}
+.viz-root svg.viz {
+  display: block;
+  overflow: visible;
+}
+.viz-root .viz-title {
+  fill: var(--foreground);
+  font-size: 12px;
+  font-weight: 600;
+}
+.viz-root .viz-sub,
+.viz-root .viz-label {
+  fill: var(--muted-foreground);
+  font-size: 11px;
+}
+.viz-root .viz-value {
+  fill: var(--foreground);
+  font-size: 11px;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+.viz-root .viz-flag {
+  fill: var(--muted-foreground);
+  font-family: var(--font-sans);
+}
+.viz-root .viz-ref {
+  stroke: var(--muted-foreground);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+}
+.viz-root .viz-grid {
+  stroke: var(--border);
+  stroke-width: 1;
+}
+.viz-root .viz-axis {
+  fill: var(--muted-foreground);
+  font-size: 10px;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+.viz-root .viz-line {
+  fill: none;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.viz-root .viz-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1rem;
+  padding-left: 0.25rem;
+  font-size: 11px;
+  color: var(--muted-foreground);
+}
+.viz-root .viz-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+}
+.viz-root .viz-legend i {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+}

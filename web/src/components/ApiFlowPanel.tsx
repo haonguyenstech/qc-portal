@@ -33,6 +33,7 @@ import {
   Search,
   Save,
   ShieldCheck,
+  SlidersHorizontal,
   SkipForward,
   TerminalSquare,
   Trash2,
@@ -51,6 +52,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { ScrollArea } from '@/components/ui/scroll-area'
+import { Textarea } from '@/components/ui/textarea'
 import { Checkbox } from '@/components/ui/checkbox'
 import {
   Select,
@@ -63,6 +65,8 @@ import { cn } from '@/lib/utils'
 import { evaluateAssertions, getJsonPath } from '@/lib/apiAssert'
 import { deriveName, uniqueName, type ApiDraft } from '@/lib/apiDraft'
 import { CurlImportDialog } from '@/components/CurlImportDialog'
+import { AssertionEditor } from '@/components/ApiAssertionEditor'
+import { KVEditor } from '@/components/ApiKvEditor'
 import { prettyJsonOrRaw } from '@/lib/apiJson'
 import {
   captureApiVariable,
@@ -84,8 +88,10 @@ import {
   type ApiFlow,
   type ApiFlowRun,
   type ApiFlowHook,
+  type ApiFlowOverride,
   type ApiFlowRunStep,
   type ApiFlowStep,
+  type ApiKV,
   type ApiRequestDef,
 } from '@/lib/api'
 
@@ -107,6 +113,8 @@ interface UnitRun {
   checks: { passed: number; total: number }
   detail: string
   captured: string[]
+  /** It ran with this flow's own body / headers / checks, not the saved request's. */
+  overridden: boolean
 }
 
 type HookPhase = 'setup' | 'before' | 'after' | 'teardown'
@@ -134,11 +142,114 @@ function newHookId(): string {
 }
 
 function newStep(requestName: string): ApiFlowStep {
-  return { id: newStepId(), requestName, enabled: true, continueOnFail: false, before: [], after: [] }
+  return {
+    id: newStepId(),
+    requestName,
+    enabled: true,
+    continueOnFail: false,
+    before: [],
+    after: [],
+    override: null,
+  }
 }
 
 function newHook(requestName: string): ApiFlowHook {
-  return { id: newHookId(), requestName, enabled: true, continueOnFail: false }
+  return { id: newHookId(), requestName, enabled: true, continueOnFail: false, override: null }
+}
+
+// ------------------------------------------------- per-step overrides (dynamic requests)
+//
+// A flow references a saved request BY NAME, which is what makes editing the request
+// update every flow — and also what forced `POST /auth/login` to be duplicated once per
+// scenario, because the happy path and the 401 need different credentials and different
+// checks. An override is that difference, stored on the STEP (in the flow), so the
+// collection keeps one login request and each flow says what IT sends and expects.
+
+const EMPTY_OVERRIDE: ApiFlowOverride = {
+  bodyMode: '',
+  body: '',
+  headers: [],
+  query: [],
+  assertionMode: 'inherit',
+  assertions: [],
+}
+
+/** The override to EDIT — a missing one reads as "nothing overridden", never undefined. */
+function ovr(o?: ApiFlowOverride | null): ApiFlowOverride {
+  return o ?? EMPTY_OVERRIDE
+}
+
+/** Is anything actually overridden? Drives the badges, and what gets stored. */
+function hasOverride(o?: ApiFlowOverride | null): boolean {
+  if (!o) return false
+  return (
+    !!o.bodyMode ||
+    o.headers.length > 0 ||
+    o.query.length > 0 ||
+    o.assertionMode !== 'inherit' ||
+    o.assertions.length > 0
+  )
+}
+
+/**
+ * What to STORE: `null` once the last field is cleared. `_flows.json` is versioned with
+ * the project, so an empty override block on every step of every flow would bury the
+ * real diff — and `null` is also what tells the runner to send the request as saved.
+ */
+function tidyOverride(o: ApiFlowOverride): ApiFlowOverride | null {
+  return hasOverride(o) ? o : null
+}
+
+/** One line naming what differs, for the collapsed row — an invisible override is a trap. */
+function overrideSummary(o?: ApiFlowOverride | null): string {
+  if (!o) return ''
+  const bits: string[] = []
+  if (o.bodyMode === 'none') bits.push('no body')
+  else if (o.bodyMode) bits.push('own body')
+  if (o.headers.length) bits.push(`${o.headers.length} header${o.headers.length > 1 ? 's' : ''}`)
+  if (o.query.length) bits.push(`${o.query.length} param${o.query.length > 1 ? 's' : ''}`)
+  if (o.assertionMode !== 'inherit' && o.assertions.length) {
+    bits.push(
+      `${o.assertions.length} check${o.assertions.length > 1 ? 's' : ''} ${o.assertionMode === 'replace' ? 'instead' : 'added'}`,
+    )
+  }
+  return bits.join(' · ')
+}
+
+/**
+ * Merge the override's rows OVER the request's, by key — a step that needs one different
+ * header must not have to restate the other twelve. Case-insensitive because HTTP header
+ * names are; a row with no key is ignored rather than sent as an empty header.
+ */
+function mergeKV(base: ApiKV[], over: ApiKV[]): ApiKV[] {
+  const out = [...base]
+  for (const row of over) {
+    if (!row.key.trim()) continue
+    const at = out.findIndex((b) => b.key.trim().toLowerCase() === row.key.trim().toLowerCase())
+    if (at >= 0) out[at] = { ...out[at], value: row.value, enabled: row.enabled }
+    else out.push(row)
+  }
+  return out
+}
+
+/** What actually goes on the wire (and what grades it) for one step of one flow. */
+function effectiveUnit(req: ApiRequestDef, o?: ApiFlowOverride | null) {
+  const over = ovr(o)
+  const assertions =
+    over.assertionMode === 'replace'
+      ? over.assertions
+      : over.assertionMode === 'append'
+        ? [...(req.assertions ?? []), ...over.assertions]
+        : (req.assertions ?? [])
+  return {
+    // '' means "the request's body" — 'none' means "send no body", which is a different
+    // instruction and the reason this isn't a boolean.
+    bodyMode: over.bodyMode || req.bodyMode,
+    body: over.bodyMode ? over.body : req.body,
+    headers: mergeKV(req.headers ?? [], over.headers),
+    query: mergeKV(req.query ?? [], over.query),
+    assertions,
+  }
 }
 
 const EMPTY_UNIT: UnitRun = {
@@ -150,6 +261,7 @@ const EMPTY_UNIT: UnitRun = {
   checks: { passed: 0, total: 0 },
   detail: '',
   captured: [],
+  overridden: false,
 }
 
 const OUTCOME_TONE: Record<StepOutcome, string> = {
@@ -454,7 +566,14 @@ function ApiFlowEditor({
   // Which steps show their hooks. A step with hooks opens by default — hidden setup is
   // how a run does something the list on screen doesn't explain.
   const [openHooks, setOpenHooks] = useState<Set<string>>(
-    () => new Set((flow.steps ?? []).filter((s) => s.before?.length || s.after?.length).map((s) => s.id)),
+    () =>
+      new Set(
+        (flow.steps ?? [])
+          // Hooks OR an override: either way the step does something the collapsed row
+          // can only hint at, and hidden is how a run surprises the engineer reading it.
+          .filter((s) => s.before?.length || s.after?.length || hasOverride(s.override))
+          .map((s) => s.id),
+      ),
   )
   const [openSetup, setOpenSetup] = useState((flow.setup ?? []).length > 0)
   const [openTeardown, setOpenTeardown] = useState((flow.teardown ?? []).length > 0)
@@ -556,18 +675,25 @@ function ApiFlowEditor({
     setSteps(next)
   }
 
-  /** Every request name this run will send — steps and hooks alike. */
-  const usedNames = useMemo(() => {
-    const out: string[] = []
-    for (const h of setup) out.push(h.requestName)
+  /**
+   * Every call this run will send — steps and hooks alike, each with the override it
+   * runs under. The override is part of the unit, not a detail of it: the credentials a
+   * step sends may exist ONLY in its override, and the auth pre-flight below has to see
+   * them or it clears a run that is about to send `{{auth.password}}` literally.
+   */
+  const usedUnits = useMemo(() => {
+    const out: { name: string; override?: ApiFlowOverride | null }[] = []
+    for (const h of setup) out.push({ name: h.requestName, override: h.override })
     for (const st of steps) {
-      for (const h of st.before ?? []) out.push(h.requestName)
-      out.push(st.requestName)
-      for (const h of st.after ?? []) out.push(h.requestName)
+      for (const h of st.before ?? []) out.push({ name: h.requestName, override: h.override })
+      out.push({ name: st.requestName, override: st.override })
+      for (const h of st.after ?? []) out.push({ name: h.requestName, override: h.override })
     }
-    for (const h of teardown) out.push(h.requestName)
+    for (const h of teardown) out.push({ name: h.requestName, override: h.override })
     return out
   }, [setup, steps, teardown])
+
+  const usedNames = useMemo(() => usedUnits.map((u) => u.name), [usedUnits])
 
   /** The ×N badge in the picker counts every use, hooks included. */
   const useCounts = useMemo(
@@ -585,7 +711,10 @@ function ApiFlowEditor({
    * graded differently from the step it sets up would be the second assertion engine
    * this page exists to avoid.
    */
-  async function runUnit(requestName: string): Promise<UnitRun> {
+  async function runUnit(
+    requestName: string,
+    override?: ApiFlowOverride | null,
+  ): Promise<UnitRun> {
     const req = savedByName.get(requestName)
     if (!req) {
       return {
@@ -594,7 +723,11 @@ function ApiFlowEditor({
         detail: `saved request “${requestName}” no longer exists`,
       }
     }
-    const base: UnitRun = { ...EMPTY_UNIT, method: req.method, url: req.url }
+    const overridden = hasOverride(override)
+    const base: UnitRun = { ...EMPTY_UNIT, method: req.method, url: req.url, overridden }
+    // This flow's own data and checks, merged over the saved request's. One place, so a
+    // step can never be SENT with its override and GRADED without it.
+    const eff = effectiveUnit(req, override)
 
     let res: Awaited<ReturnType<typeof sendApiRequest>>
     try {
@@ -602,10 +735,10 @@ function ApiFlowEditor({
         projectId,
         method: req.method,
         url: req.url,
-        query: req.query,
-        headers: req.headers,
-        bodyMode: req.bodyMode,
-        body: req.body,
+        query: eff.query,
+        headers: eff.headers,
+        bodyMode: eff.bodyMode,
+        body: eff.body,
         // Every send carries the identity, not just the login one: a later call may
         // re-authenticate, and the OTP has to be recomputed at ITS send time anyway.
         auth: {
@@ -620,7 +753,7 @@ function ApiFlowEditor({
       return { ...base, outcome: 'error', timeMs: res.timeMs, detail: res.error ?? 'request failed' }
     }
 
-    const checks = evaluateAssertions(req.assertions, res)
+    const checks = evaluateAssertions(eff.assertions, res)
     const passed = checks.filter((c) => c.pass).length
     const status = res.status ?? 0
     // No assertions still has to mean something — fall back to "2xx", the same implicit
@@ -691,11 +824,12 @@ function ApiFlowEditor({
     // So refuse up front and name the missing pick. Hooks are scanned too: a login moved
     // into the flow's setup list is the most likely thing to need the account of all.
     const needs = (re: RegExp) =>
-      usedNames.some((name) => {
-        const r = savedByName.get(name)
+      usedUnits.some((u) => {
+        const r = savedByName.get(u.name)
         if (!r) return false
+        const eff = effectiveUnit(r, u.override)
         return re.test(
-          `${r.url} ${r.body} ${[...r.headers, ...r.query].map((k) => `${k.key}${k.value}`).join(' ')}`,
+          `${r.url} ${eff.body} ${[...eff.headers, ...eff.query].map((k) => `${k.key}${k.value}`).join(' ')}`,
         )
       })
     if (!auth.accountLabel && needs(/\{\{\s*auth\.(username|password)\s*\}\}/)) {
@@ -761,7 +895,7 @@ function ApiFlowEditor({
         }
         list[k] = { ...list[k], outcome: 'running' }
         paint()
-        const r = await runUnit(list[k].hook.requestName)
+        const r = await runUnit(list[k].hook.requestName, list[k].hook.override)
         list[k] = { ...list[k], ...r }
         paint()
         if (r.outcome !== 'pass' && !list[k].hook.continueOnFail) failed = list[k].hook.requestName
@@ -804,7 +938,7 @@ function ApiFlowEditor({
       } else {
         results[i] = { ...results[i], outcome: 'running' }
         paint()
-        const r = await runUnit(step.requestName)
+        const r = await runUnit(step.requestName, step.override)
         results[i] = { ...results[i], ...r }
       }
       paint()
@@ -851,6 +985,7 @@ function ApiFlowEditor({
         checks: u.checks,
         detail: u.detail,
         captured: u.captured,
+        overridden: u.overridden,
       })
       // The stored array IS the execution order (see ApiFlowRunStep.phase): "the cleanup
       // ran even though step 3 failed" is only readable when the cleanup is in the list.
@@ -1180,7 +1315,6 @@ function ApiFlowEditor({
                 {steps.map((step, i) => {
                   const req = savedByName.get(step.requestName)
                   const result = runs?.find((r) => r.step.id === step.id)
-                  const hookCount = (step.before?.length ?? 0) + (step.after?.length ?? 0)
                   const hooksOpen = openHooks.has(step.id)
                   const patchStep = (p: Partial<ApiFlowStep>) =>
                     setSteps(steps.map((x) => (x.id === step.id ? { ...x, ...p } : x)))
@@ -1217,6 +1351,7 @@ function ApiFlowEditor({
                             {req?.method ?? '—'}
                           </span>
                           <span className="truncate text-xs font-medium">{step.requestName}</span>
+                          <OverrideBadge value={step.override} />
                           {!req && (
                             <span
                               className="flex shrink-0 items-center gap-1 text-[10px] text-destructive"
@@ -1304,19 +1439,33 @@ function ApiFlowEditor({
                       <ChevronRight
                         className={cn('size-3 transition-transform', hooksOpen && 'rotate-90')}
                       />
-                      {hookCount === 0 ? (
-                        <span>Set up / clean up data for this step</span>
-                      ) : (
-                        <span>
-                          {(step.before?.length ?? 0) > 0 && `${step.before.length} before`}
-                          {(step.before?.length ?? 0) > 0 && (step.after?.length ?? 0) > 0 && ' · '}
-                          {(step.after?.length ?? 0) > 0 && `${step.after.length} after`}
-                        </span>
-                      )}
+                      {/* The drawer now holds two things, so the line names both — an
+                          override nobody can see from the list is worse than no override. */}
+                      <span className="truncate">
+                        {[
+                          overrideSummary(step.override),
+                          (step.before?.length ?? 0) > 0 ? `${step.before.length} before` : '',
+                          (step.after?.length ?? 0) > 0 ? `${step.after.length} after` : '',
+                        ]
+                          .filter(Boolean)
+                          .join(' · ') || "This flow's own data & checks · set up / clean up"}
+                      </span>
                     </button>
 
                     {hooksOpen && (
                       <div className="space-y-2.5 border-t border-border/60 bg-muted/30 px-2.5 py-2 pl-7">
+                        <div className="space-y-1.5">
+                          <span className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                            Data &amp; checks for this flow
+                          </span>
+                          <OverrideEditor
+                            requestName={step.requestName}
+                            request={req}
+                            value={step.override}
+                            running={running}
+                            onChange={(override) => patchStep({ override })}
+                          />
+                        </div>
                         <HookList
                           label="Before this step"
                           hooks={step.before ?? []}
@@ -1627,6 +1776,16 @@ function PastRunRow({ run }: { run: ApiFlowRun }) {
                   <span className="min-w-0 flex-1 truncate text-[11px] font-medium">
                     {s.requestName}
                   </span>
+                  {/* Two runs of "the same" request that disagree are unexplainable
+                      without this — the flow may well have been edited since. */}
+                  {s.overridden && (
+                    <span
+                      className="shrink-0 rounded-full bg-primary/10 px-1.5 text-[9px] font-medium text-primary"
+                      title="Ran with this flow's own body / headers / checks"
+                    >
+                      custom
+                    </span>
+                  )}
                   <span
                     className={cn(
                       'shrink-0 text-[10px] font-medium tabular-nums',
@@ -1673,6 +1832,203 @@ function PastRunRow({ run }: { run: ApiFlowRun }) {
         </div>
       )}
     </div>
+  )
+}
+
+/**
+ * The per-step "this flow sends its own data" editor — the dynamic-request feature.
+ *
+ * It edits the FLOW, never the request: the heading says so, because the whole point is
+ * that `POST /auth/login` stays one request in the collection while the "login fails"
+ * flow sends wrong credentials and expects a 401. Everything here is optional and each
+ * field falls back to the saved request, so a step with an override still follows the
+ * request when the endpoint moves — which is what duplicating the request lost.
+ */
+function OverrideEditor({
+  requestName,
+  request,
+  value,
+  running,
+  onChange,
+}: {
+  requestName: string
+  request?: ApiRequestDef
+  value?: ApiFlowOverride | null
+  running: boolean
+  onChange: (next: ApiFlowOverride | null) => void
+}) {
+  const o = ovr(value)
+  const patch = (p: Partial<ApiFlowOverride>) => onChange(tidyOverride({ ...o, ...p }))
+  const inheritedChecks = request?.assertions?.filter((a) => a.enabled).length ?? 0
+  return (
+    <div className="space-y-2.5 rounded-lg border border-border/60 bg-background px-2.5 py-2">
+      <div className="flex items-start justify-between gap-2">
+        <p className="text-[10px] leading-4 text-muted-foreground">
+          This flow only — <span className="font-medium text-foreground">{requestName}</span> is
+          not edited. Same request, this scenario's data and expectations.
+        </p>
+        {hasOverride(value) && (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => onChange(null)}
+            disabled={running}
+            className="h-6 shrink-0 gap-1 rounded-full px-2 text-[10px]"
+            title="Send and grade exactly what the saved request says"
+          >
+            <X className="size-3" />
+            Clear
+          </Button>
+        )}
+      </div>
+
+      {/* Body — '' is "the request's", which is NOT the same as "send none". */}
+      <div className="space-y-1.5">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+            Body
+          </span>
+          <Select
+            value={o.bodyMode || 'inherit'}
+            onValueChange={(v) => {
+              const mode = (v === 'inherit' ? '' : v) as ApiFlowOverride['bodyMode']
+              // Seed from the request the first time, so "same call, one field different"
+              // is an edit and not a retype of the whole payload.
+              const seed =
+                mode && mode !== 'none' && !o.body ? prettyJsonOrRaw(request?.body ?? '') : o.body
+              patch({ bodyMode: mode, body: seed })
+            }}
+            disabled={running}
+          >
+            <SelectTrigger className="h-7 w-[188px] text-[11px] shadow-none">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="inherit" className="text-xs">
+                The request's body
+              </SelectItem>
+              <SelectItem value="json" className="text-xs">
+                Send my own JSON
+              </SelectItem>
+              <SelectItem value="text" className="text-xs">
+                Send my own text
+              </SelectItem>
+              <SelectItem value="none" className="text-xs">
+                Send no body
+              </SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+        {(o.bodyMode === 'json' || o.bodyMode === 'text') && (
+          <Textarea
+            value={o.body}
+            onChange={(e) => patch({ body: e.target.value })}
+            spellCheck={false}
+            placeholder={'{"username": "{{auth.username}}", "password": "wrong-on-purpose"}'}
+            className="max-h-64 min-h-20 font-mono text-[11px] shadow-none"
+          />
+        )}
+      </div>
+
+      {/* Headers / params — MERGED over the request's by key, so one differing header
+          doesn't mean restating the other twelve. */}
+      <div className="space-y-1.5">
+        <span className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+          Headers
+        </span>
+        <p className="text-[10px] text-muted-foreground">
+          Merged over the request's by name — a row here replaces that header, a new name adds one.
+        </p>
+        <KVEditor
+          rows={o.headers}
+          onChange={(headers) => patch({ headers })}
+          keyPlaceholder="Header-Name"
+          valuePlaceholder="value or {{variable}}"
+        />
+      </div>
+      <div className="space-y-1.5">
+        <span className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+          Query params
+        </span>
+        <KVEditor
+          rows={o.query}
+          onChange={(query) => patch({ query })}
+          keyPlaceholder="param"
+          valuePlaceholder="value or {{variable}}"
+        />
+      </div>
+
+      {/* Checks — the other half of "each flow tests something different". */}
+      <div className="space-y-1.5">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+            Checks
+          </span>
+          <Select
+            value={o.assertionMode}
+            onValueChange={(v) => {
+              const mode = v as ApiFlowOverride['assertionMode']
+              // Replacing usually means "the same checks, different expected values" —
+              // start from a copy rather than a blank list.
+              const seed =
+                mode === 'replace' && !o.assertions.length
+                  ? (request?.assertions ?? []).map((a) => ({ ...a }))
+                  : o.assertions
+              patch({ assertionMode: mode, assertions: seed })
+            }}
+            disabled={running}
+          >
+            <SelectTrigger className="h-7 w-[188px] text-[11px] shadow-none">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="inherit" className="text-xs">
+                The request's checks
+              </SelectItem>
+              <SelectItem value="replace" className="text-xs">
+                Only the checks below
+              </SelectItem>
+              <SelectItem value="append" className="text-xs">
+                The request's, plus below
+              </SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+        {o.assertionMode === 'inherit' ? (
+          <p className="text-[10px] text-muted-foreground">
+            {inheritedChecks > 0
+              ? `Graded by the ${inheritedChecks} check${inheritedChecks > 1 ? 's' : ''} on the request.`
+              : 'The request has no checks — this step passes on any 2xx.'}
+          </p>
+        ) : (
+          <>
+            {o.assertionMode === 'replace' && o.assertions.length === 0 && (
+              <p className="text-[10px] text-amber-600">
+                No checks here yet — until you add one, the step passes on any 2xx.
+              </p>
+            )}
+            <AssertionEditor
+              rows={o.assertions}
+              onChange={(assertions) => patch({ assertions })}
+              results={null}
+            />
+          </>
+        )}
+      </div>
+    </div>
+  )
+}
+
+/** The badge that keeps an override from being invisible on a collapsed row. */
+function OverrideBadge({ value }: { value?: ApiFlowOverride | null }) {
+  if (!hasOverride(value)) return null
+  return (
+    <span
+      className="shrink-0 rounded-full bg-primary/10 px-1.5 text-[9px] font-medium text-primary"
+      title={`This flow's own data / checks: ${overrideSummary(value)}`}
+    >
+      custom
+    </span>
   )
 }
 
@@ -1754,6 +2110,9 @@ function HookList({
 }) {
   const patch = (id: string, p: Partial<ApiFlowHook>) =>
     onChange(hooks.map((h) => (h.id === id ? { ...h, ...p } : h)))
+  // A hook is where the login usually lives, so it needs its own data set as much as a
+  // step does ("log in as the locked-out user, expect 423"). One open drawer per hook.
+  const [openOverride, setOpenOverride] = useState<Set<string>>(new Set())
   return (
     <div className="space-y-1.5">
       <div className="flex items-center justify-between gap-2">
@@ -1783,14 +2142,16 @@ function HookList({
       {hooks.map((h) => {
         const req = savedByName.get(h.requestName)
         const result = results?.find((r) => r.hook.id === h.id)
+        const overrideOpen = openOverride.has(h.id)
         return (
           <div
             key={h.id}
             className={cn(
-              'flex items-center gap-2 rounded-lg border border-border/60 bg-background px-2 py-1.5',
+              'rounded-lg border border-border/60 bg-background',
               !h.enabled && 'opacity-60',
             )}
           >
+          <div className="flex items-center gap-2 px-2 py-1.5">
             <Checkbox
               size="sm"
               checked={h.enabled}
@@ -1804,6 +2165,7 @@ function HookList({
                   {req?.method ?? '—'}
                 </span>
                 <span className="truncate text-[11px] font-medium">{h.requestName}</span>
+                <OverrideBadge value={h.override} />
                 {!req && (
                   <span
                     className="flex shrink-0 items-center gap-1 text-[10px] text-destructive"
@@ -1836,6 +2198,26 @@ function HookList({
             <Button
               variant="ghost"
               size="icon"
+              onClick={() =>
+                setOpenOverride((prev) => {
+                  const next = new Set(prev)
+                  if (next.has(h.id)) next.delete(h.id)
+                  else next.add(h.id)
+                  return next
+                })
+              }
+              className={cn(
+                'size-6 rounded-md text-muted-foreground hover:text-foreground',
+                (overrideOpen || hasOverride(h.override)) && 'text-primary',
+              )}
+              title="This flow's own data & checks for this request"
+              aria-expanded={overrideOpen}
+            >
+              <SlidersHorizontal className="size-3.5" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
               onClick={() => onChange(hooks.filter((x) => x.id !== h.id))}
               disabled={running}
               className="size-6 rounded-md text-muted-foreground hover:text-destructive"
@@ -1843,6 +2225,18 @@ function HookList({
             >
               <X className="size-3.5" />
             </Button>
+          </div>
+          {overrideOpen && (
+            <div className="border-t border-border/60 bg-muted/20 px-2 py-2">
+              <OverrideEditor
+                requestName={h.requestName}
+                request={req}
+                value={h.override}
+                running={running}
+                onChange={(override) => patch(h.id, { override })}
+              />
+            </div>
+          )}
           </div>
         )
       })}

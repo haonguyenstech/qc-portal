@@ -12,6 +12,8 @@ import { reconcileBundledSkills } from './skillSync.js'
 import { reconcileBundledTemplates } from './templateSync.js'
 import * as hub from './hub.js'
 import { shutdownActiveRuns } from './runManager.js'
+import { shutdownAuthSession } from './authSession.js'
+import { shutdownPerfJobs } from './perfJobs.js'
 import {
   handleTerminalConnection,
   killAllTerminalSessions,
@@ -41,6 +43,7 @@ import { diagramsRouter } from './routes/diagrams.js'
 import { apiTestsRouter } from './routes/apiTests.js'
 import { prototypeRouter } from './routes/prototype.js'
 import { chatRouter } from './routes/chat.js'
+import { performanceRouter } from './routes/performance.js'
 import { versionRouter } from './routes/version.js'
 
 // Optionally seed a default project from QC_REPO_ROOT (no-op if unset / already seeded).
@@ -139,6 +142,7 @@ app.use('/api/diagrams', diagramsRouter)
 app.use('/api/api-tests', apiTestsRouter)
 app.use('/api/prototype', prototypeRouter)
 app.use('/api/chat', chatRouter)
+app.use('/api/performance', performanceRouter)
 app.use('/api/browser', browserRouter)
 app.use('/api/version', versionRouter)
 
@@ -253,6 +257,13 @@ function gracefulExit(signal: NodeJS.Signals) {
   // or a restart would orphan them (they're setsid session leaders).
   const t = killAllTerminalSessions()
   if (t) console.log(`Closed ${t} terminal session(s) on ${signal}`)
+  // k6 children and audit browsers are spawned outside runManager, so they need
+  // their own kill or a restart orphans a 5-minute load test.
+  const p = shutdownPerfJobs()
+  if (p) console.log(`Stopped ${p} performance job(s) on ${signal}`)
+  // A forgotten sign-in window holds the Chrome profile lock, which would make
+  // every audit after the restart fail with "profile already open".
+  if (shutdownAuthSession()) console.log(`Closed the sign-in window on ${signal}`)
   // Re-raise the default behaviour so the process actually exits.
   process.exit(0)
 }

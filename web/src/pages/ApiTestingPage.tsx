@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import {
@@ -12,8 +12,10 @@ import {
   ChevronRight,
   Clipboard,
   Clock3,
+  Copy,
   FileJson,
   FolderTree,
+  Gauge,
   History as HistoryIcon,
   Check,
   Info,
@@ -64,7 +66,10 @@ import { OpenFolderButton } from '@/components/OpenFolderButton'
 import { useProjects } from '@/lib/project-context'
 import { cn } from '@/lib/utils'
 import { toCurl } from '@/lib/curl'
+import { KVEditor } from '@/components/ApiKvEditor'
+import { AssertionEditor } from '@/components/ApiAssertionEditor'
 import { CurlImportDialog } from '@/components/CurlImportDialog'
+import { endpointFromDraft, stashLoadEndpoint } from '@/lib/loadEndpoint'
 import { deriveName, emptyDraft, uniqueName, type ApiDraft } from '@/lib/apiDraft'
 import { formatJsonBody, prettyJsonOrRaw } from '@/lib/apiJson'
 import { scanResponse, type ApiFinding, type Severity } from '@/lib/apiChecks'
@@ -94,8 +99,6 @@ import {
   startApiScan,
   stopApiScan,
   type AiCheckResult,
-  type ApiAssertion,
-  type ApiAssertionType,
   type ApiBodyMode,
   type ApiCapture,
   type ApiEnvironment,
@@ -164,18 +167,6 @@ const AI_CRITERIA: { label: string; text: string }[] = [
     text: 'Field naming is consistent across the response (e.g. all camelCase).',
   },
 ]
-
-const ASSERTION_LABELS: Record<ApiAssertionType, string> = {
-  'status-2xx': 'Status is 2xx',
-  'status-equals': 'Status equals',
-  'body-contains': 'Body contains',
-  'body-matches': 'Body matches regex',
-  'json-equals': 'JSON path equals',
-  'json-exists': 'JSON path exists',
-  'header-equals': 'Header equals',
-  'header-exists': 'Header exists',
-  'time-below': 'Response time < (ms)',
-}
 
 // `Draft` / `emptyDraft` / `deriveName` / `uniqueName` live in `lib/apiDraft.ts` — the
 // Flows tab creates saved requests too (Add request → Import cURL), and the naming rules
@@ -276,331 +267,6 @@ function formatBytes(n?: number): string {
   if (n < 1024) return `${n} B`
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
   return `${(n / (1024 * 1024)).toFixed(2)} MB`
-}
-
-// ---------------------------------------------------------------- KV editor
-
-function KVEditor({
-  rows,
-  onChange,
-  keyPlaceholder,
-  valuePlaceholder,
-}: {
-  rows: ApiKV[]
-  onChange: (rows: ApiKV[]) => void
-  keyPlaceholder: string
-  valuePlaceholder: string
-}) {
-  const update = (i: number, patch: Partial<ApiKV>) =>
-    onChange(rows.map((r, idx) => (idx === i ? { ...r, ...patch } : r)))
-  const remove = (i: number) => onChange(rows.filter((_, idx) => idx !== i))
-  const add = () => onChange([...rows, { key: '', value: '', enabled: true }])
-  return (
-    <div className="space-y-2">
-      {rows.length === 0 && (
-        <p className="px-1 py-2 text-xs text-muted-foreground">None yet.</p>
-      )}
-      {rows.map((r, i) => (
-        <div key={i} className="flex items-center gap-2">
-          <Checkbox
-            checked={r.enabled}
-            onChange={(e) => update(i, { enabled: e.target.checked })}
-            aria-label="Enabled"
-          />
-          <Input
-            value={r.key}
-            onChange={(e) => update(i, { key: e.target.value })}
-            placeholder={keyPlaceholder}
-            className="h-9 flex-1 font-mono text-xs shadow-none"
-          />
-          <Input
-            value={r.value}
-            onChange={(e) => update(i, { value: e.target.value })}
-            placeholder={valuePlaceholder}
-            className="h-9 flex-[2] font-mono text-xs shadow-none"
-          />
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={() => remove(i)}
-            className="size-9 shrink-0 rounded-lg text-muted-foreground hover:text-destructive"
-            aria-label="Remove row"
-          >
-            <Trash2 className="size-4" />
-          </Button>
-        </div>
-      ))}
-      <Button
-        variant="outline"
-        size="sm"
-        onClick={add}
-        className="rounded-full active:scale-[0.98]"
-      >
-        <Plus className="size-3.5" />
-        Add
-      </Button>
-    </div>
-  )
-}
-
-// ---------------------------------------------------------------- Assertion editor
-
-const ASSERTION_PRESETS: { label: string; patch: Partial<ApiAssertion> }[] = [
-  { label: 'Status 2xx', patch: { type: 'status-2xx' } },
-  { label: 'Status =', patch: { type: 'status-equals', expected: '200' } },
-  { label: 'Body contains', patch: { type: 'body-contains' } },
-  { label: 'JSON path =', patch: { type: 'json-equals' } },
-  { label: 'Has field', patch: { type: 'json-exists' } },
-  { label: 'Header exists', patch: { type: 'header-exists' } },
-  { label: 'Time < 2s', patch: { type: 'time-below', expected: '2000' } },
-]
-
-const needsTarget = (t: ApiAssertionType) =>
-  t === 'json-equals' || t === 'json-exists' || t === 'header-equals' || t === 'header-exists'
-const needsExpected = (t: ApiAssertionType) =>
-  t !== 'status-2xx' && t !== 'json-exists' && t !== 'header-exists'
-const isEquals = (t: ApiAssertionType) => t === 'json-equals' || t === 'header-equals'
-
-/**
- * One labeled cell of a check's result (key / actual / expected). `break-all` +
- * line-clamp keeps a long JSON value from stretching the row, and the full text stays
- * reachable via the row's title.
- */
-function ResultCell({
-  label,
-  value,
-  tone,
-}: {
-  label: string
-  value: string
-  tone?: 'pass' | 'fail'
-}) {
-  return (
-    <div className="min-w-0 rounded-lg border border-border/60 bg-background/60 px-2 py-1.5">
-      <span className="block text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
-        {label}
-      </span>
-      <span
-        className={cn(
-          'block line-clamp-2 break-all font-mono text-[11px]',
-          tone === 'fail' ? 'text-red-600' : tone === 'pass' ? 'text-emerald-700' : 'text-foreground',
-        )}
-      >
-        {value}
-      </span>
-    </div>
-  )
-}
-
-function AssertionEditor({
-  rows,
-  onChange,
-  results,
-}: {
-  rows: ApiAssertion[]
-  onChange: (rows: ApiAssertion[]) => void
-  results: AssertionResult[] | null
-}) {
-  const update = (i: number, patch: Partial<ApiAssertion>) =>
-    onChange(rows.map((r, idx) => (idx === i ? { ...r, ...patch } : r)))
-  const remove = (i: number) => onChange(rows.filter((_, idx) => idx !== i))
-  // Derive the next id from existing ones (pure — no Date/random) so keys stay unique.
-  const nextId = () => {
-    const nums = rows
-      .map((r) => Number.parseInt(r.id.replace(/^a/, ''), 10))
-      .filter((n) => Number.isFinite(n))
-    return `a${(nums.length ? Math.max(...nums) : 0) + 1}`
-  }
-  const add = (patch?: Partial<ApiAssertion>) =>
-    onChange([
-      ...rows,
-      { id: nextId(), type: 'status-2xx', target: '', expected: '', enabled: true, ...patch },
-    ])
-  const resultFor = (a: ApiAssertion) => results?.find((r) => r.assertion.id === a.id) ?? null
-  const passed = results?.filter((r) => r.pass).length ?? 0
-  const total = results?.length ?? 0
-
-  return (
-    <div className="space-y-3">
-      {/* Result summary — appears once a response has been evaluated. */}
-      {total > 0 && (
-        <div className="flex items-center gap-3 rounded-xl border border-border/60 bg-muted/30 px-3 py-2">
-          <span
-            className={cn(
-              'inline-flex items-center gap-1.5 text-sm font-semibold tabular-nums',
-              passed === total ? 'text-emerald-600' : 'text-red-600',
-            )}
-          >
-            {passed === total ? (
-              <CheckCircle2 className="size-4" />
-            ) : (
-              <XCircle className="size-4" />
-            )}
-            {passed}/{total} passed
-          </span>
-          <span className="flex h-1.5 flex-1 overflow-hidden rounded-full bg-muted">
-            {results!.map((r, i) => (
-              <span
-                key={i}
-                className={cn('h-full', r.pass ? 'bg-emerald-500' : 'bg-red-500')}
-                style={{ width: `${100 / total}%` }}
-              />
-            ))}
-          </span>
-        </div>
-      )}
-
-      {/* Quick-add presets */}
-      <div className="flex flex-wrap items-center gap-1.5">
-        <span className="text-[11px] font-medium text-muted-foreground">Quick add:</span>
-        {ASSERTION_PRESETS.map((p) => (
-          <button
-            key={p.label}
-            type="button"
-            onClick={() => add(p.patch)}
-            className="inline-flex items-center gap-1 rounded-full border border-border/60 bg-muted/40 px-2.5 py-1 text-[11px] font-medium text-muted-foreground transition-colors hover:border-border hover:text-foreground active:scale-[0.98]"
-          >
-            <Plus className="size-3" />
-            {p.label}
-          </button>
-        ))}
-      </div>
-
-      {rows.length === 0 ? (
-        <div className="rounded-xl border border-dashed border-border/60 px-3 py-6 text-center">
-          <p className="text-xs text-muted-foreground">
-            No checks yet — add one above to turn the response into a pass/fail verdict.
-          </p>
-        </div>
-      ) : (
-        <div className="space-y-2">
-          {rows.map((a, i) => {
-            const r = resultFor(a)
-            return (
-              <div
-                key={a.id}
-                className={cn(
-                  'rounded-xl border border-l-[3px] p-2.5 transition-colors',
-                  r
-                    ? r.pass
-                      ? 'border-border/60 border-l-emerald-500 bg-emerald-50/30'
-                      : 'border-border/60 border-l-red-500 bg-red-50/30'
-                    : cn(
-                        'border-border/60 border-l-border bg-muted/20',
-                        !a.enabled && 'opacity-55',
-                      ),
-                )}
-              >
-                <div className="flex flex-wrap items-center gap-2">
-                  <Checkbox
-                    checked={a.enabled}
-                    onChange={(e) => update(i, { enabled: e.target.checked })}
-                    aria-label={a.enabled ? 'Enabled — click to skip' : 'Disabled — click to enable'}
-                    title={a.enabled ? 'Enabled' : 'Disabled (skipped)'}
-                  />
-                  <Select
-                    value={a.type}
-                    onValueChange={(v) => update(i, { type: v as ApiAssertionType })}
-                  >
-                    <SelectTrigger className="h-9 w-[180px] shrink-0 text-xs shadow-none">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {(Object.keys(ASSERTION_LABELS) as ApiAssertionType[]).map((t) => (
-                        <SelectItem key={t} value={t} className="text-xs">
-                          {ASSERTION_LABELS[t]}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  {needsTarget(a.type) && (
-                    <Input
-                      value={a.target}
-                      onChange={(e) => update(i, { target: e.target.value })}
-                      placeholder={
-                        a.type === 'json-equals' || a.type === 'json-exists'
-                          ? 'data.items[0].id'
-                          : 'Header-Name'
-                      }
-                      className="h-9 min-w-0 flex-1 font-mono text-xs shadow-none"
-                    />
-                  )}
-                  {isEquals(a.type) && (
-                    <span className="shrink-0 font-mono text-xs text-muted-foreground">=</span>
-                  )}
-                  {needsExpected(a.type) && (
-                    <Input
-                      value={a.expected}
-                      onChange={(e) => update(i, { expected: e.target.value })}
-                      placeholder={
-                        a.type === 'time-below'
-                          ? 'ms e.g. 2000'
-                          : a.type === 'body-matches'
-                            ? 'regex'
-                            : a.type === 'status-equals'
-                              ? '200'
-                              : 'expected value'
-                      }
-                      className="h-9 min-w-0 flex-1 font-mono text-xs shadow-none"
-                    />
-                  )}
-                  {r && (
-                    <Badge
-                      variant="outline"
-                      className={cn(
-                        'ml-auto shrink-0 gap-1',
-                        r.pass
-                          ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
-                          : 'border-red-200 bg-red-50 text-red-700',
-                      )}
-                    >
-                      {r.pass ? <CheckCircle2 className="size-3" /> : <XCircle className="size-3" />}
-                      {r.pass ? 'Pass' : 'Fail'}
-                    </Badge>
-                  )}
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    onClick={() => remove(i)}
-                    className={cn(
-                      'size-9 shrink-0 rounded-lg text-muted-foreground hover:text-destructive',
-                      !r && 'ml-auto',
-                    )}
-                    aria-label="Remove check"
-                  >
-                    <Trash2 className="size-4" />
-                  </Button>
-                </div>
-                {/* Key · actual · expected — the three things needed to see WHY it
-                    passed or failed, side by side instead of one run-on sentence. */}
-                {r && (
-                  <div className="mt-2 grid gap-2 pl-6 sm:grid-cols-3" title={r.detail}>
-                    <ResultCell label="Key" value={r.key} />
-                    <ResultCell
-                      label="Actual value"
-                      value={r.actual}
-                      tone={r.pass ? 'pass' : 'fail'}
-                    />
-                    <ResultCell label="Expected value" value={r.expected || '—'} />
-                  </div>
-                )}
-              </div>
-            )
-          })}
-        </div>
-      )}
-
-      <Button
-        variant="outline"
-        size="sm"
-        onClick={() => add()}
-        className="rounded-full active:scale-[0.98]"
-      >
-        <Plus className="size-3.5" />
-        Add custom check
-      </Button>
-    </div>
-  )
 }
 
 // ---------------------------------------------------------------- Capture editor
@@ -2134,6 +1800,7 @@ function ApiTesting({ projectId }: { projectId: string }) {
   // component state so a scenario is linkable and survives a reload — the same `?tab=`
   // idiom /settings uses. Single requests are the default: that's where a flow's steps
   // come from, so nobody lands on Flows with an empty collection behind it.
+  const navigate = useNavigate()
   const [searchParams, setSearchParams] = useSearchParams()
   const tab: 'requests' | 'flows' = searchParams.get('tab') === 'flows' ? 'flows' : 'requests'
   const goTab = (next: 'requests' | 'flows') => {
@@ -2570,6 +2237,55 @@ function ApiTesting({ projectId }: { projectId: string }) {
   }
 
   /**
+   * "Duplicate" — a second copy of a saved request, under `<name> copy`.
+   *
+   * The everyday need behind it: an imported cURL (or a page-scan import) is 90% of the
+   * next request you want — same host, same headers, same `Authorization` — and building
+   * that by re-importing, or by editing the original and losing it, is the long way round.
+   * It is also the honest answer when a flow really does need a SEPARATE request rather
+   * than a per-step override (`ApiFlowPanel.tsx`): a different endpoint, not different
+   * data for the same one.
+   *
+   * The copy carries everything — query, headers, body, assertions, AI expectation,
+   * captures — and stays in the ORIGINAL's module, because a duplicate belongs beside
+   * what it was duplicated from.
+   *
+   * Order matters: `selected` is cleared in the same batch as the new draft, exactly as
+   * the cURL import does. The auto-save effect writes `draft` to `selected`, so setting
+   * the copy's draft while the ORIGINAL was still selected would save the copy over it.
+   */
+  const duplicateRequest = async (item: ApiRequestDef) => {
+    const copy = draftOf(item)
+    setDraft(copy)
+    setRes(null)
+    setAiResult(null)
+    setSelected(null)
+    setFilter('')
+    // ` copy`, then ` copy 2`, … — `uniqueName` owns the suffix rules (and the 60-char
+    // file-name cap), so this can't produce a name the server refuses. An existing
+    // `copy` suffix is stripped first: duplicating a duplicate gave `X copy copy`, and a
+    // third gave `X copy copy copy`, which stops being readable at exactly the point
+    // (three near-identical requests) where the names are what tell them apart.
+    const base = item.name.replace(/ copy(?: \d+)?$/i, '').trim() || item.name
+    const name = uniqueName(`${base} copy`, new Set((saved ?? []).map((s) => s.name)))
+    try {
+      await saveApiRequest(projectId, name, { ...copy, group: item.group })
+      await queryClient.invalidateQueries({ queryKey: ['api-requests', projectId] })
+      // Selecting is what arms the auto-save effect, so edits to the copy persist; the
+      // pin lifts it to the top of its module instead of filing it mid-list at birth.
+      setSelected(name)
+      setPinnedFirst(name)
+      toast.success(`Duplicated as “${name}”`, {
+        description: 'Edits here don’t touch the original.',
+      })
+    } catch (e) {
+      toast.error('Could not duplicate the request', {
+        description: e instanceof Error ? e.message : undefined,
+      })
+    }
+  }
+
+  /**
    * Give a placeholder-named request its real name, once it has a URL to derive one
    * from. Awaited before the send so the stored result lands under the final name (the
    * rename endpoint carries the run history across, but only for what's on disk).
@@ -2623,6 +2339,22 @@ function ApiTesting({ projectId }: { projectId: string }) {
     }
     // Snapshot the draft so the stored result reflects exactly what was sent.
     send.mutate({ name: savedName, req: { ...draft } })
+  }
+
+  /**
+   * Take this request to Performance › API load test.
+   *
+   * The draft goes across as it stands, so unsaved edits survive the trip — the
+   * saved copy can lag by a debounce, and loading a stale URL under 50 VUs is
+   * worse than not offering the button. Query rows fold into the URL and
+   * `{{variables}}` are left intact for the server to resolve at run start
+   * (`loadEndpoint.ts`); assertions and captures are deliberately dropped, since
+   * a load test measures timing, not correctness.
+   */
+  const goLoadTest = () => {
+    if (!draft.url) return
+    stashLoadEndpoint(endpointFromDraft(draft, selected ?? undefined))
+    navigate('/performance?tab=load')
   }
 
   // Send from anywhere with ⌘/Ctrl+Enter — the guard inside handleSend covers an
@@ -2872,7 +2604,8 @@ function ApiTesting({ projectId }: { projectId: string }) {
               {tab === 'flows' ? (
                 <>
                   Chain saved requests into one scenario — log in, capture the token, then the steps
-                  that need it. Every step is graded by the same assertions it has on its own.
+                  that need it. A step is graded by the request's own checks, unless the flow gives
+                  it its own data and expectations.
                 </>
               ) : (
                 <>
@@ -3301,6 +3034,19 @@ function ApiTesting({ projectId }: { projectId: string }) {
                                   size="icon"
                                   onClick={(e) => {
                                     e.stopPropagation()
+                                    void duplicateRequest(item)
+                                  }}
+                                  className="size-6 rounded-md text-muted-foreground hover:text-foreground"
+                                  aria-label={`Duplicate ${item.name}`}
+                                  title="Duplicate — same request, its own copy to edit"
+                                >
+                                  <Copy className="size-3.5" />
+                                </Button>
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  onClick={(e) => {
+                                    e.stopPropagation()
                                     setMoving(item)
                                   }}
                                   className="size-6 rounded-md text-muted-foreground hover:text-foreground"
@@ -3456,6 +3202,22 @@ function ApiTesting({ projectId }: { projectId: string }) {
                   <kbd className="hidden rounded bg-primary-foreground/15 px-1.5 py-0.5 font-mono text-[10px] font-medium text-primary-foreground/80 sm:inline">
                     {sendHint}
                   </kbd>
+                </Button>
+                {/* "Does it hold up under load?" is the question that follows a
+                    green Send, and the answer lives on another page. Sending the
+                    request ACROSS beats making the engineer rebuild the URL,
+                    headers and body by hand in a second form. It takes the draft
+                    as it stands, unsaved edits included — those are usually the
+                    reason for wanting the load test in the first place. */}
+                <Button
+                  variant="outline"
+                  onClick={goLoadTest}
+                  disabled={!draft.url}
+                  title="Load test this request — opens Performance with it filled in"
+                  className="h-11 shrink-0 gap-2 rounded-full px-5 active:scale-[0.98]"
+                >
+                  <Gauge className="size-4" />
+                  Load test
                 </Button>
               </div>
 

@@ -60,6 +60,41 @@ server/src/
                     Don't narrow it back to one shape.
   testcaseGen.ts    core test-case generation: read ticket → stream claude → write versioned .md
   testcaseJobs.ts   in-memory background-job registry for test-case generation (logs + per-item status)
+  k6.ts             Performance › API load test: detect k6, GENERATE the k6 script, spawn
+                    `k6 run`, parse its summary. The script + summary are written BESIDE THE
+                    DB (data/perf-runs/<jobId>/), never into a project repo, and per-endpoint
+                    headers/bodies reach k6 through the ENVIRONMENT (`__ENV.QCP_H<i>` /
+                    `QCP_B<i>`) so a bearer token never lands on disk. Exit code 99 means "a
+                    threshold was crossed" — a valid RESULT, not a failure; don't turn it into
+                    an error or the report is thrown away. Per-endpoint numbers are explicit
+                    custom metrics (ep<i>_duration/_waiting/_bytes/_ok/_calls), because k6 only
+                    emits a tagged sub-metric when a threshold names it.
+  pageAudit.ts      Performance › Page load: loads a page N times in a real Chrome
+                    (playwright-core, same logged-in profile as scanJobs.ts) and reports load
+                    timings + a per-request table + which APIs were called MORE THAN ONCE per
+                    load. Keeps recording for `settleMs` AFTER the load event — duplicate calls
+                    are a post-mount effect, so stopping at `load` misses the whole point.
+                    API calls and static assets have SEPARATE caps: one shared cap fills with
+                    a dev server's ES modules and then silently drops the XHR/fetch calls the
+                    feature exists to count.
+                    Reports `redirected` + `finalUrl`: a session-less browser lands on /login
+                    and every number then describes THAT page, so the report says so first.
+  authSession.ts    Performance › Page load "sign in first": opens a HEADED Chrome on the
+                    audit's own profile (`agentProfileDir()`), holds it while the engineer
+                    logs in, and closes it — closing is what flushes localStorage to disk and
+                    frees the profile lock. One at a time, never during an audit (Chrome won't
+                    open a profile twice); auto-closed after 20min and on shutdown.
+  perfJobs.ts       in-memory background-job registry shared by both of the above (logs +
+                    result + cancel). Its PUBLIC shape strips the k6 config's headers/bodies —
+                    a poll response is the easiest place for a credential to leak.
+  reportExport.ts   Performance › report export: the CLIENT's report HTML in, a PDF (headless
+                    Chrome page.pdf) or a .docx (html-to-docx) out. Uses a CLEAN Chrome, never
+                    agentProfileDir() — sharing the audit's profile would block exports while an
+                    audit ran. Word cannot read inline SVG, so each chart FIGURE (div.viz-root:
+                    svg PLUS its legend, whose swatches are CSS vars Word cannot resolve either)
+                    is screenshotted at 2x and swapped for a data-URI <img>, in the DOM rather
+                    than by regex. An optional running footer is stripped to plain text
+                    (footerText) and printed on EVERY page.
   crawl.ts          core single-ticket crawl: download detail+comments+attachments (+ optional summary.md)
   crawlJobs.ts      in-memory background-job registry for ticket crawling (logs + per-item status)
   sourceRepo.ts     git plumbing for the Source Code page: clone/adopt/pull a GitHub/Bitbucket
@@ -167,7 +202,8 @@ server/src/
                     (500 notes / 200-char title / 100 KB body) and a normalize() that
                     tolerates anything malformed rather than throwing the page away
   routes/           projects, qc, files, skills, mcp, clickup, source, ai, templates,
-                    knowledge, memory, notes, database, diagrams, prototype, chat, version
+                    knowledge, memory, notes, database, diagrams, prototype, chat,
+                    performance, version
 
 web/src/
   App.tsx           two branches: `/ai-labs` renders BARE (no shell — see "QC AI Labs"),

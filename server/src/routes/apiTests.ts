@@ -328,7 +328,7 @@ function resolveActiveVars(root: string): Map<string, { value: string; secret: b
  * The environment wins on a key collision — an engineer who defines `otp.foo` by hand
  * for a fixed-OTP environment keeps their value.
  */
-function resolveSendVars(
+export function resolveSendVars(
   root: string,
   projectId: string,
   auth?: { account?: string; totp?: string },
@@ -369,7 +369,7 @@ const VAR_TOKEN_RE = /\{\{\s*([\w.-]+)\s*\}\}/g
  *    surface in anything echoed back to the browser.
  *  - Unknown keys are left as-is and reported in `unresolved` so callers can flag them.
  */
-function substituteVars(
+export function substituteVars(
   input: string,
   vars: Map<string, { value: string; secret: boolean }>,
   opts: { display?: boolean } = {},
@@ -1325,6 +1325,69 @@ apiTestsRouter.delete('/accounts/:label', (req, res) => {
  * own assertions and captures (a `POST /patients` hook captures `{{patient_id}}` for the
  * step that follows it).
  */
+/**
+ * What ONE step (or hook) of ONE flow sends and expects, instead of what its saved
+ * request says.
+ *
+ * Reported as: "I have to duplicate a request to run it in two flows, because each
+ * flow needs a different body and different assertions." A saved request is referenced
+ * by name on purpose (edit it once, every flow follows), but that also meant the SAME
+ * data and the SAME checks everywhere — so `POST /auth/login` had to exist twice: once
+ * with the right credentials for the happy path, once with the wrong ones for the 401.
+ * Two copies of one endpoint that drift the moment the endpoint changes.
+ *
+ * An override is per-STEP and lives in the flow, never in the request: the collection
+ * keeps one `POST /auth/login`, and the "login fails" flow says, on its own step, "send
+ * these credentials and expect 401".
+ *
+ * `bodyMode: ''` means "use the request's body" — not "no body" (that's `'none'`), a
+ * distinction the runner depends on. Headers/query are MERGED over the request's by
+ * key, so a step can change one header without restating the other twelve.
+ * `assertionMode` decides what the step is graded by: `inherit` the request's checks,
+ * `replace` them wholesale (the negative-path case), or `append` extra ones on top.
+ */
+interface ApiFlowOverride {
+  bodyMode: '' | BodyMode
+  body: string
+  headers: ApiKV[]
+  query: ApiKV[]
+  assertionMode: 'inherit' | 'replace' | 'append'
+  assertions: ApiAssertion[]
+}
+
+const ASSERTION_MODES = new Set(['inherit', 'replace', 'append'])
+
+/**
+ * Read one override, or `null` when nothing is actually overridden.
+ *
+ * Null rather than an empty object on purpose: `_flows.json` is versioned with the
+ * project, and writing eight lines of empty override into every step of every flow
+ * would bury the real diff. Readers use `EMPTY_OVERRIDE` for the null case.
+ */
+function toOverride(v: unknown): ApiFlowOverride | null {
+  if (!v || typeof v !== 'object') return null
+  const r = v as Record<string, unknown>
+  const bodyMode =
+    r.bodyMode === 'none' || r.bodyMode === 'json' || r.bodyMode === 'text' ? r.bodyMode : ''
+  const o: ApiFlowOverride = {
+    bodyMode,
+    body: typeof r.body === 'string' ? r.body.slice(0, MAX_OVERRIDE_BODY) : '',
+    headers: toKV(r.headers),
+    query: toKV(r.query),
+    assertionMode: ASSERTION_MODES.has(r.assertionMode as string)
+      ? (r.assertionMode as ApiFlowOverride['assertionMode'])
+      : 'inherit',
+    assertions: toAssertions(r.assertions),
+  }
+  const empty =
+    !o.bodyMode &&
+    !o.headers.length &&
+    !o.query.length &&
+    o.assertionMode === 'inherit' &&
+    !o.assertions.length
+  return empty ? null : o
+}
+
 interface ApiFlowHook {
   id: string
   requestName: string
@@ -1335,6 +1398,8 @@ interface ApiFlowHook {
    * so by default the step is not sent at all.
    */
   continueOnFail: boolean
+  /** This flow's own data / checks for this call — `null` = exactly what the request says. */
+  override: ApiFlowOverride | null
 }
 
 interface ApiFlowStep {
@@ -1347,6 +1412,8 @@ interface ApiFlowStep {
   before: ApiFlowHook[]
   /** Requests run right AFTER it, whether it passed, failed or was never sent. */
   after: ApiFlowHook[]
+  /** This flow's own data / checks for this step — `null` = exactly what the request says. */
+  override: ApiFlowOverride | null
 }
 
 interface ApiFlow {
@@ -1375,6 +1442,7 @@ const FLOWS_FILE = '_flows.json'
 const MAX_FLOWS = 30
 const MAX_STEPS = 40
 const MAX_HOOKS = 10 // per list: step.before, step.after, flow.setup, flow.teardown
+const MAX_OVERRIDE_BODY = 64 * 1024 // a per-step body override is data, not an asset
 const MAX_RUN_ROWS = 240 // a stored run is steps PLUS their hooks, in execution order
 const MAX_FLOW_RUNS = 20
 
@@ -1391,6 +1459,7 @@ function toHooks(v: unknown, prefix: string): ApiFlowHook[] {
       requestName: requestName.slice(0, 60),
       enabled: r.enabled !== false,
       continueOnFail: r.continueOnFail === true,
+      override: toOverride(r.override),
     })
     if (out.length >= MAX_HOOKS) break
   }
@@ -1411,6 +1480,7 @@ function toFlowStep(v: unknown, i: number): ApiFlowStep | null {
     // so the runner and the editor never have to guard for it.
     before: toHooks(r.before, `b${i}_`),
     after: toHooks(r.after, `a${i}_`),
+    override: toOverride(r.override),
   }
 }
 
@@ -1553,6 +1623,12 @@ interface FlowRunStepRecord {
   checks: { passed: number; total: number }
   detail: string
   captured: string[]
+  /**
+   * True when this row ran with the flow's own body/headers/checks instead of the saved
+   * request's. Two runs of "the same" request that disagree are otherwise unexplainable
+   * from the report, which is the only evidence left once the flow has been edited.
+   */
+  overridden: boolean
 }
 
 interface FlowRunRecord {
@@ -1601,6 +1677,7 @@ function toFlowRunStep(v: unknown): FlowRunStepRecord {
     captured: Array.isArray(r.captured)
       ? r.captured.filter((c): c is string => typeof c === 'string').slice(0, 20)
       : [],
+    overridden: r.overridden === true,
   }
 }
 
