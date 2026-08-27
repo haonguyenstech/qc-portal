@@ -280,3 +280,53 @@ web/src/
     useRunStream.ts WebSocket hook for live run events
 ```
 
+
+## Self-update — the sidebar's "Update now"
+
+`bin/qc-portal.mjs --update` + `routes/version.ts` + `VersionFooter` in `App.tsx`.
+The server spawns the launcher **detached**, the launcher stops the server, rebuilds,
+and starts a fresh one; the browser polls `/api/version` and reloads. Every rule below
+exists because that sequence produced a spinner that never finished.
+
+**A failed update must not leave the portal dead.** `update()` stops the server BEFORE
+the first step, and `run()` used to `process.exit` on a non-zero status — so any step
+that failed took the portal down permanently, and the only way back was a terminal the
+QC engineer usually doesn't have open. `run()` now returns a sentence instead of
+exiting, and `update()` restarts the previous version on ANY failure. Verified both
+ways in a sandbox: with the old launcher a failing build left `/api/version`
+unreachable; with the new one the server is answering again seconds later.
+
+**Every step is bounded.** `spawnSync` has no timeout unless one is passed, so a
+stalled `git fetch` or `npm install` — dropped VPN, corporate proxy, a credential
+prompt nobody can see — blocked forever with the server already stopped. Git gets 3
+minutes, npm 15. On Windows a `shell: true` timeout kills `cmd.exe` and may leave the
+grandchild running; that is accepted, because the point is to stop WAITING and put the
+server back. The steps also run with `GIT_TERMINAL_PROMPT=0` / `GIT_ASKPASS` /
+`GCM_INTERACTIVE=never`: the updater's stdio is a log file, so any prompt is invisible
+and waiting on one is waiting on nobody.
+
+**"The server is back" is not "the update worked."** `/api/version` reads
+`package.json` FROM DISK, and `git reset --hard` moves it before the steps that can
+still fail — so a failed build reports the new version while running the old bundle,
+and the browser would announce "update complete" and reload onto it. The launcher
+therefore writes `data/update-status.json` (`{ok, error, version, at}`, cleared to
+`{ok:null,running:true}` at the start so a stale marker can't answer for this run), and
+`GET /api/version/update-log` returns it alongside the log tail. The UI reports failure
+from the MARKER, never from the version number.
+
+**The in-flight guard is a lease, not a latch.** `updateStarted = true` forever was
+justified by "the updater restarts the server, giving a fresh process" — true only when
+the update succeeds. After a failure the flag stayed set, so every retry got
+`alreadyRunning: true` and the browser went straight back to waiting for a restart that
+was never coming. It is now a 20-minute lease.
+
+**The button's spinner is state, not a derivation.** `update.isPending || (isSuccess &&
+data.ok)` never becomes false again — the mutation succeeds the moment the server
+*accepts* the request — so the button stayed disabled and spinning for the life of the
+page even after the update had failed and said so. It is now cleared in a `finally`.
+The toast counts elapsed time while it waits: a silent spinner and a hang look
+identical, and this step legitimately takes minutes.
+
+**The browser's budget must outlast the launcher's.** Phase 2 waits 35 minutes — the
+launcher's own worst case (3 + 15 + 15) plus the restart — so the browser gives up only
+after the launcher certainly has, and what it then sees is the restored old server.

@@ -146,6 +146,12 @@ someone typed — a regression sheet, an exported checklist, a spec. `RunTestcas
 parent ticket, via `POST /api/clickup/issues/subtasks` → `createIssueSubtask`. Every field is filled
 in for the engineer, and the parts that are easy to get wrong:
 
+**The commit half is shared**: the parent field, the inherit preview, the create call and the
+created-card chips live in `components/ClickupFilingBar.tsx` (pure helpers in
+`lib/clickup-filing.ts`), and Design Check (`/verify`) files its findings through the same
+component. This page owns only the issue list and each issue's wording. Everything below is a
+rule that panel enforces for BOTH — don't fork it to change one of them.
+
 - **Priority comes from the ISSUE's severity, not the parent's priority.** Inheriting the parent's
   was the original behavior and it produced bugs with **no priority at all**, because a feature
   ticket usually has none — verified on a real ticket (`86eut664j`: one assignee, no tags,

@@ -3,6 +3,57 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.11.24 — 2026-08-27
+
+**Design Check findings go straight to ClickUp, and an update that fails leaves the portal running**
+
+### Added
+
+- **File Design Check findings to ClickUp, the same way a run's issues are filed.** The findings
+  list now carries the same filing bar as the Issues tab — pick the findings, set the parent
+  ticket, create the subtasks — so a design review ends in tickets instead of in a list somebody
+  has to retype. Four things it does on purpose: a **"match" cannot be filed** (filing the things
+  that are fine is how a bug list stops being read); only **mismatch** and **concern** are ticked
+  by default, because "needs discussion" and "not sure" are questions, not defects; the finding's
+  category sets its **priority** (mismatch → High, concern → Normal, discuss/unsure → Low) with a
+  per-row override; and the **parent ticket is prefilled with the ticket the check ran on**, since
+  that is where the gaps belong. Titles are prefixed `Design:` so a design gap is distinguishable
+  from a bug in a ClickUp list, and a check you saved days ago can still be filed from history.
+- **Design Check's setup is now three numbered steps** — what to check, the criteria, then run.
+  The inputs are not interchangeable, and the page used to present them as if they were. The run
+  button says what is still **missing** instead of sitting greyed out with no explanation, the
+  Figma field warns when the link is not a `figma.com` URL (the model cannot open what is not a
+  design), and the extra-instructions box stays collapsed until you ask for it — it was the
+  least-used field taking the most vertical space.
+- **Filter and search the findings.** The count chips are now filters, and there is a search box.
+  Twenty-six findings across five buckets is a scroll, and the question being asked of it is
+  almost always "show me the ones that failed".
+
+### Fixed
+
+- **An update that fails no longer takes the portal down with it.** This is the important half of
+  the "Updating QC Portal…" spinner that never finished, especially on Windows. The updater stops
+  the server *before* it rebuilds, and any step that failed used to end the whole thing right
+  there — leaving no portal to come back to and no way to recover except a terminal. Now every
+  failure restarts the version you were already on, so a failed update means "you are still on
+  the old version" instead of "the portal is gone".
+- **No update step can hang forever.** `git fetch` and `npm install` had no time limit, so a
+  dropped VPN, a corporate proxy, or a credential prompt nobody can see would wait indefinitely
+  with the server already stopped. Git now gets 3 minutes and npm 15, and the steps run in a mode
+  where anything that wants to ask a question fails fast instead — the updater has no console, so
+  a prompt there is invisible and waiting on it is waiting on nobody.
+- **"Update now" can be retried.** After a failed update the button stayed disabled and spinning
+  for as long as the page was open, and the server refused every further attempt as "already
+  running" — so the browser went straight back to waiting for a restart that was never coming.
+  Both now clear themselves.
+- **The update tells you what actually happened.** It no longer announces "Update complete" when
+  the update did not complete: the version shown by the server is read from a file that `git`
+  has already updated by the time a build can still fail, so a failed build looked like a
+  successful upgrade. The result now comes from what the updater itself reported, and a failure
+  names the step — *"`npm run build` failed"* — instead of pointing you at a log file inside the
+  install folder. While it works, the message counts up the elapsed time, because a silent
+  spinner and a hang look exactly the same.
+
 ## 0.11.23 — 2026-08-27
 
 **Word files that actually open, a page report that stops averaging two different visits, and a question that sorts numbers as numbers**

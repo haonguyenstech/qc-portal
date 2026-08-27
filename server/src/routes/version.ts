@@ -146,9 +146,50 @@ function spawnLauncherDetached(
   }
 }
 
-// Guards against firing the updater twice within the same process lifetime.
-// (It resets naturally — the updater restarts the server, giving a fresh process.)
-let updateStarted = false
+/**
+ * Guards against firing the updater twice while one is genuinely in flight.
+ *
+ * It used to be a one-way latch, on the reasoning that "the updater restarts the
+ * server, giving a fresh process". That only holds when the update SUCCEEDS. When
+ * it failed, the flag stayed set for the life of the process and every later click
+ * got `alreadyRunning: true` — so the browser went straight back to waiting for a
+ * restart that was never coming, and the engineer could never retry. The lease
+ * makes a stuck update recoverable without a terminal.
+ */
+const UPDATE_LEASE_MS = 20 * 60_000
+let updateStartedAt = 0
+const updateInFlight = () => updateStartedAt > 0 && Date.now() - updateStartedAt < UPDATE_LEASE_MS
+
+/**
+ * The tail of the updater's log.
+ *
+ * Without it the only thing the UI could say when an update failed was "check
+ * data/update.log in the install folder" — a file on a machine whose owner is
+ * looking at a browser, and on Windows usually a path they have never seen. The
+ * log is the launcher's own progress lines (each step, and the failure sentence),
+ * so the last few lines say exactly which step stopped and why.
+ */
+versionRouter.get('/update-log', (_req, res) => {
+  const dataDir = path.join(INSTALL_ROOT, 'data')
+  const logPath = path.join(dataDir, 'update.log')
+  let lines: string[] = []
+  try {
+    const text = fs.readFileSync(logPath, 'utf8')
+    lines = text.split(/\r?\n/).filter((l) => l.trim()).slice(-40)
+  } catch {
+    /* no log yet — an update has never run here */
+  }
+  // How the launcher says the run ENDED. The version in package.json is not that
+  // answer: `git reset` moves it before the steps that can still fail, so a failed
+  // build leaves the new number on disk with the old build running.
+  let status: { ok: boolean | null; error?: string; version?: string; at?: string } | null = null
+  try {
+    status = JSON.parse(fs.readFileSync(path.join(dataDir, 'update-status.json'), 'utf8')) as typeof status
+  } catch {
+    /* no marker — an older launcher, or no update has run */
+  }
+  res.json({ lines, status, path: logPath })
+})
 
 // Trigger a self-update. Spawns `qc-portal --update` in a DETACHED process so it
 // outlives our own death: the launcher stops this server, runs git pull + npm
@@ -174,17 +215,17 @@ versionRouter.post('/update', (_req, res) => {
     })
   }
 
-  if (updateStarted) {
+  if (updateInFlight()) {
     return res.json({ ok: true, current, alreadyRunning: true })
   }
-  updateStarted = true
+  updateStartedAt = Date.now()
 
   try {
     // QC_HEADLESS: tell the launcher there's no user terminal so its git/npm/build
     // steps run without inheriting a console — otherwise each pops its own window.
     spawnLauncherDetached(launcher, '--update', 'update.log', { QC_HEADLESS: '1' })
   } catch (err) {
-    updateStarted = false
+    updateStartedAt = 0
     return res.status(500).json({
       ok: false,
       current,

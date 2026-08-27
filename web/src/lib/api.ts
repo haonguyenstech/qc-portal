@@ -2357,6 +2357,24 @@ export async function pingHealth(): Promise<boolean> {
   }
 }
 
+export interface UpdateLog {
+  lines: string[]
+  /** How the launcher says the last run ENDED — null when no update has run here. */
+  status: { ok: boolean | null; error?: string; version?: string; at?: string } | null
+  path: string
+}
+
+/**
+ * The tail of the updater's log, plus how it ended.
+ *
+ * This is what lets the UI say "npm install failed" instead of "check
+ * data/update.log in the install folder" — a file on the machine of someone who
+ * is looking at a browser.
+ */
+export function getUpdateLog(): Promise<UpdateLog> {
+  return request('/api/version/update-log')
+}
+
 /** The portal's own release notes (CHANGELOG.md) for the Release Notes page. */
 export function getReleaseNotes(): Promise<{ current: string | null; markdown: string | null }> {
   return request('/api/version/changelog')

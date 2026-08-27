@@ -162,7 +162,36 @@ async function status() {
   else console.log('QC Portal is not running.')
 }
 
-function run(cmd, args) {
+// Nothing in an update may wait on a human. The updater runs with no console and
+// its stdio pointed at a log file, so a prompt is INVISIBLE — git asking for
+// credentials (a proxy, an expired token, a repo that went private) would sit
+// there unanswered forever with the server already stopped. Make every such
+// question fail fast instead of blocking.
+const NON_INTERACTIVE_ENV = {
+  GIT_TERMINAL_PROMPT: '0',
+  GIT_ASKPASS: 'echo',
+  GCM_INTERACTIVE: 'never',
+  npm_config_yes: 'true',
+  npm_config_audit: 'false',
+  npm_config_fund: 'false',
+}
+
+/**
+ * Run one update step. Returns null on success, or a human sentence on failure.
+ *
+ * DOES NOT EXIT. It used to call `process.exit` on a non-zero status, which is
+ * what made a failed update permanent: `update()` stops the server BEFORE the
+ * first step, so exiting here left the portal dead with no way back except a
+ * terminal the QC engineer probably doesn't have open.
+ *
+ * Every step is also BOUNDED. `spawnSync` has no timeout unless one is given, so
+ * a stalled `git fetch` or `npm install` — a dropped VPN, a corporate proxy, a
+ * credential prompt nobody can see — hung here forever, which is exactly the
+ * "updating…" spinner that never finishes. (Note: with `shell: true` on Windows
+ * the timeout kills cmd.exe and the grandchild may survive; that is acceptable,
+ * because the point is to stop WAITING and put the server back.)
+ */
+function run(cmd, args, timeout) {
   // When the updater is launched from the portal UI it has no attached terminal
   // (stdout is redirected to a log file, not a TTY). On Windows, a shell:true step
   // (git / npm via cmd.exe) with stdio:'inherit' then pops its OWN console window
@@ -171,17 +200,32 @@ function run(cmd, args) {
   // run fully headless (no inherited console → no window). Phase progress is still
   // captured because the launcher's own console.log is redirected to the log file.
   const headless = process.env.QC_HEADLESS === '1' || !process.stdout.isTTY
+  const label = `${cmd} ${args.join(' ')}`
   const r = spawnSync(cmd, args, {
     cwd: ROOT,
     stdio: headless ? 'ignore' : 'inherit',
     shell: isWin,
     windowsHide: true,
+    timeout,
+    killSignal: 'SIGKILL',
+    env: { ...process.env, ...NON_INTERACTIVE_ENV },
   })
-  if (r.status !== 0) {
-    console.error(`\n\`${cmd} ${args.join(' ')}\` failed.`)
-    process.exit(r.status ?? 1)
+  // A killed-on-timeout child reports ETIMEDOUT, or comes back signalled with no
+  // status — both mean "it never finished", which is a different fix for the user
+  // than "it ran and failed", so they get different sentences.
+  if (r.error?.code === 'ETIMEDOUT' || (r.status === null && r.signal)) {
+    const waited = timeout && timeout >= 60_000 ? `${Math.round(timeout / 60_000)} minutes` : `${Math.round((timeout ?? 0) / 1000)}s`
+    return `\`${label}\` did not finish within ${waited} and was stopped. Check the network, VPN or proxy and try again.`
   }
+  if (r.error) return `\`${label}\` could not start: ${r.error.message}`
+  if (r.status !== 0) return `\`${label}\` failed (exit ${r.status}).`
+  return null
 }
+
+// How long each step may take before it is treated as hung. Generous — a cold
+// `npm install` on a laptop over a slow link is genuinely slow — but finite.
+const GIT_TIMEOUT_MS = 3 * 60_000
+const NPM_TIMEOUT_MS = 15 * 60_000
 
 // The branch this checkout tracks (the installer clones `main`); fall back to it.
 function currentBranch() {
@@ -195,30 +239,88 @@ function currentBranch() {
   return name && name !== 'HEAD' ? name : 'main'
 }
 
+/**
+ * Record how the update ended, where the server can read it.
+ *
+ * The server reports the version from package.json ON DISK, which `git reset` has
+ * already moved by the time a later step fails — so a build that failed still
+ * looks like a version bump, and the browser would announce "update complete" and
+ * reload onto the old bundle wearing the new number. This marker is the only thing
+ * that knows the difference, so the UI can say what actually happened.
+ */
+function writeUpdateStatus(status) {
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true })
+    fs.writeFileSync(
+      path.join(DATA_DIR, 'update-status.json'),
+      JSON.stringify({ ...status, at: new Date().toISOString() }),
+    )
+  } catch {
+    /* the update itself matters more than the note about it */
+  }
+}
+
+/** The update steps, in order. Returns a failure sentence, or null when all passed. */
+function updateSteps() {
+  if (fs.existsSync(path.join(ROOT, '.git'))) {
+    console.log('Pulling latest…')
+    const branch = currentBranch()
+    let failure = run('git', ['fetch', 'origin', branch], GIT_TIMEOUT_MS)
+    if (failure) return failure
+    // Force the checkout to match the remote. A plain `git pull --ff-only` aborts
+    // the moment a tracked file is dirty, and `npm install` routinely rewrites the
+    // tracked package-lock.json (different npm version / platform-specific optional
+    // deps, esp. on Windows) — which silently blocked every subsequent update. A
+    // hard reset to the upstream tip discards those local edits and always advances.
+    failure = run('git', ['reset', '--hard', `origin/${branch}`], GIT_TIMEOUT_MS)
+    if (failure) return failure
+  } else {
+    console.warn('Not a git checkout — skipping pull. Re-run the install script to update the source.')
+  }
+  console.log('Installing dependencies…')
+  let failure = run('npm', ['install'], NPM_TIMEOUT_MS)
+  if (failure) return failure
+  console.log('Building…')
+  failure = run('npm', ['run', 'build'], NPM_TIMEOUT_MS)
+  if (failure) return failure
+  return null
+}
+
+/**
+ * Update in place, and — whatever happens — put the server back.
+ *
+ * The recovery is the point. The server is stopped BEFORE the first step, so any
+ * step that failed or hung used to leave the portal simply gone: the browser sat
+ * on "Updating QC Portal…" until it timed out, and there was nothing to come back
+ * to. A failed update must degrade to "you are still on the old version", which
+ * the engineer can see and retry, not to "the portal is not running".
+ */
 async function update() {
   const wasRunning = await ping()
   if (wasRunning) {
     console.log('Stopping server before update…')
     stop()
   }
-  if (fs.existsSync(path.join(ROOT, '.git'))) {
-    console.log('Pulling latest…')
-    const branch = currentBranch()
-    run('git', ['fetch', 'origin', branch])
-    // Force the checkout to match the remote. A plain `git pull --ff-only` aborts
-    // the moment a tracked file is dirty, and `npm install` routinely rewrites the
-    // tracked package-lock.json (different npm version / platform-specific optional
-    // deps, esp. on Windows) — which silently blocked every subsequent update. A
-    // hard reset to the upstream tip discards those local edits and always advances.
-    run('git', ['reset', '--hard', `origin/${branch}`])
-  } else {
-    console.warn('Not a git checkout — skipping pull. Re-run the install script to update the source.')
+
+  // Cleared up front so a stale marker from a previous run can never be read as
+  // the verdict on this one.
+  writeUpdateStatus({ ok: null, running: true })
+
+  const failure = updateSteps()
+  if (failure) {
+    console.error(`Update failed: ${failure}`)
+    writeUpdateStatus({ ok: false, error: failure, version: readPkgVersion() })
+    if (wasRunning) {
+      // The old build is still on disk, so this normally succeeds even when the
+      // update did not. Reported either way — this line is what the UI shows.
+      console.log('Update did not complete — restarting the previous version…')
+      await start({ open: false })
+    }
+    process.exit(1)
   }
-  console.log('Installing dependencies…')
-  run('npm', ['install'])
-  console.log('Building…')
-  run('npm', ['run', 'build'])
+
   console.log(`Updated to v${readPkgVersion()}.`)
+  writeUpdateStatus({ ok: true, version: readPkgVersion() })
   if (wasRunning) {
     console.log('Restarting…')
     await start({ open: false })

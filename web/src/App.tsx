@@ -50,7 +50,7 @@ import {
   SelectTrigger,
 } from '@/components/ui/select'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
-import { checkForUpdate, getVersion, triggerUpdate } from '@/lib/api'
+import { checkForUpdate, getUpdateLog, getVersion, triggerUpdate } from '@/lib/api'
 import { listRuns } from '@/lib/api'
 import { useProjects } from '@/lib/project-context'
 import NotificationBell from '@/components/NotificationBell'
@@ -618,7 +618,11 @@ async function waitForRestart(prevVersion: string | null): Promise<boolean> {
   }
 
   // Phase 2 — wait for it to answer again as a restarted server, twice in a row.
-  const upDeadline = Date.now() + 5 * 60_000
+  // The budget covers the launcher's own worst case (git 3min + npm install 15min +
+  // build 15min) plus the restart, so the browser stops waiting only once the
+  // launcher itself has certainly given up — and the launcher, on giving up, puts
+  // the old server back, which is what this loop then sees.
+  const upDeadline = Date.now() + 35 * 60_000
   let good = 0
   while (Date.now() < upDeadline) {
     await sleep(2000)
@@ -690,34 +694,91 @@ function VersionFooter({ collapsed }: { collapsed: boolean }) {
     }
   }
 
+  // Whether an update is in flight, as OUR state rather than a derivation of the
+  // mutation. `update.isSuccess && update.data.ok` never becomes false again — the
+  // mutation succeeded the moment the server accepted the request — so the button
+  // stayed disabled and spinning for the life of the page even after the update had
+  // failed and said so. There was then no way to retry except a reload, which is
+  // precisely the "stuck updating forever" this whole path keeps producing.
+  const [updating, setUpdating] = useState(false)
+
+  /** The last lines the launcher wrote, for a failure message worth reading. */
+  async function updateFailureDetail(fallback: string): Promise<string> {
+    try {
+      const log = await getUpdateLog()
+      if (log.status?.ok === false && log.status.error) return log.status.error
+      const lastError = [...log.lines].reverse().find((l) => /fail|error|not finish/i.test(l))
+      return lastError ?? fallback
+    } catch {
+      return fallback
+    }
+  }
+
   const update = useMutation({
     mutationFn: triggerUpdate,
+    onMutate: () => setUpdating(true),
     onSuccess: async (r) => {
       if (!r.ok) {
         toast.error('Update failed to start', { description: r.error })
+        setUpdating(false)
         return
       }
-      toast.loading('Updating QC Portal…', {
-        id: 'qc-update',
-        description: 'Pulling, rebuilding, and restarting the server.',
-        duration: Infinity,
-      })
-      // Gate the reload on the server coming back as a RESTARTED process (new
-      // version, or a witnessed down→up), so we never reload mid-restart.
-      const back = await waitForRestart(r.current ?? version)
-      if (back) {
+      // A silent spinner is indistinguishable from a hang, and this step legitimately
+      // takes minutes. Count up, and say that the portal returns either way.
+      const started = Date.now()
+      const describe = () => {
+        const secs = Math.round((Date.now() - started) / 1000)
+        const elapsed = secs < 60 ? `${secs}s` : `${Math.floor(secs / 60)}m ${secs % 60}s`
+        return `Pulling, rebuilding and restarting — ${elapsed} elapsed. The portal comes back either way.`
+      }
+      const show = () =>
+        toast.loading('Updating QC Portal…', {
+          id: 'qc-update',
+          description: describe(),
+          duration: Infinity,
+        })
+      show()
+      const ticker = window.setInterval(show, 5000)
+
+      try {
+        // Gate the reload on the server coming back as a RESTARTED process (new
+        // version, or a witnessed down→up), so we never reload mid-restart.
+        const back = await waitForRestart(r.current ?? version)
+        if (!back) {
+          toast.error('Update timed out', {
+            id: 'qc-update',
+            description: await updateFailureDetail(
+              'The server did not come back. Open a terminal in the install folder and run `qc-portal --restart`.',
+            ),
+            duration: Infinity,
+          })
+          return
+        }
+        // The server is back — but "back" is not "updated". The version endpoint
+        // reads package.json from disk, which `git reset` has already moved by the
+        // time a later step can fail, so a failed build still looks like a bump.
+        // The launcher's own verdict is the only thing that knows.
+        const log = await getUpdateLog().catch(() => null)
+        if (log?.status?.ok === false) {
+          toast.error('Update did not complete — still on the previous version', {
+            id: 'qc-update',
+            description: log.status.error ?? 'The launcher reported a failure.',
+            duration: Infinity,
+          })
+          return
+        }
         toast.success('Update complete — reloading…', { id: 'qc-update', duration: 2000 })
         await sleep(600)
         window.location.reload()
-      } else {
-        toast.error('Update timed out', {
-          id: 'qc-update',
-          description: 'The server did not come back. Check data/update.log in the install folder.',
-          duration: Infinity,
-        })
+      } finally {
+        window.clearInterval(ticker)
+        setUpdating(false)
       }
     },
-    onError: (e) => toast.error('Update failed to start', { description: String(e) }),
+    onError: (e) => {
+      setUpdating(false)
+      toast.error('Update failed to start', { description: String(e) })
+    },
   })
 
   const checkData = updateCheck.data
@@ -725,7 +786,6 @@ function VersionFooter({ collapsed }: { collapsed: boolean }) {
   const latest = checkData?.latest
   const checking = manualChecking || updateCheck.isFetching
   const checkedAgo = timeAgoShort(checkData?.checkedAt)
-  const updating = update.isPending || (update.isSuccess && update.data?.ok)
   const { pathname } = useLocation()
 
   if (collapsed) {

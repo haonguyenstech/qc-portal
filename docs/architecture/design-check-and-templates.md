@@ -8,6 +8,40 @@ once in the project dir (tools enabled so it can open the design via Figma/Playw
 structured `findings` bucketed into `match` / `mismatch` / `concern` / `unsure` / `discuss`, rendered as
 grouped cards. Output shape is fixed by the prompt's JSON contract — don't reshape it into a template.
 
+The page is one **setup card with three numbered steps** (what to check → criteria → run),
+then live progress, then the findings. The steps exist because the three inputs are not
+interchangeable: the ticket and the Figma link are required, the checklist and instructions
+shape what is judged, and the model only changes how hard it looks. The run button says what is
+still MISSING instead of sitting greyed out, the Figma field warns on a non-`figma.com` URL
+(the model can't open what isn't a design), and the instructions box stays collapsed until
+asked for — it was the least-used field taking the most vertical space.
+
+**Findings are filed to ClickUp exactly like a QC run's issues** (`FindingsPanel` →
+`components/ClickupFilingBar.tsx`, shared with `RunDetailPage`'s Issues tab — see "Filing a
+run's issues to ClickUp" in `runs.md` for the rules that panel enforces). Design Check specifics:
+
+- **A "match" cannot be filed.** Filing the things that are FINE is how a bug list stops being
+  read. The other four buckets are filable; only `mismatch` + `concern` are ticked by default —
+  "needs discussion" and "not sure" are questions, and a batch that quietly files every question
+  is one the engineer stops trusting.
+- **The category supplies the severity, and severity is what sets the priority** (`CATEGORY[...]
+  .severity` → the server's `severityPriority()`): mismatch → High, concern → Normal, discuss /
+  unsure → Low. Each row carries a severity picker so the default can be overridden per finding,
+  and the inherit preview re-tallies as it changes — the preview and the filed field come from
+  the same value, which is the whole point of the shared module.
+- **The parent ticket is prefilled with the crawled ticket's own ClickUp URL** (the check ran on
+  that ticket; its subtasks are where the gaps belong). Typing in the field marks it the
+  engineer's, so a later ticket change can't overwrite what they pasted.
+- **The card body carries the verdict, the detail, the ticket and the Figma link**
+  (`findingBody`), and the title is prefixed `Design:` so a design gap is distinguishable from a
+  run's bug in a ClickUp list. There are no screenshots, so the bar's evidence row is hidden
+  rather than reporting "0 attached".
+- **A saved check can still be filed.** History rows open the SAME `FindingsPanel`, because the
+  follow-up conversation usually happens later than the check itself.
+
+Count chips double as **filters** and the list has a search box: 26 findings across five buckets
+is a scroll, and the question being asked of it is almost always "show me the ones that failed".
+
 **Project templates (`/templates` → `ProjectSettingsPage.tsx`, `routes/templates.ts`)** — plain-text
 files under `testing/templates/<key>.md`. The UI owns the catalog in `TEMPLATE_KINDS`; add a kind there
 to expose a new upload slot. Current kinds:

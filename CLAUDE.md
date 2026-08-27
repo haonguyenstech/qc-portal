@@ -85,7 +85,10 @@ Step by step, from a clean-ish tree on `main`:
 
 End users upgrade with `qc-portal --update` (git fetch + hard-reset to the upstream branch,
 then `npm install` + `npm run build`; see `bin/qc-portal.mjs`), or the **Release notes** page's
-"check for updates" / "update now". So a release isn't usable until both the commit and the tag
+"check for updates" / "update now". That path stops the server BEFORE it rebuilds, so every
+step is bounded and every failure restarts the previous version — a failed update must
+degrade to "still on the old version", never to a portal that is gone. See
+"Self-update" in `docs/architecture/layout.md` before touching it. So a release isn't usable until both the commit and the tag
 are pushed.
 
 ## Layout
@@ -158,6 +161,11 @@ web/src/
   lib/  api.ts (ALL backend calls) types.ts project-context.tsx notifications.tsx theme.ts
         testRules.ts highlight.ts apiAssert.ts devices.ts sql-complete.ts noteHtml.ts
         utils.ts useRunStream.ts useXtermSession.ts
+        clickup-filing.ts + components/ClickupFilingBar.tsx  (filing a finding to ClickUp:
+        the severity->priority map, the error wording, and the parent field + inherit
+        preview + create call. ONE implementation for the run Issues tab AND Design
+        Check — a second copy drifts, and then the priority shown before filing stops
+        matching the one applied)
         perfReport.ts perfCharts.ts perfReportHtml.ts  (Performance: verdict bands, derived
         metrics (peak RPS, drift, phase shares) + MEASUREMENT_NOTES /
         PAGE_MEASUREMENT_NOTES, the SVG charts — bars, lines, stacks and the page

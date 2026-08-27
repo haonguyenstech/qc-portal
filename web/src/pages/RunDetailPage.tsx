@@ -17,7 +17,6 @@ import {
   ArrowLeft,
   Ban,
   CalendarClock,
-  CheckCircle2,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
@@ -30,13 +29,9 @@ import {
   Folder,
   Globe,
   Image as ImageIcon,
-  Link2,
   ListChecks,
   Loader2,
-  MessageSquare,
   Send,
-  SignalHigh,
-  UserRound,
   TabletSmartphone,
   Terminal,
   Timer,
@@ -52,7 +47,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
-import { Input } from '@/components/ui/input'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { CheckboxIndicator } from '@/components/ui/checkbox'
@@ -64,8 +58,6 @@ import { RunKindTag } from '@/components/RunKindTag'
 import { asRunKind } from '@/lib/runKind'
 import { asTestTarget } from '@/lib/testTarget'
 import {
-  clickupIssueFilingContext,
-  createClickupIssueSubtasks,
   deleteRun,
   getRun,
   listCrawledTickets,
@@ -73,11 +65,10 @@ import {
   openRunFolder,
   runFileUrl,
   screenshotUrl,
-  type AppliedIssueFields,
-  type ClickupFilingContext,
-  type ClickupTask,
   type RunFile,
 } from '@/lib/api'
+import { ClickupFilingBar } from '@/components/ClickupFilingBar'
+import { severityMeta, type FilingItem } from '@/lib/clickup-filing'
 import { StatusBadge } from '@/lib/status'
 import type { LogEvent } from '@/lib/types'
 import { cn } from '@/lib/utils'
@@ -610,200 +601,6 @@ const SEVERITY_RE =
 function extractSeverity(text: string): string | null {
   const m = text.match(SEVERITY_RE)
   return m ? m[1].toLowerCase() : null
-}
-
-/** Map a parsed severity word onto a display label + our status-color palette. */
-function severityMeta(sev: string): { label: string; className: string } {
-  if (/critical|blocker|urgent/.test(sev))
-    return { label: sev, className: 'border-red-200 bg-red-50 text-red-700' }
-  if (/high/.test(sev)) return { label: sev, className: 'border-amber-200 bg-amber-50 text-amber-700' }
-  if (/medium|moderate|normal/.test(sev))
-    return { label: sev, className: 'border-blue-200 bg-blue-50 text-blue-700' }
-  return { label: sev, className: 'border-border bg-muted text-muted-foreground' } // low / minor / trivial
-}
-
-/**
- * Severity word -> the ClickUp priority label the bug will be filed with. MIRRORS
- * `severityPriority()` in server/src/clickup.ts, which is what actually sets it — this
- * copy exists only so the panel can show the outcome before filing. Keep them in step.
- */
-function priorityFromSeverity(severity: string | null): string | null {
-  const s = (severity ?? '').toLowerCase()
-  if (!s) return null
-  if (/blocker|critical|urgent|showstopper/.test(s)) return 'Urgent'
-  if (/high|major|severe/.test(s)) return 'High'
-  if (/medium|moderate|normal/.test(s)) return 'Normal'
-  if (/low|minor|trivial|cosmetic|nit/.test(s)) return 'Low'
-  return null
-}
-
-/** Long-form version of a created card's inherited fields, for the chip's tooltip. */
-function appliedSummary(applied?: AppliedIssueFields): string | undefined {
-  if (!applied) return undefined
-  const parts = [
-    applied.assignees.length
-      ? `Assigned to ${applied.assignees.join(', ')}`
-      : 'Unassigned (the parent ticket has no assignee)',
-    applied.priority
-      ? `Priority ${applied.priority}${applied.prioritySource === 'severity' ? ' (from the issue severity)' : applied.prioritySource === 'parent' ? ' (from the parent ticket)' : ''}`
-      : 'No priority (neither the issue nor the parent had one)',
-    applied.screenshots
-      ? `${applied.screenshots} screenshot${applied.screenshots === 1 ? '' : 's'} attached${applied.commented ? ' and posted as a comment' : ''}`
-      : 'No screenshots attached',
-  ]
-  if (applied.screenshotsFailed) {
-    const why = screenshotErrorSentence(applied.screenshotsError)
-    parts.push(
-      why ? `${applied.screenshotsFailed} could not be attached (${why})` : `${applied.screenshotsFailed} could not be attached`,
-    )
-  }
-  return parts.join(' · ')
-}
-
-/** Strip the server's `ClickUp attachment <status>: ` envelope from a failure
- *  reason — "ClickUp attachment 400: Over allocated storage" → "Over allocated
- *  storage". The surrounding UI already says these are ClickUp attachments. */
-function screenshotErrorSentence(err?: string | null): string | undefined {
-  if (!err) return undefined
-  return err.replace(/^ClickUp attachment \d+: /, '') || undefined
-}
-
-/**
- * Turn a thrown API error into one readable sentence. `request()` throws the raw
- * response body, so a ClickUp failure arrives as `{"error":"ClickUp API 404: {…}"}`
- * — which is what the panel used to print at the engineer verbatim.
- */
-function errorSentence(err: unknown, fallback: string): string {
-  const raw = err instanceof Error ? err.message : typeof err === 'string' ? err : ''
-  if (!raw.trim()) return fallback
-  let text = raw.trim()
-  try {
-    const parsed = JSON.parse(text) as { error?: string }
-    if (parsed?.error) text = parsed.error
-  } catch {
-    /* not JSON — use it as-is */
-  }
-  // ClickUp appends its own JSON body: "ClickUp API 404: {"err":"Not found",…}".
-  const nested = text.match(/^(.*?)[:\s]*\{.*"err"\s*:\s*"([^"]+)".*\}\s*$/)
-  if (nested) text = `${nested[1].trim()} — ${nested[2]}`
-  return text.slice(0, 240) || fallback
-}
-
-type FilingState =
-  | { kind: 'idle' }
-  | { kind: 'loading' }
-  | { kind: 'error'; message: string }
-  | { kind: 'ready'; context: ClickupFilingContext }
-
-/**
- * What the selected issues will inherit from the parent ticket, shown before filing.
- * The panel fills assignee / priority / evidence in automatically, and an automation
- * whose result you can only check by opening ClickUp is one nobody relies on — this is
- * also where a parent with NO assignee admits that the bugs would land unassigned.
- */
-function FilingPreview({ state, issues }: { state: FilingState; issues: ParsedIssue[] }) {
-  if (state.kind === 'idle') return null
-
-  if (state.kind === 'loading') {
-    return (
-      <p className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
-        <Loader2 className="size-3 animate-spin" />
-        Reading the parent ticket…
-      </p>
-    )
-  }
-  if (state.kind === 'error') {
-    return (
-      <p className="flex items-start gap-1.5 rounded-xl border border-amber-200 bg-amber-50/60 px-2.5 py-1.5 text-[11px] text-amber-700">
-        <AlertCircle className="mt-px size-3 shrink-0" />
-        <span>
-          Could not read that ticket, so nothing can be inherited from it.{' '}
-          <span className="opacity-80">{state.message}</span>
-        </span>
-      </p>
-    )
-  }
-
-  const { context } = state
-  const names = context.assignees.map((a) => a.username).filter(Boolean)
-
-  // Group the priorities these issues will get, so "High x3, Normal x1" is visible
-  // rather than a promise that priority is "handled".
-  const tally = new Map<string, number>()
-  for (const issue of issues) {
-    const label = priorityFromSeverity(issue.severity) ?? context.priority?.label ?? null
-    const key = label ?? 'not set'
-    tally.set(key, (tally.get(key) ?? 0) + 1)
-  }
-  const priorities = [...tally.entries()]
-  const shots = issues.reduce((n, i) => n + i.screenshots.length, 0)
-
-  return (
-    <div className="space-y-1.5 rounded-xl border border-border/60 bg-background/70 px-2.5 py-2">
-      <p className="text-[11px] font-semibold text-foreground">
-        Inherited from{' '}
-        <span className="font-mono font-normal">{context.displayId}</span>
-        {context.name ? <span className="text-muted-foreground"> · {context.name}</span> : null}
-      </p>
-      <FilingRow icon={<UserRound className="size-3" />} label="Assignee">
-        {names.length ? (
-          names.join(', ')
-        ) : (
-          <span className="text-amber-700">
-            none on the parent — the subtasks will be unassigned
-          </span>
-        )}
-      </FilingRow>
-      <FilingRow icon={<SignalHigh className="size-3" />} label="Priority">
-        {issues.length === 0
-          ? '—'
-          : priorities.map(([label, n], i) => (
-              <span key={label}>
-                {i > 0 ? ', ' : ''}
-                <span className={label === 'not set' ? 'text-muted-foreground' : 'font-medium'}>
-                  {label}
-                </span>
-                {n > 1 ? ` ×${n}` : ''}
-              </span>
-            ))}
-        {priorities.length > 0 && (
-          <span className="text-muted-foreground/70">
-            {' '}
-            (from each issue&apos;s severity
-            {context.priority ? `, else the parent's ${context.priority.label}` : ''})
-          </span>
-        )}
-      </FilingRow>
-      {context.tags.length > 0 && (
-        <FilingRow icon={<Link2 className="size-3" />} label="Tags">
-          {context.tags.join(', ')}
-        </FilingRow>
-      )}
-      <FilingRow icon={<MessageSquare className="size-3" />} label="Evidence">
-        {shots > 0
-          ? `${shots} screenshot${shots === 1 ? '' : 's'} attached to the cards and posted as a comment`
-          : 'no screenshots on the selected issues'}
-      </FilingRow>
-    </div>
-  )
-}
-
-function FilingRow({
-  icon,
-  label,
-  children,
-}: {
-  icon: React.ReactNode
-  label: string
-  children: React.ReactNode
-}) {
-  return (
-    <p className="flex items-start gap-1.5 text-[11px] leading-relaxed text-muted-foreground">
-      <span className="mt-0.5 shrink-0 text-muted-foreground/70">{icon}</span>
-      <span className="shrink-0 font-medium text-foreground/80">{label}:</span>
-      <span className="min-w-0">{children}</span>
-    </p>
-  )
 }
 
 function parseIssues(md: string | null): ParsedIssue[] {
@@ -1544,19 +1341,6 @@ function ScreenshotLightbox({
   )
 }
 
-/**
- * Hold a value still for `ms` after the last change. Used by the ClickUp parent field:
- * the filing-context lookup is a real API call, so it must not fire per keystroke.
- */
-function useDebounced<T>(value: T, ms: number): T {
-  const [settled, setSettled] = useState(value)
-  useEffect(() => {
-    const t = setTimeout(() => setSettled(value), ms)
-    return () => clearTimeout(t)
-  }, [value, ms])
-  return settled
-}
-
 function IssueClickupPanel({
   issuesMd,
   projectId,
@@ -1569,76 +1353,24 @@ function IssueClickupPanel({
   slug: string | null
 }) {
   const issues = parseIssues(issuesMd)
-  const [parentTask, setParentTask] = useState('')
   const [selected, setSelected] = useState<Set<string>>(() => new Set(issues.map((issue) => issue.id)))
-  const [created, setCreated] = useState<(ClickupTask & { applied?: AppliedIssueFields })[]>([])
   // Screenshot path currently open in the lightbox (null = closed).
   const [viewer, setViewer] = useState<string | null>(null)
   // Every issue's evidence, in report order — the lightbox steps through the lot,
   // so ← / → walks from one issue's last screenshot into the next issue's first.
   const issueShots = issues.flatMap((issue) => issue.screenshots)
 
-  const selectedIssues = issues.filter((issue) => selected.has(issue.id))
-
-  // What filing under this parent will inherit. Read-only and shown BEFORE the button:
-  // a parent with no assignee (the common case) has to say so, or the engineer only
-  // finds out by opening ClickUp and seeing unassigned bugs. Debounced because the
-  // field is typed/pasted a character at a time.
-  const parentRef = useDebounced(parentTask.trim(), 500)
-  const filing = useQuery({
-    queryKey: ['clickup-filing-context', projectId, parentRef],
-    queryFn: () => clickupIssueFilingContext(parentRef, projectId),
-    enabled: parentRef.length >= 6,
-    retry: false,
-    staleTime: 60_000,
-  })
-
-  const mutation = useMutation({
-    mutationFn: () =>
-      createClickupIssueSubtasks({
-        parentTask,
-        projectId,
-        slug,
-        issues: selectedIssues.map((issue) => ({
-          title: issue.title,
-          description: [
-            issue.description,
-            '',
-            `Source: QC run ${ticketId}`,
-          ].join('\n'),
-          // Sets the bug's ClickUp priority (the parent's is the fallback).
-          severity: issue.severity,
-          screenshots: issue.screenshots,
-        })),
-      }),
-    onSuccess: (result) => {
-      setCreated((prev) => [...result.created, ...prev])
-      // Say what landed on the cards, not just that they were created — the whole
-      // point of the automation is the fields, so a silent success hides its own work.
-      const shots = result.created.reduce((n, t) => n + (t.applied?.screenshots ?? 0), 0)
-      const missed = result.created.reduce((n, t) => n + (t.applied?.screenshotsFailed ?? 0), 0)
-      const who = result.created[0]?.applied?.assignees ?? []
-      const parts = [
-        who.length ? `assigned to ${who.join(', ')}` : 'unassigned (parent has no assignee)',
-        `${shots} screenshot${shots === 1 ? '' : 's'} attached`,
-      ]
-      if (missed) {
-        const why = screenshotErrorSentence(
-          result.created.find((t) => t.applied?.screenshotsError)?.applied?.screenshotsError,
-        )
-        parts.push(why ? `${missed} could not be attached — ${why}` : `${missed} could not be attached`)
-      }
-      toast.success(
-        `Created ${result.created.length} ClickUp subtask${result.created.length === 1 ? '' : 's'}`,
-        { description: parts.join(' · ') },
-      )
-    },
-    onError: (err) => {
-      toast.error('Could not create ClickUp subtasks', {
-        description: errorSentence(err, 'ClickUp request failed.'),
-      })
-    },
-  })
+  // The selected issues, worded for ClickUp. The parent field, the inherit preview
+  // and the create call all live in <ClickupFilingBar/>, shared with Design Check.
+  const filingItems: FilingItem[] = issues
+    .filter((issue) => selected.has(issue.id))
+    .map((issue) => ({
+      id: issue.id,
+      title: issue.title,
+      description: [issue.description, '', `Source: QC run ${ticketId}`].join('\n'),
+      severity: issue.severity,
+      screenshots: issue.screenshots,
+    }))
 
   if (issues.length === 0) return null
 
@@ -1676,7 +1408,7 @@ function IssueClickupPanel({
           </div>
         </div>
         <span className="w-fit shrink-0 rounded-full border border-border/60 bg-background px-2.5 py-1 text-xs font-semibold tabular-nums text-muted-foreground">
-          {selectedIssues.length}
+          {filingItems.length}
           <span className="text-muted-foreground/60"> / {issues.length}</span> selected
         </span>
       </div>
@@ -1718,97 +1450,8 @@ function IssueClickupPanel({
           ))}
         </div>
 
-        {/* Commit bar: parent ticket + create */}
-        <div className="space-y-2.5 rounded-2xl border border-border/60 bg-muted/40 p-3.5">
-          <label
-            htmlFor="clickup-parent"
-            className="flex items-center gap-1.5 text-xs font-semibold text-foreground"
-          >
-            <Link2 className="size-3.5 text-muted-foreground" />
-            Parent ClickUp ticket
-          </label>
-          <div className="flex flex-col gap-2 sm:flex-row">
-            <Input
-              id="clickup-parent"
-              value={parentTask}
-              onChange={(event) => setParentTask(event.target.value)}
-              placeholder="https://app.clickup.com/t/86eut664j"
-              className="h-10 flex-1 shadow-none"
-            />
-            <Button
-              onClick={() => mutation.mutate()}
-              disabled={!parentTask.trim() || selectedIssues.length === 0 || mutation.isPending}
-              className="h-10 shrink-0 rounded-full transition-all duration-200 active:scale-[0.98] sm:min-w-44"
-            >
-              {mutation.isPending ? (
-                <Loader2 className="size-4 animate-spin" />
-              ) : (
-                <Send className="size-4" />
-              )}
-              Create{selectedIssues.length > 0 ? ` ${selectedIssues.length}` : ''} subtask
-              {selectedIssues.length === 1 ? '' : 's'}
-            </Button>
-          </div>
-          <p className="text-[11px] text-muted-foreground">
-            {selectedIssues.length === 0
-              ? 'Select at least one issue to file.'
-              : 'Each selected issue becomes a subtask inside that ticket.'}
-          </p>
-
-          {/* What the subtasks will inherit, resolved from the parent ticket itself. */}
-          <FilingPreview
-            state={
-              parentTask.trim().length < 6
-                ? { kind: 'idle' }
-                : filing.isPending
-                  ? { kind: 'loading' }
-                  : filing.isError
-                    ? { kind: 'error', message: errorSentence(filing.error, 'Could not read that ticket.') }
-                    : filing.data
-                      ? { kind: 'ready', context: filing.data }
-                      : { kind: 'idle' }
-            }
-            issues={selectedIssues}
-          />
-        </div>
-
-        {created.length > 0 && (
-          <div className="rounded-2xl border border-emerald-200 bg-emerald-50/60 p-3">
-            <div className="flex items-center gap-1.5 text-xs font-semibold text-emerald-700">
-              <CheckCircle2 className="size-3.5" />
-              Created {created.length} subtask{created.length === 1 ? '' : 's'}
-            </div>
-            <div className="mt-2 flex flex-wrap gap-2">
-              {created.map((task) => (
-                <a
-                  key={task.id}
-                  href={task.url}
-                  target="_blank"
-                  rel="noreferrer"
-                  title={appliedSummary(task.applied)}
-                  className="inline-flex items-center gap-1 rounded-full border border-emerald-200 bg-background px-2 py-1 text-xs font-medium text-emerald-700 transition-colors hover:bg-emerald-100"
-                >
-                  {task.displayId}
-                  {/* What actually landed on the card, per subtask — the toast is a
-                      summary and disappears; this stays while the panel is open. */}
-                  {task.applied && (
-                    <span className="font-normal text-emerald-700/70">
-                      {task.applied.priority ? ` · ${task.applied.priority}` : ''}
-                      {task.applied.assignees.length
-                        ? ` · ${task.applied.assignees[0]}${task.applied.assignees.length > 1 ? ` +${task.applied.assignees.length - 1}` : ''}`
-                        : ' · unassigned'}
-                      {task.applied.screenshots ? ` · ${task.applied.screenshots} 🖼` : ''}
-                      {task.applied.screenshotsFailed
-                        ? ` · ${task.applied.screenshotsFailed} ⚠️`
-                        : ''}
-                    </span>
-                  )}
-                  <ArrowUpRight className="size-3" />
-                </a>
-              ))}
-            </div>
-          </div>
-        )}
+        {/* Commit bar: parent ticket + inherit preview + create (shared with Design Check) */}
+        <ClickupFilingBar projectId={projectId} items={filingItems} slug={slug} noun="issue" />
       </div>
 
       {/* Screenshot lightbox */}
