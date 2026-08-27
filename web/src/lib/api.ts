@@ -4097,6 +4097,13 @@ export interface RequestPhases {
  * "did it degrade as load arrived?" can be answered at all. A slice with no
  * requests is absent, not zero.
  */
+/** One rung of the response-time histogram. `toMs` is null on the top rung. */
+export interface LatencyBucket {
+  fromMs: number
+  toMs: number | null
+  count: number
+}
+
 export interface LoadTimeBucket {
   atSeconds: number
   requests: number
@@ -4133,6 +4140,8 @@ export interface LoadTestResult {
   dataSent: number
   bucketSeconds: number
   buckets: LoadTimeBucket[]
+  /** The response-time distribution; empty for a run recorded before it existed. */
+  latency: LatencyBucket[]
   endpoints: LoadEndpointResult[]
 }
 
@@ -4145,6 +4154,37 @@ export interface PageLoadMetrics {
   lcpMs: number
   transferBytes: number
   requestCount: number
+  /** Cumulative Layout Shift — the third Core Web Vital. */
+  cls: number
+  /** Blocking time: long tasks before the load event, the part past 50ms each. */
+  tbtMs: number
+  longestTaskMs: number
+}
+
+/** A JavaScript error the page reported while loading. */
+export interface PageIssue {
+  kind: 'pageerror' | 'console'
+  text: string
+  count: number
+}
+
+/** Cold-load bytes and request count for one resource type. */
+export interface ResourceGroup {
+  type: string
+  count: number
+  bytes: number
+}
+
+/** One cold-load request, positioned in time. Offsets are ms from navigation start. */
+export interface TimelineEntry {
+  method: string
+  url: string
+  resourceType: string
+  api: boolean
+  startMs: number
+  endMs: number
+  bytes: number
+  status: number | null
 }
 
 export interface AuditRequest {
@@ -4181,7 +4221,17 @@ export interface PageAuditResult {
   /** True when the browser ended on a different path than the requested URL. */
   redirected: boolean
   perRun: PageLoadMetrics[]
+  /** The mean across loads. Kept for older reports; the page grades on cold/warm. */
   average: PageLoadMetrics
+  /** The first load — an empty cache, what a new visitor gets. */
+  cold: PageLoadMetrics
+  /** The median of every load after the first. Equals `cold` when there was one. */
+  warm: PageLoadMetrics
+  /** How many loads went into `warm`; 0 means there is no warm measurement. */
+  warmRuns: number
+  issues: PageIssue[]
+  resources: ResourceGroup[]
+  timeline: TimelineEntry[]
   requests: AuditRequest[]
   duplicates: DuplicateEndpoint[]
   totals: {

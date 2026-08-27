@@ -50,7 +50,6 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
 import {
-  Table,
   TableBody,
   TableCell,
   TableHead,
@@ -755,12 +754,34 @@ function ResultsTable({ result }: { result: DbQueryResult }) {
   return (
     <div className="space-y-2">
       <div className="max-h-[26rem] overflow-auto rounded-2xl border border-border/60">
-        <Table>
-          <TableHeader className="sticky top-0 z-10 bg-muted">
-            <TableRow>
-              <TableHead className="w-10 text-right text-[10px] text-muted-foreground/70">#</TableHead>
+        {/*
+          A BARE <table>, not shadcn's <Table>. That component wraps its table in
+          its own `overflow-x-auto` div, and CSS turns the other axis into `auto`
+          too — so that div, not this one, is the scroll container the sticky
+          header attaches to. It has no height limit, never scrolls vertically,
+          and scrolls straight out of the top of this box, taking the "frozen"
+          header with it. Measured: after scrolling 260px the header sat 259px
+          above the container. The scroll container and the sticky element's
+          nearest scrolling ancestor have to be the same element.
+        */}
+        <table className="w-full caption-bottom text-sm">
+          <TableHeader>
+            <TableRow className="hover:bg-transparent">
+              {/*
+                Sticky on the CELLS, not on <thead>: thead-level sticky is the
+                less-supported form, and a sticky cell paints its own background,
+                which a sticky row does not — without it the rows scroll THROUGH
+                the header. The bottom rule is an inset shadow for the same
+                reason: a border on a sticky cell is not reliably painted.
+              */}
+              <TableHead className="sticky top-0 z-10 w-10 bg-muted text-right text-[10px] text-muted-foreground/70 shadow-[inset_0_-1px_0_var(--border)]">
+                #
+              </TableHead>
               {result.columns.map((c, i) => (
-                <TableHead key={i} className="whitespace-nowrap font-mono text-xs font-semibold">
+                <TableHead
+                  key={i}
+                  className="sticky top-0 z-10 whitespace-nowrap bg-muted font-mono text-xs font-semibold shadow-[inset_0_-1px_0_var(--border)]"
+                >
                   {c}
                 </TableHead>
               ))}
@@ -780,7 +801,7 @@ function ResultsTable({ result }: { result: DbQueryResult }) {
               </TableRow>
             ))}
           </TableBody>
-        </Table>
+        </table>
       </div>
       <div className="flex flex-wrap items-center gap-2">
         <p className="text-[11px] text-muted-foreground">

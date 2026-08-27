@@ -1,4 +1,5 @@
 import HTMLtoDOCX from 'html-to-docx'
+import JSZip from 'jszip'
 import type { Browser } from 'playwright-core'
 import { friendlyLaunchError, loadChromium } from './pageAudit.js'
 
@@ -149,6 +150,95 @@ async function inlineChartsAsPng(html: string): Promise<string> {
   }
 }
 
+/**
+ * OOXML measurements are INTEGERS — twips, half-points, EMUs, eighths of a point.
+ * The schema types (ST_TwipsMeasure, ST_SignedTwipsMeasure, ST_HpsMeasure,
+ * ST_DecimalNumber…) admit no decimal point, and Word enforces that: one fractional
+ * value and it refuses to open the file at all, with "Word experienced an error
+ * trying to open the file" and no hint as to which value.
+ *
+ * A decimal here is therefore always a generator bug, never intent, so rounding is
+ * safe: the largest possible correction is half a twip, 1/2880 inch.
+ */
+const DECIMAL_ATTR = /(\s)([\w:]+)="(-?\d+\.\d+)"/g
+
+/**
+ * Measurement attributes that are OPTIONAL, and can therefore be dropped when their
+ * value is not a number at all. Word applies its own default for a missing one; it
+ * rejects the document for a present-but-invalid one.
+ */
+const DROPPABLE_ATTRS = new Set([
+  'w:header',
+  'w:footer',
+  'w:gutter',
+  'w:space',
+  'w:leftFromText',
+  'w:rightFromText',
+  'w:topFromText',
+  'w:bottomFromText',
+])
+const NON_NUMERIC_ATTR = /(\s)([\w:]+)="(undefined|NaN|null|)"/g
+
+/**
+ * Make one .docx part schema-legal.
+ *
+ * This repairs the OUTPUT rather than the generator on purpose. `html-to-docx`
+ * divides the content width by the column count to size table cells, so any table
+ * whose column count does not divide 10800 twips evenly — seven columns gives
+ * 1542.857142857143 — produces a file Word will not open. Fixing it per table would
+ * mean never writing a 7-, 11- or 13-column table again in any report, enforced by
+ * nothing but memory. Fixing it here is enforced by the code.
+ */
+function repairOoxmlPart(xml: string): { xml: string; rounded: number; dropped: number } {
+  let rounded = 0
+  let dropped = 0
+  // The XML declaration's version="1.0" is not an element attribute; keep it out of
+  // the rewrite instead of teaching the pattern about it.
+  const declEnd = xml.startsWith('<?xml') ? xml.indexOf('?>') + 2 : 0
+  const head = xml.slice(0, declEnd)
+  let body = xml.slice(declEnd)
+
+  body = body.replace(DECIMAL_ATTR, (_all, space: string, attr: string, value: string) => {
+    rounded += 1
+    return `${space}${attr}="${Math.round(Number(value))}"`
+  })
+  body = body.replace(NON_NUMERIC_ATTR, (all, space: string, attr: string) => {
+    if (!DROPPABLE_ATTRS.has(attr)) return all
+    dropped += 1
+    return space.slice(0, -1) || ''
+  })
+  return { xml: head + body, rounded, dropped }
+}
+
+/**
+ * Rewrite every XML part of a generated .docx so no measurement is fractional.
+ *
+ * Failure is deliberately silent-but-honest: if the archive cannot be reopened, the
+ * ORIGINAL bytes are returned. A file Word may refuse is still better than an export
+ * button that errors, and the original is exactly what shipped before this existed.
+ */
+async function repairDocx(buffer: Buffer): Promise<Buffer> {
+  try {
+    const zip = await JSZip.loadAsync(buffer)
+    let changed = false
+    for (const path of Object.keys(zip.files)) {
+      if (!/\.(xml|rels)$/i.test(path) || zip.files[path].dir) continue
+      const original = await zip.file(path)!.async('string')
+      const { xml, rounded, dropped } = repairOoxmlPart(original)
+      if (rounded || dropped) {
+        zip.file(path, xml)
+        changed = true
+      }
+    }
+    if (!changed) return buffer
+    // DEFLATE, and mimetype-agnostic: a .docx is an ordinary zip, unlike ODF there
+    // is no stored-first entry to preserve.
+    return await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' })
+  } catch {
+    return buffer
+  }
+}
+
 export async function htmlToDocx(html: string, footer = ''): Promise<Buffer> {
   const withImages = await inlineChartsAsPng(html)
   const clean = footerText(footer)
@@ -157,7 +247,11 @@ export async function htmlToDocx(html: string, footer = ''): Promise<Buffer> {
     null,
     {
       orientation: 'portrait',
-      margins: { top: 720, right: 720, bottom: 720, left: 720 },
+      // header/footer/gutter are given even though nothing here changes them from
+      // the defaults: html-to-docx copies this object into `<w:pgMar>` key by key,
+      // so a missing key becomes `w:header="undefined"` — which, like a fractional
+      // width, is a value Word refuses the whole document over.
+      margins: { top: 720, right: 720, bottom: 720, left: 720, header: 360, footer: 360, gutter: 0 },
       table: { row: { cantSplit: true } },
       // `pageNumber` is only honoured when `footer` is on, so the two move together.
       footer: Boolean(clean),
@@ -167,7 +261,7 @@ export async function htmlToDocx(html: string, footer = ''): Promise<Buffer> {
       ? `<p style="text-align:center;font-size:8pt;color:#6b6a66;">${clean}</p>`
       : undefined,
   )) as Buffer | ArrayBuffer
-  return Buffer.isBuffer(out) ? out : Buffer.from(out)
+  return repairDocx(Buffer.isBuffer(out) ? out : Buffer.from(out))
 }
 
 /** Strip anything a filename can't carry, on either platform. */

@@ -5,7 +5,7 @@ import {
   METRIC_LABEL,
   type NfrRequirementResult,
 } from './nfrReport'
-import { atSeconds, ms } from './perfReport'
+import { atSeconds, bytes, ms, warmMetrics } from './perfReport'
 
 /**
  * PERFORMANCE CHARTS — plain SVG strings, no charting library.
@@ -168,7 +168,10 @@ function legend(items: { color: string; label: string }[]): string {
 
 /** Milestones of one page load, in the order the user experiences them. */
 export function pageMilestoneChart(result: PageAuditResult, showTitle = true): string {
-  const a = result.average
+  // The load a RETURNING visitor gets. Drawing the mean of a cold and a warm load
+  // draws a milestone sequence that no single load ever produced.
+  const a = warmMetrics(result)
+  const warmRuns = result.warmRuns ?? 0
   const rows: BarRow[] = ([
     { label: 'TTFB', value: a.ttfbMs, display: ms(a.ttfbMs), tone: a.ttfbMs > 1800 ? 'bad' : a.ttfbMs > 800 ? 'warn' : 'series' },
     { label: 'First paint (FCP)', value: a.fcpMs, display: ms(a.fcpMs), tone: a.fcpMs > 3000 ? 'bad' : a.fcpMs > 1800 ? 'warn' : 'series' },
@@ -183,7 +186,9 @@ export function pageMilestoneChart(result: PageAuditResult, showTitle = true): s
   }
   return barChart(rows, {
     title: showTitle ? 'What the user waits for' : '',
-    subtitle: `average of ${result.runs} load${result.runs === 1 ? '' : 's'}`,
+    subtitle: warmRuns
+      ? `a returning visit — median of ${warmRuns} warm load${warmRuns === 1 ? '' : 's'}`
+      : 'a first visit — one cold load',
     labelWidth: 150,
   })
 }
@@ -192,14 +197,17 @@ export function pageMilestoneChart(result: PageAuditResult, showTitle = true): s
 export function pageRunsChart(result: PageAuditResult, showTitle = true): string {
   if (result.perRun.length < 2) return ''
   const rows: BarRow[] = result.perRun.map((r, i) => ({
-    label: `Load ${i + 1}`,
+    label: i === 0 ? 'Load 1 (cold)' : `Load ${i + 1}`,
     value: r.loadMs,
     display: ms(r.loadMs),
+    // Named in WORDS, not by hue: the cold load is a different measurement from
+    // the ones beside it, not a slow outlier of the same one.
+    flag: i === 0 ? 'empty cache' : undefined,
   }))
   return barChart(rows, {
     title: showTitle ? 'Load time per run' : '',
-    subtitle: 'the first load is cold — a warm load is the one users usually get',
-    labelWidth: 80,
+    subtitle: 'the first load fills the cache; the rest are what a returning visitor gets',
+    labelWidth: 110,
   })
 }
 
@@ -240,7 +248,258 @@ export function pageApiChart(result: PageAuditResult, showTitle = true): string 
   )
 }
 
+/**
+ * THE WATERFALL — the cold load, drawn against a time axis.
+ *
+ * Every other chart on this page says how LONG something took. This is the only
+ * one that says WHEN, and that is the whole of page-load analysis: three 200ms
+ * calls fired together cost 200ms, and the same three chained cost 600ms. In a
+ * table of averages those two pages are identical; drawn against an axis, one has
+ * three bars starting at the same x and the other has a staircase.
+ *
+ * The milestones are drawn ON the same axis, because "the LCP is at 2.9s" is only
+ * a finding once you can see which request is still in flight at 2.9s.
+ *
+ * The cold load is used deliberately — a warm load reads everything from cache and
+ * its waterfall is a picture of the cache, not of the page.
+ */
+export function pageWaterfallChart(result: PageAuditResult, showTitle = true): string {
+  const timeline = result.timeline ?? []
+  if (timeline.length < 2) return ''
+  const cold = result.cold ?? result.average
+
+  // APIs first — they are the question this page exists to answer — then the
+  // slowest assets to fill the remaining rows. Everything is then re-sorted by
+  // start time, because a waterfall read out of time order is not a waterfall.
+  const MAX_API = 14
+  const MAX_ASSETS = 8
+  const api = timeline.filter((t) => t.api)
+  // Assets are capped tightly and separately. A dev server serves 180 modules that
+  // all take 74ms; filling the chart with the longest of them buries the six calls
+  // the reader came for under thirteen rows of identical bars.
+  const rest = timeline.filter((t) => !t.api).sort((a, b) => b.endMs - b.startMs - (a.endMs - a.startMs))
+  const shownApi = api.slice(0, MAX_API)
+  const shownRest = rest.slice(0, MAX_ASSETS)
+  const rows = [...shownApi, ...shownRest].sort((a, b) => a.startMs - b.startMs)
+  if (!rows.length) return ''
+
+  const marks = [
+    { at: cold.fcpMs, label: 'FCP' },
+    { at: cold.lcpMs, label: 'LCP' },
+    { at: cold.loadMs, label: 'load' },
+  ].filter((m) => m.at > 0)
+
+  const width = 720
+  const labelW = 220
+  const rightPad = 64
+  const plotW = width - labelW - rightPad
+  const rowH = 20
+  const barH = 10
+  const span = Math.max(...rows.map((r) => r.endMs), ...marks.map((m) => m.at), 1)
+  const hasTitle = !!showTitle
+  // Two rows of headroom for the milestone labels: FCP and LCP routinely land
+  // within a few milliseconds of each other, so one row of them always collides.
+  const top = (hasTitle ? 46 : 26) + 26
+  /**
+   * A time label sized to the span being drawn.
+   *
+   * `atSeconds` is the load-test formatter and rounds to whole seconds, which on a
+   * page that loads in 1.6s prints an axis reading "0s · 0s · 1s · 1s · 2s". A page
+   * waterfall is a sub-second instrument and needs a sub-second axis.
+   */
+  const at = (msValue: number) => {
+    if (span < 2000) return `${Math.round(msValue)}ms`
+    if (span < 20_000) return `${(msValue / 1000).toFixed(1)}s`
+    return atSeconds(msValue / 1000)
+  }
+  const axisY = top + rows.length * rowH + 6
+  const height = axisY + 30
+  const x = (t: number) => labelW + Math.min(plotW, Math.max(0, (t / span) * plotW))
+
+  const parts: string[] = [
+    `<svg class="viz" viewBox="0 0 ${width} ${height}" width="100%" height="${height}" role="img" aria-label="Request waterfall" xmlns="http://www.w3.org/2000/svg">`,
+  ]
+  if (hasTitle) parts.push(`<text x="0" y="14" class="viz-title">When each request happened</text>`)
+  parts.push(
+    `<text x="0" y="${hasTitle ? 32 : 12}" class="viz-sub">${esc(
+      `first visit · ${shownApi.length} API call${shownApi.length === 1 ? '' : 's'}${
+        api.length > MAX_API ? ` of ${api.length}` : ''
+      } and the ${shownRest.length} slowest of ${rest.length} assets`,
+    )}</text>`,
+  )
+
+  // Ticks land on round numbers, not on span/4: an axis reading "0ms · 403ms ·
+  // 807ms · 1210ms" is precise and unreadable, and nobody ever wanted to know
+  // where 403ms was. Four or five gridlines, recessive, behind the bars.
+  const rawStep = span / 4
+  const magnitude = Math.pow(10, Math.floor(Math.log10(rawStep)))
+  const step = [1, 2, 2.5, 5, 10].map((m) => m * magnitude).find((v) => v >= rawStep) ?? magnitude * 10
+  for (let t = 0; t <= span + 0.5; t += step) {
+    const gx = x(t)
+    parts.push(
+      `<line x1="${gx}" y1="${top - 8}" x2="${gx}" y2="${axisY}" class="viz-grid"/>`,
+      `<text x="${gx}" y="${axisY + 14}" text-anchor="${t === 0 ? 'start' : 'middle'}" class="viz-sub">${esc(at(t))}</text>`,
+    )
+  }
+
+  rows.forEach((r, i) => {
+    const y = top + i * rowH
+    const x1 = x(r.startMs)
+    const w = Math.max(2, x(r.endMs) - x1)
+    const path = (() => {
+      try {
+        return new URL(r.url).pathname
+      } catch {
+        return r.url
+      }
+    })()
+    const label = `${r.api ? `${r.method} ` : ''}${path}`
+    const failed = r.status !== null && r.status >= 400
+    // API calls wear the series hue, assets a muted one — but the label already
+    // carries the method, and a failure is written as a word, so the picture is
+    // still complete in print with no colour at all.
+    const fill = failed ? 'var(--viz-bad)' : r.api ? 'var(--viz-series-1)' : 'var(--viz-series-4)'
+    parts.push(
+      `<text x="0" y="${y + barH + 1}" class="viz-label">${esc(label.length > 32 ? `…${label.slice(-31)}` : label)}</text>`,
+      `<g><title>${esc(`${r.method} ${r.url} — starts ${at(r.startMs)}, takes ${ms(r.endMs - r.startMs)}${r.status ? `, ${r.status}` : ''}`)}</title>`,
+      `<path d="${barPath(x1, y, w, barH, 3)}" fill="${fill}"/>`,
+      '</g>',
+      `<text x="${Math.min(width - 2, x1 + w + 6)}" y="${y + barH + 1}" class="viz-value">${esc(ms(r.endMs - r.startMs))}${failed ? ` <tspan class="viz-flag">${r.status}</tspan>` : ''}</text>`,
+    )
+  })
+
+  // Milestones last, so they sit over the bars rather than under them. Their
+  // labels are staggered onto a second row when they would collide: FCP and LCP
+  // are often milliseconds apart, which puts two labels at the same x.
+  let lastLabelX = -Infinity
+  let row = 0
+  for (const m of [...marks].sort((a, b) => a.at - b.at)) {
+    const mx = x(m.at)
+    row = mx - lastLabelX < 70 ? (row + 1) % 2 : 0
+    lastLabelX = mx
+    // Keep the label inside the frame — a milestone at t=0 sits on the left edge.
+    const anchor = mx < labelW + 30 ? 'start' : mx > width - 40 ? 'end' : 'middle'
+    parts.push(
+      `<line x1="${mx}" y1="${top - 14}" x2="${mx}" y2="${axisY}" class="viz-ref"/>`,
+      `<text x="${mx}" y="${top - 18 - row * 12}" text-anchor="${anchor}" class="viz-sub">${esc(`${m.label} ${at(m.at)}`)}</text>`,
+    )
+  }
+
+  parts.push('</svg>')
+  return (
+    parts.join('') +
+    legend([
+      { color: 'var(--viz-series-1)', label: 'API call (XHR/fetch)' },
+      { color: 'var(--viz-series-4)', label: 'script, style, image, font' },
+      { color: 'var(--viz-muted)', label: 'FCP / LCP / load event (dashed)' },
+    ])
+  )
+}
+
+/**
+ * What the first visit actually downloads, by resource type.
+ *
+ * "4.9 MB transferred" is not a finding anybody can act on; "4.1 MB of it is
+ * JavaScript over 179 requests" names the fix. Cold load only — a returning visit
+ * reads nearly all of it from cache, so an average over loads would be a number no
+ * visit produced.
+ */
+export function pageResourceChart(result: PageAuditResult, showTitle = true): string {
+  const groups = (result.resources ?? []).filter((g) => g.bytes > 0)
+  if (groups.length < 2) return ''
+  const HUES = [
+    'var(--viz-series-1)',
+    'var(--viz-series-2)',
+    'var(--viz-series-3)',
+    'var(--viz-series-4)',
+    'var(--viz-series-5)',
+  ]
+  // Past five named types the tail is folded into one "other" segment rather than
+  // given a generated hue — the categorical palette has five validated slots.
+  const top = groups.slice(0, 5)
+  const tail = groups.slice(5)
+  const segments: StackSegment[] = top.map((g, i) => ({
+    label: `${g.type} · ${g.count} request${g.count === 1 ? '' : 's'}`,
+    value: g.bytes,
+    display: bytes(g.bytes),
+    color: HUES[i],
+  }))
+  if (tail.length) {
+    const other = tail.reduce((sum, g) => sum + g.bytes, 0)
+    segments.push({
+      // Named by its actual type when the tail is one type: a browser resource
+      // type is itself called "other", and folding it into a segment ALSO called
+      // "other" puts two different "other" rows in one legend.
+      label:
+        tail.length === 1
+          ? `${tail[0].type} · ${tail[0].count} request${tail[0].count === 1 ? '' : 's'}`
+          : `${tail.length} other types`,
+      value: other,
+      display: bytes(other),
+      color: 'var(--viz-muted)',
+    })
+  }
+  const total = groups.reduce((sum, g) => sum + g.bytes, 0)
+  return stackedRowChart(segments, {
+    title: showTitle ? 'What the first visit downloads' : '',
+    // Named as response bodies, not "transferred": these are decoded sizes from
+    // the network layer, while the tile's "downloaded" figure is the browser's own
+    // over-the-wire transferSize, which is compressed. Two different true numbers
+    // under one word is how a report gets argued with.
+    subtitle: `${bytes(total)} of response bodies on a cold cache, by resource type`,
+  })
+}
+
 // -------------------------------------------------------------- load test
+
+/**
+ * THE RESPONSE-TIME DISTRIBUTION — the shape percentiles cannot carry.
+ *
+ * A p50 of 20ms with a p99 of 4s is printed identically by two systems that need
+ * opposite fixes: one with a smooth tail (everything is a bit variable) and one
+ * with two populations (almost everything is 20ms, and one endpoint always takes
+ * 4s). The percentile ladder chart above shows the same five numbers for both.
+ * This shows the gap between the two humps, and the gap is the finding.
+ *
+ * Counts are drawn, with the share as the flag — the count is what makes "0.4% of
+ * requests" concrete when 0.4% is 900 users a day.
+ */
+export function loadLatencyChart(
+  result: LoadTestResult,
+  thresholdP95Ms = 0,
+  showTitle = true,
+): string {
+  const rungs = result.latency ?? []
+  const total = rungs.reduce((sum, r) => sum + r.count, 0)
+  // One rung holding everything is a bar chart with one bar: true, and useless.
+  if (total <= 0 || rungs.filter((r) => r.count > 0).length < 2) return ''
+  const label = (r: { fromMs: number; toMs: number | null }) =>
+    r.toMs === null ? `over ${ms(r.fromMs)}` : r.fromMs === 0 ? `under ${ms(r.toMs)}` : `${ms(r.fromMs)} – ${ms(r.toMs)}`
+  const rows: BarRow[] = rungs.map((r) => {
+    const share = r.count / total
+    // A rung wholly above the engineer's own p95 target is over target by
+    // definition; it is flagged in words as well as tone.
+    const over = thresholdP95Ms > 0 && r.fromMs >= thresholdP95Ms
+    return {
+      label: label(r),
+      value: r.count,
+      display: r.count.toLocaleString(),
+      tone: over ? 'bad' : 'series',
+      // Two decimals only below 1%: "0.54%" is the finding, "94.85%" is noise.
+      flag: `${(share * 100).toFixed(share * 100 < 1 ? 2 : 1)}%${over ? ' over target' : ''}`,
+    }
+  })
+  // Only promise the marking when a rung actually earns it — a note about bars
+  // that are not on the chart reads as a chart that failed to draw them.
+  const anyOver = rows.some((r) => r.tone === 'bad')
+  return barChart(rows, {
+    title: showTitle ? 'How the response times were distributed' : '',
+    subtitle: `${total.toLocaleString()} requests${
+      anyOver ? ` · rungs at or above the ${ms(thresholdP95Ms)} target are marked over target` : ''
+    }`,
+    labelWidth: 130,
+  })
+}
 
 /** The percentile ladder, against the engineer's own p95 target. */
 export function loadPercentileChart(

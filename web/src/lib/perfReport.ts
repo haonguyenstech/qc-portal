@@ -1,4 +1,4 @@
-import type { LoadTestResult, PageAuditResult, PerfJob } from './api'
+import type { LoadTestResult, PageAuditResult, PageLoadMetrics, PerfJob } from './api'
 
 /**
  * PERFORMANCE VERDICTS + EXPORT.
@@ -141,6 +141,29 @@ export function gradeLabel(grade: Grade): string {
   return 'Inconclusive'
 }
 
+/**
+ * What a page-load report does and does not measure. Same contract as
+ * `MEASUREMENT_NOTES`: each line is a way one of these numbers has been read wrong.
+ */
+export const PAGE_MEASUREMENT_NOTES = [
+  '**A first visit and a returning visit are different measurements.** The first load fetches everything; every load after it is served largely from cache. They are reported separately and never averaged together — their mean describes neither visit.',
+  '**The returning-visit figure is a median, not a mean**, so one stalled load out of three does not become the headline. The per-load times are listed so an outlier stays visible.',
+  '**Bytes are the cold load.** A returning visit transfers a fraction of them, so a per-load average of the bytes would be a number no visit ever produced.',
+  '**Blocking time counts long tasks before the load event**, which is what Lighthouse compares against. Work the page does after that is real, but it is not in this figure.',
+  '**"Transferred" and "response bodies" are different totals.** The first is what came over the wire, compressed; the second is the decoded size of each response. Both are true, and the second is always the larger.',
+  '**This is one browser on one machine.** No throttling is applied: a real user on a phone over 4G will be slower than every number here, and the gap grows with the JavaScript.',
+] as const
+
+/** The load a returning visitor gets, falling back to the mean for older reports. */
+export function warmMetrics(result: PageAuditResult): PageLoadMetrics {
+  return result.warm ?? result.average
+}
+
+/** The first, cache-cold load, falling back to the mean for older reports. */
+export function coldMetrics(result: PageAuditResult): PageLoadMetrics {
+  return result.cold ?? result.average
+}
+
 /** Milliseconds per load spent on repeat calls — the cost of the duplicates. */
 export function wastedMs(result: PageAuditResult): number {
   return result.duplicates.reduce((sum, d) => sum + d.avgMs * (d.perLoad - 1), 0)
@@ -164,14 +187,20 @@ export function assessPageAudit(result: PageAuditResult): Assessment {
     }
   }
 
-  const a = result.average
+  // Grade the load a RETURNING visitor gets. The cold load is reported beside it
+  // and gets its own finding, but grading on a mean of the two produced a headline
+  // that matched no load that happened: 1291ms cold and 70ms warm average to 529ms.
+  const a = warmMetrics(result)
+  const cold = coldMetrics(result)
+  const warmRuns = result.warmRuns ?? 0
+  const visit = warmRuns > 0 ? 'returning visit' : 'first visit'
   const dupWaste = wastedMs(result)
   const checks: MetricCheck[] = [
     {
       label: 'Page load',
       value: ms(a.loadMs),
       grade: band(a.loadMs, 2500, 5000),
-      note: 'load event · good ≤ 2.5s, poor > 5s',
+      note: `${visit} · good ≤ 2.5s, poor > 5s`,
     },
     {
       label: 'LCP (main content)',
@@ -184,6 +213,22 @@ export function assessPageAudit(result: PageAuditResult): Assessment {
       value: ms(a.fcpMs),
       grade: band(a.fcpMs, 1800, 3000),
       note: 'good ≤ 1.8s, poor > 3s',
+    },
+    {
+      label: 'CLS (layout shift)',
+      // A page that never shifts scores a true 0, and `band` treats 0 as
+      // unmeasurable — which would drop the one perfect result from the grade.
+      value: a.cls != null ? a.cls.toFixed(3) : '—',
+      grade: a.cls == null ? 'unknown' : a.cls <= 0.1 ? 'good' : a.cls <= 0.25 ? 'warn' : 'bad',
+      note: 'Core Web Vitals · good ≤ 0.1, poor > 0.25',
+    },
+    {
+      label: 'Blocking time',
+      // 0ms of blocking is the best possible answer, and `ms(0)` renders '—' —
+      // which reads as "not measured" on the one page that scored perfectly.
+      value: a.tbtMs == null ? '—' : a.tbtMs > 0 ? ms(a.tbtMs) : '0ms',
+      grade: a.tbtMs == null ? 'unknown' : a.tbtMs <= 200 ? 'good' : a.tbtMs <= 600 ? 'warn' : 'bad',
+      note: 'long tasks before load · good ≤ 200ms, poor > 600ms',
     },
     {
       label: 'TTFB',
@@ -205,15 +250,59 @@ export function assessPageAudit(result: PageAuditResult): Assessment {
         ? `≈ ${ms(dupWaste)} per load spent on repeat calls`
         : 'no endpoint called twice per load',
     },
+    {
+      label: 'JavaScript errors',
+      value: (result.issues ?? []).some((i) => i.kind === 'pageerror')
+        ? `${(result.issues ?? []).filter((i) => i.kind === 'pageerror').length} uncaught`
+        : 'none',
+      grade: (result.issues ?? []).some((i) => i.kind === 'pageerror') ? 'bad' : 'good',
+      note: 'uncaught exceptions during load',
+    },
   ]
 
   const findings: Finding[] = []
+
+  // An uncaught exception outranks every timing here: the page is not merely slow.
+  for (const issue of (result.issues ?? []).filter((i) => i.kind === 'pageerror').slice(0, 5)) {
+    findings.push({
+      severity: 'high',
+      title: `Uncaught error on load: ${issue.text.slice(0, 110)}`,
+      detail: `Seen ${issue.count}× across ${result.runs} load${result.runs === 1 ? '' : 's'}. The load event fires anyway, so no timing on this page shows it — but whatever that code was meant to do did not happen.`,
+    })
+  }
 
   for (const d of result.duplicates.slice(0, 5)) {
     findings.push({
       severity: d.perLoad >= 3 || d.avgMs * (d.perLoad - 1) >= 300 ? 'high' : 'medium',
       title: `${d.method} ${shortUrl(d.endpoint)} is called ${d.perLoad % 1 === 0 ? d.perLoad : d.perLoad.toFixed(1)}× per page load`,
       detail: `${ms(d.avgMs)} each, ${ms(d.totalMsPerLoad)} per load in total. Usually an effect that re-runs, or two components fetching the same resource — the extra calls are pure waste.`,
+    })
+  }
+
+  // The first-visit cost, stated as a finding rather than buried in a second tile.
+  if (warmRuns > 0 && cold.loadMs > 0 && a.loadMs > 0 && cold.loadMs >= a.loadMs * 2 && cold.loadMs - a.loadMs >= 500) {
+    findings.push({
+      severity: cold.loadMs >= 5000 ? 'high' : 'medium',
+      title: `A first visit costs ${ms(cold.loadMs)} — ${(cold.loadMs / a.loadMs).toFixed(1)}× a returning one`,
+      detail: `${bytes(cold.transferBytes)} is fetched on that first load and served from cache afterwards. Everyone who has not opened this app today pays the first number, so it is the one to quote to a client.`,
+    })
+  }
+
+  if (a.cls > 0.1) {
+    findings.push({
+      severity: a.cls > 0.25 ? 'high' : 'medium',
+      title: `Layout shifts by ${a.cls.toFixed(3)} while loading`,
+      detail:
+        'Content moves after it is painted — the classic cause is an image, ad slot or banner with no reserved height. It is the fault users describe as "I clicked the wrong thing".',
+    })
+  }
+
+  if (a.tbtMs > 200) {
+    findings.push({
+      severity: a.tbtMs > 600 ? 'high' : 'medium',
+      title: `${ms(a.tbtMs)} of blocking time${a.longestTaskMs ? `, longest task ${ms(a.longestTaskMs)}` : ''}`,
+      detail:
+        'The main thread is busy for long stretches, so the page looks ready before it answers a click. Usually one big script parsing or one synchronous pass over a large response.',
     })
   }
 
@@ -246,18 +335,26 @@ export function assessPageAudit(result: PageAuditResult): Assessment {
         'Heavy, but a Vite dev server serves every module as its own request — measure a production build before treating this as a finding.',
     })
   }
-  if (a.transferBytes > 3 * 1024 * 1024) {
+  // Bytes are quoted from the COLD load — the only visit that actually fetched
+  // them — and named by their heaviest type, because "3.2 MB" is not something
+  // anyone can act on and "2.4 MB of it is JavaScript" is.
+  if (cold.transferBytes > 3 * 1024 * 1024) {
+    const heaviest = (result.resources ?? [])[0]
     findings.push({
-      severity: 'low',
-      title: `${bytes(a.transferBytes)} transferred per load`,
-      detail: 'Large payload. Check images and any API returning a full table when the page shows a page of it.',
+      severity: cold.transferBytes > 8 * 1024 * 1024 ? 'medium' : 'low',
+      title: `${bytes(cold.transferBytes)} downloaded on a first visit`,
+      detail: heaviest
+        ? `The largest share is ${heaviest.type} — ${bytes(heaviest.bytes)} over ${heaviest.count} request${heaviest.count === 1 ? '' : 's'}. On a dev server every module is served unbundled, so measure a production build before treating this as a finding.`
+        : 'Large payload. Check images and any API returning a full table when the page shows a page of it.',
     })
   }
 
   const grade = worst(checks.map((c) => c.grade))
   const headline =
     grade === 'good'
-      ? `Loads in ${ms(a.loadMs)} with no duplicate API calls`
+      ? warmRuns > 0
+        ? `First visit ${ms(cold.loadMs)}, returning visit ${ms(a.loadMs)} — nothing outside its band`
+        : `Loads in ${ms(a.loadMs)} on a cold cache with no duplicate API calls`
       : grade === 'bad'
         ? `${gradeLabel(grade)} — ${findings[0]?.title ?? 'several metrics are outside their band'}`
         : `Usable, but ${findings.length || 'some metrics'} thing${findings.length === 1 ? '' : 's'} worth fixing`
@@ -339,6 +436,12 @@ export function loadExtras(result: LoadTestResult): LoadExtras {
 }
 
 export function assessLoadTest(result: LoadTestResult, thresholdP95Ms = 0): Assessment {
+  /**
+   * How slow the worst call has to be before a spread is worth reporting at all.
+   * The engineer's own target when there is one — nothing that finished inside it
+   * is a finding — and a quarter second otherwise.
+   */
+  const spreadFloor = Math.max(250, thresholdP95Ms)
   const p95 = result.overall.p95
   const extra = loadExtras(result)
   const checks: MetricCheck[] = [
@@ -365,9 +468,22 @@ export function assessLoadTest(result: LoadTestResult, thresholdP95Ms = 0): Asse
     {
       label: 'Spread (max ÷ median)',
       value: result.overall.med > 0 ? `${(result.overall.max / result.overall.med).toFixed(1)}×` : '—',
+      // A RATIO is scale-blind, and on a fast service that makes it wrong. A local
+      // API answering in 4ms with one 92ms outlier scores 24× and used to grade the
+      // whole run "Poor" while every other check was green and k6's own thresholds
+      // passed. Nobody has a stability problem whose worst call is 92ms. So the
+      // ratio only counts once the worst call is slow in ABSOLUTE terms — past the
+      // engineer's own target when they set one, and past a quarter second otherwise.
       grade:
-        result.overall.med > 0 ? band(result.overall.max / result.overall.med, 5, 15) : 'unknown',
-      note: 'stability under load · good ≤ 5×, poor > 15×',
+        result.overall.med <= 0
+          ? 'unknown'
+          : result.overall.max <= spreadFloor
+            ? 'good'
+            : band(result.overall.max / result.overall.med, 5, 15),
+      note:
+        result.overall.max <= spreadFloor
+          ? `every call finished inside ${ms(spreadFloor)}, so the ratio is noise around a small number`
+          : 'stability under load · good ≤ 5×, poor > 15×',
     },
     {
       label: 'Stability over the run',
@@ -480,7 +596,8 @@ export function assessLoadTest(result: LoadTestResult, thresholdP95Ms = 0): Asse
   }
 
   for (const e of result.endpoints) {
-    if (e.duration.med > 0 && e.duration.max / e.duration.med >= 10) {
+    // Same absolute floor as the spread check: "spikes to 5ms" is not a spike.
+    if (e.duration.med > 0 && e.duration.max > spreadFloor && e.duration.max / e.duration.med >= 10) {
       findings.push({
         severity: 'medium',
         title: `${e.name} spikes to ${ms(e.duration.max)}`,
@@ -490,8 +607,14 @@ export function assessLoadTest(result: LoadTestResult, thresholdP95Ms = 0): Asse
   }
 
   const grade = worst(checks.map((c) => c.grade))
+  // k6's thresholds and this page's checks can disagree — the thresholds are the
+  // two numbers the engineer typed, the checks are eight. When they do, the
+  // headline has to carry both, or it reads "Held up" beside a red Poor badge.
+  const worstCheck = checks.find((c) => c.grade === grade && grade !== 'good')
   const headline = result.thresholdsPassed
-    ? `Held up: p95 ${ms(p95)} at ${pct(result.failRate)} errors`
+    ? `Held up: p95 ${ms(p95)} at ${pct(result.failRate)} errors${
+        worstCheck ? ` — but ${worstCheck.label.toLowerCase()} is ${worstCheck.value}` : ''
+      }`
     : `Did not hold: p95 ${ms(p95)}${thresholdP95Ms > 0 ? ` against a ${ms(thresholdP95Ms)} target` : ''}`
 
   return { grade, headline, checks, findings }
@@ -554,23 +677,50 @@ export function reportMarkdown(job: PerfJob): string {
     if (r.redirected) lines.push(`> ⚠️ The browser ended on ${r.finalUrl}, not the requested URL. These numbers describe that page.`, '')
     lines.push(`## Verdict — ${gradeMark(assessment?.grade ?? 'unknown')} ${gradeLabel(assessment?.grade ?? 'unknown')}`, '', assessment?.headline ?? '', '')
     lines.push(checksTable(assessment?.checks ?? []), '')
-    lines.push('## Timings (average across loads)', '')
+    const warm = warmMetrics(r)
+    const cold = coldMetrics(r)
+    const warmRuns = r.warmRuns ?? 0
+    const warmCell = (value: string) => (warmRuns ? value : '—')
+    // `ms(0)` is an em dash, which reads as "not measured" rather than "perfect".
+    const blocking = (value: number | undefined) => (value == null ? '—' : value > 0 ? ms(value) : '0ms')
+    lines.push('## Timings', '')
     lines.push(
-      '| Metric | Value |',
-      '|---|---|',
-      `| Page load | ${ms(r.average.loadMs)} |`,
-      `| TTFB | ${ms(r.average.ttfbMs)} |`,
-      `| DOM ready | ${ms(r.average.domContentLoadedMs)} |`,
-      `| First paint (FCP) | ${ms(r.average.fcpMs)} |`,
-      `| Main content (LCP) | ${ms(r.average.lcpMs)} |`,
-      `| Requests per load | ${r.average.requestCount.toFixed(1)} |`,
-      `| API calls per load | ${(r.totals.apiCount / r.runs).toFixed(1)} |`,
-      `| Transferred per load | ${bytes(r.average.transferBytes)} |`,
+      'A first visit fetches everything; a returning visit is served largely from cache. They are different measurements and are never averaged together.',
       '',
-      `Per load: ${r.perRun.map((x) => ms(x.loadMs)).join(' · ')}`,
+      `| Metric | First visit (cold) | ${warmRuns ? `Returning visit (median of ${warmRuns})` : 'Returning visit'} |`,
+      '|---|---|---|',
+      `| Page load | ${ms(cold.loadMs)} | ${warmRuns ? ms(warm.loadMs) : 'not measured'} |`,
+      `| TTFB | ${ms(cold.ttfbMs)} | ${warmCell(ms(warm.ttfbMs))} |`,
+      `| DOM ready | ${ms(cold.domContentLoadedMs)} | ${warmCell(ms(warm.domContentLoadedMs))} |`,
+      `| First paint (FCP) | ${ms(cold.fcpMs)} | ${warmCell(ms(warm.fcpMs))} |`,
+      `| Main content (LCP) | ${ms(cold.lcpMs)} | ${warmCell(ms(warm.lcpMs))} |`,
+      `| Layout shift (CLS) | ${(cold.cls ?? 0).toFixed(3)} | ${warmCell((warm.cls ?? 0).toFixed(3))} |`,
+      `| Blocking time | ${blocking(cold.tbtMs)} | ${warmCell(blocking(warm.tbtMs))} |`,
+      `| Requests | ${cold.requestCount.toFixed(0)} | ${warmCell(warm.requestCount.toFixed(0))} |`,
+      `| Transferred | ${bytes(cold.transferBytes)} | ${warmCell(bytes(warm.transferBytes))} |`,
+      '',
+      `Per load: ${r.perRun.map((x, i) => `${ms(x.loadMs)}${i === 0 ? ' (cold)' : ''}`).join(' · ')}`,
+      `API calls per load: ${(r.totals.apiCount / r.runs).toFixed(1)} · slowest API call ${ms(r.totals.slowestApiMs)}`,
       '',
     )
+    if ((r.resources ?? []).length) {
+      lines.push('## What the first visit downloads', '', '| Resource type | Requests | Bytes (cold load) |', '|---|---|---|')
+      for (const g of r.resources) lines.push(`| ${g.type} | ${g.count} | ${bytes(g.bytes)} |`)
+      lines.push('')
+    }
+    if ((r.issues ?? []).length) {
+      lines.push('## JavaScript errors while loading', '')
+      lines.push('The load event fires whether or not the page threw, so none of the timings above show these.', '')
+      lines.push('| Kind | Message | Seen |', '|---|---|---|')
+      for (const i of r.issues) {
+        lines.push(`| ${i.kind === 'pageerror' ? 'uncaught' : 'console'} | ${i.text.replace(/\|/g, '\\|')} | ${i.count}× |`)
+      }
+      lines.push('')
+    }
     lines.push('## What to look at', '', findingsBlock(assessment?.findings ?? []), '')
+    lines.push('## How to read these numbers', '')
+    for (const note of PAGE_MEASUREMENT_NOTES) lines.push(`- ${note}`)
+    lines.push('')
     if (r.duplicates.length) {
       lines.push('## Duplicate API calls', '')
       lines.push('| Endpoint | Per load | Avg | Total per load |', '|---|---|---|---|')
@@ -662,6 +812,22 @@ export function reportMarkdown(job: PerfJob): string {
       lines.push('')
     }
 
+    const latency = r.latency ?? []
+    const latencyTotal = latency.reduce((sum, b) => sum + b.count, 0)
+    if (latencyTotal > 0 && latency.filter((b) => b.count > 0).length > 1) {
+      lines.push('## How the response times were distributed', '')
+      lines.push(
+        'Percentiles give five numbers; this gives the shape. A gap between two groups is two populations, not one variable system.',
+        '',
+      )
+      lines.push('| Response time | Requests | Share |', '|---|---|---|')
+      for (const b of latency) {
+        const range =
+          b.toMs === null ? `over ${ms(b.fromMs)}` : b.fromMs === 0 ? `under ${ms(b.toMs)}` : `${ms(b.fromMs)} – ${ms(b.toMs)}`
+        lines.push(`| ${range} | ${b.count.toLocaleString()} | ${pct(b.count / latencyTotal)} |`)
+      }
+      lines.push('')
+    }
     lines.push('## Per endpoint', '')
     lines.push(
       '| Endpoint | Calls | Req/s | OK | Failed | Min | Avg | p90 | p95 | p99 | Slowest | TTFB | Size |',

@@ -64,6 +64,72 @@ export interface PageLoadMetrics {
   transferBytes: number
   /** How many requests the page made in this run (all resource types). */
   requestCount: number
+  /**
+   * Cumulative Layout Shift — unitless, the third Core Web Vital. Without it a
+   * report that quotes the CWV bands for LCP and FCP is quoting two thirds of a
+   * standard: a page can hit every timing band and still throw its content around
+   * under the reader's cursor, which is the complaint users actually file.
+   */
+  cls: number
+  /**
+   * Total Blocking Time — the sum, over every task longer than 50ms, of the part
+   * past 50ms. This is the lab measure of "the page is painted but does nothing
+   * when I click", which no navigation timing can express.
+   */
+  tbtMs: number
+  /** The single longest task, ms. One 3s task and sixty 60ms ones share a TBT. */
+  longestTaskMs: number
+}
+
+/**
+ * A JavaScript error the page reported while it loaded.
+ *
+ * A page that throws on mount is a bug whether or not it still renders, and it is
+ * invisible to every timing in this file — the load event fires just the same. It
+ * is also the cheapest finding here to act on, because the message names the file.
+ *
+ * `pageerror` is an uncaught exception; `console` is something the app chose to
+ * log at error level. They are kept apart because the second is often deliberate.
+ */
+export interface PageIssue {
+  kind: 'pageerror' | 'console'
+  text: string
+  /** Times this exact message was seen across all runs. */
+  count: number
+}
+
+/**
+ * Bytes and request count for one resource type on the FIRST (cold) load.
+ *
+ * "4.9 MB transferred" is not a finding; "4.1 MB of it is JavaScript" is. Taken
+ * from the cold run on purpose — on a warm load the browser serves almost all of
+ * it from cache, so a per-load average of the bytes describes neither visit.
+ */
+export interface ResourceGroup {
+  type: string
+  count: number
+  bytes: number
+}
+
+/**
+ * One request on the cold load, positioned in time.
+ *
+ * Everything else in this file says how LONG a request took. Only this says WHEN,
+ * and "when" is the whole of page-load analysis: three 200ms calls fired together
+ * cost 200ms, and the same three chained cost 600ms. The two are indistinguishable
+ * in a table of averages and obvious the moment they are drawn against an axis.
+ *
+ * Offsets are milliseconds from the moment the navigation was issued.
+ */
+export interface TimelineEntry {
+  method: string
+  url: string
+  resourceType: string
+  api: boolean
+  startMs: number
+  endMs: number
+  bytes: number
+  status: number | null
 }
 
 /** One request URL, aggregated across every run of the audit. */
@@ -119,8 +185,30 @@ export interface PageAuditResult {
   redirected: boolean
   /** Per-navigation metrics, in run order — an outlier stays visible. */
   perRun: PageLoadMetrics[]
-  /** The average across runs; what the headline tiles show. */
+  /**
+   * The mean across runs. Kept because older reports quote it, but it is NOT what
+   * the page grades on — see `cold` / `warm`. A first visit and a cached one differ
+   * by more than any regression this tool can find, so their mean describes neither.
+   */
   average: PageLoadMetrics
+  /** The FIRST load: an empty cache, which is what a new visitor gets. */
+  cold: PageLoadMetrics
+  /**
+   * The MEDIAN of every load after the first — a returning visitor, and the one an
+   * internal app's users get all day. Median, not mean, so a single GC pause in one
+   * of three loads does not become the headline.
+   *
+   * Equal to `cold` when only one load was requested; `warmRuns` says which it is.
+   */
+  warm: PageLoadMetrics
+  /** How many loads went into `warm`. 0 means there is no warm measurement. */
+  warmRuns: number
+  /** Uncaught exceptions and console errors seen while loading. */
+  issues: PageIssue[]
+  /** Cold-load bytes and request count, grouped by resource type. */
+  resources: ResourceGroup[]
+  /** Every request of the cold load, with its start and end offset. */
+  timeline: TimelineEntry[]
   requests: AuditRequest[]
   duplicates: DuplicateEndpoint[]
   totals: {
@@ -149,6 +237,10 @@ const MAX_RUNS = 10
 const MAX_TRACKED_API = 2000
 const MAX_TRACKED_OTHER = 400
 const MAX_DUPLICATE_URLS = 6
+/** Enough to draw a waterfall of the cold load; past that the rows are 1px each. */
+const MAX_TIMELINE = 200
+/** Distinct error messages kept. A page in a render loop can log thousands. */
+const MAX_ISSUES = 25
 
 interface Agg {
   method: string
@@ -172,6 +264,9 @@ function emptyMetrics(): PageLoadMetrics {
     lcpMs: 0,
     transferBytes: 0,
     requestCount: 0,
+    cls: 0,
+    tbtMs: 0,
+    longestTaskMs: 0,
   }
 }
 
@@ -186,6 +281,9 @@ function averageMetrics(runs: PageLoadMetrics[]): PageLoadMetrics {
     sum.lcpMs += r.lcpMs
     sum.transferBytes += r.transferBytes
     sum.requestCount += r.requestCount
+    sum.cls += r.cls
+    sum.tbtMs += r.tbtMs
+    sum.longestTaskMs += r.longestTaskMs
   }
   const n = runs.length
   return {
@@ -196,26 +294,89 @@ function averageMetrics(runs: PageLoadMetrics[]): PageLoadMetrics {
     lcpMs: sum.lcpMs / n,
     transferBytes: sum.transferBytes / n,
     requestCount: sum.requestCount / n,
+    cls: sum.cls / n,
+    tbtMs: sum.tbtMs / n,
+    longestTaskMs: sum.longestTaskMs / n,
+  }
+}
+
+/** The middle value, or the mean of the middle two. */
+function median(values: number[]): number {
+  if (!values.length) return 0
+  const sorted = [...values].sort((a, b) => a - b)
+  const mid = Math.floor(sorted.length / 2)
+  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2
+}
+
+/**
+ * The median load, metric by metric.
+ *
+ * Deliberately NOT "the median run" — one run does not have to be the middle one
+ * for every metric, and picking a single representative run would let one slow
+ * TTFB drag a fast LCP into the headline with it. Each metric is answered by its
+ * own middle value, which is what "typical" means for that metric.
+ */
+function medianMetrics(runs: PageLoadMetrics[]): PageLoadMetrics {
+  if (!runs.length) return emptyMetrics()
+  const pick = (read: (m: PageLoadMetrics) => number) => median(runs.map(read))
+  return {
+    ttfbMs: pick((m) => m.ttfbMs),
+    domContentLoadedMs: pick((m) => m.domContentLoadedMs),
+    loadMs: pick((m) => m.loadMs),
+    fcpMs: pick((m) => m.fcpMs),
+    lcpMs: pick((m) => m.lcpMs),
+    transferBytes: pick((m) => m.transferBytes),
+    requestCount: pick((m) => m.requestCount),
+    cls: pick((m) => m.cls),
+    tbtMs: pick((m) => m.tbtMs),
+    longestTaskMs: pick((m) => m.longestTaskMs),
   }
 }
 
 /**
- * Records LCP before any page script runs. It has to be an init script: a
- * PerformanceObserver registered after `load` sees nothing, because LCP entries
- * are only buffered for an observer that asked for them.
+ * Registers the three observers that only work if they are registered FIRST.
+ *
+ * It has to be an init script for all three: a PerformanceObserver added after
+ * `load` sees nothing, because entries are only buffered for an observer that
+ * asked for them up front — and for layout shifts and long tasks there is no
+ * buffer at all, so anything that happened before the observer existed is simply
+ * gone. Reading them after the fact is not an option that produces a wrong number;
+ * it produces zero, which is worse, because zero reads as "clean".
+ *
+ * Every observer is wrapped on its own: `longtask` is not supported everywhere,
+ * and one unsupported type must not take the other two down with it.
  */
-const LCP_INIT_SCRIPT = `
+const INIT_SCRIPT = `
 (() => {
+  window.__qcLcp = 0
+  window.__qcCls = 0
+  window.__qcTasks = []
   try {
-    window.__qcLcp = 0
     new PerformanceObserver((list) => {
       for (const entry of list.getEntries()) {
         window.__qcLcp = Math.max(window.__qcLcp || 0, entry.startTime || 0)
       }
     }).observe({ type: 'largest-contentful-paint', buffered: true })
-  } catch (e) {
-    /* an old browser without LCP still reports every other metric */
-  }
+  } catch (e) { /* an old browser without LCP still reports every other metric */ }
+  try {
+    new PerformanceObserver((list) => {
+      for (const entry of list.getEntries()) {
+        // A shift the user caused by clicking something is not a defect, and the
+        // spec flags exactly those. Counting them would report every expanding
+        // accordion in the app as a layout problem.
+        if (!entry.hadRecentInput) window.__qcCls += entry.value || 0
+      }
+    }).observe({ type: 'layout-shift', buffered: true })
+  } catch (e) { /* no layout-shift support */ }
+  try {
+    new PerformanceObserver((list) => {
+      for (const entry of list.getEntries()) {
+        if (window.__qcTasks.length < 500) {
+          window.__qcTasks.push([entry.startTime || 0, entry.duration || 0])
+        }
+      }
+    }).observe({ type: 'longtask', buffered: true })
+  } catch (e) { /* no longtask support */ }
 })()
 `
 
@@ -228,15 +389,25 @@ async function collectMetrics(page: Page): Promise<PageLoadMetrics> {
     const resources = performance.getEntriesByType('resource') as PerformanceResourceTiming[]
     const transfer =
       (nav?.transferSize ?? 0) + resources.reduce((sum, r) => sum + (r.transferSize || 0), 0)
+    const w = window as unknown as { __qcLcp?: number; __qcCls?: number; __qcTasks?: [number, number][] }
+    const loadMs = nav?.loadEventEnd ?? 0
+    const tasks = w.__qcTasks ?? []
+    // Blocking time is summed over tasks that started BEFORE the load event, so it
+    // is comparable with what Lighthouse reports rather than being inflated by the
+    // settle window this audit deliberately keeps recording through.
+    const beforeLoad = loadMs > 0 ? tasks.filter((t) => t[0] < loadMs) : tasks
     return {
       ttfbMs: nav?.responseStart ?? 0,
       // These are 0 while the event hasn't fired yet; the caller waits for `load`.
       domContentLoadedMs: nav?.domContentLoadedEventEnd ?? 0,
-      loadMs: nav?.loadEventEnd ?? 0,
+      loadMs,
       fcpMs: fcp?.startTime ?? 0,
-      lcpMs: (window as unknown as { __qcLcp?: number }).__qcLcp ?? 0,
+      lcpMs: w.__qcLcp ?? 0,
       transferBytes: transfer,
       requestCount: resources.length + (nav ? 1 : 0),
+      cls: w.__qcCls ?? 0,
+      tbtMs: beforeLoad.reduce((sum, t) => sum + Math.max(0, t[1] - 50), 0),
+      longestTaskMs: tasks.reduce((max, t) => Math.max(max, t[1]), 0),
     }
   })
   return {
@@ -247,6 +418,9 @@ async function collectMetrics(page: Page): Promise<PageLoadMetrics> {
     lcpMs: Math.max(0, raw.lcpMs),
     transferBytes: Math.max(0, raw.transferBytes),
     requestCount: Math.max(0, raw.requestCount),
+    cls: Math.max(0, raw.cls),
+    tbtMs: Math.max(0, raw.tbtMs),
+    longestTaskMs: Math.max(0, raw.longestTaskMs),
   }
 }
 
@@ -341,9 +515,30 @@ export async function auditPageLoad(opts: PageAuditOptions): Promise<PageAuditRe
   let otherTracked = 0
   let droppedApi = 0
   let droppedOther = 0
+  /** Which load is in flight — the cold one is index 0 and is the only one drawn. */
+  let runIndex = 0
+  /** Wall clock at the moment `goto` was issued; the zero of the timeline. */
+  let navStart = 0
+  const timeline: TimelineEntry[] = []
+  const coldByType = new Map<string, { count: number; bytes: number }>()
+  const issueMap = new Map<string, PageIssue>()
+
+  /** Record one error message, deduped — a render loop logs the same line 400 times. */
+  function noteIssue(kind: PageIssue['kind'], text: string): void {
+    const clean = text.replace(/\s+/g, ' ').trim().slice(0, 300)
+    if (!clean) return
+    const key = `${kind}:${clean}`
+    const existing = issueMap.get(key)
+    if (existing) {
+      existing.count++
+      return
+    }
+    if (issueMap.size >= MAX_ISSUES) return
+    issueMap.set(key, { kind, text: clean, count: 1 })
+  }
 
   try {
-    await context.addInitScript(LCP_INIT_SCRIPT)
+    await context.addInitScript(INIT_SCRIPT)
 
     // requestfinished carries the completed timing envelope; `response` alone
     // fires before the body is read, so its numbers would understate slow APIs.
@@ -357,6 +552,7 @@ export async function auditPageLoad(opts: PageAuditOptions): Promise<PageAuditRe
           const durationMs = timing.responseEnd >= 0 ? timing.responseEnd : 0
           const waitMs = timing.responseStart >= 0 ? timing.responseStart : 0
           const resourceType = req.resourceType()
+          const isApi = resourceType === 'xhr' || resourceType === 'fetch'
           const method = req.method().toUpperCase()
           const url = req.url().split('#')[0]
           const key = `${method} ${url}`
@@ -375,6 +571,30 @@ export async function auditPageLoad(opts: PageAuditOptions): Promise<PageAuditRe
           } catch {
             /* a redirected/cancelled request may have no response */
           }
+          // The cold load is the one with a story: every byte is fetched and every
+          // dependency shows in the order it was discovered. Later loads repeat it
+          // from cache, so drawing them would be drawing the cache.
+          if (runIndex === 0) {
+            const group = coldByType.get(resourceType) ?? { count: 0, bytes: 0 }
+            group.count += 1
+            group.bytes += bytes
+            coldByType.set(resourceType, group)
+            if (timeline.length < MAX_TIMELINE) {
+              // `timing.startTime` is wall-clock ms, so the offset is relative to
+              // the goto that started this navigation — not to some browser epoch.
+              const startMs = navStart > 0 ? Math.max(0, timing.startTime - navStart) : 0
+              timeline.push({
+                method,
+                url,
+                resourceType,
+                api: isApi,
+                startMs,
+                endMs: startMs + Math.max(0, durationMs),
+                bytes,
+                status,
+              })
+            }
+          }
           if (existing) {
             existing.count++
             existing.totalMs += durationMs
@@ -384,7 +604,6 @@ export async function auditPageLoad(opts: PageAuditOptions): Promise<PageAuditRe
             if (status !== null) existing.status = status
             return
           }
-          const isApi = resourceType === 'xhr' || resourceType === 'fetch'
           if (isApi ? apiTracked >= MAX_TRACKED_API : otherTracked >= MAX_TRACKED_OTHER) {
             if (isApi) droppedApi++
             else droppedOther++
@@ -411,12 +630,24 @@ export async function auditPageLoad(opts: PageAuditOptions): Promise<PageAuditRe
     })
 
     const page = context.pages()[0] ?? (await context.newPage())
+
+    // Uncaught exceptions and error-level console lines. Neither shows up in any
+    // timing: a page that throws on mount still fires `load` on schedule.
+    page.on('pageerror', (err) => {
+      if (recording) noteIssue('pageerror', err.message)
+    })
+    page.on('console', (msg) => {
+      if (recording && msg.type() === 'error') noteIssue('console', msg.text())
+    })
+
     const perRun: PageLoadMetrics[] = []
     let finalUrl = ''
 
     for (let i = 0; i < runs; i++) {
       if (opts.signal?.aborted) throw new Error('cancelled')
       opts.onLog('info', `Load ${i + 1}/${runs} — navigating to ${opts.url}`)
+      runIndex = i
+      navStart = Date.now()
       recording = true
       try {
         await page.goto(opts.url, { waitUntil: 'load', timeout: 60_000 })
@@ -442,7 +673,9 @@ export async function auditPageLoad(opts: PageAuditOptions): Promise<PageAuditRe
       finalUrl = page.url()
       opts.onLog(
         'success',
-        `Load ${i + 1} — page load ${Math.round(metrics.loadMs)}ms · TTFB ${Math.round(metrics.ttfbMs)}ms · LCP ${Math.round(metrics.lcpMs)}ms`,
+        `Load ${i + 1} — page load ${Math.round(metrics.loadMs)}ms · TTFB ${Math.round(metrics.ttfbMs)}ms · LCP ${Math.round(metrics.lcpMs)}ms${
+          i === 0 ? ' (cold — empty cache)' : ''
+        }`,
       )
     }
 
@@ -526,6 +759,12 @@ export async function auditPageLoad(opts: PageAuditOptions): Promise<PageAuditRe
 
     const apiRequests = requests.filter((r) => r.api)
     const redirected = isRedirect(opts.url, finalUrl)
+    const cold = perRun[0] ?? emptyMetrics()
+    const laterRuns = perRun.slice(1)
+    const warm = laterRuns.length ? medianMetrics(laterRuns) : cold
+    const resources = [...coldByType.entries()]
+      .map(([type, g]) => ({ type, count: g.count, bytes: g.bytes }))
+      .sort((a, b) => b.bytes - a.bytes || b.count - a.count)
     const result: PageAuditResult = {
       url: opts.url,
       runs,
@@ -533,6 +772,12 @@ export async function auditPageLoad(opts: PageAuditOptions): Promise<PageAuditRe
       redirected,
       perRun,
       average: averageMetrics(perRun),
+      cold,
+      warm,
+      warmRuns: laterRuns.length,
+      issues: [...issueMap.values()].sort((a, b) => b.count - a.count),
+      resources,
+      timeline: timeline.sort((a, b) => a.startMs - b.startMs),
       requests,
       duplicates,
       totals: {
@@ -544,6 +789,23 @@ export async function auditPageLoad(opts: PageAuditOptions): Promise<PageAuditRe
         transferBytes: averageMetrics(perRun).transferBytes,
         slowestApiMs: apiRequests.reduce((m, r) => Math.max(m, r.maxMs), 0),
       },
+    }
+
+    // The gap between a first visit and a returning one is a finding in its own
+    // right, and stating it here stops the two being read as one number later.
+    if (laterRuns.length && cold.loadMs > 0) {
+      opts.onLog(
+        'info',
+        `First visit ${Math.round(cold.loadMs)}ms · returning visit ${Math.round(warm.loadMs)}ms (median of ${laterRuns.length}).`,
+      )
+    }
+
+    const pageErrors = [...issueMap.values()].filter((i) => i.kind === 'pageerror')
+    if (pageErrors.length) {
+      opts.onLog(
+        'error',
+        `${pageErrors.length} uncaught JavaScript error${pageErrors.length === 1 ? '' : 's'} while loading — the first is: ${pageErrors[0].text.slice(0, 120)}`,
+      )
     }
 
     // Say this BEFORE the duplicate verdict: on a login screen "no endpoint was

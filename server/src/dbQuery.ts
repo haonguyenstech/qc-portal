@@ -521,12 +521,28 @@ export async function questionToSql(opts: {
     opts.config.kind === 'sqlserver'
       ? 'cap rows with SELECT TOP 200'
       : 'cap rows with LIMIT 200'
+  /**
+   * How to turn a TEXT column that holds numbers into a number, safely, in this
+   * dialect. "Safely" means a row whose text is not a number must not blow up the
+   * whole query — SQL Server and MySQL both have a non-throwing form, Postgres has
+   * none, so there it is guarded by a pattern test.
+   */
+  const numericCast =
+    opts.config.kind === 'sqlserver'
+      ? 'TRY_CAST(col AS float)'
+      : opts.config.kind === 'mysql'
+        ? 'CAST(col AS DECIMAL(38,10))'
+        : "CASE WHEN col ~ '^-?[0-9]+(\\.[0-9]+)?$' THEN col::numeric END"
 
   const prompt = `You are a SQL assistant for a ${dialect} database. Using ONLY the schema below, write ONE read-only SQL query that answers the user's question.
 
 Rules:
 - ${dialect} syntax. A single statement only. SELECT / WITH / SHOW / EXPLAIN only — NEVER modify data (no INSERT/UPDATE/DELETE/DDL).
 - Use the EXACT table and column names from the schema.
+- MATCH TYPES TO THE SCHEMA. Every column's declared type is listed above; read it before you compare, sort or aggregate.
+  - A number column (int/bigint/decimal/numeric/float/money) takes an UNQUOTED number: TotalAmount > 1000, never TotalAmount > '1000'.
+  - A TEXT column (varchar/nvarchar/char/text) that holds numbers must be converted before ANY numeric use — comparing, SUM/AVG/MAX, and ORDER BY. Sorting such a column as text is the silent one: it raises no error and puts '9' above '100'. Convert with ${numericCast}.
+  - Do NOT wrap a column that is already numeric in a cast.
 - ${limitHint} unless the question clearly asks for an aggregate/single value.
 - Output ONLY the SQL. No explanation, no markdown code fences.
 

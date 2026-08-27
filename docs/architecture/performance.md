@@ -34,6 +34,63 @@ not optional either. Neither tab is a lesser version of the other.
 
 ## Page audit — the decisions that matter
 
+**A first visit and a returning visit are two measurements, and their mean is
+neither.** The audit used to average every load into one set of numbers. Measured on
+a real page that was 1291ms cold and 70ms warm — a headline of 529ms, a load time
+that never happened, and 4.88 MB of "transferred per load" against a cold load of
+14.5 MB and warm loads of 43 KB. So `cold` (the first load) and `warm` (the MEDIAN
+of every load after it) are carried separately from the tiles to the .docx, the
+verdict grades on `warm` because that is what an internal app's users get all day,
+and the first-visit cost is a FINDING with its own sentence rather than a number
+folded into an average. `average` is still in the result for older reports and is
+used by nothing. The warm figure is a median so that one stalled load in three is
+not the headline; it is a per-METRIC median rather than "the middle run", because no
+single run has to be the middle one for every metric.
+
+The redirect rule extends to the closing log line for the same reason. `perfJobs.ts`
+used to end every audit with `Done — average page load 529ms`, in the success voice,
+even when the browser had spent the whole run on the login screen — the one line most
+likely to be quoted, saying the thing the redirect banner exists to prevent.
+
+**Three signals that no timing can express.** All three are registered in the init
+script, and none can be read after the fact: an observer added after `load` sees
+nothing, and for layout shifts and long tasks there is no buffer at all — a late
+observer reports 0, which reads as "clean".
+
+| Signal | Why it is here |
+|---|---|
+| **CLS** | The report quotes the Core Web Vitals bands. Without CLS it was quoting two of the three, and a page can hit every timing band while throwing its content around under the reader's cursor. Shifts with `hadRecentInput` are excluded — an accordion the user opened is not a defect. |
+| **Blocking time** | Long tasks before the load event, summed past 50ms each. This is "painted but does not answer a click", which no navigation timing carries. Restricted to tasks before `load` so it is comparable with Lighthouse rather than inflated by the settle window. `ms(0)` renders an em dash, so a true zero is printed as `0ms` — "—" on the one page that scored perfectly reads as *not measured*. |
+| **JavaScript errors** | `pageerror` (uncaught) and error-level `console` output, deduped and counted. A page that throws on mount fires `load` exactly on schedule, so every number in this file says it is fine. Kept apart because a logged error is often deliberate and an uncaught one never is. |
+
+**The waterfall is the only thing here that says WHEN.** Everything else says how
+long. Three 200ms calls fired together cost 200ms and the same three chained cost
+600ms; in a table of averages those pages are identical, and against a time axis one
+is three bars at the same x and the other is a staircase. The milestones are drawn on
+the same axis, because "LCP at 2.9s" is a finding only once you can see what is still
+in flight at 2.9s. Four details it needs to be right:
+
+- **The cold load only.** A warm load reads from cache, so its waterfall is a picture
+  of the cache. Offsets are wall-clock against the `Date.now()` taken at `goto`.
+- **Assets are capped separately and tightly** (8, against 14 API calls). A Vite dev
+  server serves 180 modules that all take 74ms; "the longest requests" filled thirteen
+  rows with identical bars and buried the six calls the reader came for.
+- **The axis is sub-second.** `atSeconds` is the load-test formatter and rounds to
+  whole seconds, which on a 1.6s page prints `0s · 0s · 1s · 1s · 2s`. Ticks land on
+  round numbers, not on `span/4` — nobody wanted to know where 403ms was.
+- **FCP and LCP are routinely milliseconds apart**, which puts two labels at one x, so
+  the labels stagger onto a second row.
+
+**Bytes are named by what they are made of, and by which total they came from.**
+"4.9 MB transferred" is not something anyone can act on; "4.1 MB of it is JavaScript
+over 179 requests" names the fix. The breakdown is the cold load, and it is labelled
+*response bodies* rather than *transferred*: the tile's figure is the browser's own
+`transferSize` (compressed, over the wire) and the breakdown sums decoded response
+bodies. Both are true, they differ by ~0.8 MB on the portal's own UI, and two
+different true numbers under one word is how a report gets argued with. The
+difference is stated in `PAGE_MEASUREMENT_NOTES`, which ships with the report in all
+four formats exactly as the load test's notes do.
+
 **It loads the page N times, not once.** A single navigation is noise: a cold first
 load and a warm second load differ by more than most regressions do. The headline
 tiles are averages; `perRun` keeps every individual load so an outlier stays visible
@@ -238,6 +295,33 @@ Three things this depends on, each verified against **k6 v2.2.0**:
   its predecessor: the run almost never ends on a boundary, and that sliver otherwise
   reports a fraction of a second's traffic as if it were a full one.
 
+**The histogram is bucketed in the script too, for the reason the time axis is.**
+Percentiles describe a distribution with five numbers, and five numbers cannot carry
+its SHAPE: a p50 of 20ms with a p99 of 4s is printed identically by a system with a
+smooth tail and by one with two populations — almost everything at 20ms plus one
+endpoint that always takes 4s. Those need opposite fixes. `LATENCY_EDGES` is a fixed,
+roughly logarithmic ladder shared by `buildK6Script` and `parseK6Summary`, for the
+same reason `timeBuckets` is derived only from the config: the two must agree with
+nothing stored between them, and two runs of one test must compare rung for rung. An
+interior zero is KEPT — "nothing at all between 500ms and 1s" is the finding — while
+empty rungs are trimmed off both ends, which is ladder this test never needed. The
+histogram total equals `http_reqs` exactly, which is what makes it checkable.
+
+**Two scale-blindness bugs, both of which graded a healthy run Poor.** A ratio has no
+units, and on a fast service that makes it wrong:
+
+- **Spread (max ÷ median)** flagged a local API answering in 3.8ms with one 92ms
+  outlier as 24×, and that single check dragged the whole run to **Poor** while k6's
+  own thresholds passed and every other check was green. Nobody has a stability
+  problem whose worst call is 92ms. The ratio now counts only once the worst call is
+  slow in ABSOLUTE terms — past the engineer's own p95 target when they set one, past
+  a quarter second otherwise — and the same floor stops the per-endpoint finding
+  reporting "version spikes to 5ms".
+- **The headline and the badge could contradict each other**, because the headline
+  reads k6's two thresholds and the badge reads eight checks. "Held up: p95 10ms at
+  0.0% errors" beside a red *Poor* is worse than either half alone, so when they
+  disagree the headline names the check that dissents.
+
 **Drift is measured on the steady part of the run, using the MEDIAN slice.** Two
 corrections, both from real data:
 
@@ -318,6 +402,37 @@ text: identity by color alone, with the color missing. Capturing the figure bake
 the swatches into the image. The swap happens in the DOM (`page.evaluate`), not by
 regex on the markup: `viz-root` has nested children, and "up to the closing tag" is
 not something a regex can be trusted to find.
+
+### The .docx is repaired before it is handed over
+
+**Every Word export the portal produced was a file Word refused to open** — *"Word
+experienced an error trying to open the file"* — for two reasons, both from
+`html-to-docx`, both invisible to every lenient reader:
+
+- **`w:w="1542.857142857143"`.** Table cells are sized by dividing the content width
+  (10800 twips) by the column count, and 10800 does not divide by 7. Every OOXML
+  measurement type is an integer — twips, half-points, EMUs — so a decimal point makes
+  the whole document invalid.
+- **`w:header="undefined" w:footer="undefined" w:gutter="undefined"`.** The `margins`
+  option is copied into `<w:pgMar>` key by key, so any key not supplied becomes the
+  string `undefined`. This one was in *every* document, whatever its tables looked like.
+
+The second is fixed at the source, by passing all seven margin keys. The first cannot
+be: it is inside html-to-docx's table sizing. So `repairDocx` reopens the generated
+archive and rewrites every XML part — decimals rounded, non-numeric optional
+measurements dropped — before the buffer is returned.
+
+Repairing the output rather than avoiding the input is deliberate. The alternative is
+"never write a 7-, 11- or 13-column table in any report again", enforced by nothing but
+memory, in files that get a column added whenever a metric does. Rounding is safe
+because a decimal there is always a generator artefact and never intent: the largest
+possible correction is half a twip, 1/2880 inch.
+
+**Why it took a user to find it.** The checks used when the export was built — the file
+starts with `PK`, the XML parses, `textutil` reads it, the chart PNGs are present and
+correct — all pass on a file Word rejects, because none of them validate against the
+schema. `docxcheck` in the scratchpad now scans for exactly this class of value; a
+lenient reader agreeing is not evidence.
 
 Nothing is written into the project: the page's promise is that it draws nothing on
 disk, so every file reaches the engineer through the browser's own download.
@@ -489,6 +604,7 @@ so the report carries the numbers that decide what to do next:
 | Errors across the run | *when* did the failures start? | drawn only when there were any |
 | Where the time goes | server think-time, payload, connection setup, or the generator? | `http_req_blocked/connecting/tls/sending/waiting/receiving` |
 | Calls per endpoint | is the mix realistic, and which endpoint owns the failures? | `ep<i>_calls` / `ep<i>_ok` |
+| Response-time distribution | one variable system, or two populations? | the latency ladder (`h<i>_n`) |
 
 Two rules the charts follow, both easy to break by accident:
 

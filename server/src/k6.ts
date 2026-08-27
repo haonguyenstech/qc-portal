@@ -193,6 +193,25 @@ function str(v: unknown, fallback = ''): string {
 const TARGET_BUCKETS = 36
 const MAX_BUCKETS = 48
 
+/**
+ * THE LATENCY LADDER — fixed upper bounds, in milliseconds, for the response-time
+ * histogram. The last bucket is open-ended.
+ *
+ * Percentiles describe a distribution by five numbers, and five numbers cannot
+ * show its SHAPE. A p50 of 20ms with a p99 of 4s is reported identically whether
+ * the slow tail is a smooth curve or a second population — one endpoint that
+ * always answers in 4s while the rest answer in 20ms. Those two need different
+ * fixes, and only a histogram tells them apart.
+ *
+ * The ladder is fixed rather than derived from the run for the same reason
+ * `timeBuckets` is derived only from the config: the generator and the parser must
+ * agree without anything being stored between them, and two runs of the same test
+ * must be comparable bucket for bucket. It is roughly logarithmic because response
+ * times are: the interesting distinctions are 10 vs 100ms and 1 vs 10s, not 4200
+ * vs 4300ms.
+ */
+export const LATENCY_EDGES = [10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10_000] as const
+
 export function timeBuckets(cfg: K6TestConfig): { count: number; seconds: number } {
   const hold = durationSeconds(cfg.duration) ?? 0
   const ramp = cfg.rampUp ? (durationSeconds(cfg.rampUp) ?? 0) : 0
@@ -379,6 +398,22 @@ function bucketNow() {
   return B[i < 0 ? 0 : i > BUCKET_COUNT - 1 ? BUCKET_COUNT - 1 : i]
 }
 
+// The response-time histogram. One counter per rung of a fixed ladder, so the
+// summary carries the SHAPE of the distribution and not only its percentiles.
+const EDGES = ${jsLiteral([...LATENCY_EDGES])}
+const H = []
+for (let i = 0; i <= EDGES.length; i++) H.push(new Counter('h' + i + '_n'))
+
+function histAdd(d) {
+  for (let i = 0; i < EDGES.length; i++) {
+    if (d < EDGES[i]) {
+      H[i].add(1)
+      return
+    }
+  }
+  H[EDGES.length].add(1)
+}
+
 export const options = {
   ${stages}
   insecureSkipTLSVerify: ${cfg.insecureSkipTLSVerify},
@@ -403,6 +438,7 @@ export default function () {
     b.reqs.add(1)
     b.fail.add(!good)
     b.vus.add(exec.instance.vusActive)
+    histAdd(res.timings.duration)
     M[i].duration.add(res.timings.duration)
     M[i].waiting.add(res.timings.waiting)
     M[i].bytes.add(res.body ? res.body.length : 0)
@@ -466,6 +502,16 @@ export interface RequestPhases {
   receiving: TrendStats
 }
 
+/**
+ * One rung of the response-time histogram — see `LATENCY_EDGES`.
+ * `toMs` is null on the open-ended top rung.
+ */
+export interface LatencyBucket {
+  fromMs: number
+  toMs: number | null
+  count: number
+}
+
 /** One slice of the run — see `timeBuckets`. */
 export interface LoadTimeBucket {
   /** Seconds from the start of the run to the START of this slice. */
@@ -510,6 +556,8 @@ export interface LoadTestResult {
   dataSent: number
   bucketSeconds: number
   buckets: LoadTimeBucket[]
+  /** The response-time distribution. Empty when k6 emitted no histogram counters. */
+  latency: LatencyBucket[]
   endpoints: EndpointResult[]
 }
 
@@ -572,6 +620,23 @@ export function parseK6Summary(
     })
   }
 
+  // The histogram. A rung nobody landed on is absent from the summary rather than
+  // zero, exactly like a time slice — but here the zero is the finding ("nothing at
+  // all between 500ms and 1s"), so an absent rung is read as 0 and kept.
+  const latency: LatencyBucket[] = []
+  for (let i = 0; i <= LATENCY_EDGES.length; i += 1) {
+    latency.push({
+      fromMs: i === 0 ? 0 : LATENCY_EDGES[i - 1],
+      toMs: i < LATENCY_EDGES.length ? LATENCY_EDGES[i] : null,
+      count: counter(metrics, `h${i}_n`),
+    })
+  }
+  // Trim the empty rungs off both ENDS only. An interior zero is a real gap in the
+  // distribution and is exactly what this chart exists to show; a trailing run of
+  // zeros is just ladder that this test never needed.
+  while (latency.length && latency[latency.length - 1].count === 0) latency.pop()
+  while (latency.length && latency[0].count === 0) latency.shift()
+
   // The run almost never ends exactly on a slice boundary, so the last slice is a
   // sliver — a fraction of a second's traffic reported as if it were a full one.
   // Left in, every throughput chart ends in a cliff to near-zero that never
@@ -616,6 +681,7 @@ export function parseK6Summary(
     dataSent: counter(metrics, 'data_sent'),
     bucketSeconds: bucketPlan.seconds,
     buckets,
+    latency,
     endpoints: cfg.endpoints.map((e, i) => ({
       name: e.name,
       method: e.method,

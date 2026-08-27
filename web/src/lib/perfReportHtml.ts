@@ -3,6 +3,7 @@ import {
   loadConcurrencyChart,
   loadEndpointChart,
   loadErrorsOverTimeChart,
+  loadLatencyChart,
   loadOverTimeChart,
   loadPercentileChart,
   loadPhaseChart,
@@ -10,19 +11,24 @@ import {
   loadVolumeChart,
   pageApiChart,
   pageMilestoneChart,
+  pageResourceChart,
   pageRunsChart,
+  pageWaterfallChart,
 } from './perfCharts'
 import {
   assessJob,
   atSeconds,
   bytes,
+  coldMetrics,
   gradeLabel,
   hostOf,
   loadExtras,
   ms,
   MEASUREMENT_NOTES,
+  PAGE_MEASUREMENT_NOTES,
   pct,
   shortUrl,
+  warmMetrics,
   type Assessment,
   type Grade,
 } from './perfReport'
@@ -142,6 +148,12 @@ const STYLE = `
   h2 { font-size: 14px; margin: 22px 0 8px; padding-bottom: 4px; border-bottom: 1px solid #e5e4e0; page-break-after: avoid; }
   h3 { font-size: 12px; margin: 14px 0 4px; page-break-after: avoid; }
   svg, .finding, tr { page-break-inside: avoid; }
+  /* A heading only binds to the block that FOLLOWS it, and here that block is
+     usually an explanatory paragraph — which left the heading and its lead-in
+     stranded at the foot of a page with the chart overleaf. The paragraph has to
+     carry the rule too, or the pair still splits. */
+  h2 + p.muted, h3 + p.muted { page-break-after: avoid; }
+  .viz-root { page-break-inside: avoid; }
   p { margin: 0 0 6px; }
   .meta { color: #52514e; font-size: 10.5px; margin-bottom: 14px; }
   .muted { color: #52514e; }
@@ -165,7 +177,7 @@ const STYLE = `
   ul.notes li { margin-bottom: 4px; color: #52514e; }
   .footer { margin-top: 22px; padding-top: 8px; border-top: 1px solid #e5e4e0; color: #52514e; font-size: 10px; }
   /* Chart roles - the same names perfCharts.ts draws against in the app. */
-  .viz-root { --viz-series-1: #2a78d6; --viz-series-2: #eb6834; --viz-series-3: #a24bd8; --viz-series-4: #00a08a; --viz-series-5: #a37500; --viz-good: #0ca30c; --viz-warn: #fab219; --viz-bad: #d03b3b; }
+  .viz-root { --viz-series-1: #2a78d6; --viz-series-2: #eb6834; --viz-series-3: #a24bd8; --viz-series-4: #00a08a; --viz-series-5: #a37500; --viz-muted: #8a8a8a; --viz-good: #0ca30c; --viz-warn: #fab219; --viz-bad: #d03b3b; }
   .viz-root svg.viz { display: block; overflow: visible; margin: 4px 0 2px; }
   .viz-title { fill: #1a1a19; font-size: 12px; font-weight: 600; }
   .viz-sub, .viz-label { fill: #52514e; font-size: 11px; }
@@ -199,26 +211,75 @@ export function reportHtml(job: PerfJob): string {
     body.push(verdictBlock(assessment))
     body.push('<h2>Verdict by metric</h2>', checksTable(assessment))
     body.push('<h2>What the user waits for</h2>', `<div class="viz-root">${pageMilestoneChart(r, false)}</div>`)
+    const wf = pageWaterfallChart(r, false)
+    if (wf) {
+      body.push(
+        '<h2>When each request happened</h2>',
+        `<p class="muted">The first visit, on a time axis. Requests that start together were fired together; a staircase is a chain, and each step is waiting for the one above it.</p>`,
+        `<div class="viz-root">${wf}</div>`,
+      )
+    }
     const runs = pageRunsChart(r, false)
     if (runs) body.push('<h3>Load time per run</h3>', `<div class="viz-root">${runs}</div>`)
+    // Cold and warm are reported as two columns, never merged. Their mean is a
+    // number no visit produced, and it is the one a reader would otherwise quote.
+    const warm = warmMetrics(r)
+    const cold = coldMetrics(r)
+    const warmRuns = r.warmRuns ?? 0
+    // `ms(0)` renders an em dash, and "—" beside Blocking time reads as "not
+    // measured" on the one page that scored a perfect zero.
+    const blocking = (value: number | undefined) =>
+      value == null ? '—' : value > 0 ? ms(value) : '0ms'
     body.push(
       '<h2>Page in numbers</h2>',
+      `<p class="muted">A first visit fetches everything; a returning visit is served largely from cache. They are different measurements and are never averaged together.</p>`,
       table(
-        ['Metric', 'Value'],
+        ['Metric', 'First visit (cold)', warmRuns ? `Returning visit (median of ${warmRuns})` : 'Returning visit'],
         [
-          ['Page load (average)', ms(r.average.loadMs)],
-          ['Per load', r.perRun.map((x) => ms(x.loadMs)).join(' · ')],
-          ['TTFB', ms(r.average.ttfbMs)],
-          ['DOM ready', ms(r.average.domContentLoadedMs)],
-          ['First paint (FCP)', ms(r.average.fcpMs)],
-          ['Main content (LCP)', ms(r.average.lcpMs)],
-          ['Requests per load', r.average.requestCount.toFixed(1)],
-          ['API calls per load', (r.totals.apiCount / r.runs).toFixed(1)],
-          ['Transferred per load', bytes(r.average.transferBytes)],
-          ['Slowest API call', ms(r.totals.slowestApiMs)],
+          ['Page load', ms(cold.loadMs), warmRuns ? ms(warm.loadMs) : 'not measured'],
+          ['TTFB', ms(cold.ttfbMs), warmRuns ? ms(warm.ttfbMs) : '—'],
+          ['DOM ready', ms(cold.domContentLoadedMs), warmRuns ? ms(warm.domContentLoadedMs) : '—'],
+          ['First paint (FCP)', ms(cold.fcpMs), warmRuns ? ms(warm.fcpMs) : '—'],
+          ['Main content (LCP)', ms(cold.lcpMs), warmRuns ? ms(warm.lcpMs) : '—'],
+          ['Layout shift (CLS)', (cold.cls ?? 0).toFixed(3), warmRuns ? (warm.cls ?? 0).toFixed(3) : '—'],
+          ['Blocking time', blocking(cold.tbtMs), warmRuns ? blocking(warm.tbtMs) : '—'],
+          ['Requests', cold.requestCount.toFixed(0), warmRuns ? warm.requestCount.toFixed(0) : '—'],
+          ['Transferred', bytes(cold.transferBytes), warmRuns ? bytes(warm.transferBytes) : '—'],
+          ['Per load', r.perRun.map((x, i) => `${ms(x.loadMs)}${i === 0 ? ' (cold)' : ''}`).join(' · '), ''],
+          ['API calls per load', (r.totals.apiCount / r.runs).toFixed(1), ''],
+          ['Slowest API call', ms(r.totals.slowestApiMs), ''],
         ],
+        true,
+        [1, 2],
       ),
     )
+    const resourceChart = pageResourceChart(r, false)
+    if (resourceChart) {
+      body.push('<h2>What the first visit downloads</h2>', `<div class="viz-root">${resourceChart}</div>`)
+      body.push(
+        table(
+          ['Resource type', 'Requests', 'Bytes (cold load)'],
+          (r.resources ?? []).map((g) => [esc(g.type), String(g.count), bytes(g.bytes)]),
+        ),
+      )
+    }
+    const issues = r.issues ?? []
+    if (issues.length) {
+      body.push(
+        '<h2>JavaScript errors while loading</h2>',
+        `<p class="muted">The load event fires whether or not the page threw, so none of the timings above show these.</p>`,
+        table(
+          ['Kind', 'Message', 'Seen'],
+          issues.map((i) => [
+            i.kind === 'pageerror' ? 'uncaught' : 'console',
+            esc(i.text),
+            `${i.count}×`,
+          ]),
+          true,
+          [1],
+        ),
+      )
+    }
     const apiChart = pageApiChart(r, false)
     if (apiChart) body.push('<h2>Slowest API calls</h2>', `<div class="viz-root">${apiChart}</div>`)
     if (r.duplicates.length) {
@@ -237,6 +298,10 @@ export function reportHtml(job: PerfJob): string {
       )
     }
     body.push('<h2>What to look at</h2>', findingsBlock(assessment))
+    body.push(
+      '<h2>How to read these numbers</h2>',
+      `<ul class="notes">${PAGE_MEASUREMENT_NOTES.map((n) => `<li>${bold(n)}</li>`).join('')}</ul>`,
+    )
     const api = r.requests.filter((x) => x.api).slice(0, 40)
     if (api.length) {
       body.push(
@@ -270,6 +335,31 @@ export function reportHtml(job: PerfJob): string {
       '<h2>Response times</h2>',
       `<div class="viz-root">${loadPercentileChart(r, cfg?.thresholdP95Ms ?? 0, false)}</div>`,
     )
+    const latency = loadLatencyChart(r, cfg?.thresholdP95Ms ?? 0, false)
+    if (latency) {
+      body.push(
+        '<h3>How the response times were distributed</h3>',
+        `<p class="muted">Percentiles give five numbers; this gives the shape. A gap between two groups of bars is two populations, not one variable system — and they need different fixes.</p>`,
+        `<div class="viz-root">${latency}</div>`,
+        table(
+          ['Response time', 'Requests', 'Share'],
+          (r.latency ?? []).map((b) => {
+            const total = (r.latency ?? []).reduce((sum, x) => sum + x.count, 0) || 1
+            return [
+              b.toMs === null
+                ? `over ${ms(b.fromMs)}`
+                : b.fromMs === 0
+                  ? `under ${ms(b.toMs)}`
+                  : `${ms(b.fromMs)} – ${ms(b.toMs)}`,
+              b.count.toLocaleString(),
+              pct(b.count / total),
+            ]
+          }),
+          true,
+          [1],
+        ),
+      )
+    }
     const extra = loadExtras(r)
     const seconds = r.durationMs > 0 ? r.durationMs / 1000 : 0
     body.push(

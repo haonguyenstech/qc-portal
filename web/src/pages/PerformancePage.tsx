@@ -8,7 +8,6 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronRight,
-  Clock,
   Copy,
   Download,
   FileDown,
@@ -26,6 +25,7 @@ import {
   TerminalSquare,
   Timer,
   Trash2,
+  TriangleAlert,
   TrendingUp,
   XCircle,
   Zap,
@@ -94,14 +94,17 @@ import {
   downloadText,
   gradeLabel,
   hostOf,
+  coldMetrics,
   loadExtras,
   MEASUREMENT_NOTES,
   ms,
+  PAGE_MEASUREMENT_NOTES,
   pct,
   reportFileName,
   reportJson,
   reportMarkdown,
   shortUrl,
+  warmMetrics,
   type Assessment,
   type Grade,
 } from '@/lib/perfReport'
@@ -110,6 +113,7 @@ import {
   loadConcurrencyChart,
   loadEndpointChart,
   loadErrorsOverTimeChart,
+  loadLatencyChart,
   loadOverTimeChart,
   loadPercentileChart,
   loadPhaseChart,
@@ -117,7 +121,9 @@ import {
   loadVolumeChart,
   pageApiChart,
   pageMilestoneChart,
+  pageResourceChart,
   pageRunsChart,
+  pageWaterfallChart,
 } from '@/lib/perfCharts'
 import { useProjects } from '@/lib/project-context'
 import type { Project } from '@/lib/types'
@@ -1066,8 +1072,82 @@ function AuthWarning({
   )
 }
 
+/**
+ * The JavaScript errors the page reported while loading.
+ *
+ * Deliberately its own card rather than a row in the request table: an uncaught
+ * exception is not a timing, and a page that throws on mount is broken whatever
+ * its load time says. `pageerror` (nobody caught it) is separated from
+ * error-level console output (the app chose to log it), because the second is
+ * routinely deliberate and the first never is.
+ */
+function PageIssuesCard({ result }: { result: PageAuditResult }) {
+  const issues = result.issues ?? []
+  if (!issues.length) return null
+  const thrown = issues.filter((i) => i.kind === 'pageerror')
+  const logged = issues.filter((i) => i.kind === 'console')
+  return (
+    <Card
+      className={cn(
+        'rounded-3xl shadow-none',
+        thrown.length ? 'border-destructive/30 bg-destructive/5' : 'border-border/60',
+      )}
+    >
+      <CardContent className="space-y-2.5 p-5">
+        <div className="flex items-center gap-2">
+          <TriangleAlert className={cn('size-4', thrown.length ? 'text-destructive' : 'text-amber-500')} />
+          <p className="text-sm font-semibold tracking-tight">
+            {thrown.length
+              ? `${thrown.length} uncaught JavaScript error${thrown.length === 1 ? '' : 's'} while loading`
+              : `${logged.length} console error${logged.length === 1 ? '' : 's'} while loading`}
+          </p>
+        </div>
+        <p className="text-xs text-muted-foreground">
+          The load event fires either way, so no timing on this page shows these — but whatever
+          that code was meant to do did not happen.
+        </p>
+        <ul className="space-y-1.5">
+          {issues.slice(0, 8).map((issue) => (
+            <li
+              key={`${issue.kind}:${issue.text}`}
+              className="flex items-start gap-2 rounded-xl border border-border/60 bg-card px-3 py-2"
+            >
+              <span
+                className={cn(
+                  'mt-0.5 shrink-0 rounded-md px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide',
+                  issue.kind === 'pageerror'
+                    ? 'bg-destructive/10 text-destructive'
+                    : 'bg-muted text-muted-foreground',
+                )}
+              >
+                {issue.kind === 'pageerror' ? 'thrown' : 'console'}
+              </span>
+              <span className="min-w-0 flex-1 break-words font-mono text-[11px] leading-relaxed">
+                {issue.text}
+              </span>
+              {issue.count > 1 ? (
+                <span className="shrink-0 text-[11px] text-muted-foreground">×{issue.count}</span>
+              ) : null}
+            </li>
+          ))}
+        </ul>
+        {issues.length > 8 ? (
+          <p className="text-[11px] text-muted-foreground">
+            {issues.length - 8} more distinct message{issues.length - 8 === 1 ? '' : 's'} not listed.
+          </p>
+        ) : null}
+      </CardContent>
+    </Card>
+  )
+}
+
 function PageAuditReport({ job, result }: { job: PerfJob; result: PageAuditResult }) {
-  const a = result.average
+  // Cold and warm are kept apart everywhere on this report. Their MEAN is what
+  // `result.average` holds, and it describes neither visit: a 1291ms first load
+  // and a 70ms cached one average to 529ms, a number no load ever produced.
+  const warm = warmMetrics(result)
+  const cold = coldMetrics(result)
+  const warmRuns = result.warmRuns ?? 0
   const assessment = useMemo(() => assessPageAudit(result), [result])
   return (
     <div className="space-y-5">
@@ -1075,27 +1155,49 @@ function PageAuditReport({ job, result }: { job: PerfJob; result: PageAuditResul
       <AssessmentCard assessment={assessment} job={job} />
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
         <StatTile
-          label="Page load"
-          value={ms(a.loadMs)}
-          hint={`average of ${result.runs} load${result.runs === 1 ? '' : 's'}`}
-          tone={loadTone(a.loadMs)}
+          label={warmRuns ? 'Returning visit' : 'Page load'}
+          value={ms(warm.loadMs)}
+          hint={warmRuns ? `median of ${warmRuns} warm load${warmRuns === 1 ? '' : 's'}` : 'one cold load'}
+          tone={loadTone(warm.loadMs)}
           icon={Timer}
         />
-        <StatTile label="TTFB" value={ms(a.ttfbMs)} hint="first byte of the document" icon={Clock} />
-        <StatTile label="DOM ready" value={ms(a.domContentLoadedMs)} hint="DOMContentLoaded" />
-        <StatTile label="First paint" value={ms(a.fcpMs)} hint="FCP" />
-        <StatTile label="Main content" value={ms(a.lcpMs)} hint="LCP" />
+        <StatTile
+          label="First visit"
+          value={ms(cold.loadMs)}
+          hint={`empty cache · ${bytes(cold.transferBytes)} downloaded`}
+          tone={loadTone(cold.loadMs)}
+          icon={Download}
+        />
+        <StatTile label="Main content" value={ms(warm.lcpMs)} hint="LCP · good ≤ 2.5s" />
+        <StatTile
+          label="Layout shift"
+          value={warm.cls != null ? warm.cls.toFixed(3) : '—'}
+          hint="CLS · good ≤ 0.1"
+          tone={warm.cls == null ? undefined : warm.cls <= 0.1 ? 'good' : warm.cls <= 0.25 ? 'warn' : 'bad'}
+        />
+        <StatTile
+          label="Blocking time"
+          value={warm.tbtMs == null ? '—' : warm.tbtMs > 0 ? ms(warm.tbtMs) : '0ms'}
+          hint={warm.longestTaskMs ? `longest task ${ms(warm.longestTaskMs)}` : 'long tasks before load'}
+          tone={warm.tbtMs == null ? undefined : warm.tbtMs <= 200 ? 'good' : warm.tbtMs <= 600 ? 'warn' : 'bad'}
+        />
       </div>
 
       <div className="flex flex-wrap items-center gap-x-5 gap-y-1.5 rounded-2xl border border-border/60 bg-card px-4 py-3 text-xs text-muted-foreground">
         <span>
           Per load:{' '}
           <span className="font-mono text-foreground">
-            {result.perRun.map((r) => ms(r.loadMs)).join(' · ')}
+            {result.perRun.map((r, i) => `${ms(r.loadMs)}${i === 0 ? ' (cold)' : ''}`).join(' · ')}
           </span>
         </span>
         <span>
-          Requests/load: <span className="font-mono text-foreground">{a.requestCount.toFixed(1)}</span>
+          TTFB: <span className="font-mono text-foreground">{ms(warm.ttfbMs)}</span>
+        </span>
+        <span>
+          First paint: <span className="font-mono text-foreground">{ms(warm.fcpMs)}</span>
+        </span>
+        <span>
+          Requests/load: <span className="font-mono text-foreground">{warm.requestCount.toFixed(0)}</span>
         </span>
         <span>
           API calls/load:{' '}
@@ -1104,25 +1206,36 @@ function PageAuditReport({ job, result }: { job: PerfJob; result: PageAuditResul
           </span>
         </span>
         <span>
-          Transferred: <span className="font-mono text-foreground">{bytes(a.transferBytes)}</span>
-        </span>
-        <span>
           Slowest API:{' '}
           <span className="font-mono text-foreground">{ms(result.totals.slowestApiMs)}</span>
         </span>
       </div>
 
+      <PageIssuesCard result={result} />
       <DuplicateCallsCard result={result} />
 
       {/* One chart per row, full width. Side by side they scale to ~60%, and an
           11px label becomes 7px — unreadable, which is worse than scrolling. */}
       <div className="space-y-4 rounded-2xl border border-border/60 bg-card p-4">
         <Chart svg={pageMilestoneChart(result)} />
+        <Chart svg={pageWaterfallChart(result)} />
         <Chart svg={pageRunsChart(result)} />
+        <Chart svg={pageResourceChart(result)} />
         <Chart svg={pageApiChart(result)} />
       </div>
 
       <RequestTable result={result} />
+
+      <details className="rounded-2xl border border-border/60 bg-card px-4 py-3">
+        <summary className="cursor-pointer text-xs font-medium">How to read these numbers</summary>
+        <ul className="mt-2 space-y-1.5 text-xs text-muted-foreground">
+          {PAGE_MEASUREMENT_NOTES.map((note) => (
+            <li key={note} className="leading-relaxed">
+              {note.replace(/\*\*/g, '')}
+            </li>
+          ))}
+        </ul>
+      </details>
     </div>
   )
 }
@@ -1455,6 +1568,7 @@ function LoadTestReport({ job, result }: { job: PerfJob; result: LoadTestResult 
 
       <div className="space-y-4 rounded-2xl border border-border/60 bg-card p-4">
         <Chart svg={loadPercentileChart(result, job.loadConfig?.thresholdP95Ms ?? 0)} />
+        <Chart svg={loadLatencyChart(result, job.loadConfig?.thresholdP95Ms ?? 0)} />
         <Chart svg={loadPhaseChart(result)} />
         <Chart svg={loadEndpointChart(result)} />
         <Chart svg={loadVolumeChart(result)} />

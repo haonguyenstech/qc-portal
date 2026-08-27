@@ -261,11 +261,21 @@ export async function startPageJob(
       if (job.status === 'cancelled') return
       job.pageResult = result
       job.status = 'done'
-      pushLog(
-        job,
-        'success',
-        `Done — average page load ${Math.round(result.average.loadMs)}ms over ${result.runs} load${result.runs === 1 ? '' : 's'}.`,
-      )
+      // A redirected audit measured the login screen, so its numbers must not be
+      // published in the success voice — the closing line is the one that gets
+      // quoted, and "average page load 529ms" is exactly the confident wrong
+      // answer the redirect banner exists to prevent.
+      if (result.redirected) {
+        pushLog(job, 'error', `Finished, but on ${result.finalUrl} — no number below describes the page you asked for.`)
+      } else if (result.warmRuns > 0) {
+        pushLog(
+          job,
+          'success',
+          `Done — first visit ${Math.round(result.cold.loadMs)}ms, returning visit ${Math.round(result.warm.loadMs)}ms.`,
+        )
+      } else {
+        pushLog(job, 'success', `Done — page load ${Math.round(result.cold.loadMs)}ms on a cold cache.`)
+      }
     })
     .catch((err) => {
       job.abort = null

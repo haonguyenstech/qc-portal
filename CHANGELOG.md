@@ -3,6 +3,75 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.11.23 — 2026-08-27
+
+**Word files that actually open, a page report that stops averaging two different visits, and a question that sorts numbers as numbers**
+
+### Fixed
+
+- **Every Word export the Performance page had ever produced was a file Word refused to open** —
+  *"Word experienced an error trying to open the file."* Two causes, both from the library that
+  writes the .docx, both invisible to every other reader: a table column width that came out as
+  `1542.857142857143` (the content width does not divide by 7, and every measurement in the Word
+  format must be a whole number), and three page-margin values written as the literal word
+  `undefined`. The second was in **every** document whatever its tables looked like, so no export
+  had ever opened. The margins are now passed in full, and the finished file is repaired before
+  you get it — so a report that grows an eleventh column later cannot bring the bug back. Nothing
+  in the report changed: same charts, same tables, same page count. The PDF was never affected.
+- **The page-load report was averaging a first visit with a cached one, and the average described
+  neither.** Measured on a real page: 1291ms, then 227ms, then 70ms — reported as "529ms", a load
+  time that never happened. The bytes were worse: 14.5 MB on the first load and 43 KB on the
+  cached ones, published as "4.88 MB per load". A **first visit** (empty cache) and a **returning
+  visit** (the median of the loads after it) are now reported side by side everywhere — tiles,
+  charts, Markdown, PDF and Word — the verdict grades the returning visit, and the cost of that
+  first visit gets a finding of its own naming what is downloaded. A median, not an average, so
+  one stalled load out of three is not the headline.
+- **A page audit that got bounced to a login screen still signed off in the success voice.** The
+  banner said the run never reached your page, and the last line of the log said "Done — average
+  page load 529ms". That closing line is the one people quote. It now says where the browser
+  actually ended up.
+- **A load test could be graded "Poor" while every threshold passed.** The stability check compared
+  the slowest call with the typical one as a bare ratio, and a local API answering in 4ms with one
+  92ms call scored 24× — dragging the whole run to Poor while k6's own verdict was a pass and every
+  other check was green. Nobody has a stability problem whose worst call is 92ms, so the ratio now
+  only counts once the slowest call is genuinely slow — past your own p95 target, or past a quarter
+  second when you did not set one. The same floor stops findings like "this endpoint spikes to 5ms".
+  And when the headline and the badge do disagree, the headline now says which check dissents
+  instead of reading "Held up" beside a red *Poor*.
+- **Database → Ask: a column of numbers stored as text was sorted as text.** Asked for "the 10
+  highest", the generated query sorted `'9'` above `'100'` — no error, ten plausible rows, the wrong
+  ten. It happened in 3 of 4 attempts. The assistant already converted correctly when summing or
+  comparing, because those fail loudly; sorting is the silent case, which is why it survived. The
+  question now carries explicit type rules and converts in every attempt — while still comparing a
+  reference code like `'0042'` as text rather than turning it into `42`.
+- **Database: the results header now stays put when you scroll.** It was marked as a frozen header
+  and behaved like one for about a pixel: measured, it drifted 259px out of view on a 260px scroll.
+  True of the SQL editor's grid as well as Ask's.
+
+### Added
+
+- **Page load now measures what no timing can show.** **Layout shift (CLS)** — the third Core Web
+  Vital, so the report no longer quotes two thirds of a standard while a page throws its content
+  around under your cursor. **Blocking time** — how long the page is painted but will not answer a
+  click. And **JavaScript errors**: a page that throws on mount fires its load event exactly on
+  schedule, so every other number here calls it healthy; uncaught errors and console errors are now
+  listed with the message and how often each appeared.
+- **A waterfall: when each request happened, not just how long it took.** Three calls fired together
+  cost what one costs; the same three chained cost triple. In a table of averages those pages look
+  identical. Drawn against a time axis, with first paint, main content and the load event marked on
+  the same axis, one is three bars starting together and the other is a staircase. It also shows the
+  thing tables hide — API calls that only start *after* the page has "loaded".
+- **What a first visit downloads, by type.** "14.7 MB" is not something you can act on; "13.6 MB of
+  it is JavaScript over 179 requests" names the fix.
+- **The response-time distribution for a load test.** Percentiles are five numbers and cannot carry
+  the shape: a p50 of 20ms with a p99 of 4s reads identically whether the tail is a smooth curve or
+  a second population — one endpoint that always takes 4s while everything else takes 20ms. Those
+  need opposite fixes. The run is now counted into response-time bands, so the gap between two
+  groups of bars is visible, with the exact request count and share beside each.
+- **"How to read these numbers" now ships with the page-load report too**, in Markdown, PDF and Word
+  as well as on screen — including the one that catches people out: bytes *transferred* (compressed,
+  over the wire) and response *body* sizes are different totals, and both are true.
+
 ## 0.11.22 — 2026-08-26
 
 **A Performance page: how slow, why slow, and does it hold under load — with the client report to hand over**

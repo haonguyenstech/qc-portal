@@ -113,13 +113,25 @@ server/src/
                     has NO time series, so the script buckets its own samples into a fixed
                     metric set (`timeBuckets`, shared by the generator and the parser) —
                     that is the only reason "did it degrade under load?" can be answered.
+                    The same trick gives the response-time HISTOGRAM (`LATENCY_EDGES`,
+                    also shared both ways) — percentiles carry five numbers and cannot
+                    carry the SHAPE of a distribution. `pageAudit.ts` keeps a FIRST
+                    visit and a RETURNING one apart end to end (`cold` / `warm`, warm
+                    being a per-metric MEDIAN): their mean is a load that never
+                    happened. It also records CLS, blocking time, uncaught JS errors,
+                    and a cold-load request TIMELINE — the only thing on that page that
+                    says WHEN rather than how long.
   authSession.ts reportExport.ts    Performance page: the "sign in first" window (a headed
                     Chrome on the audit's own profile — closing it is what saves the session)
                     and report export (the CLIENT's report HTML → PDF via headless Chrome,
                     → .docx via html-to-docx with each chart FIGURE — svg plus its
                     legend — rasterised first; an optional running footer goes on
                     EVERY page via Chrome's displayHeaderFooter / html-to-docx's
-                    4th argument, and is stripped to plain text first).
+                    4th argument, and is stripped to plain text first. The .docx is
+                    then REPAIRED (`repairDocx`): html-to-docx emits fractional
+                    `w:w` widths and `w:*="undefined"` page margins, and OOXML
+                    measurements are integers — Word refuses the whole file over
+                    either, while `textutil`/XML parsers read it happily).
   crawl.ts crawlJobs.ts            ticket crawling (+ in-memory job registry)
   testcaseGen.ts testcaseJobs.ts   test-case generation (+ in-memory job registry)
   sourceRepo.ts sourceJobs.ts sourceMap.ts   Source Code page: clone/sync + AI source map
@@ -147,9 +159,12 @@ web/src/
         testRules.ts highlight.ts apiAssert.ts devices.ts sql-complete.ts noteHtml.ts
         utils.ts useRunStream.ts useXtermSession.ts
         perfReport.ts perfCharts.ts perfReportHtml.ts  (Performance: verdict bands, derived
-        metrics (peak RPS, drift, phase shares) + MEASUREMENT_NOTES, the SVG charts —
-        bars, lines and stacks, ONE y axis each — and the printable report. ONE source
-        for screen, Markdown, PDF and Word)
+        metrics (peak RPS, drift, phase shares) + MEASUREMENT_NOTES /
+        PAGE_MEASUREMENT_NOTES, the SVG charts — bars, lines, stacks and the page
+        WATERFALL, ONE y axis each — and the printable report. ONE source
+        for screen, Markdown, PDF and Word. `warmMetrics`/`coldMetrics` are how a
+        first visit and a returning one stay apart; any ratio check needs an
+        ABSOLUTE floor or a 4ms API with one 92ms call grades the run Poor)
         loadEndpoint.ts  (Performance: a pasted cURL or a saved API Testing request →
         one load-test endpoint. Query rows fold into the URL; {{variables}} survive
         encoding and are resolved SERVER-SIDE at run start, never in the browser)

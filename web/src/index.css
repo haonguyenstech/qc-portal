@@ -816,6 +816,9 @@
   --viz-series-3: #a24bd8;
   --viz-series-4: #00a08a;
   --viz-series-5: #a37500;
+  /* Deliberately NOT a sixth categorical slot: a neutral for "everything else"
+     and for the milestone rules, so a folded tail never reads as its own series. */
+  --viz-muted: #8a8a8a;
   --viz-good: #0ca30c;
   --viz-warn: #fab219;
   --viz-bad: #d03b3b;
@@ -826,6 +829,7 @@
   --viz-series-3: #a86ce0;
   --viz-series-4: #12998b;
   --viz-series-5: #9c7a10;
+  --viz-muted: #9b9b9b;
 }
 .viz-root svg.viz {
   display: block;
