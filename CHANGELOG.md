@@ -3,6 +3,28 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.11.26 — 2026-08-28
+
+**Connect and Disconnect work on Windows too**
+
+### Fixed
+
+- **Auto Agent's Connect button no longer reads "not installed" on a Windows machine that has
+  it.** The portal looked for the CLI on PATH only — but `npm i -g` puts its shims in
+  `%APPDATA%\npm`, and that folder is regularly missing from the PATH of a portal launched
+  detached (the same gap the `claude` binary lookup already worked around by hand). So a correct
+  `npm install -g @saigontechnology/auto-agent` could show up as "Auto Agent is not set up on this
+  machine", with Connect and Disconnect greyed out and no way to act from the portal. That folder
+  is now part of the PATH every child spawn here gets, which also helps any other npm-installed
+  tool the portal shells out to.
+
+- **"Cancel sign-in" now really stops the sign-in on Windows.** Windows has no process groups, and
+  every CLI there is a `.cmd` shim — so what the portal starts is `cmd.exe`, and stopping it left
+  the actual sign-in running underneath, still holding the browser hand-off open. Cancelling (or a
+  sign-in that ran out its five minutes) would say "cancelled" in the panel while the process
+  carried on invisibly, and the next Connect could then race it over the same credential state.
+  The whole process tree is stopped now.
+
 ## 0.11.25 — 2026-08-28
 
 **Auto Agent connects from the sidebar, and the chat box is the height you drag it to**

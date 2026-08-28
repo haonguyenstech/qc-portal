@@ -3,7 +3,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
-import { spawnEnv } from './toolPath.js'
+import { killSpawnedTree, spawnEnv } from './toolPath.js'
 
 // Driving the Auto Agent CLI (`auto-agent-ai`) from the portal, so signing in is a
 // button instead of "open a terminal and keep it open".
@@ -49,7 +49,10 @@ export function resolveAutoAgentBin(): string | null {
       : ['']
   for (const dir of (env[pathKey] ?? '').split(path.delimiter).filter(Boolean)) {
     for (const ext of exts) {
-      const candidate = path.join(dir, BIN_NAME + ext)
+      // Lower-cased: PATHEXT is conventionally upper-case, Windows paths are
+      // case-insensitive, and npm writes `auto-agent-ai.cmd` — so this is the spelling
+      // to SHOW, and the panel prints this path back to the engineer.
+      const candidate = path.join(dir, BIN_NAME + ext.toLowerCase())
       try {
         if (fs.statSync(candidate).isFile()) return candidate
       } catch {
@@ -224,11 +227,7 @@ export function startAutoAgentLogin(): { ok: true; job: AutoAgentLoginJob } | { 
   })
   job.timer = setTimeout(() => {
     if (job.state !== 'running') return
-    try {
-      child.kill()
-    } catch {
-      /* already gone */
-    }
+    killSpawnedTree(child)
     finish(job, 'failed', 'Sign-in timed out — the browser step was never completed.')
   }, LOGIN_TIMEOUT_MS)
   job.timer.unref()
@@ -260,11 +259,9 @@ export function cancelAutoAgentLogin(): { ok: boolean; error?: string } {
   if (!current || current.state !== 'running') return { ok: false, error: 'No sign-in is running.' }
   const child = current.child
   finish(current, 'cancelled', 'Sign-in cancelled.')
-  try {
-    child?.kill()
-  } catch {
-    /* already gone */
-  }
+  // The TREE, not the child: on Windows `child` is the cmd.exe shim, and the CLI it
+  // wraps would keep its loopback sign-in server open after a "cancel".
+  if (child) killSpawnedTree(child)
   return { ok: true }
 }
 
@@ -315,11 +312,7 @@ export function runAutoAgentLogout(): Promise<{ ok: boolean; error?: string; out
       return
     }
     const timer = setTimeout(() => {
-      try {
-        child.kill()
-      } catch {
-        /* already gone */
-      }
+      killSpawnedTree(child)
       done({ ok: false, error: 'Sign-out timed out.' })
     }, LOGOUT_TIMEOUT_MS)
     timer.unref()

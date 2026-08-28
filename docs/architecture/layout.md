@@ -150,10 +150,18 @@ server/src/
                     zip-slip can't escape the project root. JSZip remains the fallback for
                     archives under 256 MB when bsdtar is absent.
   toolPath.ts       spawnEnv(): process.env with PATH augmented by well-known per-user tool
-                    dirs (~/.local/bin, ~/.cargo/bin, WinGet Links) — used by EVERY child
-                    spawn (claude, uvx probe, terminal) so uvx/npx MCP servers start even
-                    when the portal was launched with a stale PATH; never spawn with a bare
-                    { ...process.env }
+                    dirs (~/.local/bin, ~/.cargo/bin, WinGet Links, %APPDATA%\npm) — used by
+                    EVERY child spawn (claude, uvx probe, terminal) so uvx/npx MCP servers
+                    start even when the portal was launched with a stale PATH; never spawn
+                    with a bare { ...process.env }. %APPDATA%\npm is where `npm i -g` puts
+                    its .cmd shims and is regularly missing from the PATH of a detached
+                    server — the same gap resolveClaudeBin() works around by hand.
+                    Also killSpawnedTree(child): kill a child AND its descendants for
+                    children spawned WITHOUT detached. On Windows every CLI is a .cmd shim,
+                    so cross-spawn really starts cmd.exe and child.kill() reaches only that
+                    wrapper — the real process survives a "cancel". claude.ts's killTree is
+                    the sibling for DETACHED spawns (it signals the posix process GROUP);
+                    keep both, neither branch covers the other's case
   clickup.ts        ClickUp ticket lookup + crawl
   ticketActivity.ts a ticket's activity log — ClickUp exposes no task history (404 /history,
                     403 TIS_027 for time_in_status, no MCP tool), so the portal accumulates one:

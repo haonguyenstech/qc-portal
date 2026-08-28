@@ -9,6 +9,8 @@
 // absolute paths in .mcp.json, append the well-known per-user tool directories
 // to PATH for every child the portal spawns.
 
+import crossSpawn from 'cross-spawn'
+import type { ChildProcess } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -88,6 +90,12 @@ function extraToolDirs(): string[] {
     // winget puts shims for its packages (incl. astral-sh.uv) here.
     const local = process.env.LOCALAPPDATA
     if (local) dirs.push(path.join(local, 'Microsoft', 'WinGet', 'Links'))
+    // Where `npm i -g` puts its .cmd shims (claude, auto-agent-ai). Frequently missing
+    // from the PATH of a server launched detached by the `qc-portal` command — the same
+    // gap `resolveClaudeBin()` works around with explicit candidates, and the reason a
+    // perfectly good `npm i -g @saigontechnology/auto-agent` could read as "not installed".
+    const appData = process.env.APPDATA
+    if (appData) dirs.push(path.join(appData, 'npm'))
   } else {
     dirs.push('/opt/homebrew/bin', '/usr/local/bin')
   }
@@ -117,4 +125,40 @@ export function spawnEnv(extra?: Record<string, string>): NodeJS.ProcessEnv {
   })
   if (additions.length) env[pathKey] = [...current, ...additions].join(path.delimiter)
   return env
+}
+
+/**
+ * Kill a spawned child **and its descendants** on both platforms.
+ *
+ * Windows has no process groups, and on Windows every CLI we spawn is a `.cmd` shim —
+ * so cross-spawn actually starts `cmd.exe`, and `child.kill()` reaches only that
+ * wrapper. The real process (e.g. `node auto-agent-ai login`, still holding its
+ * loopback OAuth server open) survives, which turns "cancelled" into "still running
+ * where nobody can see it". `taskkill /T` walks the tree by pid instead; `/F` forces it.
+ *
+ * For children spawned WITHOUT `detached`. QC runs use `killTree` in `claude.ts`,
+ * which additionally signals the POSIX process GROUP because it spawns detached (and
+ * has a whole tree of MCP servers and a browser to take down with it) — keep both:
+ * this one's posix branch would not reach a group, and that one's would fail here.
+ */
+export function killSpawnedTree(child: ChildProcess): void {
+  const fallback = () => {
+    try {
+      child.kill()
+    } catch {
+      /* already gone */
+    }
+  }
+  if (process.platform !== 'win32' || child.pid == null) {
+    fallback()
+    return
+  }
+  try {
+    crossSpawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], {
+      stdio: 'ignore',
+      windowsHide: true,
+    }).on('error', fallback)
+  } catch {
+    fallback()
+  }
 }

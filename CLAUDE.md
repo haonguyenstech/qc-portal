@@ -200,8 +200,11 @@ Four module-level rules that bite mid-edit, so they stay here:
   object (current CLI). Reading `.result` off the array yields undefined, which all ~12 callers
   report as "the AI produced nothing". Don't narrow it back to one shape.
 - **Every child spawn goes through `toolPath.ts` `spawnEnv()`** (PATH augmented with `~/.local/bin`,
-  `~/.cargo/bin`, WinGet Links, bundled emulator adb) so uvx/npx MCP servers start under a stale
-  PATH. Never spawn with a bare `{ ...process.env }`.
+  `~/.cargo/bin`, WinGet Links, `%APPDATA%\npm`, bundled emulator adb) so uvx/npx MCP servers start
+  under a stale PATH. Never spawn with a bare `{ ...process.env }`. **And never end one with a bare
+  `child.kill()`** — on Windows the child is the `cmd.exe` shim around a `.cmd`, so the real process
+  outlives the kill: use `killSpawnedTree()` (same module), or `claude.ts`'s `killTree` for a
+  detached spawn.
 - **All file writes go through `projectScope.ts` path-guarding** so they can't escape the project root.
 
 ## Routing note
