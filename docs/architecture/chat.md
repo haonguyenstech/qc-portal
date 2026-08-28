@@ -387,15 +387,24 @@ does this endpoint validate?").
     buttons on the right are `size-8` rather than `size-9`, and the row is `px-3 py-2` rather
     than `p-3`. The row is ~32px of controls; every pixel of chrome around them is a pixel the
     textarea above doesn't get, which is the whole reason the shape is pinned here.
-  - **The textarea opens at ~6 lines and grows with the content.** `min-h-38` (152px) is the
-    floor, `field-sizing-content` grows it, `max-h-[26rem]` (~19 lines) is the ceiling and then
-    it scrolls. It used to be `min-h-[52px]` with no growth at all, so the box was one line tall
+  - **The textarea opens at ~6 lines and grows with the content.** `composerH` (152px by
+    default, ≈6 lines) is the floor, `field-sizing-content` grows it,
+    `max(var(--composer-h), min(26rem, 45vh))` is the ceiling and then it scrolls. It used to be `min-h-[52px]` with no growth at all, so the box was one line tall
     forever: a QC question carries a ticket id, a URL and two or three steps, and the third
     line scrolled out of sight *while it was being typed*. `max-h-48` was dead code — nothing
     ever grew into it. Where a browser doesn't support `field-sizing`, the box simply stays at
     the taller floor. `ComposerPaint` needs no change with it (`absolute inset-0`, same `p-4`
     and `text-sm`) — but that is exactly why the two layers must keep identical padding and
     font metrics.
+  - **That floor is DRAGGABLE** — the grip strip on top of the input card (`role="separator"`,
+    `startComposerResize`, `COMPOSER_H_KEY` in localStorage). 152px is right on a monitor and
+    eats a third of a 13" laptop screen, so the opening height is the engineer's, remembered
+    per browser, clamped to 56–640px; double-click restores the default and ↑/↓ nudge it 24px
+    for a keyboard. The drag listens on the **window**, not the 10px strip — a pointer leaves
+    that strip the instant you move fast, and a drag that drops halfway reads as a broken
+    control. The ceiling moved with it: `min(26rem, 45vh)` is what stops a GROWN box from
+    swallowing the conversation on a short screen, and the `max(...)` around it is what keeps a
+    deliberately tall dragged box from being clipped by that same cap.
   - **A picked tag renders as a CHIP, painted behind the textarea** (`ComposerPaint` +
     `paintSegments`) — a `<textarea>` can't hold an element, so a tag used to read as plain
     text with a spellcheck squiggle through it, indistinguishable from typing. Same overlay

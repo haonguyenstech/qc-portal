@@ -108,7 +108,12 @@ server/src/
   qcBrowser.ts      the portal-owned browser Playwright MCP attaches to over CDP
   playwrightRunMode.ts  per-RUN headless/headed browser choice (a per-run MCP config; never
                     rewrites the project's .mcp.json)
-  autoAgent.ts      Auto Agent (shared Claude credential) status
+  autoAgent.ts      Auto Agent (shared Claude credential) status — read-only probe
+  autoAgentCli.ts   RUNS `auto-agent-ai login` / `logout` for the sidebar's Connect /
+                    Disconnect buttons. Sign-in is a POLLED in-memory job (the Microsoft
+                    step is a loopback OAuth flow in the user's browser); the watcher the
+                    CLI starts is detached, so no terminal has to stay open. Output is
+                    ANSI-stripped, scrubbed and kept in memory only.
   k6.ts pageAudit.ts perfJobs.ts   Performance page: k6 load tests + browser page-load
                     audits (+ their shared job registry). The generated k6 script and its
                     summary live BESIDE THE DB, never in a repo, and credentials reach k6
@@ -187,7 +192,9 @@ web/src/
 Four module-level rules that bite mid-edit, so they stay here:
 
 - **`autoAgent.ts` reads `~/.auto-agent-ai/state.json` ONLY.** The sibling `.config.json` holds
-  `auth.accessToken` and the distributed Claude credentials and must never be opened.
+  `auth.accessToken` and the distributed Claude credentials and must never be opened. It also
+  stays a pure filesystem probe — the sidebar polls it every 30s; spawning the CLI belongs in
+  `autoAgentCli.ts`.
 - **`parseClaudeJsonResult` must accept BOTH `--output-format json` shapes** — a single
   `{type:'result',result,is_error}` object (older CLI) and the whole message ARRAY ending in that
   object (current CLI). Reading `.result` off the array yields undefined, which all ~12 callers
@@ -340,4 +347,5 @@ holds the actionable recipe; `web/src/pages/McpPage.tsx` is the canonical implem
 | `QC_BROWSER_PROFILE_DIR` | `~/.pw-agent-profile-qc` | QC browser profile; separate from the self-launch one because Chrome won't open a profile twice |
 | `QC_BROWSER_PATH` | _(unset)_ | explicit browser executable, when neither Edge nor Chrome is where we look |
 | `QC_K6_BIN` | `k6` | path to the k6 binary, for an install that isn't on PATH (Performance › API load test) |
+| `QC_AUTO_AGENT_BIN` | _(unset)_ | explicit path to the `auto-agent-ai` CLI, for an install the PATH lookup can't find (sidebar → Auto Agent → Connect) |
 | `IMGBB_API_KEY` | _(unset)_ | free imgbb API key (api.imgbb.com); when set, issue screenshots upload to imgbb and their URLs are embedded in the ClickUp comment — a workaround for a workspace that has hit ClickUp's "Over allocated storage" limit (`GBUSED_005`) |

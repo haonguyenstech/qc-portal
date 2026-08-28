@@ -3435,12 +3435,62 @@ export interface AutoAgentStatus {
   expiresAt: string | null
   watcherRunning: boolean
   lastError: string | null
+  /** Path to the `auto-agent-ai` binary, or null when it isn't installed here. */
+  cliPath: string | null
   checkedAt: string
 }
 
 /** Poll Auto Agent's connection state (filesystem + pid probe on the server). */
 export function getAutoAgentStatus(): Promise<AutoAgentStatus> {
   return request('/api/auto-agent/status')
+}
+
+export type AutoAgentLoginState = 'running' | 'succeeded' | 'failed' | 'cancelled'
+
+/**
+ * A sign-in the SERVER is running (`auto-agent-ai login`). A job rather than a request
+ * because the Microsoft step happens in the user's browser: the page starts it, then
+ * polls, so a reload mid-sign-in re-attaches instead of losing it.
+ */
+export interface AutoAgentLoginJob {
+  id: string
+  state: AutoAgentLoginState
+  startedAt: string
+  finishedAt: string | null
+  /** The Microsoft URL the CLI printed — a fallback for when it can't open the browser. */
+  signInUrl: string | null
+  /** The CLI is waiting for a typed answer (it asks which AI session when several exist). */
+  awaitingAnswer: boolean
+  lines: string[]
+  error: string | null
+  exitCode: number | null
+}
+
+/** Start `auto-agent-ai login` on the server. */
+export function startAutoAgentLogin(): Promise<AutoAgentLoginJob> {
+  return request('/api/auto-agent/login', { method: 'POST' })
+}
+
+/** The sign-in in flight (or the last one), or null if none was ever started. */
+export function getAutoAgentLogin(): Promise<AutoAgentLoginJob | null> {
+  return request('/api/auto-agent/login')
+}
+
+/** Answer the CLI's session picker. */
+export function answerAutoAgentLogin(text: string): Promise<{ ok: boolean }> {
+  return request('/api/auto-agent/login/answer', {
+    method: 'POST',
+    body: JSON.stringify({ text }),
+  })
+}
+
+export function cancelAutoAgentLogin(): Promise<{ ok: boolean }> {
+  return request('/api/auto-agent/login/cancel', { method: 'POST' })
+}
+
+/** Run `auto-agent-ai logout`: stops the watcher and drops the shared credential. */
+export function autoAgentLogout(): Promise<{ ok: boolean; output: string[] }> {
+  return request('/api/auto-agent/logout', { method: 'POST' })
 }
 
 // ---- Chat (plain conversation with Claude Code, in the project folder) -------

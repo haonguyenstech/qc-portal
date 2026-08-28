@@ -469,6 +469,21 @@ const MODEL_KEY = 'qc.chatModel.v2'
 const TOOLS_KEY = 'qc.chatTools.v2'
 /** v1 — this setting is new, so there is no old value whose meaning could have changed. */
 const EFFORT_KEY = 'qc.chatEffort.v1'
+/**
+ * How tall the composer opens, in px — dragged by the grip on top of the input card.
+ *
+ * A fixed 152px (≈6 lines) is right on a desktop monitor and eats a third of a 13" laptop
+ * screen, so the height is the engineer's to set and it is remembered per browser. It is a
+ * MINIMUM, not a fixed height: the box still grows with what's typed (`field-sizing-content`)
+ * up to `max(that height, min(26rem, 45vh))` — the `45vh` is what stops a grown box from
+ * swallowing the conversation on a short screen.
+ */
+const COMPOSER_H_KEY = 'qc.chatComposerHeight.v1'
+const COMPOSER_H_DEFAULT = 152
+const COMPOSER_H_MIN = 56
+const COMPOSER_H_MAX = 640
+const clampComposerH = (px: number) =>
+  Math.round(Math.min(COMPOSER_H_MAX, Math.max(COMPOSER_H_MIN, px)))
 /** Mirrors the server's cap (routes/chat.ts). Over it the server 413s rather than truncating. */
 const MAX_PROMPT = 48_000
 /**
@@ -3976,6 +3991,13 @@ function ChatWorkspace({
     const saved = localStorage.getItem(EFFORT_KEY)
     return CHAT_EFFORTS.some((e) => e.value === saved) ? (saved as ChatEffort) : DEFAULT_EFFORT
   })
+  /** The composer's open height in px — see COMPOSER_H_KEY. */
+  const [composerH, setComposerH] = useState<number>(() => {
+    const saved = Number(localStorage.getItem(COMPOSER_H_KEY))
+    return Number.isFinite(saved) && saved > 0 ? clampComposerH(saved) : COMPOSER_H_DEFAULT
+  })
+  /** True while the grip is being dragged — kills the tint/transition flicker mid-drag. */
+  const [resizingComposer, setResizingComposer] = useState(false)
   /** Files attached to the NEXT message — converted to markdown here in the browser. */
   const [attached, setAttached] = useState<{ name: string; markdown: string }[]>([])
   /** Images pasted/dropped/picked for the NEXT message (see StagedImage). */
@@ -4110,6 +4132,37 @@ function ChatWorkspace({
   useEffect(() => {
     localStorage.setItem(EFFORT_KEY, effort)
   }, [effort])
+  useEffect(() => {
+    localStorage.setItem(COMPOSER_H_KEY, String(composerH))
+  }, [composerH])
+
+  /**
+   * Drag the composer taller/shorter.
+   *
+   * Listeners go on the WINDOW, not the grip: a pointer that leaves the 10px strip mid-drag
+   * (which it does the moment you move fast) would otherwise drop the drag halfway. Dragging
+   * UP grows the box, so the delta is start-minus-now.
+   */
+  const startComposerResize = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      if (e.button !== 0) return
+      e.preventDefault()
+      const startY = e.clientY
+      const startH = composerH
+      setResizingComposer(true)
+      const onMove = (ev: PointerEvent) => setComposerH(clampComposerH(startH + (startY - ev.clientY)))
+      const onUp = () => {
+        setResizingComposer(false)
+        window.removeEventListener('pointermove', onMove)
+        window.removeEventListener('pointerup', onUp)
+        window.removeEventListener('pointercancel', onUp)
+      }
+      window.addEventListener('pointermove', onMove)
+      window.addEventListener('pointerup', onUp)
+      window.addEventListener('pointercancel', onUp)
+    },
+    [composerH],
+  )
 
   // Leaving the page only stops WATCHING: the turn is registered server-side and runs to
   // completion, so coming back re-attaches (or finds the finished answer) instead of
@@ -5175,6 +5228,42 @@ function ChatWorkspace({
             </div>
 
             <div className="w-full overflow-hidden rounded-2xl bg-background">
+              {/* The resize grip. Full width so it's easy to hit, but only 10px tall — it
+                  sits between the hint strip and the text, and any pixel it takes is a pixel
+                  the input box doesn't get. Keyboard-reachable (a `separator` is the role a
+                  resizer carries), arrows nudge it, double-click restores the default. */}
+              <div
+                role="separator"
+                aria-orientation="horizontal"
+                aria-label="Resize the message box"
+                aria-valuenow={composerH}
+                aria-valuemin={COMPOSER_H_MIN}
+                aria-valuemax={COMPOSER_H_MAX}
+                tabIndex={0}
+                title="Drag to resize the message box (double-click to reset)"
+                onPointerDown={startComposerResize}
+                onDoubleClick={() => setComposerH(COMPOSER_H_DEFAULT)}
+                onKeyDown={(e) => {
+                  if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+                    e.preventDefault()
+                    setComposerH((h) => clampComposerH(h + (e.key === 'ArrowUp' ? 24 : -24)))
+                  }
+                }}
+                className={cn(
+                  'group flex h-2.5 w-full cursor-ns-resize touch-none items-center justify-center outline-none',
+                  resizingComposer && 'cursor-grabbing',
+                )}
+              >
+                <span
+                  className={cn(
+                    'h-1 w-10 rounded-full bg-border transition-colors',
+                    resizingComposer
+                      ? 'bg-primary'
+                      : 'group-hover:bg-muted-foreground/60 group-focus-visible:bg-primary',
+                  )}
+                />
+              </div>
+
               {images.length > 0 && (
                 <div className="flex flex-wrap gap-2 px-4 pt-3">
                   {images.map((img, i) => (
@@ -5303,12 +5392,23 @@ function ChatWorkspace({
                 // text-transparent: the glyphs come from ComposerPaint underneath. The
                 // caret and a translucent selection are what's left visible here, so the
                 // painted text still reads through a selection.
-                // Opens at ~6 lines (min-h-38 = 152px) and GROWS with the content
-                // (`field-sizing-content`) up to ~19 lines, then scrolls. A one-line box
-                // was the complaint: the questions asked here are paragraphs with a path
-                // and a ticket id in them. ComposerPaint underneath must keep identical
-                // padding and font metrics or the caret drifts off the glyphs.
-                className="relative max-h-[26rem] min-h-38 w-full resize-none border-none bg-transparent p-4 text-sm text-transparent caret-foreground shadow-none outline-none field-sizing-content selection:bg-primary/25 placeholder:text-muted-foreground"
+                // Opens at the DRAGGED height (`--composer-h`, default 152px ≈ 6 lines; see
+                // COMPOSER_H_KEY) and GROWS with the content (`field-sizing-content`) until
+                // `min(26rem, 45vh)`, then scrolls. A one-line box was the first complaint —
+                // the questions asked here are paragraphs with a path and a ticket id in
+                // them — and 6 fixed lines was the next one, on a 13" laptop; hence the grip
+                // above rather than another hardcoded number. The `max(...)` is what lets a
+                // deliberately TALL box stay tall: it must never be clipped by the vh cap.
+                // ComposerPaint underneath must keep identical padding and font metrics or
+                // the caret drifts off the glyphs.
+                style={
+                  {
+                    '--composer-h': `${composerH}px`,
+                    minHeight: 'var(--composer-h)',
+                    maxHeight: 'max(var(--composer-h), min(26rem, 45vh))',
+                  } as React.CSSProperties
+                }
+                className="relative w-full resize-none border-none bg-transparent p-4 text-sm text-transparent caret-foreground shadow-none outline-none field-sizing-content selection:bg-primary/25 placeholder:text-muted-foreground"
               />
               </div>
 

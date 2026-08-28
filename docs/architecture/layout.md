@@ -21,8 +21,29 @@ server/src/
                     a later "Watcher started" is stale, not current). SECRET: read
                     state.json ONLY — the sibling .config.json holds auth.accessToken and
                     the distributed Claude credentials and must never be opened here.
+                    "Installed" is the BINARY (autoAgentCli.ts), not the state dir:
+                    `logout` deletes ~/.auto-agent-ai entirely, and a dir-only test read a
+                    deliberate sign-out as "not set up on this machine".
                     Surfaced by GET /api/auto-agent/status (routes/autoAgent.ts) and the
                     sidebar's AutoAgentStatusIndicator, ABOVE Release notes.
+  autoAgentCli.ts   RUNS that CLI, so Connect / Disconnect are buttons in the sidebar panel
+                    instead of a terminal window parked on `auto-agent-ai login` forever.
+                    The split from autoAgent.ts is deliberate: the status endpoint is polled
+                    every 30s and may never depend on a child process. Why a background
+                    child suffices: the Microsoft step is a LOOPBACK OAuth flow (the CLI
+                    listens on 127.0.0.1, opens the browser, waits ≤5 min for the callback)
+                    and the credential watcher is spawned detached+unref'd BY THE CLI — so
+                    the login child exits at sign-in and the watcher survives with no
+                    terminal. Sign-in is therefore an in-memory JOB the browser POLLS
+                    (POST/GET /api/auto-agent/login), not an awaited request: a closed
+                    dialog or a reloaded page must not abandon a half-done sign-in.
+                    `--role client` is passed because the role prompt is an ARROW-KEY
+                    picker a piped stdin cannot answer; the session picker (asked only with
+                    several sessions assigned) falls back to a NUMBERED list read line by
+                    line, which is the only reason /login/answer can answer it from a form.
+                    Output is ANSI-stripped, bounded, scrub()ed and kept IN MEMORY only —
+                    never the DB, never disk. QC_AUTO_AGENT_BIN overrides the PATH lookup,
+                    which goes through spawnEnv() like every other tool here.
   qcBrowser.ts      THE QC BROWSER: one long-lived browser window the PORTAL owns, which
                     Playwright MCP attaches to over CDP (--cdp-endpoint) instead of
                     launching its own. Fixes two things a stdio MCP cannot: pressing Stop
@@ -213,7 +234,11 @@ web/src/
                     NotificationBell + TestCaseJobWatcher + CrawlJobWatcher; the sidebar
                     footer (VersionFooter) carries AutoAgentStatusIndicator ABOVE the
                     Release notes card — keep it in BOTH the collapsed and expanded
-                    branches, they render separately
+                    branches, they render separately. That indicator is a BUTTON in both:
+                    it opens AutoAgentPanel (same file), which shows the full status and
+                    runs Connect / Disconnect. The panel polls the sign-in job rather than
+                    awaiting it, and Disconnect is two-step — it stops every AI feature in
+                    the portal until someone signs in again
   main.tsx          React Query + Project + Notification providers + Toaster mount
   index.css         Tailwind v4 theme — oklch design tokens (light + .dark)
   pages/            OverviewPage, DiagramsPage (at /diagrams), SourceCodePage (at /source),

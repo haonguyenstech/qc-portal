@@ -1,6 +1,7 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { resolveAutoAgentBin } from './autoAgentCli.js'
 
 // Auto Agent (@saigontechnology/auto-agent, CLI `auto-agent-ai`) — the company's
 // credential distributor for Claude Code. It signs in (Microsoft), pulls the shared
@@ -44,6 +45,12 @@ export interface AutoAgentStatus {
   watcherRunning: boolean
   /** Last ✖ line from watch.log, when it explains the current problem. */
   lastError: string | null
+  /**
+   * Path to the `auto-agent-ai` binary, or null when it isn't on this machine. This is
+   * what tells the UI whether Connect/Disconnect can do anything at all — without it the
+   * only honest offer is "install Auto Agent".
+   */
+  cliPath: string | null
   checkedAt: string
 }
 
@@ -119,6 +126,7 @@ const str = (v: unknown): string | null => (typeof v === 'string' && v.trim() ? 
  */
 export function readAutoAgentStatus(): AutoAgentStatus {
   const checkedAt = new Date().toISOString()
+  const cliPath = resolveAutoAgentBin()
   const base = {
     ok: false,
     username: null,
@@ -127,17 +135,21 @@ export function readAutoAgentStatus(): AutoAgentStatus {
     expiresAt: null,
     watcherRunning: false,
     lastError: null,
+    cliPath,
     checkedAt,
   }
 
-  const installed = fs.existsSync(AGENT_DIR)
+  // "Installed" is the BINARY, not the state dir. `auto-agent-ai logout` deletes the
+  // whole config dir, so a dir-only test reported a deliberate sign-out as "not set up
+  // on this machine" — and hid the Connect button that fixes it.
+  const installed = cliPath != null || fs.existsSync(AGENT_DIR)
   const state = readState()
   if (!installed || !state) {
     return {
       ...base,
       state: installed ? 'logged-out' : 'not-installed',
       message: installed
-        ? 'Auto Agent is not signed in — run `auto-agent-ai login` to pull the Claude credential.'
+        ? 'Auto Agent is not signed in — connect to pull the shared Claude credential.'
         : 'Auto Agent is not set up on this machine, so Claude runs use whatever credential `claude` already has.',
     }
   }
@@ -149,7 +161,7 @@ export function readAutoAgentStatus(): AutoAgentStatus {
   const expiresAt = expiresMs ? new Date(expiresMs).toISOString() : null
   const watcherRunning = pidAlive(typeof state.watchPid === 'number' ? state.watchPid : 0)
   const lastError = lastWatcherError()
-  const common = { username, serverUrl, role, expiresAt, watcherRunning, lastError, checkedAt }
+  const common = { username, serverUrl, role, expiresAt, watcherRunning, lastError, cliPath, checkedAt }
   const left = expiresMs ? expiresMs - Date.now() : null
 
   if (left != null && left <= 0) {
@@ -159,7 +171,7 @@ export function readAutoAgentStatus(): AutoAgentStatus {
       state: 'expired',
       message: lastError
         ? `Auto Agent's Claude credential expired — ${lastError}`
-        : "Auto Agent's Claude credential expired. Run `auto-agent-ai login` to pull a fresh one.",
+        : "Auto Agent's Claude credential expired. Connect again to pull a fresh one.",
     }
   }
   if (!watcherRunning) {
@@ -169,7 +181,7 @@ export function readAutoAgentStatus(): AutoAgentStatus {
       state: 'stalled',
       message: lastError
         ? `Auto Agent's watcher stopped — ${lastError}`
-        : "Auto Agent's watcher is not running, so the Claude credential will not be refreshed. Run `auto-agent-ai login`.",
+        : "Auto Agent's watcher is not running, so the Claude credential will not be refreshed. Connect again to restart it.",
     }
   }
   if (left != null && left <= EXPIRY_WARN_MS) {

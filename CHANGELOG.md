@@ -3,6 +3,48 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.11.25 — 2026-08-28
+
+**Auto Agent connects from the sidebar, and the chat box is the height you drag it to**
+
+### Added
+
+- **Connect and disconnect Auto Agent from inside the portal — no terminal window parked on it.**
+  The sidebar's **Auto Agent AI** card is now a button: it opens a panel with the full status
+  (who you are signed in as, the server, your role, when the credential expires, whether the
+  watcher is running, where the CLI is) and the two buttons that were missing — **Connect** /
+  **Reconnect** and **Disconnect**. Until now the status was read-only: the card told you the
+  credential had lapsed and then asked you to go and type `auto-agent-ai login` somewhere else.
+  It turns out none of that needed a terminal at all. The Microsoft sign-in is a loopback flow —
+  the CLI opens a browser tab and waits for it — and the credential watcher it starts afterwards
+  is already detached, so nothing has to keep a window open for it. The portal runs the same
+  command and the sign-in happens in a normal browser tab.
+  While it runs, the panel shows what the CLI is doing: a **"Open the sign-in page"** link for
+  when the browser doesn't open by itself (otherwise a failed hand-off is a five-minute silent
+  wait), the CLI's own output, and **Cancel sign-in**. If your account has more than one AI
+  session assigned, the CLI's question is asked here too — type the number and it goes through.
+  Closing the panel, or reloading the page, does **not** abandon a sign-in that is half done;
+  reopening re-attaches to it. **Disconnect asks twice** on purpose: it stops every AI feature in
+  the portal until someone signs in again.
+
+- **Drag the chat box to the height you want.** `/chat` opened at a fixed six lines, which is
+  right on a monitor and eats a third of a small laptop screen. There is now a grip on the top
+  edge of the message box: drag it up or down and the box opens at that height from then on,
+  remembered per browser (double-click the grip to go back to the default, or nudge it with ↑/↓
+  when it has focus). It stays a *minimum*, not a lid — the box still grows as you type. What
+  changed for everyone, dragged or not: a grown box now stops at **45% of the window height**
+  instead of a fixed 416px, so a long question can no longer push the conversation off a short
+  screen.
+
+### Fixed
+
+- **A deliberate sign-out no longer reads as "Auto Agent is not set up on this machine".** The
+  status decided whether Auto Agent was installed by looking for its state folder — but
+  `auto-agent-ai logout` deletes that folder outright, so signing out reported the one state that
+  offers no way back, and hid the Connect button that fixes it. Installed now means the CLI
+  itself is there (`QC_AUTO_AGENT_BIN` if it's somewhere unusual), and a sign-out reads as
+  **Signed out**.
+
 ## 0.11.24 — 2026-08-27
 
 **Design Check findings go straight to ClickUp, and an update that fails leaves the portal running**
