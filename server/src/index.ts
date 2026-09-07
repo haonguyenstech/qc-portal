@@ -14,6 +14,8 @@ import * as hub from './hub.js'
 import { shutdownActiveRuns } from './runManager.js'
 import { shutdownAuthSession } from './authSession.js'
 import { shutdownPerfJobs } from './perfJobs.js'
+import { remoteAccessGuard, wsUpgradeAllowed } from './remoteAccess.js'
+import { autoStartTunnel, reapOrphanedTunnel, shutdownTunnel } from './tunnel.js'
 import {
   handleTerminalConnection,
   killAllTerminalSessions,
@@ -32,6 +34,7 @@ import { azureRouter } from './routes/azure.js'
 import { sourceRouter } from './routes/source.js'
 import { databaseRouter } from './routes/database.js'
 import { autoAgentRouter } from './routes/autoAgent.js'
+import { mailboxRouter } from './routes/mailbox.js'
 import { aiRouter } from './routes/ai.js'
 import { templatesRouter } from './routes/templates.js'
 import { knowledgeRouter } from './routes/knowledge.js'
@@ -45,6 +48,7 @@ import { prototypeRouter } from './routes/prototype.js'
 import { chatRouter } from './routes/chat.js'
 import { performanceRouter } from './routes/performance.js'
 import { versionRouter } from './routes/version.js'
+import { remoteRouter } from './routes/remote.js'
 
 // Optionally seed a default project from QC_REPO_ROOT (no-op if unset / already seeded).
 const defaultProject = seedDefaultProject()
@@ -105,6 +109,13 @@ app.use(cors())
 // middleware, so it isn't affected by this JSON limit.)
 app.use(express.json({ limit: '50mb' }))
 
+// The access gate for Cloudflare Tunnel traffic. FIRST, ahead of every router and of
+// the static web bundle: a visitor arriving through the tunnel without a valid session
+// must get the unlock page and nothing else — not the API, not the JS. Requests that
+// did not come through Cloudflare pass straight through, so localhost is unchanged.
+// See remoteAccess.ts for how "came through Cloudflare" is decided.
+app.use(remoteAccessGuard)
+
 app.get('/api/health', (_req, res) => {
   res.json({ ok: true })
 })
@@ -144,7 +155,9 @@ app.use('/api/prototype', prototypeRouter)
 app.use('/api/chat', chatRouter)
 app.use('/api/performance', performanceRouter)
 app.use('/api/browser', browserRouter)
+app.use('/api/mailbox', mailboxRouter)
 app.use('/api/version', versionRouter)
+app.use('/api/remote', remoteRouter)
 
 // JSON error handler for /api routes: turn body-parser failures (notably
 // PayloadTooLargeError, which otherwise returns an HTML page) into a clean JSON
@@ -193,6 +206,13 @@ const terminalWss = new WebSocketServer({ noServer: true })
 
 server.on('upgrade', (req, socket, head) => {
   const pathname = new URL(req.url ?? '', 'http://localhost').pathname
+  // The upgrade never passes through Express middleware, so the remote gate is
+  // re-applied here by hand. Without this, a locked visitor could still attach to a
+  // run stream — or open a shell on /ws/terminal — around the HTTP gate.
+  if (!wsUpgradeAllowed(req, pathname)) {
+    socket.destroy()
+    return
+  }
   if (pathname === '/ws') {
     wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req))
   } else if (pathname === '/ws/terminal') {
@@ -242,6 +262,15 @@ server.listen(PORT, '127.0.0.1', () => {
   if (defaultProject) {
     console.log(`Default project: ${defaultProject.name} (${defaultProject.rootPath})`)
   }
+  // A cloudflared orphaned by a SIGKILLed / power-cut previous run keeps a PUBLIC
+  // hostname pointed at this port while the page reports "Not published" — reap it
+  // before considering a new one.
+  if (reapOrphanedTunnel()) {
+    console.log('Killed a Cloudflare Tunnel left behind by a previous portal process')
+  }
+  // Re-publish over Cloudflare Tunnel if the engineer left "publish on start" on.
+  // After listen(), so cloudflared never dials the edge for a port nothing answers.
+  autoStartTunnel()
 })
 
 // Kill in-flight claude/Playwright trees before exit so a `tsx watch` restart or
@@ -264,6 +293,9 @@ function gracefulExit(signal: NodeJS.Signals) {
   // A forgotten sign-in window holds the Chrome profile lock, which would make
   // every audit after the restart fail with "profile already open".
   if (shutdownAuthSession()) console.log(`Closed the sign-in window on ${signal}`)
+  // cloudflared is a detached-from-the-request child like the rest: left running it
+  // would keep a public hostname pointed at a port that no longer answers.
+  if (shutdownTunnel()) console.log(`Closed the Cloudflare Tunnel on ${signal}`)
   // Re-raise the default behaviour so the process actually exits.
   process.exit(0)
 }

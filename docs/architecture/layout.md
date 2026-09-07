@@ -137,6 +137,33 @@ server/src/
   terminal.ts       device pseudo-terminal: node-pty shell bridged over /ws/terminal; sessions
                     persist across page navigation (registry keyed by project/run, detach on socket
                     close, re-attach with replay, killed only on {type:'kill'} / exit / idle / shutdown)
+  tunnel.ts         Remote access (/remote): publishes the portal to a public HTTPS address by
+                    running `cloudflared`. Three modes — quick (random *.trycloudflare.com, no
+                    account), token (a Zero Trust connector token; fixed hostname, NO --url
+                    because its ingress is remotely managed), named (a locally-managed tunnel).
+                    cloudflared has no status API, so its stderr IS the progress signal: state
+                    stays `starting` until the quick URL or "Registered tunnel connection"
+                    appears, because reporting a URL that 502s is worse than reporting none.
+                    Every launch claims `live.generation` and every handler checks it — a killed
+                    child's `close` arriving AFTER the next spawn used to overwrite a working
+                    tunnel's state with "exited with code 0". The connector token is stored
+                    BESIDE THE DB (0600), never in a repo, never returned to the browser, and
+                    scrubbed from the log. The pid is written beside the DB too, so
+                    reapOrphanedTunnel() can kill a cloudflared a SIGKILLed portal left holding
+                    a public hostname open. REFUSES to start without an access password.
+  remoteAccess.ts   the gate in front of that tunnel, and the reason publishing is allowed at
+                    all: the portal spawns claude with permissions bypassed and hands out a
+                    shell, so a public URL without a password is remote code execution. FAILS
+                    CLOSED — a locked visitor gets one self-contained unlock page and nothing
+                    else, not even the JS bundle (hence app.use() BEFORE express.static in
+                    index.ts). "Came through the tunnel" = the presence of Cloudflare's
+                    cf-connecting-ip / cf-ray, because cloudflared connects to 127.0.0.1 and is
+                    otherwise indistinguishable from a local client. Sessions are a stateless
+                    HMAC cookie (a restart must not sign every phone out); "sign out all
+                    devices" and changing the password both rotate the signing secret. The
+                    device terminal stays blocked for remote sessions unless allowed.
+                    QC_REMOTE_FORCE_GUARD=1 treats every request as remote — for testing the
+                    gate, not a security control. See remote-access.md.
   hub.ts            WebSocket pub/sub by runId (replays persisted events to late subscribers)
   projectScope.ts   resolves the active project's root path; path-guards file writes
   projectArchive.ts streaming .zip receive + extract for project import (Settings -> Projects).
@@ -162,6 +189,15 @@ server/src/
                     wrapper — the real process survives a "cancel". claude.ts's killTree is
                     the sibling for DETACHED spawns (it signals the posix process GROUP);
                     keep both, neither branch covers the other's case
+  mailbox.ts        MailBox (/mailbox): a throwaway inbox for sign-up / OTP / reset-link
+                    testing, over Guerrilla Mail's JSON API. YOPmail — what everyone asks
+                    for — has NO api: an inbox URL without the tokens its own JS computes
+                    answers HTTP 400, and x-frame-options blocks embedding it. Traps:
+                    get_email_list is the LIST call (check_email is a DELTA and returns an
+                    empty list on the second call while the inbox visibly holds mail); all
+                    their domains reach the same box, the username IS the address; the
+                    sid_token lives beside the DB (0600) and never reaches the browser.
+                    See docs/architecture/mailbox.md
   clickup.ts        ClickUp ticket lookup + crawl
   ticketActivity.ts a ticket's activity log — ClickUp exposes no task history (404 /history,
                     403 TIS_027 for time_in_status, no MCP tool), so the portal accumulates one:

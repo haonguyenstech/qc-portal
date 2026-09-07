@@ -16,6 +16,7 @@ import {
   FileText,
   FolderGit2,
   Gauge,
+  Globe,
   History,
   Loader2,
   Layout,
@@ -32,6 +33,7 @@ import {
   Settings,
   TerminalSquare,
   MessagesSquare,
+  Inbox,
   NotebookPen,
   Ticket,
   Upload,
@@ -84,10 +86,12 @@ import SourceCodePage from '@/pages/SourceCodePage'
 import DatabasePage from '@/pages/DatabasePage'
 import DiagramsPage from '@/pages/DiagramsPage'
 import VerifyDesignPage from '@/pages/VerifyDesignPage'
+import MailBoxPage from '@/pages/MailBoxPage'
 import TerminalPage from '@/pages/TerminalPage'
 import NotificationsPage from '@/pages/NotificationsPage'
 import NotesPage from '@/pages/NotesPage'
 import ReleaseNotesPage from '@/pages/ReleaseNotesPage'
+import RemoteAccessPage from '@/pages/RemoteAccessPage'
 import DocumentPage from '@/pages/DocumentPage'
 
 /**
@@ -198,6 +202,7 @@ const navGroups: { label: string; items: NavItemDef[] }[] = [
       { to: '/prototype', label: 'Prototype', icon: Layout, end: false },
       { to: '/terminal', label: 'Terminal', icon: TerminalSquare, end: false },
       { to: '/notes', label: 'Note', icon: NotebookPen, end: false },
+      { to: '/mailbox', label: 'MailBox', icon: Inbox, end: false },
       // A reading page, not a project tool — it's here because Tools is where an engineer
       // looks when asking "what else can I use?".
       // Temporarily hidden from the sidebar; the /ai-labs routes still work by URL.
@@ -206,7 +211,10 @@ const navGroups: { label: string; items: NavItemDef[] }[] = [
   },
   {
     label: 'System',
-    items: [{ to: '/settings', label: 'Settings', icon: Settings, end: false }],
+    items: [
+      { to: '/settings', label: 'Settings', icon: Settings, end: false },
+      { to: '/remote', label: 'Remote access', icon: Globe, end: false },
+    ],
   },
 ]
 
@@ -1031,7 +1039,10 @@ function CollapsedSearchButton({ onClick }: { onClick: () => void }) {
 
 // Routes that work without a project — the user must still reach Settings to
 // create one, and the docs / release notes are project-agnostic reference.
-const PROJECT_AGNOSTIC_PREFIXES = ['/settings', '/projects', '/releases', '/document']
+// `/remote` belongs here too: publishing the portal is a property of the MACHINE,
+// not of any project, and it is exactly what someone setting the portal up on a
+// fresh install wants before registering anything.
+const PROJECT_AGNOSTIC_PREFIXES = ['/settings', '/projects', '/releases', '/document', '/remote']
 function isProjectAgnostic(pathname: string): boolean {
   return PROJECT_AGNOSTIC_PREFIXES.some(
     (p) => pathname === p || pathname.startsWith(`${p}/`),
@@ -1331,6 +1342,7 @@ function AppShell() {
             <Route path="/prototype" element={<PrototypePage />} />
              <Route path="/terminal" element={<TerminalPage />} />
              <Route path="/notes" element={<NotesPage />} />
+            <Route path="/mailbox" element={<MailBoxPage />} />
             <Route path="/skills" element={<SkillsPage />} />
             <Route path="/mcp" element={<McpPage />} />
             <Route path="/notifications" element={<NotificationsPage />} />
@@ -1340,6 +1352,7 @@ function AppShell() {
             <Route path="/instructions" element={<InstructionsPage />} />
             <Route path="/templates" element={<ProjectSettingsPage />} />
             <Route path="/settings" element={<ProjectsPage />} />
+            <Route path="/remote" element={<RemoteAccessPage />} />
             <Route path="/projects" element={<Navigate to="/settings" replace />} />
           </Routes>
           )}

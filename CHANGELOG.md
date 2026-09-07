@@ -3,6 +3,50 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.11.27 — 2026-09-07
+
+**Reach the portal from anywhere, and a throwaway inbox for sign-up codes**
+
+### Added
+
+- **Remote access: publish the portal to a public web address, and take it back down again.**
+  Settings → **Remote access** (sidebar → System) runs a Cloudflare Tunnel for you: press
+  *Publish to the internet* and the page hands you an HTTPS address you can open on another
+  laptop or a phone; press *Stop publishing* and it is gone. Nothing is opened on your network
+  and no router port is forwarded — the tunnel dials outward, and the portal keeps listening on
+  localhost exactly as before. Three ways to get an address: a **quick tunnel** needs no
+  Cloudflare account at all (the address is random and changes every time you publish), a
+  **connector token** from Cloudflare Zero Trust gives you a fixed address on your own domain,
+  and a **named tunnel** runs one you already set up on the machine. Optional extras: publish
+  automatically when the portal starts, and reconnect by itself after a network blip or a closed
+  laptop lid. Needs `cloudflared` on the machine (`brew install cloudflared`, or
+  `winget install --id Cloudflare.cloudflared`).
+
+- **An access password stands in front of that address, and the portal will not publish without
+  one.** This is not optional and it is worth knowing why: the portal starts Claude with
+  permission prompts turned off, gives out a real terminal on this machine, and reads and writes
+  your project files. A public URL with nobody at the door is not a convenience — it is a way for
+  anyone who stumbles on the link to run commands on your laptop. So *Publish* stays greyed out
+  until you set a password (at least 10 characters), and a visitor arriving from outside sees one
+  unlock screen and **nothing else** until they enter it — no page, no data, not even the app
+  itself. On top of that: the Terminal page stays blocked for remote visitors unless you switch it
+  on, the password and the tunnel settings can only be changed at the machine itself (stopping the
+  tunnel can be done from anywhere), repeated wrong guesses lock the door for 15 minutes,
+  *Sign out all devices* boots every phone and laptop that was still unlocked, and you can choose
+  how long a device stays unlocked before it has to ask again. Your Cloudflare token is stored
+  beside the portal's own database with owner-only permissions, never inside a project folder, and
+  never shown back to the browser.
+
+- **MailBox: a disposable inbox inside the portal.** `/mailbox` (sidebar → Tools) gives you an
+  address you can paste straight into a sign-up, password-reset or "verify your email" form, and
+  shows the mail as it arrives. Rename the address to something you will recognise, and the page
+  pulls the **one-time code** and the **confirmation link** out of each message and puts them next
+  to a copy button — which is the whole point, because a six-digit code retyped by hand from a
+  second browser tab is how a passing flow ends up filed as a bug. Mail bodies are displayed in a
+  fully sandboxed frame, so a test email cannot run anything. One honest limitation: the service
+  behind it hands out `@sharklasers.com`-style addresses, not `@yopmail.com` — YOPmail publishes
+  no API at all — so an account already registered against a yopmail address cannot be read here.
+
 ## 0.11.26 — 2026-08-28
 
 **Connect and Disconnect work on Windows too**

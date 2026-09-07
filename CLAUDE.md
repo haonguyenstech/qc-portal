@@ -105,6 +105,12 @@ server/src/
   claudeExec.ts     shared one-shot helpers: runClaude / runClaudeStream / parseClaudeJsonResult
   runManager.ts     in-flight run lifecycle + which on-disk folder a run's output lives in
   hub.ts            WebSocket pub/sub by runId        terminal.ts  node-pty over /ws/terminal
+  tunnel.ts         Remote access: publishes the portal to a public HTTPS address by running
+                    `cloudflared` (quick / connector-token / named tunnel). REFUSES to start
+                    without an access password.
+  remoteAccess.ts   the gate in front of that tunnel — a locked visitor gets one unlock page
+                    and NOTHING else, not even the JS bundle. Its middleware must stay ahead
+                    of every router AND of express.static in index.ts
   qcBrowser.ts      the portal-owned browser Playwright MCP attaches to over CDP
   playwrightRunMode.ts  per-RUN headless/headed browser choice (a per-run MCP config; never
                     rewrites the project's .mcp.json)
@@ -152,11 +158,15 @@ server/src/
   learn.ts          AI auto-capture after a run       groundingCheck.ts  anti-hallucination audit
   answerCheck.ts    free existsSync check of the paths a chat answer cited (every turn)
   answerAudit.ts    on-demand fact check of ONE chat answer by an independent cheap model
+  mailbox.ts        MailBox: a disposable inbox (Guerrilla Mail's JSON API — YOPmail has no
+                    API at all). The session token is stored BESIDE THE DB, never in a repo,
+                    and never reaches the browser. `get_email_list` is the LIST call;
+                    `check_email` is a delta and answers empty on the second call
   totp.ts apiAccounts.ts   2FA seeds + API login accounts — stored BESIDE THE DB, never in a repo
   clickup.ts folderPicker.ts projectScope.ts toolPath.ts mobileDevices.ts
   routes/           projects, qc, files, skills, mcp, clickup, source, ai, templates,
                     knowledge, memory, notes, database, diagrams, prototype, chat,
-                    performance, version
+                    performance, version, remote
 
 web/src/
   App.tsx           two branches: `/ai-labs` renders BARE, everything else via AppShell; the job
@@ -165,6 +175,9 @@ web/src/
   pages/ components/ components/ui/ (shadcn primitives)
   lib/  api.ts (ALL backend calls) types.ts project-context.tsx notifications.tsx theme.ts
         testRules.ts highlight.ts apiAssert.ts devices.ts sql-complete.ts noteHtml.ts
+        mailbox.ts  (MailBox: OTP/verify-link extraction — RANKED, never filtered, by
+        distance to the nearest code word; the mail body itself is rendered in a
+        `sandbox=""` iframe and must stay that way)
         utils.ts useRunStream.ts useXtermSession.ts
         clickup-filing.ts + components/ClickupFilingBar.tsx  (filing a finding to ClickUp:
         the severity->priority map, the error wording, and the parent field + inherit
@@ -237,9 +250,11 @@ commit when the behaviour changes.
 | `/chat` — sessions, streaming, `@`/`/` mentions, temporary chats, composer, follow-ups | `chat.md` |
 | `/database` — read-only SQL console, SQL editor, Ask AI | `database.md` |
 | `/notes` | `notes.md` |
+| `/mailbox` — the disposable inbox, OTP/link extraction | `mailbox.md` |
 | the sidebar/theme/app mark, or `/ai-labs` | `shell-and-ai-labs.md` |
 | `/terminal` or Continue session (resume a run's session) | `terminal-and-sessions.md` |
 | the portal-owned QC browser / Playwright attach mode | `qc-browser.md` |
+| `/remote` — publishing the portal over a Cloudflare Tunnel, and the access gate in front of it | `remote-access.md` |
 
 ## Conventions
 
@@ -292,7 +307,17 @@ holds the actionable recipe; `web/src/pages/McpPage.tsx` is the canonical implem
 
 ## Critical constraints
 
-- **Localhost only.** Server binds `127.0.0.1`. No auth in this MVP — do not add network exposure.
+- **Localhost only by default.** The server binds `127.0.0.1` and there is no auth on that
+  path — do not add network exposure. The ONE sanctioned way out is `/remote`: a Cloudflare
+  Tunnel (`tunnel.ts`), which is an OUTBOUND connection, so the bind address is unchanged and
+  no port is forwarded. It ships welded to the access gate in `remoteAccess.ts` and **neither
+  half may be softened**: the portal spawns `claude` with permissions bypassed and hands out a
+  shell, so a public URL without a password is remote code execution, not a convenience.
+  Concretely — the tunnel refuses to start with no access password; a request arriving through
+  Cloudflare without a valid session gets the unlock page and nothing else, the JS bundle
+  included (so the guard stays ahead of `express.static`); the WebSocket upgrade is gated
+  separately or a shell could be attached around HTTP; and the password cannot be removed while
+  the tunnel is up. Read `docs/architecture/remote-access.md` before touching any of it.
 - **Never log/persist secrets.** OTPs and credentials must not hit the log stream, DB, or disk.
 - **The Database page must never be able to write.** `/database` runs SQL the AI wrote and
   nobody reviewed, so `server/src/dbQuery.ts` protects the DB in **layers, none of which may be
@@ -350,5 +375,7 @@ holds the actionable recipe; `web/src/pages/McpPage.tsx` is the canonical implem
 | `QC_BROWSER_PROFILE_DIR` | `~/.pw-agent-profile-qc` | QC browser profile; separate from the self-launch one because Chrome won't open a profile twice |
 | `QC_BROWSER_PATH` | _(unset)_ | explicit browser executable, when neither Edge nor Chrome is where we look |
 | `QC_K6_BIN` | `k6` | path to the k6 binary, for an install that isn't on PATH (Performance › API load test) |
+| `QC_CLOUDFLARED_BIN` | _(unset)_ | explicit path to the `cloudflared` binary, for an install the PATH lookup can't find (Remote access) |
+| `QC_REMOTE_FORCE_GUARD` | `0` | treat EVERY request as if it arrived through the tunnel, so the access gate can be tested without publishing one. A development switch, not a security control |
 | `QC_AUTO_AGENT_BIN` | _(unset)_ | explicit path to the `auto-agent-ai` CLI, for an install the PATH lookup can't find (sidebar → Auto Agent → Connect) |
 | `IMGBB_API_KEY` | _(unset)_ | free imgbb API key (api.imgbb.com); when set, issue screenshots upload to imgbb and their URLs are embedded in the ClickUp comment — a workaround for a workspace that has hit ClickUp's "Over allocated storage" limit (`GBUSED_005`) |

@@ -20,6 +20,14 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
   })
   if (!res.ok) {
     const text = await res.text().catch(() => '')
+    // A remote session that expired mid-visit: every subsequent call would fail with
+    // "Unlock required." and the page would fill with toasts instead of asking for the
+    // password. Reloading hands the navigation to the server's gate, which answers with
+    // the unlock screen. (Only ever sent to a request that came through the tunnel —
+    // see server/src/remoteAccess.ts.)
+    if (res.status === 401 && text.includes('needsUnlock')) {
+      window.location.reload()
+    }
     // Unwrap the `{ "error": "…" }` envelope every route answers a failure with.
     // Without this the raw JSON reaches the `toast.error` description at ~90 call
     // sites, so a message written FOR a QC engineer — "Unknown variable(s):
@@ -3493,6 +3501,58 @@ export function autoAgentLogout(): Promise<{ ok: boolean; output: string[] }> {
   return request('/api/auto-agent/logout', { method: 'POST' })
 }
 
+// ---- MailBox (disposable inbox for sign-up / OTP / reset-link testing) -------
+
+export interface MailboxInfo {
+  address: string
+  createdAt: string
+  /** The service's own polling floor — the page's auto-refresh must not go under it. */
+  minPollMs: number
+}
+
+export interface MailSummary {
+  id: string
+  from: string
+  subject: string
+  excerpt: string
+  date: string
+  read: boolean
+}
+
+export interface MailDetail extends MailSummary {
+  body: string
+  to: string
+  /** Attachment count — reported so a dropped PDF isn't mistaken for a mail without one. */
+  attachments: number
+}
+
+/** The current inbox — created on the server the first time this is called. */
+export function getMailbox(): Promise<MailboxInfo> {
+  return request('/api/mailbox')
+}
+
+export function listMail(): Promise<{ address: string; messages: MailSummary[] }> {
+  return request('/api/mailbox/messages')
+}
+
+export function readMail(id: string): Promise<MailDetail> {
+  return request(`/api/mailbox/messages/${encodeURIComponent(id)}`)
+}
+
+export function deleteMail(id: string): Promise<{ ok: boolean }> {
+  return request(`/api/mailbox/messages/${encodeURIComponent(id)}`, { method: 'DELETE' })
+}
+
+/** Rename the inbox (the local part before the @). */
+export function setMailboxAddress(name: string): Promise<{ address: string }> {
+  return request('/api/mailbox/address', { method: 'POST', body: JSON.stringify({ name }) })
+}
+
+/** Abandon this inbox and take a fresh random one. */
+export function resetMailbox(): Promise<{ address: string }> {
+  return request('/api/mailbox/reset', { method: 'POST' })
+}
+
 // ---- Chat (plain conversation with Claude Code, in the project folder) -------
 
 /**
@@ -4533,4 +4593,101 @@ export function cancelPerfJob(id: string): Promise<{ job: PerfJob }> {
 /** Drop a run from Recent runs for good — cancels it first if it is still going. */
 export function deletePerfJob(id: string): Promise<{ deleted: boolean }> {
   return request(`/api/performance/jobs/${encodeURIComponent(id)}`, { method: 'DELETE' })
+}
+
+// ---- Remote access (Cloudflare Tunnel) ----
+
+export type TunnelMode = 'quick' | 'token' | 'named'
+export type TunnelState = 'stopped' | 'starting' | 'running' | 'stopping' | 'error'
+
+export interface TunnelStatus {
+  state: TunnelState
+  url: string | null
+  mode: TunnelMode | null
+  startedAt: string | null
+  readyAt: string | null
+  error: string | null
+  log: string[]
+  restarts: number
+  installed: boolean
+  binPath: string | null
+  installHint: string
+  target: string
+  uiBundled: boolean
+  hasAccessPassword: boolean
+}
+
+export interface TunnelSettings {
+  mode: TunnelMode
+  hasToken: boolean
+  tunnelName: string
+  hostname: string
+  autoStart: boolean
+  autoRestart: boolean
+  updatedAt: string
+}
+
+export interface RemoteAccessInfo {
+  hasPassword: boolean
+  sessionHours: number
+  allowTerminal: boolean
+  minPasswordLength: number
+  updatedAt: string
+}
+
+export interface RemoteOverview {
+  status: TunnelStatus
+  settings: TunnelSettings
+  access: RemoteAccessInfo
+  /** True when the page itself is being viewed through the tunnel — controls go read-only. */
+  viewingRemotely: boolean
+}
+
+export function getRemoteOverview(): Promise<RemoteOverview> {
+  return request('/api/remote')
+}
+
+/**
+ * `token: null` clears the stored connector token; omitting the field keeps it — the
+ * page never receives the token, so it must be able to save a hostname without it.
+ */
+export function saveTunnelSettings(patch: {
+  mode?: TunnelMode
+  token?: string | null
+  tunnelName?: string
+  hostname?: string
+  autoStart?: boolean
+  autoRestart?: boolean
+}): Promise<{ ok: true; settings: TunnelSettings; status: TunnelStatus }> {
+  return request('/api/remote/settings', { method: 'PUT', body: JSON.stringify(patch) })
+}
+
+export function startTunnel(): Promise<{ ok: true; status: TunnelStatus }> {
+  return request('/api/remote/start', { method: 'POST' })
+}
+
+export function stopTunnel(): Promise<{ ok: true; status: TunnelStatus }> {
+  return request('/api/remote/stop', { method: 'POST' })
+}
+
+export function setRemotePassword(
+  password: string,
+): Promise<{ ok: true; access: RemoteAccessInfo; sessionsRevoked: boolean }> {
+  return request('/api/remote/password', { method: 'POST', body: JSON.stringify({ password }) })
+}
+
+export function clearRemotePassword(): Promise<{ ok: true; access: RemoteAccessInfo }> {
+  return request('/api/remote/password', { method: 'DELETE' })
+}
+
+export function saveRemoteAccessOptions(patch: {
+  sessionHours?: number
+  allowTerminal?: boolean
+}): Promise<{ ok: true; access: RemoteAccessInfo }> {
+  return request('/api/remote/access', { method: 'PUT', body: JSON.stringify(patch) })
+}
+
+/** Rotate the session key — every already-unlocked device has to enter the password again. */
+export function revokeRemoteSessions(): Promise<{ ok: true }> {
+  return request('/api/remote/sessions/revoke', { method: 'POST' })
 }

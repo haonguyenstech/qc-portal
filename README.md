@@ -78,6 +78,13 @@ npm start            # = qc-portal: serves API + UI on 5174 and opens the browse
 - **History** — past runs with pass/fail counts (SQLite), scoped to the active project.
 - **Skills** — list / edit / create skills under the active project's `.claude/skills/`.
 - **MCP** — list / add / remove servers in the active project's `.mcp.json`.
+- **Remote access** — publish the portal to a public HTTPS address over a Cloudflare Tunnel
+  (one click to publish, one to stop), so you can run and review QC work from another machine
+  or a phone. Requires [`cloudflared`](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/)
+  (`brew install cloudflared` / `winget install --id Cloudflare.cloudflared`) and an **access
+  password** — the tunnel will not start without one, and every request arriving from outside
+  has to enter it before any page or API responds. See
+  [`docs/architecture/remote-access.md`](./docs/architecture/remote-access.md).
 
 ## Config (env vars)
 | Var | Default | Meaning |
@@ -86,6 +93,7 @@ npm start            # = qc-portal: serves API + UI on 5174 and opens the browse
 | `QC_REPO_ROOT` | _(unset)_ | optional absolute path to auto-seed as the **default** project on first run; otherwise add projects via the Projects page |
 | `QC_CLAUDE_BIN` | `claude` | path to the Claude CLI |
 | `QC_DB_PATH` | `qc-portal/data/qc-portal.db` | SQLite file |
+| `QC_CLOUDFLARED_BIN` | _(unset)_ | path to `cloudflared`, when it isn't on `PATH` (Remote access) |
 
 > Projects are stored in SQLite, so they persist across restarts and moves of the `qc-portal/`
 > folder. `QC_REPO_ROOT` only matters for seeding the first project on a brand-new database.
@@ -97,7 +105,9 @@ and Jira run via `uvx`, so the machine needs Astral's [`uv`](https://docs.astral
 installed (`winget install --id=astral-sh.uv -e` on Windows).
 
 ## Notes
-- Binds to `127.0.0.1` only (local use). No auth in this MVP.
+- Binds to `127.0.0.1` only (local use), with no auth on that path. Reaching it from outside
+  goes through **Remote access** — a Cloudflare Tunnel plus a mandatory access password — and
+  never by exposing the port.
 - Permissions are bypassed so the headless run never blocks on a prompt; the skill itself forbids
   mutating actions on the shared environment.
 - `node:sqlite` is an experimental Node feature (warning suppressed in the npm scripts).
