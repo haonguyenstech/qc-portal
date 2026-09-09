@@ -3,6 +3,23 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.11.28 — 2026-09-09
+
+**MailBox reads Vietnamese mail as Vietnamese**
+
+### Fixed
+
+- **A non-English subject no longer arrives as gibberish.** Mail composers encode anything
+  that isn't plain ASCII, so a Vietnamese sign-up mail reached the inbox reading
+  `Xin ch&agrave;o` and `M&atilde; x&aacute;c th&#7921;c` instead of *Xin chào* and
+  *Mã xác thực*. The subject, the sender, the one-line excerpt, the *to* line and the
+  new-mail toast now show the real characters — accents included — and the mail body still
+  renders exactly as the sender wrote it.
+- **The code and link finder no longer has to read through that gibberish.** It works on the
+  decoded text, so the *Copy code* / *Open link* buttons pick the right code out of a
+  Vietnamese mail as reliably as an English one, and a link's `&` in the URL survives
+  intact.
+
 ## 0.11.27 — 2026-09-07
 
 **Reach the portal from anywhere, and a throwaway inbox for sign-up codes**

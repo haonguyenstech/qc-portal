@@ -2,19 +2,95 @@
 // message: the CODE and the LINK. Everything else on the MailBox page is plumbing —
 // this is the part that turns "read the mail, squint, retype six digits" into a click.
 
+// ------------------------------------------------------------------ HTML entities
+
+/**
+ * Entities that are not a letter-with-accent. `amp` decodes here like any other, in
+ * the SAME single pass as the rest — decoding it separately (or first) turns
+ * `&amp;#7841;`, which is the literal text "&#7841;", into "ạ".
+ */
+const NAMED: Record<string, string> = {
+  amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: '\u00a0',
+  hellip: '…', mdash: '—', ndash: '–', lsquo: '‘', rsquo: '’',
+  ldquo: '“', rdquo: '”', bull: '•', middot: '·', laquo: '«', raquo: '»',
+  copy: '©', reg: '®', trade: '™', deg: '°', euro: '€', pound: '£',
+  yen: '¥', cent: '¢', sect: '§', para: '¶', dagger: '†', permil: '‰',
+  prime: '′', Prime: '″', szlig: 'ß', aring: 'å', Aring: 'Å',
+  aelig: 'æ', AElig: 'Æ', oslash: 'ø', Oslash: 'Ø', ccedil: 'ç',
+  Ccedil: 'Ç', ntilde: 'ñ', Ntilde: 'Ñ', iexcl: '¡', iquest: '¿',
+  times: '×', divide: '÷', plusmn: '±', frac12: '½', frac14: '¼',
+  frac34: '¾', sup2: '²', sup3: '³', micro: 'µ', not: '¬', macr: '¯',
+  acute: '´', cedil: '¸', uml: '¨', ordf: 'ª', ordm: 'º', curren: '¤',
+  brvbar: '¦', eth: 'ð', ETH: 'Ð', thorn: 'þ', THORN: 'Þ',
+}
+
+/** The Latin-1 vowels-with-accent, lower case; the upper-case twin is derived below. */
+const ACCENTED: Record<string, string> = {
+  agrave: 'à', aacute: 'á', acirc: 'â', atilde: 'ã', auml: 'ä',
+  egrave: 'è', eacute: 'é', ecirc: 'ê', euml: 'ë',
+  igrave: 'ì', iacute: 'í', icirc: 'î', iuml: 'ï',
+  ograve: 'ò', oacute: 'ó', ocirc: 'ô', otilde: 'õ', ouml: 'ö',
+  ugrave: 'ù', uacute: 'ú', ucirc: 'û', uuml: 'ü',
+  yacute: 'ý', yuml: 'ÿ',
+}
+
+const ENTITIES: Record<string, string> = { ...NAMED }
+for (const [name, char] of Object.entries(ACCENTED)) {
+  ENTITIES[name] = char
+  // `&Agrave;` — HTML entity names are case-SENSITIVE, so this is a second key, not
+  // a case-insensitive lookup: `&AGRAVE;` is not an entity and must stay literal.
+  ENTITIES[name[0].toUpperCase() + name.slice(1)] = char.toUpperCase()
+}
+
+const ENTITY = /&(#\d{1,7}|#[xX][0-9a-fA-F]{1,6}|[A-Za-z][A-Za-z0-9]{1,31});/g
+
+/**
+ * Decode the HTML entities in text that will be rendered AS TEXT.
+ *
+ * Mail templates written for Vietnamese arrive entity-encoded — `Xin ch&agrave;o`,
+ * `M&atilde; x&aacute;c th&#7921;c` — because that is what a mail composer emits for
+ * non-ASCII. The body is fine (it renders as HTML in the preview frame), but the
+ * subject, the sender and the excerpt are printed as plain strings by React, so
+ * without this the inbox reads "Xin ch&agrave;o" and a code hunted out of the
+ * flattened text is surrounded by gibberish.
+ *
+ * NUMERIC refs matter more than named ones here: most Vietnamese letters (ạ ả ấ ầ ơ
+ * ư…) have no HTML name at all and can only be written `&#7841;` / `&#x1EA1;`, so both
+ * numeric forms are handled with `fromCodePoint`. `fromCharCode` would be wrong for
+ * anything above U+FFFF. An unknown name, an out-of-range code point or a lone
+ * surrogate is left exactly as written rather than replaced with a wrong character —
+ * showing `&notreal;` is honest; showing `\ufffd` is not.
+ */
+export function decodeEntities(text: string): string {
+  if (!text.includes('&')) return text // the overwhelmingly common case
+  return text.replace(ENTITY, (whole, ref: string) => {
+    if (ref[0] === '#') {
+      const hex = ref[1] === 'x' || ref[1] === 'X'
+      const cp = hex ? parseInt(ref.slice(2), 16) : Number(ref.slice(1))
+      const valid =
+        Number.isInteger(cp) && cp > 0 && cp <= 0x10ffff && !(cp >= 0xd800 && cp <= 0xdfff)
+      if (!valid) return whole
+      try {
+        return String.fromCodePoint(cp)
+      } catch {
+        return whole
+      }
+    }
+    return Object.prototype.hasOwnProperty.call(ENTITIES, ref) ? ENTITIES[ref] : whole
+  })
+}
+
 /** Plain text from a mail body, which may be HTML, `<pre>`-wrapped text, or neither. */
 export function mailText(html: string): string {
-  return html
-    .replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1>/gi, ' ')
-    .replace(/<br\s*\/?>/gi, '\n')
-    .replace(/<\/(p|div|tr|li|h[1-6])>/gi, '\n')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/&nbsp;/gi, ' ')
-    .replace(/&amp;/gi, '&')
-    .replace(/&lt;/gi, '<')
-    .replace(/&gt;/gi, '>')
-    .replace(/&quot;/gi, '"')
-    .replace(/&#(\d+);/g, (_, d: string) => String.fromCharCode(Number(d)))
+  // Tags first, entities second, and never the other way round: decoding `&lt;b&gt;`
+  // before the tag strip would invent a tag and then delete the words inside it.
+  return decodeEntities(
+    html
+      .replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1>/gi, ' ')
+      .replace(/<br\s*\/?>/gi, '\n')
+      .replace(/<\/(p|div|tr|li|h[1-6])>/gi, '\n')
+      .replace(/<[^>]+>/g, ' '),
+  )
     .replace(/[ \t\u00a0]+/g, ' ') // NBSP included: mail templates are full of them
     .replace(/\n{3,}/g, '\n\n')
     .trim()

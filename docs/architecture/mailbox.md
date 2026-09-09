@@ -100,6 +100,36 @@ as a mail that never had one. Body height cannot be auto-fitted either: the fram
 origin (the whole point of `sandbox=""`), so its content height is unreadable — hence a fixed
 60vh with a **Taller** toggle instead of a guess.
 
+## HTML entities — the headers, not the body
+
+A mail whose subject is not pure ASCII arrives **entity-encoded**, because that is what a
+mail composer emits: `Xin ch&agrave;o`, `M&atilde; x&aacute;c th&#7921;c c&#7911;a b&#7841;n`.
+The body was always fine — it renders as HTML in the preview frame — but the subject, the
+sender, the excerpt and the `to` line are printed as plain strings by React, so the inbox
+read literally "Xin ch&agrave;o", and `mailText` (which only knew `&nbsp; &amp; &lt; &gt;
+&quot;` plus decimal refs) fed the same gibberish to the code finder.
+
+`decodeEntities()` in `web/src/lib/mailbox.ts` is now the one decoder, and the page applies
+it in each query's `select` — once per query, rather than at the six render sites where the
+seventh one added would forget. **`body` is deliberately not decoded**: the frame renders
+it as markup, and decoding `&lt;b&gt;` there would invent a tag the sender never wrote.
+
+Three things about it are load-bearing:
+
+- **Numeric refs matter more than named ones.** Most Vietnamese letters (ạ ả ấ ầ ơ ư …) have
+  no HTML name at all and can only be written `&#7841;` / `&#x1EA1;`, so both numeric forms
+  are handled — with `fromCodePoint`, since `fromCharCode` is wrong above U+FFFF.
+- **One pass, `&amp;` included.** Decoding `&amp;` separately or first turns `&amp;#7841;`
+  — which is the literal text `&#7841;` — into "ạ".
+- **Entity names are case-sensitive**, so `&Agrave;` is a second table key rather than a
+  case-insensitive lookup: `&AGRAVE;` is not an entity and must stay as written. Anything
+  unknown, out of range, or a lone surrogate is left exactly as written — showing
+  `&notreal;` is honest, showing `�` is not.
+
+Verified in the running app with an entity-encoded Vietnamese mail (subject, sender,
+excerpt, `to`, the extracted code and the link's `&`): nothing matching `/&[a-z#0-9]+;/i`
+survives anywhere on the page.
+
 ## Codes and links (`web/src/lib/mailbox.ts`)
 
 The extraction is **ranked, never filtered**: guessing wrong and HIDING the real code sends the

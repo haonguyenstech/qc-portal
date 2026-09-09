@@ -39,12 +39,28 @@ import {
 } from '@/lib/api'
 import {
   MAIL_DOMAINS,
+  decodeEntities,
   findCodes,
   findLinks,
   mailText,
   randomMailName,
   splitAddress,
 } from '@/lib/mailbox'
+
+/**
+ * Mail headers arrive entity-encoded whenever they are not pure ASCII — a Vietnamese
+ * subject reaches us as `Xin ch&agrave;o`. These four fields are printed as plain text
+ * (list row, detail header, the new-mail toast), so they are decoded ONCE here, at the
+ * query, rather than at each render site where the next one added would forget.
+ */
+function decodeHeaders<T extends MailSummary>(mail: T): T {
+  return {
+    ...mail,
+    from: decodeEntities(mail.from),
+    subject: decodeEntities(mail.subject),
+    excerpt: decodeEntities(mail.excerpt),
+  }
+}
 
 /**
  * MailBox — a throwaway inbox, inside the portal.
@@ -179,11 +195,16 @@ export default function MailBoxPage() {
     // A QC engineer starts a sign-up in another tab and comes back — the mail must
     // already be here, so keep polling while this tab is in the background.
     refetchIntervalInBackground: true,
+    select: (data) => ({ ...data, messages: data.messages.map(decodeHeaders) }),
   })
   const detail = useQuery({
     queryKey: ['mailbox', 'message', selectedId],
     queryFn: () => readMail(selectedId!),
     enabled: !!selectedId,
+    // Headers only — `body` stays exactly as the service sent it, because the preview
+    // frame renders it as HTML and decoding it here would turn `&lt;b&gt;` into markup
+    // the sender never wrote.
+    select: (mail) => ({ ...decodeHeaders(mail), to: decodeEntities(mail.to) }),
   })
 
   // Memoised: it is a dependency of the new-mail effect below, and a fresh []
