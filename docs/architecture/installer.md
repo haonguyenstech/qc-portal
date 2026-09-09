@@ -76,6 +76,33 @@ bash installer/macos/build-dmg.sh   # -> installer/macos/dist/QC-Portal-Installe
 
 `installer/*/dist/` is gitignored: the `.exe` and `.dmg` are release downloads, not source.
 
+## Publishing them — the README buttons must not need editing
+
+The two artefacts are **GitHub release assets**, never committed (`installer/*/dist/` is
+gitignored). A 2 MB `.exe` per release would sit in the git history for ever, and a repo is
+not a download server.
+
+So each release, after the tag is pushed:
+
+```bash
+bash installer/macos/build-dmg.sh          # the .dmg builds anywhere
+# the .exe must be compiled on Windows (see above), then:
+gh release create vX.Y.Z --title "X.Y.Z — <title>" --notes-file <notes> \
+  installer/windows/dist/QC-Portal-Setup.exe installer/macos/dist/QC-Portal-Installer.dmg
+```
+
+The README's download buttons point at
+`releases/latest/download/QC-Portal-Setup.exe` — a **version-independent** URL that GitHub
+resolves to the newest release carrying an asset of that exact name. That is why the asset
+filenames are fixed and must not gain a version suffix: rename them and every published link
+breaks silently, and nobody notices until a QC engineer downloads nothing.
+
+The corollary: a release whose assets were never uploaded leaves those buttons pointing at
+the PREVIOUS release's installers. That is the failure mode to watch for — the buttons keep
+working, they just hand out something older than the tag suggests. Both installers clone
+`main` at install time, so what they build is current regardless; the stale part would only
+be the installer logic itself.
+
 ## Signing — the part that costs money
 
 Neither artefact is signed, and the failure modes differ, so tell users the right thing:

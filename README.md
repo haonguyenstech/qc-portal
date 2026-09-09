@@ -26,17 +26,21 @@ address bar, its own icon in the Dock/taskbar. No terminal involved.
 
 ### Easiest: one file to double-click
 
-No terminal at all. Ask for these from whoever set the portal up (they are built from
-`installer/`, not checked in):
+[![Download for Windows](https://img.shields.io/badge/Download-Windows%20.exe-0078D4?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/haonguyenstech/qc-portal/releases/latest/download/QC-Portal-Setup.exe)
+&nbsp;
+[![Download for macOS](https://img.shields.io/badge/Download-macOS%20.dmg-111827?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/haonguyenstech/qc-portal/releases/latest/download/QC-Portal-Installer.dmg)
 
-| | File | First time |
-|---|---|---|
-| Windows | `QC-Portal-Setup.exe` | SmartScreen warns about an unknown publisher — *More info* → *Run anyway*. |
-| macOS | `QC-Portal-Installer.dmg` | Open it, then **right-click** *Install QC Portal.command* → *Open* (a plain double-click is blocked). |
+No terminal at all. Both buttons always point at the newest release
+([all releases](https://github.com/haonguyenstech/qc-portal/releases/latest)).
 
-Either way the first install takes a few minutes in a console window: it fetches Node, Git
-and Claude Code if they are missing, downloads the portal and builds it. Leave it alone
-until it says Done.
+| | First time |
+|---|---|
+| **Windows** — `QC-Portal-Setup.exe` | SmartScreen warns about an unknown publisher: *More info* → *Run anyway*. |
+| **macOS** — `QC-Portal-Installer.dmg` | Open it, then **right-click** *Install QC Portal.command* → *Open* (a plain double-click is blocked). |
+
+Neither file is code-signed yet, which is all those warnings mean. The first install takes a
+few minutes in a console window: it fetches Node, Git and Claude Code if they are missing,
+downloads the portal and builds it. Leave it alone until it says Done.
 
 ### Or from a terminal
 
