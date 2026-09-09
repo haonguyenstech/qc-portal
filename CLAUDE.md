@@ -91,6 +91,58 @@ degrade to "still on the old version", never to a portal that is gone. See
 "Self-update" in `docs/architecture/layout.md` before touching it. So a release isn't usable until both the commit and the tag
 are pushed.
 
+### Shipping the desktop installers (`.exe` / `.dmg`)
+
+The portal also ships as a **desktop app**: the installers leave a *QC Portal* icon behind
+(Desktop + Start Menu on Windows, `~/Applications` + Launchpad on macOS) and that shortcut
+runs **`qc-portal --app`**, which shows the portal in a chromeless Chromium window instead of
+a browser tab. Read `docs/architecture/installer.md` and `pwa.md` before touching any of it.
+The rules that bite:
+
+- **The installers are thin, and must stay thin.** `install.ps1` / `install.bat` /
+  `install.sh` at the repo root are *the* install — one implementation. `installer/` only adds
+  packaging and shortcuts, and `qc-portal.iss` bundles `..\..\install.ps1` **itself**, not a
+  copy. Nothing bundles Node or the built app: the install stays an ordinary **git checkout**,
+  which is the only reason `qc-portal --update` still works. Package it into a blob and that
+  whole self-update path has to be replaced by a signed updater feed.
+- **Every `.ps1` and the `.iss` are pure ASCII.** PowerShell 5.1 (what Windows 10 ships) reads
+  a BOM-less `.ps1` as ANSI, so a UTF-8 em dash decodes to a **curly quote — which 5.1 treats
+  as a string delimiter**. One em dash in a comment and the file will not parse. This was
+  measured, not theorised: it broke `shortcut.ps1` and `uninstall.ps1` outright. A BOM would
+  also fix it, but a BOM is invisible and one tool that strips it brings the bug back silently.
+- **`installer/*/dist/` is gitignored — the artefacts are GitHub release assets.** A 2 MB
+  `.exe` per release would live in the git history for ever.
+- **The asset filenames are FIXED** (`QC-Portal-Setup.exe`, `QC-Portal-Installer.dmg`),
+  because the README's download buttons use the version-independent
+  `releases/latest/download/<name>`. Add a version suffix and every published link breaks
+  silently. The mirror-image failure: a release whose assets were never uploaded leaves those
+  buttons serving the **previous** release's installers — still working, just older than the
+  tag says.
+
+So after the tag is pushed (step 7 above), publish the artefacts:
+
+```bash
+bash installer/macos/build-dmg.sh      # the .dmg builds on any machine
+# the .exe must be COMPILED ON WINDOWS — Inno Setup only runs there:
+#   winget install JRSoftware.InnoSetup     (with no admin it lands PER USER at
+#                                            %LOCALAPPDATA%\Programs\Inno Setup 6, NOT
+#                                            Program Files (x86) — look in both)
+#   git clone --depth 1 <repo> %TEMP%\qcbuild   (clone main, so the .exe wraps what shipped)
+#   ISCC.exe installer\windows\qc-portal.iss   -> installer\windows\dist\QC-Portal-Setup.exe
+gh release create vX.Y.Z --title "X.Y.Z — <title>" --notes-file <notes> \
+  installer/windows/dist/QC-Portal-Setup.exe installer/macos/dist/QC-Portal-Installer.dmg
+```
+
+Neither artefact is code-signed, and the two warnings differ: Windows SmartScreen says
+"unknown publisher" (*More info* → *Run anyway*), while macOS **blocks a double-click** on the
+`.dmg`'s `.command` (right-click → *Open*). Proper fixes cost money — a Windows code-signing
+certificate and an Apple Developer ID ($99/yr) — so until then those are documentation, not
+bugs. Tell users the right one; they are not interchangeable.
+
+Also: **app mode has no browser toolbar, so it has no download popup.** Any new export must
+`toast` and name the file, or it saves into `~/Downloads` in total silence and reads as a
+button that does nothing.
+
 ## Layout
 
 The **full annotated tree** — every module, what it does, and the traps in each — lives in
