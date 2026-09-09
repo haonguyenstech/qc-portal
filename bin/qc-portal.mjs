@@ -95,16 +95,66 @@ function openBrowser(url) {
   spawn(cmd, args, { stdio: 'ignore', detached: true, windowsHide: true }).unref()
 }
 
+// Chromium in `--app=` mode: a window with no tab strip, no address bar and no
+// browser UI, carrying the portal's own icon and name (it reads them from
+// web/public/manifest.webmanifest). That is what makes clicking the Applications /
+// Start Menu shortcut feel like opening a desktop app rather than a browser.
+//
+// Edge first because that is the browser these machines actually have set up;
+// Chrome is the fallback. QC_APP_BROWSER overrides both.
+function findAppBrowser() {
+  const candidates = process.env.QC_APP_BROWSER
+    ? [process.env.QC_APP_BROWSER]
+    : isWin
+      ? [
+          'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
+          'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
+          'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+          'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+          path.join(process.env.LOCALAPPDATA ?? '', 'Microsoft\\Edge\\Application\\msedge.exe'),
+          path.join(process.env.LOCALAPPDATA ?? '', 'Google\\Chrome\\Application\\chrome.exe'),
+        ]
+      : process.platform === 'darwin'
+        ? [
+            '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
+            '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+            path.join(process.env.HOME ?? '', 'Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge'),
+          ]
+        : ['/usr/bin/microsoft-edge', '/usr/bin/google-chrome', '/usr/bin/chromium']
+  return candidates.find((p) => p && fs.existsSync(p)) ?? null
+}
+
+function openAppWindow(url) {
+  const exe = findAppBrowser()
+  if (!exe) {
+    // No Chromium anywhere: a normal browser tab is a working portal, so open one
+    // rather than failing. The only thing lost is the chromeless window.
+    openBrowser(url)
+    return
+  }
+  // The EXECUTABLE is run directly, deliberately. On macOS `open -a Edge --args
+  // --app=...` silently DROPS the arguments whenever Edge is already running, so the
+  // user would get an ordinary tab; and `open -na` would fight the profile lock of
+  // the running instance. Executing the binary lets Chromium's own singleton hand
+  // the command line to the live process, which then opens the app window.
+  //
+  // No --user-data-dir: the window shares the normal profile, so the portal's theme
+  // and last-open project are the same ones the browser tab shows.
+  spawn(exe, [`--app=${url}`], { stdio: 'ignore', detached: true, windowsHide: true }).unref()
+}
+
 function ensureBuilt() {
   if (fs.existsSync(SERVER_ENTRY)) return true
   console.error('QC Portal is not built yet. Run `qc-portal --update` or `npm run build` in the install folder.')
   return false
 }
 
-async function start({ open = true } = {}) {
+// `open` is 'tab' (a normal browser tab), 'app' (a chromeless window) or false.
+async function start({ open = 'tab' } = {}) {
+  const show = () => (open === 'app' ? openAppWindow(URL) : open ? openBrowser(URL) : undefined)
   if (await ping()) {
     console.log(`QC Portal already running at ${URL}`)
-    if (open) openBrowser(URL)
+    show()
     return
   }
   if (!ensureBuilt()) process.exit(1)
@@ -129,7 +179,7 @@ async function start({ open = true } = {}) {
     process.exit(1)
   }
   console.log(`QC Portal running at ${URL}`)
-  if (open) openBrowser(URL)
+  show()
 }
 
 function stop() {
@@ -333,6 +383,8 @@ function help() {
 Usage:
   qc-portal              start the server (if needed) and open the browser
   qc-portal --open       same as above
+  qc-portal --app        start it and open it as a desktop app window (no tabs,
+                         no address bar) — what the desktop shortcut runs
   qc-portal --stop       stop the running server
   qc-portal --restart    restart the server
   qc-portal --status     show whether the server is running
@@ -348,7 +400,12 @@ switch (arg) {
   case '':
   case 'open':
   case 'start':
-    await start({ open: true })
+    await start({ open: 'tab' })
+    break
+  // What the Applications / Start Menu shortcut runs: same server, but shown in a
+  // chromeless window instead of a tab.
+  case 'app':
+    await start({ open: 'app' })
     break
   case 'stop':
     stop()
@@ -357,7 +414,7 @@ switch (arg) {
     stop()
     // QC_NO_OPEN lets the in-app "Restart" button restart without popping a new
     // browser window (the user already has the portal open).
-    await start({ open: !process.env.QC_NO_OPEN })
+    await start({ open: process.env.QC_NO_OPEN ? false : 'tab' })
     break
   case 'status':
     await status()

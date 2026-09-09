@@ -3815,10 +3815,15 @@ function downloadTranscript(name: string, messages: ChatMessage[]) {
   const md = `# ${name}\n\n${body}\n`
   const url = URL.createObjectURL(new Blob([md], { type: 'text/markdown' }))
   const a = document.createElement('a')
+  const file = `${name.replace(/[^\w.-]+/g, '-').replace(/^-+|-+$/g, '') || 'chat'}.md`
   a.href = url
-  a.download = `${name.replace(/[^\w.-]+/g, '-').replace(/^-+|-+$/g, '') || 'chat'}.md`
+  a.download = file
   a.click()
   URL.revokeObjectURL(url)
+  // Say so explicitly. In a browser tab Chromium's own download bubble is the
+  // confirmation; the desktop-app window (`qc-portal --app`) has NO toolbar and so
+  // no bubble, and a save with no feedback reads as a button that does nothing.
+  toast.success('Transcript downloaded', { description: file })
 }
 
 /**

@@ -120,6 +120,18 @@ EOF
   export PATH="$BIN_DIR:$PATH"
 }
 
+# --- Launchpad app (macOS only) --------------------------------------------
+# Only a launcher for what install_shim already installed: it makes the portal
+# startable without a terminal. Delegated to installer/macos/shortcut.sh so there
+# is ONE implementation of it (the .dmg installer runs this same install.sh).
+install_shortcut() {
+  [ "$(uname -s)" = 'Darwin' ] || return 0
+  local script="$INSTALL_DIR/installer/macos/shortcut.sh"
+  [ -f "$script" ] || return 0
+  bold "Creating the Launchpad app…"
+  bash "$script" "$INSTALL_DIR" || warn 'app bundle skipped.'
+}
+
 main() {
   bold "QC Portal installer"
   ensure_node
@@ -127,6 +139,7 @@ main() {
   fetch_source
   build
   install_shim
+  install_shortcut
   echo
   bold "Done! 🎉"
   info "Open a new terminal (so PATH refreshes), then run:"

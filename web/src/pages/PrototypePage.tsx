@@ -323,6 +323,10 @@ function downloadHtml(html: string, filename: string) {
   a.click()
   a.remove()
   window.setTimeout(() => URL.revokeObjectURL(url), 30_000)
+  // Say so explicitly. In a browser tab Chromium's own download bubble is the
+  // confirmation; the desktop-app window (`qc-portal --app`) has NO toolbar and so
+  // no bubble, and a save with no feedback reads as a button that does nothing.
+  toast.success('Prototype downloaded', { description: filename })
 }
 
 // ------------------------------------------------------- comment mode (element picker)

@@ -845,12 +845,17 @@ function downloadCsv(result: DbQueryResult): void {
   // names come out as mojibake. Escaped, not literal: an invisible character in the
   // source is unreadable and lint rejects it.
   const blob = new Blob([`\uFEFF${toCsv(result)}`], { type: 'text/csv;charset=utf-8' })
+  const name = `query-results-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.csv`
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url
-  a.download = `query-results-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.csv`
+  a.download = name
   a.click()
   URL.revokeObjectURL(url)
+  // Say so explicitly. In a browser tab Chromium's own download bubble is the
+  // confirmation; the desktop-app window (`qc-portal --app`) has NO toolbar and so
+  // no bubble, and a save with no feedback reads as a button that does nothing.
+  toast.success('CSV downloaded', { description: name })
 }
 
 /** Read-only SQL block with a copy button (shows the AI-generated query). */

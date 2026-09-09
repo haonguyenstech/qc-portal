@@ -57,6 +57,10 @@ function downloadExampleCsv() {
   a.click()
   a.remove()
   URL.revokeObjectURL(url)
+  // Say so explicitly. In a browser tab Chromium's own download bubble is the
+  // confirmation; the desktop-app window (`qc-portal --app`) has NO toolbar and so
+  // no bubble, and a save with no feedback reads as a button that does nothing.
+  toast.success('Example downloaded', { description: 'environments-example.csv' })
 }
 
 /** A starting scaffold shown when the project has no sheet yet. */

@@ -87,6 +87,13 @@ if errorlevel 1 (
   )
 )
 
+REM --- Desktop / Start Menu shortcut ---------------------------------------
+REM Only a launcher for the qc-portal command installed above. cmd.exe cannot make
+REM a .lnk, so this hands off to the same shortcut.ps1 the other installers use.
+echo(
+echo Creating the Desktop and Start Menu shortcut...
+powershell -NoProfile -ExecutionPolicy Bypass -File "%INSTALL_DIR%\installer\windows\shortcut.ps1" -InstallDir "%INSTALL_DIR%"
+
 echo(
 echo === Done! ===
 echo Open a NEW Command Prompt, then run:

@@ -70,6 +70,17 @@ if (-not ($userPath -split ';' | Where-Object { $_ -eq $BinDir })) {
   [Environment]::SetEnvironmentVariable('PATH', $newPath, 'User')
 }
 
+# --- Desktop / Start Menu shortcut -----------------------------------------
+# Everything above is the install; this only adds a way to start it without a
+# terminal. Delegated to installer\windows\shortcut.ps1 so there is ONE
+# implementation of the shortcut (the .exe installer calls the same file).
+$shortcut = Join-Path $InstallDir 'installer\windows\shortcut.ps1'
+if (Test-Path $shortcut) {
+  Step 'Creating the Desktop and Start Menu shortcut...'
+  try { & powershell -NoProfile -ExecutionPolicy Bypass -File $shortcut -InstallDir $InstallDir }
+  catch { Info "shortcut skipped: $($_.Exception.Message)" }
+}
+
 Write-Host "`n=== Done! ===" -ForegroundColor Green
 Write-Host 'Open a NEW terminal, then run:'
 Write-Host ''

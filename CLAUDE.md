@@ -174,6 +174,8 @@ web/src/
   main.tsx  index.css (Tailwind v4 oklch tokens, light + .dark)
   pages/ components/ components/ui/ (shadcn primitives)
   lib/  api.ts (ALL backend calls) types.ts project-context.tsx notifications.tsx theme.ts
+        pwa.ts (registers the service worker that makes the portal installable —
+        it caches NOTHING on purpose; see docs/architecture/pwa.md)
         testRules.ts highlight.ts apiAssert.ts devices.ts sql-complete.ts noteHtml.ts
         mailbox.ts  (MailBox: OTP/verify-link extraction — RANKED, never filtered, by
         distance to the nearest code word; the mail body itself is rendered in a
@@ -255,6 +257,8 @@ commit when the behaviour changes.
 | `/terminal` or Continue session (resume a run's session) | `terminal-and-sessions.md` |
 | the portal-owned QC browser / Playwright attach mode | `qc-browser.md` |
 | `/remote` — publishing the portal over a Cloudflare Tunnel, and the access gate in front of it | `remote-access.md` |
+| installing the portal as a desktop app (the manifest / service worker) | `pwa.md` |
+| the installers, the `.exe` / `.dmg`, desktop shortcuts | `installer.md` |
 
 ## Conventions
 

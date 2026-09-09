@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="512" height="512">
+  <rect width="32" height="32" rx="4" fill="#0f172a" />
+  <svg x="2.24" y="2.24" width="27.52" height="27.52" viewBox="0 0 32 32">
+    <mask id="qc-icon-check">
+      <rect width="32" height="32" fill="#fff" />
+      <path d="M10.4 16.4l3.9 3.9 7.5-8.6" stroke="#000" stroke-width="3.4"
+            stroke-linecap="round" stroke-linejoin="round" fill="none" />
+    </mask>
+    <path fill="#f8fafc" stroke="#f8fafc" stroke-width="3.4" stroke-linejoin="round"
+      mask="url(#qc-icon-check)"
+      d="M16.00 3.30L19.12 6.39L23.46 5.73L24.17 10.06L28.08 12.08L26.10 16.00L28.08 19.92L24.17 21.94L23.46 26.27L19.12 25.61L16.00 28.70L12.88 25.61L8.54 26.27L7.83 21.94L3.92 19.92L5.90 16.00L3.92 12.08L7.83 10.06L8.54 5.73L12.88 6.39Z" />
+  </svg>
+</svg>

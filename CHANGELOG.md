@@ -3,6 +3,40 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.12.0 — 2026-09-09
+
+**The portal installs and opens like a desktop app**
+
+### Added
+
+- **A real app, not a browser tab.** The installer now leaves a **QC Portal** icon behind —
+  Desktop and Start Menu on Windows, Launchpad and `~/Applications` on macOS. Click it and
+  the portal opens in **its own window**: no tabs, no address bar, its own icon in the
+  taskbar/Dock. No terminal, no URL to remember. It is the same portal on the same address,
+  just shown as a window; the server still starts automatically when you click the icon.
+- **One file to install, for people who never open a terminal.** A single `.exe` on Windows
+  and a single `.dmg` on macOS, built from the project's own installer — hand it over,
+  double-click, wait a few minutes. It still installs Node, Git and Claude Code for you if
+  they are missing. (The first time, Windows warns about an unknown publisher and macOS asks
+  you to right-click → Open: neither file is code-signed yet.) Ask whoever set up the portal
+  for the file; the `curl` one-liners in the README still work exactly as before.
+- **Install it from the browser instead, if you prefer.** The portal is now a proper
+  installable web app, so Edge's or Chrome's install icon in the address bar pins it to the
+  same kind of window.
+- **`qc-portal --app`** — start the portal and show it in that window from the command line.
+  This is what the desktop shortcut runs.
+- **Uninstall scripts.** `installer/windows/uninstall.ps1` and `installer/macos/uninstall.sh`
+  remove the portal, the shortcut and the command, ask before deleting anything, tell you
+  where your run history is first, and leave Node, Git and Claude Code alone.
+
+### Fixed
+
+- **Exports no longer save in silence.** In a browser tab, the browser's own download popup
+  is what tells you an export worked. The app window has no toolbar and therefore no popup,
+  so four downloads looked like buttons that did nothing. Downloading a **query result CSV**,
+  a **prototype `.html`**, a **chat transcript**, or the **example accounts CSV** now says so
+  and names the file. (The performance and NFR reports and project export already did.)
+
 ## 0.11.28 — 2026-09-09
 
 **MailBox reads Vietnamese mail as Vietnamese**

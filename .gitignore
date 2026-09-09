@@ -17,3 +17,6 @@ runtime/
 snap.md
 settings-projects-*.png
 .serena/
+
+# Built installer artefacts (the .exe / .dmg are release downloads, not source)
+installer/*/dist/

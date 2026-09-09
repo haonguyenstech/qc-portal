@@ -8,12 +8,17 @@ import { Toaster } from '@/components/ui/sonner'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { ProjectProvider } from '@/lib/project-context'
 import { NotificationProvider } from '@/lib/notifications'
+import { registerServiceWorker } from '@/lib/pwa'
 
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: { retry: false, refetchOnWindowFocus: false },
   },
 })
+
+// Makes the portal installable as a desktop app (Edge/Chrome → "Install QC Portal").
+// The browser tab is unaffected: same URL, same bundle, no offline mode.
+registerServiceWorker()
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>

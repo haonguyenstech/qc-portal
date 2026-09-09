@@ -20,6 +20,26 @@ folder**, so its `qc-testing` skill, `CLAUDE.md`, `.mcp.json`, and `testing/` ou
 The installer ensures Node 22.5+ and Claude Code are present, downloads the portal into
 `~/.qc-portal`, builds it, and adds a `qc-portal` command to your PATH.
 
+It also adds a **QC Portal** app — Desktop + Start Menu on Windows, Launchpad and
+`~/Applications` on macOS. Click it and the portal opens **in its own window**: no tabs, no
+address bar, its own icon in the Dock/taskbar. No terminal involved.
+
+### Easiest: one file to double-click
+
+No terminal at all. Ask for these from whoever set the portal up (they are built from
+`installer/`, not checked in):
+
+| | File | First time |
+|---|---|---|
+| Windows | `QC-Portal-Setup.exe` | SmartScreen warns about an unknown publisher — *More info* → *Run anyway*. |
+| macOS | `QC-Portal-Installer.dmg` | Open it, then **right-click** *Install QC Portal.command* → *Open* (a plain double-click is blocked). |
+
+Either way the first install takes a few minutes in a console window: it fetches Node, Git
+and Claude Code if they are missing, downloads the portal and builds it. Leave it alone
+until it says Done.
+
+### Or from a terminal
+
 **Windows — Command Prompt (cmd.exe, no PowerShell)**
 ```bat
 curl -fsSLo "%TEMP%\qc-install.bat" https://raw.githubusercontent.com/haonguyenstech/qc-portal/main/install.bat && "%TEMP%\qc-install.bat"
@@ -47,6 +67,16 @@ qc-portal --version  # print the installed version
 ```
 The portal runs as a single process on **http://127.0.0.1:5174** (override with `QC_PORT`); the
 Express server serves both the API and the built web UI.
+
+The **QC Portal** shortcut the installer created runs `qc-portal --app`, which is the same
+server shown in its own window instead of a browser tab. If you would rather pin it from the
+browser, Edge's install icon in the address bar does the same thing. Either way the server
+has to be running — the window is a view onto it, not a copy of it. See
+`docs/architecture/pwa.md` and `docs/architecture/installer.md`.
+
+**To remove it:** `installer\windows\uninstall.ps1` (Windows) or
+`bash installer/macos/uninstall.sh` (macOS/Linux). Both ask before deleting, and both leave
+Node, Git and Claude Code alone.
 
 ## Develop (from a clone)
 
