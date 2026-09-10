@@ -3,6 +3,26 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.12.2 — 2026-09-10
+
+**The macOS installer is a double-click again**
+
+### Changed
+
+- **The disk image now holds an app you double-click,** *Install QC Portal*, instead of a
+  script you had to run from Terminal. Double-click it and a Terminal window does the work,
+  showing what it is doing. That change is also what makes an Apple-signed installer possible
+  at all: a bare shell script can never be notarised, an app can — so the day there is an
+  Apple Developer ID, one command produces an image that opens with no warning whatsoever.
+- **The warning is explained honestly, because it was measured.** macOS blocks the installer
+  only when the image was **downloaded with a web browser** — that is what puts the mark on
+  it. The very same file, handed over on a **USB stick, a shared folder, or through Google
+  Drive**, opens with no dialog at all. If you did download it and get "Apple could not
+  verify…", press **Done** and allow it once in **System Settings → Privacy & Security →
+  Open Anyway**, or paste the one-line `curl` install instead. The old *right-click → Open*
+  trick was removed by Apple in macOS 15 and no longer does anything, so ignore any advice
+  that still mentions it — ours did, and it was wrong.
+
 ## 0.12.1 — 2026-09-10
 
 **The macOS installer actually installs**

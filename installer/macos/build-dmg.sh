@@ -1,28 +1,41 @@
 #!/usr/bin/env bash
-# Build installer/macos/dist/QC-Portal-Installer.dmg — the macOS equivalent of the
-# .exe: one file to download, open, and double-click.
+# Build installer/macos/dist/QC-Portal-Installer.dmg - the macOS equivalent of the
+# .exe: one file to hand over, open, and double-click.
 #
-#   bash installer/macos/build-dmg.sh
+#   bash installer/macos/build-dmg.sh                 # unsigned (the default)
+#   QC_SIGN_ID="Developer ID Application: ..." \
+#   QC_NOTARY_PROFILE=qcportal \
+#   bash installer/macos/build-dmg.sh                 # signed + notarised
 #
-# The disk image holds ONE file, "Install QC Portal.command", whose whole body is
-# the curl|bash line from the README. It is a delivery vehicle, not a second
-# installer: the logic stays in install.sh, fetched fresh at install time, so a dmg
-# handed round on a USB stick can never install a stale version of it.
+# THE GATEKEEPER PROBLEM, measured rather than assumed (macOS 26.4):
 #
-# NOT notarised, and on macOS 15 (Sequoia) and later that means a double-click is
-# simply REFUSED: "Apple could not verify ... is free of malware", with Move to Trash
-# as the default button. The old right-click -> Open bypass NO LONGER EXISTS - Apple
-# removed it, so any instruction that still says it is wrong.
+#   dmg with NO com.apple.quarantine  -> double-click RUNS
+#   dmg quarantined, flags 0001       -> double-click BLOCKED ("Apple could not
+#                                        verify ... is free of malware")
+#   after the user approves it once   -> runs
 #
-# What does work is running the script through an interpreter: the notarization check
-# lives in LaunchServices (a Finder double-click), not in the shell. So READ ME
-# FIRST.txt leads with `bash ` + DRAG THE FILE IN, which needs no settings change at
-# all -- and is deliberately not a hardcoded /Volumes path, because a second copy of
-# this image mounts as "<name> 1" and every typed path would then be wrong. The GUI
-# route (System Settings -> Privacy & Security -> Open Anyway) is offered second.
+# Only the DOWNLOADER sets quarantine - a browser or Mail. A file that arrives on a
+# USB stick, over a network share, or through a sync client is not quarantined, and
+# then this image double-clicks with no dialog at all. That is also exactly why the
+# `~/Applications/QC Portal.app` the installer writes is never blocked: it is created
+# locally, not downloaded.
 #
-# Notarising, which would restore the double-click, needs a paid Apple Developer ID;
-# see docs/architecture/installer.md.
+# And note what does NOT help: the block is NOT spctl's assessment. It was reproduced
+# on a machine with `spctl --status: assessments disabled`, so `spctl --master-disable`
+# is not a workaround. Ad-hoc signing is not one either - it satisfies no notarisation
+# check.
+#
+# So there are exactly two ways to make a DOWNLOADED image double-click:
+#
+#   1. Notarise it. Needs a paid Apple Developer ID; this script does the whole thing
+#      when QC_SIGN_ID and QC_NOTARY_PROFILE are set (see below).
+#   2. Don't deliver it through a browser. Put it on a share or a USB stick.
+#
+# WHY THE PAYLOAD IS AN .app AND NOT A .command: a bare shell script can never be
+# notarised - there is nothing to sign. An .app bundle whose executable is a shell
+# script CAN be, which is what makes route 1 possible at all. Unsigned, an .app also
+# gets the *System Settings -> Privacy & Security -> Open Anyway* button, which Apple
+# documents for applications (not verified here - it needs a real GUI).
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -31,92 +44,124 @@ DIST="$HERE/dist"
 STAGE="$(mktemp -d)"
 VOL='QC Portal Installer'
 DMG="$DIST/QC-Portal-Installer.dmg"
+APP="$STAGE/Install QC Portal.app"
 RAW='https://raw.githubusercontent.com/haonguyenstech/qc-portal/main/install.sh'
+SIGN_ID="${QC_SIGN_ID:-}"
+NOTARY_PROFILE="${QC_NOTARY_PROFILE:-}"
 
 trap 'rm -rf "$STAGE"' EXIT
-
 mkdir -p "$DIST"
-cat > "$STAGE/Install QC Portal.command" <<CMD
-#!/bin/bash
-# QC Portal installer. Runs the project's own install.sh, fetched fresh — so this
-# file cannot go stale no matter how long the disk image has been sitting around.
-#
-# A double-click on this file is REFUSED by macOS 15+ (this image is not notarised).
-# Run it from Terminal instead - see READ ME FIRST.txt in the same window.
-set -euo pipefail
-printf '\033[1mQC Portal installer\033[0m\n\n'
-curl -fsSL '$RAW' | bash
-printf '\nPress any key to close.\n'
-read -r -n 1 -s
-CMD
-chmod +x "$STAGE/Install QC Portal.command"
 
-# A README the user sees next to it in the mounted window, because the right-click
-# dance is not discoverable and a failed double-click looks like a broken download.
+# ---------------------------------------------------------------- the installer app
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+cat > "$APP/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key><string>Install QC Portal</string>
+  <key>CFBundleDisplayName</key><string>Install QC Portal</string>
+  <key>CFBundleIdentifier</key><string>com.stsdata.qcportal.installer</string>
+  <key>CFBundleVersion</key><string>1.0</string>
+  <key>CFBundleShortVersionString</key><string>1.0</string>
+  <key>CFBundleExecutable</key><string>install-qc-portal</string>
+  <key>CFBundleIconFile</key><string>qc-portal</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <!-- No window of its own: it hands the work to Terminal and exits. -->
+  <key>LSUIElement</key><true/>
+</dict>
+</plist>
+PLIST
+[ -f "$ROOT/installer/icons/qc-portal.icns" ] && cp "$ROOT/installer/icons/qc-portal.icns" "$APP/Contents/Resources/qc-portal.icns"
+
+# The executable hands the install to Terminal and exits. It deliberately runs the
+# project's own install.sh FETCHED FRESH rather than a copy carried in the image, for
+# two reasons: an image left on a share for six months cannot install a stale
+# installer, and there is no second script inside the bundle for Gatekeeper to assess.
+cat > "$APP/Contents/MacOS/install-qc-portal" <<LAUNCH
+#!/bin/bash
+# Generated by installer/macos/build-dmg.sh. Opens Terminal and runs the installer
+# there, because the install takes minutes and prints what it is doing -- a progress
+# bar we would have to invent, badly.
+set -eu
+osascript <<'OSA'
+tell application "Terminal"
+  activate
+  do script "clear; echo 'QC Portal installer'; echo; curl -fsSL $RAW | bash"
+end tell
+OSA
+LAUNCH
+chmod +x "$APP/Contents/MacOS/install-qc-portal"
+
+# ------------------------------------------------------------------ the README
 cat > "$STAGE/READ ME FIRST.txt" <<TXT
 QC Portal - install
 ===================
 
-macOS will NOT let you double-click the installer. This disk image is not signed
-by Apple, and since macOS 15 an unsigned download is refused outright ("Apple
-could not verify..."). That is expected, and the file is fine. Do this instead.
+Double-click "Install QC Portal". A Terminal window opens and does the work: it
+installs Node, Git and Claude Code if they are missing, downloads the portal and
+builds it. A few minutes. Leave it alone until it says Done.
+
+Afterwards you get a "QC Portal" app in Launchpad - click it and the portal opens
+in its own window - plus a \`qc-portal\` command in a new terminal (--stop,
+--status, --update). One thing stays yours to do: sign in to Claude once, either
+by running \`claude\` or with Auto Agent AI > Connect in the portal's sidebar.
 
 
-EASIEST - run it from Terminal (nothing to confirm, no settings to change)
--------------------------------------------------------------------------
+IF macOS SAYS IT "COULD NOT VERIFY" THE APP
+-------------------------------------------
 
-1. Open Terminal: press Command-Space, type Terminal, press Return.
-2. Type these five characters, INCLUDING the space at the end:
+That appears when this image was downloaded with a WEB BROWSER, and it means the
+installer is not signed by Apple - not that anything is wrong with it. Press Done,
+then either:
 
-       bash 
+  * System Settings > Privacy & Security, scroll to Security, and click
+    "Open Anyway" next to "Install QC Portal was blocked". Then double-click again.
 
-3. DRAG "Install QC Portal.command" from this window into the Terminal window.
-   Terminal fills in the path for you.
-4. Press Return.
+  * Or skip the image entirely and paste this one line into Terminal:
 
-The block applies to opening the file from Finder, not to running it in a shell.
+        curl -fsSL $RAW | bash
 
-(Typing the path by hand works too, but only while this is the only copy of
-the image you have open: macOS mounts a second one under a different name, and
-a typed path is then wrong. Dragging is always right.)
+    It does exactly the same thing.
 
-
-DON'T WANT THE DISK IMAGE AT ALL?
----------------------------------
-
-This one line does exactly the same thing, with nothing to download first:
-
-    curl -fsSL $RAW | bash
-
-
-IF YOU PREFER CLICKING
-----------------------
-
-1. Double-click "Install QC Portal.command", then press Done on the warning.
-2. Open System Settings > Privacy & Security and scroll to Security.
-3. Next to "Install QC Portal.command was blocked", click Open Anyway.
-4. Double-click the file again and confirm.
-
-
-WHAT HAPPENS NEXT
------------------
-
-A Terminal window works for a few minutes: it installs Node, Git and Claude Code
-if they are missing, downloads the portal and builds it. Leave it alone until it
-says Done.
-
-You get a "QC Portal" app in Launchpad - click it and the portal opens in its own
-window - plus a \`qc-portal\` command in a new terminal (--stop, --status, --update).
-
-One thing stays yours to do: sign in to Claude once. Either run \`claude\` in a
-terminal, or use Auto Agent AI > Connect in the portal's sidebar.
+You will not see that warning at all if you got this image on a USB stick, from a
+shared folder, or through a sync client such as Google Drive - macOS only marks
+browser and Mail downloads.
 
 Requires an internet connection.
 TXT
 
 [ -f "$ROOT/installer/icons/qc-portal.icns" ] && cp "$ROOT/installer/icons/qc-portal.icns" "$STAGE/.VolumeIcon.icns"
 
+# ------------------------------------------------------------- sign, if we can
+if [ -n "$SIGN_ID" ]; then
+  echo "signing the app as: $SIGN_ID"
+  # --options runtime (the hardened runtime) is REQUIRED for notarisation; without it
+  # notarytool accepts the upload and then fails the ticket.
+  codesign --force --timestamp --options runtime --sign "$SIGN_ID" "$APP"
+  codesign --verify --strict --verbose=2 "$APP"
+else
+  echo "unsigned (set QC_SIGN_ID to sign; see the comment at the top of this file)"
+fi
+
+# ------------------------------------------------------------------- the image
 rm -f "$DMG"
-# UDZO = compressed read-only, the normal shape for a download.
 hdiutil create -quiet -volname "$VOL" -srcfolder "$STAGE" -ov -format UDZO "$DMG"
+
+if [ -n "$SIGN_ID" ]; then
+  codesign --force --timestamp --sign "$SIGN_ID" "$DMG"
+  if [ -n "$NOTARY_PROFILE" ]; then
+    echo "submitting to Apple for notarisation (a few minutes)..."
+    # One-time setup of the profile this reads:
+    #   xcrun notarytool store-credentials qcportal --apple-id <you@example.com> \
+    #     --team-id <TEAMID> --password <app-specific-password>
+    xcrun notarytool submit "$DMG" --keychain-profile "$NOTARY_PROFILE" --wait
+    # Stapling is what lets a machine with no network still see the ticket.
+    xcrun stapler staple "$DMG"
+    xcrun stapler validate "$DMG" && echo "notarised and stapled - a downloaded copy will double-click"
+  else
+    echo "signed but NOT notarised (set QC_NOTARY_PROFILE) - a browser download will still be blocked"
+  fi
+fi
+
 printf 'built %s (%s)\n' "$DMG" "$(du -h "$DMG" | cut -f1)"

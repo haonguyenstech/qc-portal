@@ -36,17 +36,19 @@ No terminal at all. Both buttons always point at the newest release
 | | First time |
 |---|---|
 | **Windows** — `QC-Portal-Setup.exe` | SmartScreen warns about an unknown publisher: *More info* → *Run anyway*. |
-| **macOS** — `QC-Portal-Installer.dmg` | Open it and read *READ ME FIRST.txt*: macOS refuses to **double-click** an unsigned installer, so you type `bash ` in Terminal and drag the `.command` in. On macOS, the terminal line below is genuinely less work. |
+| **macOS** — `QC-Portal-Installer.dmg` | Open it and double-click **Install QC Portal**. A Terminal window does the work. |
 
 Neither file is code-signed yet, which is all those warnings mean. The first install takes a
 few minutes in a console window: it fetches Node, Git and Claude Code if they are missing,
 downloads the portal and builds it. Leave it alone until it says Done.
 
-> **macOS 15 and later** no longer offer the old *right-click → Open* bypass for unsigned
-> downloads — the dialog only says "Apple could not verify…", with **Move to Trash** as the
-> default button. Nothing is wrong with the file: press **Done**, and either run it from
-> Terminal (the `.dmg`'s READ ME FIRST.txt walks through it) or allow it once in
-> **System Settings → Privacy & Security → Open Anyway**.
+> **If macOS says it "could not verify" the installer** — that appears when you downloaded
+> the `.dmg` **with a web browser**, and it means the installer is not signed by Apple, not
+> that anything is wrong with it. Press **Done**, then allow it once in **System Settings →
+> Privacy & Security → Open Anyway**, or just paste the one-line `curl` install below.
+> (macOS 15 removed the old *right-click → Open* trick, so ignore any advice that mentions
+> it.) You will not see the warning at all if the image reached you on a **USB stick, a
+> shared folder, or a sync client** — macOS only marks browser and Mail downloads.
 
 ### Or from a terminal
 

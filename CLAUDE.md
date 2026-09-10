@@ -133,14 +133,20 @@ gh release create vX.Y.Z --title "X.Y.Z — <title>" --notes-file <notes> \
   installer/windows/dist/QC-Portal-Setup.exe installer/macos/dist/QC-Portal-Installer.dmg
 ```
 
-Neither artefact is code-signed, and the two warnings differ, so tell users the right one:
-Windows SmartScreen says "unknown publisher" (*More info* → *Run anyway*), while macOS
-**refuses the double-click outright** — and since macOS 15 the old *right-click → Open*
-bypass **no longer exists**, so do not write it down anywhere. The dialog's default button is
-*Move to Trash*. What works is running the script through a shell (`bash ` + drag the file
-in — the notarization check is in LaunchServices, not the shell), or
-*System Settings → Privacy & Security → Open Anyway*. Proper fixes cost money: a Windows
-code-signing certificate, and an Apple Developer ID ($99/yr) plus notarisation.
+Neither artefact is code-signed, and the two warnings differ, so tell users the right one.
+Windows SmartScreen says "unknown publisher" (*More info* → *Run anyway*). macOS **refuses
+the double-click**, and the old *right-click → Open* bypass **no longer exists** (removed in
+macOS 15) — never write it down. Measured facts, because this went wrong twice: the block is
+the **quarantine flag a browser sets**, not `spctl` (it reproduces with
+`spctl --status: assessments disabled`), and not the missing signature as such — an
+*unquarantined* copy of the same image double-clicks fine. So an image handed over on a USB
+stick, a share or a sync client shows no warning at all, and the locally created
+`~/Applications/QC Portal.app` is never blocked either. For a browser download there are only
+two answers: *System Settings → Privacy & Security → Open Anyway*, or **notarise**. The dmg's
+payload is therefore an `.app`, not a `.command` — a bare script cannot be notarised, an app
+bundle can — and `build-dmg.sh` does sign + notarise + staple when `QC_SIGN_ID` and
+`QC_NOTARY_PROFILE` are set. That needs an Apple Developer ID ($99/yr); Windows needs a
+code-signing certificate.
 
 Also: **app mode has no browser toolbar, so it has no download popup.** Any new export must
 `toast` and name the file, or it saves into `~/Downloads` in total silence and reads as a

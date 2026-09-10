@@ -110,21 +110,60 @@ Neither artefact is signed, and the failure modes differ, so tell users the righ
 | | What the user sees | Way through |
 |---|---|---|
 | **Windows** `.exe` | SmartScreen: "Windows protected your PC", unknown publisher | *More info* -> *Run anyway*. It installs fine. |
-| **macOS** `.dmg` | "Apple could not verify ... is free of malware", default button **Move to Trash** | Run it in a shell (`bash ` + drag the file in), or *System Settings -> Privacy & Security -> Open Anyway*. Hence `READ ME FIRST.txt`. |
+| **macOS** `.dmg` | "Apple could not verify ... is free of malware", default button **Move to Trash** — only when downloaded with a browser | *System Settings -> Privacy & Security -> Open Anyway*, or the `curl` one-liner, or get the image off a share instead. Hence `READ ME FIRST.txt`. |
 
-**The right-click -> Open bypass is gone.** It was the standard advice for a decade and it
-was in this doc, the README and the disk image's own README — all three were wrong. Apple
-removed it in macOS 15 (Sequoia); an unsigned download now gets a dialog whose only choices
-are *Move to Trash* and *Done*. Observed on macOS 26.4 with the published `.dmg`.
+**The macOS block, measured.** Three rounds of wrong advice went into this doc before it was
+actually tested, so here are the observations (macOS 26.4):
 
-What still works, and why: the notarization check lives in **LaunchServices** — the thing a
-Finder double-click goes through — not in the shell. So `bash <path>` runs the installer with
-nothing to confirm and no setting to change. `READ ME FIRST.txt` therefore leads with
-`bash ` + **drag the file into Terminal**, deliberately NOT a typed `/Volumes/QC Portal
-Installer/...` path: a second copy of the image mounts under a different name (`... 1`), which
-was hit while verifying this, and every typed path is then silently wrong. The GUI route
-(*Privacy & Security -> Open Anyway*) is offered second, and the plain `curl | bash` line
-third — on macOS that one is genuinely less work than the disk image.
+| The `.dmg` | Double-click |
+|---|---|
+| no `com.apple.quarantine` (built locally, USB stick, share, sync client) | **runs** |
+| quarantined, flags `0001` — what a browser sets | **blocked**: "Apple could not verify ... is free of malware", default button *Move to Trash* |
+| after the user approves it once (the `0002` bit) | runs |
+
+Three conclusions follow, and each one killed a plausible fix:
+
+- **It is not `spctl`.** The block reproduces on a machine reporting
+  `spctl --status: assessments disabled`, so `spctl --master-disable` is not a workaround —
+  this gate lives in LaunchServices/XProtect, not in the assessment `spctl` controls.
+- **It is not "unsigned" as such.** The *same unsigned image*, unquarantined, double-clicks.
+  Which is also why the `~/Applications/QC Portal.app` the installer writes is never blocked,
+  and why `AutoAgent Status.app` — ad-hoc signed, no Team ID, not notarised — launches
+  perfectly: it was written locally by an npm CLI, never downloaded.
+- **Ad-hoc signing buys nothing.** It satisfies no notarisation check.
+- **The `right-click -> Open` bypass is gone**, removed in macOS 15. It was in this doc, the
+  README and the image's own README, and all three were wrong: the dialog offers only *Move
+  to Trash* and *Done*.
+
+So for a browser download there are exactly two answers: *System Settings -> Privacy &
+Security -> Open Anyway*, or **notarise**. And one way to avoid the question entirely — hand
+the image over on a share or a USB stick, where nothing marks it.
+
+**Why the payload is an `.app`, not a `.command`.** A bare shell script **can never be
+notarised**: there is nothing to sign. An `.app` bundle whose executable is a shell script
+can be, which is the only reason route 1 exists for us at all. The bundle
+(`Install QC Portal.app`) is three files — an `Info.plist`, the icon, and a script that opens
+Terminal and runs `curl -fsSL <install.sh> | bash`. Fetching the installer fresh rather than
+carrying a copy means an image left on a share for six months cannot install a stale
+installer, and leaves no second script inside the bundle for Gatekeeper to assess. Terminal
+does the work because the install takes minutes and prints its progress — a progress bar we
+would otherwise have to invent, badly.
+
+**Notarising, when there is a Developer ID.** `build-dmg.sh` does the whole thing; it is
+skipped with a printed note when the two variables are absent:
+
+```bash
+# once per machine:
+xcrun notarytool store-credentials qcportal --apple-id <you@example.com> \
+  --team-id <TEAMID> --password <app-specific-password>
+
+QC_SIGN_ID="Developer ID Application: <Name> (<TEAMID>)" \
+QC_NOTARY_PROFILE=qcportal bash installer/macos/build-dmg.sh
+```
+
+It signs the app **with the hardened runtime** (`--options runtime`, which notarisation
+requires — without it the upload is accepted and the ticket then fails), signs the image,
+submits it, waits, and staples the ticket so a machine with no network still sees it.
 
 Fixing them properly: an OV/EV code-signing certificate on Windows (a few hundred USD a
 year), and an Apple Developer ID plus notarisation on macOS ($99/year). Until someone buys
@@ -249,6 +288,14 @@ scripts are unaffected — this is a PowerShell 5.1 encoding rule, not a house s
   (a normal Edge window has no such label, because its title lives in the tab strip). A
   screenshot could not be taken to show it: `screencapture` produced no file, almost
   certainly for want of Screen Recording permission for the terminal.
+- **macOS, the whole file install, step by step** (which is what caught the bash 3.2 bug the
+  piecewise checks missed): downloaded the published `.dmg`, mounted it, double-clicked
+  *Install QC Portal*, watched Terminal install Node/Claude checks -> clone -> build ->
+  `Done!`, and confirmed `~/.qc-portal` at the shipped version, `~/Applications/QC
+  Portal.app` created (unquarantined, launcher carrying `--app`), the `~/.local/bin/qc-portal`
+  shim, and clicking the app opening the chromeless window. The installer app also ad-hoc
+  signs and verifies (`codesign --verify --strict`), which is what says the bundle is
+  structurally notarisable.
 - **macOS, end to end on the pieces that are fiddly**: the `Info.plist` text taken straight
   out of `shortcut.sh` passes `plutil -lint` and reads back with the right keys
   (`LSUIElement`, `CFBundleIconFile`, version); the generated bundle launches
