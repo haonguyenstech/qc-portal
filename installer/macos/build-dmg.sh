@@ -9,10 +9,20 @@
 # installer: the logic stays in install.sh, fetched fresh at install time, so a dmg
 # handed round on a USB stick can never install a stale version of it.
 #
-# NOT notarised. macOS quarantines anything downloaded, and an unsigned .command
-# inside it will refuse to open on a double-click — right-click -> Open, once, is
-# the way through (Apple's own dialog offers it). Notarising needs a paid Apple
-# Developer ID; see docs/architecture/installer.md.
+# NOT notarised, and on macOS 15 (Sequoia) and later that means a double-click is
+# simply REFUSED: "Apple could not verify ... is free of malware", with Move to Trash
+# as the default button. The old right-click -> Open bypass NO LONGER EXISTS - Apple
+# removed it, so any instruction that still says it is wrong.
+#
+# What does work is running the script through an interpreter: the notarization check
+# lives in LaunchServices (a Finder double-click), not in the shell. So READ ME
+# FIRST.txt leads with `bash ` + DRAG THE FILE IN, which needs no settings change at
+# all -- and is deliberately not a hardcoded /Volumes path, because a second copy of
+# this image mounts as "<name> 1" and every typed path would then be wrong. The GUI
+# route (System Settings -> Privacy & Security -> Open Anyway) is offered second.
+#
+# Notarising, which would restore the double-click, needs a paid Apple Developer ID;
+# see docs/architecture/installer.md.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -31,8 +41,8 @@ cat > "$STAGE/Install QC Portal.command" <<CMD
 # QC Portal installer. Runs the project's own install.sh, fetched fresh — so this
 # file cannot go stale no matter how long the disk image has been sitting around.
 #
-# If macOS refuses to open this: right-click it -> Open, and confirm once. The
-# image is not notarised, so Gatekeeper quarantines it on a plain double-click.
+# A double-click on this file is REFUSED by macOS 15+ (this image is not notarised).
+# Run it from Terminal instead - see READ ME FIRST.txt in the same window.
 set -euo pipefail
 printf '\033[1mQC Portal installer\033[0m\n\n'
 curl -fsSL '$RAW' | bash
@@ -43,19 +53,63 @@ chmod +x "$STAGE/Install QC Portal.command"
 
 # A README the user sees next to it in the mounted window, because the right-click
 # dance is not discoverable and a failed double-click looks like a broken download.
-cat > "$STAGE/READ ME FIRST.txt" <<'TXT'
-QC Portal — install
+cat > "$STAGE/READ ME FIRST.txt" <<TXT
+QC Portal - install
 ===================
 
-1. RIGHT-CLICK "Install QC Portal.command" and choose Open.
-   (A plain double-click is blocked by macOS: this image is not signed by Apple.)
-2. Confirm when macOS asks.
-3. Leave the Terminal window alone until it says Done — the first install takes a
-   few minutes: it fetches Node, Git and Claude Code if they are missing, downloads
-   the portal and builds it.
+macOS will NOT let you double-click the installer. This disk image is not signed
+by Apple, and since macOS 15 an unsigned download is refused outright ("Apple
+could not verify..."). That is expected, and the file is fine. Do this instead.
 
-You get: a "QC Portal" app in Launchpad, and a `qc-portal` command in a new
-terminal (--stop, --status, --update).
+
+EASIEST - run it from Terminal (nothing to confirm, no settings to change)
+-------------------------------------------------------------------------
+
+1. Open Terminal: press Command-Space, type Terminal, press Return.
+2. Type these five characters, INCLUDING the space at the end:
+
+       bash 
+
+3. DRAG "Install QC Portal.command" from this window into the Terminal window.
+   Terminal fills in the path for you.
+4. Press Return.
+
+The block applies to opening the file from Finder, not to running it in a shell.
+
+(Typing the path by hand works too, but only while this is the only copy of
+the image you have open: macOS mounts a second one under a different name, and
+a typed path is then wrong. Dragging is always right.)
+
+
+DON'T WANT THE DISK IMAGE AT ALL?
+---------------------------------
+
+This one line does exactly the same thing, with nothing to download first:
+
+    curl -fsSL $RAW | bash
+
+
+IF YOU PREFER CLICKING
+----------------------
+
+1. Double-click "Install QC Portal.command", then press Done on the warning.
+2. Open System Settings > Privacy & Security and scroll to Security.
+3. Next to "Install QC Portal.command was blocked", click Open Anyway.
+4. Double-click the file again and confirm.
+
+
+WHAT HAPPENS NEXT
+-----------------
+
+A Terminal window works for a few minutes: it installs Node, Git and Claude Code
+if they are missing, downloads the portal and builds it. Leave it alone until it
+says Done.
+
+You get a "QC Portal" app in Launchpad - click it and the portal opens in its own
+window - plus a \`qc-portal\` command in a new terminal (--stop, --status, --update).
+
+One thing stays yours to do: sign in to Claude once. Either run \`claude\` in a
+terminal, or use Auto Agent AI > Connect in the portal's sidebar.
 
 Requires an internet connection.
 TXT

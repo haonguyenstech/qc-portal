@@ -110,7 +110,21 @@ Neither artefact is signed, and the failure modes differ, so tell users the righ
 | | What the user sees | Way through |
 |---|---|---|
 | **Windows** `.exe` | SmartScreen: "Windows protected your PC", unknown publisher | *More info* -> *Run anyway*. It installs fine. |
-| **macOS** `.dmg` | The `.command` refuses to open on a double-click (quarantine) | **Right-click -> Open**, confirm once. Hence `READ ME FIRST.txt`. |
+| **macOS** `.dmg` | "Apple could not verify ... is free of malware", default button **Move to Trash** | Run it in a shell (`bash ` + drag the file in), or *System Settings -> Privacy & Security -> Open Anyway*. Hence `READ ME FIRST.txt`. |
+
+**The right-click -> Open bypass is gone.** It was the standard advice for a decade and it
+was in this doc, the README and the disk image's own README — all three were wrong. Apple
+removed it in macOS 15 (Sequoia); an unsigned download now gets a dialog whose only choices
+are *Move to Trash* and *Done*. Observed on macOS 26.4 with the published `.dmg`.
+
+What still works, and why: the notarization check lives in **LaunchServices** — the thing a
+Finder double-click goes through — not in the shell. So `bash <path>` runs the installer with
+nothing to confirm and no setting to change. `READ ME FIRST.txt` therefore leads with
+`bash ` + **drag the file into Terminal**, deliberately NOT a typed `/Volumes/QC Portal
+Installer/...` path: a second copy of the image mounts under a different name (`... 1`), which
+was hit while verifying this, and every typed path is then silently wrong. The GUI route
+(*Privacy & Security -> Open Anyway*) is offered second, and the plain `curl | bash` line
+third — on macOS that one is genuinely less work than the disk image.
 
 Fixing them properly: an OV/EV code-signing certificate on Windows (a few hundred USD a
 year), and an Apple Developer ID plus notarisation on macOS ($99/year). Until someone buys

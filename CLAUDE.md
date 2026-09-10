@@ -133,11 +133,14 @@ gh release create vX.Y.Z --title "X.Y.Z — <title>" --notes-file <notes> \
   installer/windows/dist/QC-Portal-Setup.exe installer/macos/dist/QC-Portal-Installer.dmg
 ```
 
-Neither artefact is code-signed, and the two warnings differ: Windows SmartScreen says
-"unknown publisher" (*More info* → *Run anyway*), while macOS **blocks a double-click** on the
-`.dmg`'s `.command` (right-click → *Open*). Proper fixes cost money — a Windows code-signing
-certificate and an Apple Developer ID ($99/yr) — so until then those are documentation, not
-bugs. Tell users the right one; they are not interchangeable.
+Neither artefact is code-signed, and the two warnings differ, so tell users the right one:
+Windows SmartScreen says "unknown publisher" (*More info* → *Run anyway*), while macOS
+**refuses the double-click outright** — and since macOS 15 the old *right-click → Open*
+bypass **no longer exists**, so do not write it down anywhere. The dialog's default button is
+*Move to Trash*. What works is running the script through a shell (`bash ` + drag the file
+in — the notarization check is in LaunchServices, not the shell), or
+*System Settings → Privacy & Security → Open Anyway*. Proper fixes cost money: a Windows
+code-signing certificate, and an Apple Developer ID ($99/yr) plus notarisation.
 
 Also: **app mode has no browser toolbar, so it has no download popup.** Any new export must
 `toast` and name the file, or it saves into `~/Downloads` in total silence and reads as a
