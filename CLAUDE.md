@@ -82,6 +82,10 @@ Step by step, from a clean-ish tree on `main`:
    the root cause / rationale, and the repo's `Co-Authored-By` trailer.
 6. **Tag** the commit `vX.Y.Z` (the `v` prefix matches existing tags).
 7. **Push** the branch **and** the tag: `git push origin main && git push origin vX.Y.Z`.
+8. **Publish the desktop installers** — `bash installer/publish-release.sh`. A release without
+   them is not finished: the README's download buttons then hand out the PREVIOUS version's
+   installers, still working, just older than the tag says. See the next section (and build
+   the `.exe` on Windows first; the script tells you how).
 
 End users upgrade with `qc-portal --update` (git fetch + hard-reset to the upstream branch,
 then `npm install` + `npm run build`; see `bin/qc-portal.mjs`), or the **Release notes** page's
@@ -112,26 +116,26 @@ The rules that bite:
   also fix it, but a BOM is invisible and one tool that strips it brings the bug back silently.
 - **`installer/*/dist/` is gitignored — the artefacts are GitHub release assets.** A 2 MB
   `.exe` per release would live in the git history for ever.
-- **The asset filenames are FIXED** (`QC-Portal-Setup.exe`, `QC-Portal-Installer.dmg`),
-  because the README's download buttons use the version-independent
-  `releases/latest/download/<name>`. Add a version suffix and every published link breaks
-  silently. The mirror-image failure: a release whose assets were never uploaded leaves those
-  buttons serving the **previous** release's installers — still working, just older than the
-  tag says.
+- **Each artefact is uploaded TWICE, under two names**, and both are load-bearing:
+  `QC-Portal-Setup-X.Y.Z.exe` / `QC-Portal-Installer-X.Y.Z.dmg` are the ones to hand to a
+  person — the filename says which version it is, which matters the moment two of them are in
+  someone's Downloads folder. `QC-Portal-Setup.exe` / `QC-Portal-Installer.dmg`, with **no
+  suffix**, are what the README's buttons reach through the version-independent
+  `releases/latest/download/<name>`; GitHub resolves that by **exact filename**, so that pair
+  must never gain a version — rename it and every published link breaks silently. The
+  mirror-image failure: a release whose assets were never uploaded leaves those buttons
+  serving the **previous** release's installers, still working, just older than the tag says.
 
-So after the tag is pushed (step 7 above), publish the artefacts:
+So after the tag is pushed, **`bash installer/publish-release.sh`** does the lot: builds the
+`.dmg`, makes the versioned copies, uploads all four assets to `vX.Y.Z` with `--clobber`, and
+then re-checks that `releases/latest/download/...` still returns 200 for both stable names. It
+refuses to publish half a release, and `QC_DRY_RUN=1` builds and prints without uploading.
 
-```bash
-bash installer/macos/build-dmg.sh      # the .dmg builds on any machine
-# the .exe must be COMPILED ON WINDOWS — Inno Setup only runs there:
-#   winget install JRSoftware.InnoSetup     (with no admin it lands PER USER at
-#                                            %LOCALAPPDATA%\Programs\Inno Setup 6, NOT
-#                                            Program Files (x86) — look in both)
-#   git clone --depth 1 <repo> %TEMP%\qcbuild   (clone main, so the .exe wraps what shipped)
-#   ISCC.exe installer\windows\qc-portal.iss   -> installer\windows\dist\QC-Portal-Setup.exe
-gh release create vX.Y.Z --title "X.Y.Z — <title>" --notes-file <notes> \
-  installer/windows/dist/QC-Portal-Setup.exe installer/macos/dist/QC-Portal-Installer.dmg
-```
+The one thing it cannot do is build the `.exe` — **Inno Setup only runs on Windows** — so
+compile that there first and copy it into `installer/windows/dist/`; the script prints the
+exact commands when it is missing. Note ISCC lands under `%LOCALAPPDATA%\Programs\Inno
+Setup 6` when winget has no admin rights, not `Program Files (x86)`. Clone `main` for that
+build so the `.exe` wraps the `install.ps1` that actually shipped.
 
 Neither artefact is code-signed, and the two warnings differ, so tell users the right one.
 Windows SmartScreen says "unknown publisher" (*More info* → *Run anyway*). macOS **refuses

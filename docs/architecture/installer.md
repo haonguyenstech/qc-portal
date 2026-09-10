@@ -82,20 +82,28 @@ The two artefacts are **GitHub release assets**, never committed (`installer/*/d
 gitignored). A 2 MB `.exe` per release would sit in the git history for ever, and a repo is
 not a download server.
 
-So each release, after the tag is pushed:
+So each release, once the tag is pushed:
 
 ```bash
-bash installer/macos/build-dmg.sh          # the .dmg builds anywhere
-# the .exe must be compiled on Windows (see above), then:
-gh release create vX.Y.Z --title "X.Y.Z — <title>" --notes-file <notes> \
-  installer/windows/dist/QC-Portal-Setup.exe installer/macos/dist/QC-Portal-Installer.dmg
+bash installer/publish-release.sh          # QC_DRY_RUN=1 to build and print only
 ```
 
-The README's download buttons point at
-`releases/latest/download/QC-Portal-Setup.exe` — a **version-independent** URL that GitHub
-resolves to the newest release carrying an asset of that exact name. That is why the asset
-filenames are fixed and must not gain a version suffix: rename them and every published link
-breaks silently, and nobody notices until a QC engineer downloads nothing.
+It builds the `.dmg`, makes the versioned copies, uploads **four** assets with `--clobber`,
+and then re-checks that both stable names still return 200 through
+`releases/latest/download/`. It refuses to run before the tag exists, and refuses to publish
+half a release if the `.exe` is absent — printing the Windows commands instead, since Inno
+Setup only runs there.
+
+**Four assets, two names per artefact**, and both names matter:
+
+| Name | For |
+|---|---|
+| `QC-Portal-Setup-X.Y.Z.exe`, `QC-Portal-Installer-X.Y.Z.dmg` | handing to a person — the filename says which version it is, which matters the moment two are sitting in a Downloads folder |
+| `QC-Portal-Setup.exe`, `QC-Portal-Installer.dmg` | the README's buttons, through the version-independent `releases/latest/download/<name>` |
+
+GitHub resolves `latest/download` by **exact filename**, which is why the unsuffixed pair can
+never gain a version: rename it and every published link breaks silently, with no error
+anywhere. Uploading both costs 2.2 MB per release and removes the choice.
 
 The corollary: a release whose assets were never uploaded leaves those buttons pointing at
 the PREVIOUS release's installers. That is the failure mode to watch for — the buttons keep
