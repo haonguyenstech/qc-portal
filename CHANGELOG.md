@@ -3,6 +3,26 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.12.1 — 2026-09-10
+
+**The macOS installer actually installs**
+
+### Fixed
+
+- **The macOS installer aborted the moment it started.** On a stock Mac it died with
+  `INSTALL_DIR: unbound variable` and installed nothing — both on a first install and on an
+  update. macOS ships **bash 3.2**, which is old enough to swallow the first byte of a `…`
+  character into the *name* of the variable in front of it, so `"$INSTALL_DIR…"` was read as
+  a variable that does not exist. Two lines, two characters, and the whole install stopped.
+  Anyone who got it working had a newer bash on their PATH and never saw it.
+- **The macOS block is explained correctly now.** Apple removed the old *right-click → Open*
+  bypass in macOS 15, so the warning on the downloaded `.dmg` ("Apple could not verify…",
+  with **Move to Trash** as the default button) had no way out in our instructions. The disk
+  image's *READ ME FIRST* now walks through what works — type `bash ` in Terminal and drag
+  the installer in, no settings to change — with *System Settings → Privacy & Security →
+  Open Anyway* as the alternative. On macOS the one-line `curl` install is genuinely less
+  work than the disk image, and the README now says so.
+
 ## 0.12.0 — 2026-09-09
 
 **The portal installs and opens like a desktop app**

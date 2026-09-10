@@ -7,6 +7,15 @@
 # repo into ~/.qc-portal, builds it, and adds a `qc-portal` command to your PATH.
 set -euo pipefail
 
+# NEVER write `$VAR` immediately followed by a non-ASCII character in this file.
+# macOS ships **bash 3.2**, and 3.2 swallows the leading byte of a UTF-8 character
+# into the variable NAME: `"$INSTALL_DIR…"` is read as the variable `INSTALL_DIR\xe2`,
+# which is unset, and `set -u` then kills the installer outright. It did exactly that
+# on lines 85 and 88 -- both the fresh-install and the update path -- on stock macOS,
+# where `env bash` finds /bin/bash 3.2 and nothing newer. Brace it (`${VAR}`) or keep
+# the surrounding text ASCII. A bare non-ASCII character not touching a `$VAR` (the
+# tick marks below) is fine.
+
 REPO="https://github.com/haonguyenstech/qc-portal.git"
 RAW_BRANCH="main"
 INSTALL_DIR="${QC_PORTAL_HOME:-$HOME/.qc-portal}"
@@ -82,10 +91,10 @@ ensure_claude() {
 fetch_source() {
   have git || die "git is required. Install git and re-run."
   if [ -d "$INSTALL_DIR/.git" ]; then
-    bold "Updating existing install at $INSTALL_DIR…"
+    bold "Updating existing install at ${INSTALL_DIR}..."
     git -C "$INSTALL_DIR" pull --ff-only
   else
-    bold "Cloning into $INSTALL_DIR…"
+    bold "Cloning into ${INSTALL_DIR}..."
     rm -rf "$INSTALL_DIR"
     git clone --depth 1 "$REPO" "$INSTALL_DIR"
   fi
