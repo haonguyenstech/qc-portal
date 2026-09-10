@@ -9,7 +9,8 @@ set -euo pipefail
 
 # NEVER write `$VAR` immediately followed by a non-ASCII character in this file.
 # macOS ships **bash 3.2**, and 3.2 swallows the leading byte of a UTF-8 character
-# into the variable NAME: `"$INSTALL_DIR…"` is read as the variable `INSTALL_DIR\xe2`,
+# into the variable NAME: a "$INSTALL_DIR" with an ellipsis stuck to it is read as the
+# variable `INSTALL_DIR\xe2`,
 # which is unset, and `set -u` then kills the installer outright. It did exactly that
 # on lines 85 and 88 -- both the fresh-install and the update path -- on stock macOS,
 # where `env bash` finds /bin/bash 3.2 and nothing newer. Brace it (`${VAR}`) or keep
