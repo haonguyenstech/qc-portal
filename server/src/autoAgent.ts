@@ -4,30 +4,35 @@ import path from 'node:path'
 import { resolveAutoAgentBin } from './autoAgentCli.js'
 
 // Auto Agent (@saigontechnology/auto-agent, CLI `auto-agent-ai`) — the company's
-// credential distributor for Claude Code. It signs in (Microsoft), pulls the shared
-// Claude credential into the keychain, and leaves a WATCHER process running to keep
-// it fresh. The QC Portal still spawns plain `claude`; it just can't authenticate if
-// Auto Agent is logged out, its watcher died, or the credential lapsed — which shows
-// up as confusing mid-run auth failures. This module reports that state so the
+// credential distributor for Claude Code. It signs in (Microsoft) and pulls the shared
+// Claude credential into the keychain. The QC Portal still spawns plain `claude`; it
+// just can't authenticate if Auto Agent is logged out or the credential lapsed — which
+// shows up as confusing mid-run auth failures. This module reports that state so the
 // sidebar can say so up front.
+//
+// WHAT COUNTS AS HEALTHY, and why this changed: up to CLI 1.1.16 `login` left a
+// detached WATCHER process behind and wrote its pid to state.json, so "healthy" meant
+// "that pid is alive". CLI 1.1.20 removed that mode entirely — `login` only keeps the
+// credential current while it owns a TTY, and it writes no pid. Probing for one made
+// every healthy machine report "Watcher stopped" for ever. What actually matters to a
+// `claude` run is the one thing it reads: an unexpired credential.
 //
 // SECRETS: read `state.json` ONLY. The sibling `.config.json` holds `auth.accessToken`
 // and the distributed Claude credentials — this module must never open it, and nothing
 // here may return a token. state.json carries no secret material (role, username,
-// server URL, expiry, session id, watcher pid).
+// server URL, expiry, session id).
 
 const AGENT_DIR = path.join(os.homedir(), '.auto-agent-ai')
 const STATE_FILE = path.join(AGENT_DIR, 'state.json')
 const WATCH_LOG = path.join(AGENT_DIR, 'watch.log')
 
-/** How close to expiry we start warning (the watcher normally refreshes well before). */
+/** How close to expiry we start warning. */
 const EXPIRY_WARN_MS = 30 * 60 * 1000
 
 export type AutoAgentState =
-  | 'connected' // logged in, watcher alive, credential valid
-  | 'expiring' // as above but the credential lapses soon
-  | 'stalled' // logged in + credential valid, but the watcher process is gone
-  | 'expired' // logged in but the credential has lapsed
+  | 'connected' // signed in and the credential is good
+  | 'expiring' // as above but it lapses soon
+  | 'expired' // signed in but the credential has lapsed
   | 'logged-out' // Auto Agent is installed but nobody is signed in
   | 'not-installed' // no Auto Agent state on this machine at all
 
@@ -42,8 +47,7 @@ export interface AutoAgentStatus {
   role: string | null
   /** ISO timestamp the pulled credential expires, when known. */
   expiresAt: string | null
-  watcherRunning: boolean
-  /** Last ✖ line from watch.log, when it explains the current problem. */
+  /** Last ✖ line from watch.log, when it explains the CURRENT problem. */
   lastError: string | null
   /**
    * Path to the `auto-agent-ai` binary, or null when it isn't on this machine. This is
@@ -59,7 +63,6 @@ interface RawState {
   username?: unknown
   serverUrl?: unknown
   lastExpiresAt?: unknown
-  watchPid?: unknown
 }
 
 function readState(): RawState | null {
@@ -71,26 +74,22 @@ function readState(): RawState | null {
   }
 }
 
-/** Is that pid still alive? `kill(pid, 0)` tests existence without signalling. */
-function pidAlive(pid: number): boolean {
-  if (!Number.isInteger(pid) || pid <= 0) return false
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch (err) {
-    // EPERM = alive but owned by another user; only ESRCH means "no such process".
-    return (err as NodeJS.ErrnoException).code === 'EPERM'
-  }
-}
-
 /**
- * Last failure the watcher logged, if it's the most recent thing that happened.
+ * Last failure the CLI logged, if it's still the most recent thing that happened.
  * The log is append-only and can be ~1 MB, so read only the tail. A ✖ line that is
  * followed by a later "Watcher started" is stale history, not the current state.
+ *
+ * The mtime gate matters more than it looks: CLI 1.1.20 stopped writing this file at
+ * all, so whatever ✖ it ends on is frozen there for ever. Presented as the current
+ * problem, last week's 403 becomes a permanent red herring in the sidebar — which is
+ * exactly what it did. A log older than the sign-in that wrote state.json describes a
+ * session that is over.
  */
 function lastWatcherError(): string | null {
   try {
-    const { size } = fs.statSync(WATCH_LOG)
+    const { size, mtimeMs } = fs.statSync(WATCH_LOG)
+    const stateMtime = fs.statSync(STATE_FILE).mtimeMs
+    if (mtimeMs < stateMtime) return null // predates the current sign-in
     const span = Math.min(size, 8192)
     const fd = fs.openSync(WATCH_LOG, 'r')
     const buf = Buffer.alloc(span)
@@ -133,7 +132,6 @@ export function readAutoAgentStatus(): AutoAgentStatus {
     serverUrl: null,
     role: null,
     expiresAt: null,
-    watcherRunning: false,
     lastError: null,
     cliPath,
     checkedAt,
@@ -159,9 +157,8 @@ export function readAutoAgentStatus(): AutoAgentStatus {
   const role = str(state.role)
   const expiresMs = typeof state.lastExpiresAt === 'number' ? state.lastExpiresAt : null
   const expiresAt = expiresMs ? new Date(expiresMs).toISOString() : null
-  const watcherRunning = pidAlive(typeof state.watchPid === 'number' ? state.watchPid : 0)
   const lastError = lastWatcherError()
-  const common = { username, serverUrl, role, expiresAt, watcherRunning, lastError, cliPath, checkedAt }
+  const common = { username, serverUrl, role, expiresAt, lastError, cliPath, checkedAt }
   const left = expiresMs ? expiresMs - Date.now() : null
 
   if (left != null && left <= 0) {
@@ -174,23 +171,13 @@ export function readAutoAgentStatus(): AutoAgentStatus {
         : "Auto Agent's Claude credential expired. Connect again to pull a fresh one.",
     }
   }
-  if (!watcherRunning) {
-    return {
-      ...common,
-      ok: false,
-      state: 'stalled',
-      message: lastError
-        ? `Auto Agent's watcher stopped — ${lastError}`
-        : "Auto Agent's watcher is not running, so the Claude credential will not be refreshed. Connect again to restart it.",
-    }
-  }
   if (left != null && left <= EXPIRY_WARN_MS) {
     const mins = Math.max(1, Math.round(left / 60_000))
     return {
       ...common,
       ok: false,
       state: 'expiring',
-      message: `Auto Agent's Claude credential expires in ~${mins} min. The watcher should refresh it automatically.`,
+      message: `Auto Agent's Claude credential expires in ~${mins} min. It is renewed automatically if the AutoAgent Status app is running here; otherwise connect again before it lapses.`,
     }
   }
   return {

@@ -3431,7 +3431,6 @@ export function listTerminalSessions(): Promise<{ sessions: TerminalSessionInfo[
 export type AutoAgentState =
   | 'connected'
   | 'expiring'
-  | 'stalled'
   | 'expired'
   | 'logged-out'
   | 'not-installed'
@@ -3445,14 +3444,13 @@ export interface AutoAgentStatus {
   serverUrl: string | null
   role: string | null
   expiresAt: string | null
-  watcherRunning: boolean
   lastError: string | null
   /** Path to the `auto-agent-ai` binary, or null when it isn't installed here. */
   cliPath: string | null
   checkedAt: string
 }
 
-/** Poll Auto Agent's connection state (filesystem + pid probe on the server). */
+/** Poll Auto Agent's connection state (a filesystem read on the server). */
 export function getAutoAgentStatus(): Promise<AutoAgentStatus> {
   return request('/api/auto-agent/status')
 }
@@ -3500,7 +3498,7 @@ export function cancelAutoAgentLogin(): Promise<{ ok: boolean }> {
   return request('/api/auto-agent/login/cancel', { method: 'POST' })
 }
 
-/** Run `auto-agent-ai logout`: stops the watcher and drops the shared credential. */
+/** Run `auto-agent-ai logout`: drops the shared credential and the local state. */
 export function autoAgentLogout(): Promise<{ ok: boolean; output: string[] }> {
   return request('/api/auto-agent/logout', { method: 'POST' })
 }
@@ -3886,6 +3884,29 @@ export function archiveChat(
   return request(`/api/chat/${encodeURIComponent(slug)}/archive`, {
     method: 'POST',
     body: JSON.stringify({ projectId, archived }),
+  })
+}
+
+/** What a bulk rail action does to every conversation it is given. */
+export type ChatBulkAction = 'delete' | 'pin' | 'unpin' | 'archive' | 'unarchive'
+
+/**
+ * One action over many conversations (`POST /api/chat/bulk`) — what the rail's multi-select
+ * footer calls.
+ *
+ * Deliberately NOT all-or-nothing, and the caller has to say so on screen: the response
+ * carries what was `done` and what `failed`, each failure named with its reason, because a
+ * batch that half-applied and reported "deleted" is how a conversation comes back from the
+ * dead an hour later.
+ */
+export function bulkChatAction(
+  projectId: string,
+  slugs: string[],
+  action: ChatBulkAction,
+): Promise<{ done: string[]; failed: { slug: string; error: string }[] }> {
+  return request('/api/chat/bulk', {
+    method: 'POST',
+    body: JSON.stringify({ projectId, slugs, action }),
   })
 }
 

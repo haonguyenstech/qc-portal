@@ -98,7 +98,7 @@ export const CATALOG: LabTool[] = [
       },
       {
         title: 'Get the shared credential (this team)',
-        body: 'We do not each buy a seat — the company distributes one Claude Code credential through the Auto Agent CLI. `login` signs you in with Microsoft, pulls the credential into your keychain, and leaves a watcher running to keep it fresh.',
+        body: 'We do not each buy a seat — the company distributes one Claude Code credential through the Auto Agent CLI. `login` signs you in with Microsoft and pulls the credential into your keychain. Run it in a terminal and it stays open on a countdown, renewing the credential as it nears expiry; close it and the credential still works until it lapses.',
         code: 'npm install -g @saigontechnology/auto-agent\nauto-agent-ai login',
       },
       {

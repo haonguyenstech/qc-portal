@@ -38,19 +38,24 @@ import {
 /**
  * Sidebar indicator for the company's **Auto Agent** CLI (`auto-agent-ai`), which
  * distributes the shared Claude Code credential. Every QC run, test-case generation
- * and Ask-AI call ultimately shells out to `claude`, so when Auto Agent logs out,
- * its watcher dies, or the credential lapses, all of that starts failing with
- * confusing mid-run auth errors. This puts the state where it's always visible —
- * directly above Release notes — and raises a toast + bell notification the moment
- * it drops, so nobody discovers it halfway through a run.
+ * and Ask-AI call ultimately shells out to `claude`, so when Auto Agent logs out or
+ * the credential lapses, all of that starts failing with confusing mid-run auth
+ * errors. This puts the state where it's always visible — directly above Release
+ * notes — and raises a toast + bell notification the moment it drops, so nobody
+ * discovers it halfway through a run.
  *
- * Polled (not pushed): the server check is a filesystem read + pid probe, so it's
- * cheap enough to run every 30s and needs no socket.
+ * What "healthy" means is the credential, not a process: CLI 1.1.20 removed the
+ * detached watcher the earlier versions left running, so there is nothing to probe
+ * for any more (see `server/src/autoAgent.ts`).
+ *
+ * Polled (not pushed): the server check is a filesystem read, cheap enough to run
+ * every 30s and needs no socket.
  *
  * Clicking it opens `AutoAgentPanel`, which can also CONNECT and DISCONNECT — the CLI
  * used to mean an open terminal window parked on `auto-agent-ai login` forever. It
- * doesn't have to: the sign-in is a loopback OAuth flow and the credential watcher is
- * detached, so the server can run it and the browser step happens in a normal tab (see
+ * doesn't have to: the sign-in is a loopback OAuth flow, and with a piped stdin the
+ * CLI pulls the credential and exits instead of holding a countdown screen open, so
+ * the server can run it and the browser step happens in a normal tab (see
  * `server/src/autoAgentCli.ts`).
  */
 
@@ -77,14 +82,6 @@ function lookFor(state: AutoAgentState): Look {
     case 'expiring':
       return {
         label: 'Expiring soon',
-        dot: 'bg-amber-500',
-        text: 'text-amber-600 dark:text-amber-400',
-        border: 'border-amber-500/40 bg-amber-500/5',
-        Icon: AlertTriangle,
-      }
-    case 'stalled':
-      return {
-        label: 'Watcher stopped',
         dot: 'bg-amber-500',
         text: 'text-amber-600 dark:text-amber-400',
         border: 'border-amber-500/40 bg-amber-500/5',
@@ -123,8 +120,6 @@ function hintFor(state: AutoAgentState): string | null {
     case 'expired':
     case 'logged-out':
       return 'Click to connect — the portal runs the sign-in for you.'
-    case 'stalled':
-      return 'The watcher exited — click to connect again and restart it.'
     case 'not-installed':
       return 'Claude runs will use whatever credential the `claude` CLI already has.'
     default:
@@ -211,7 +206,7 @@ function AutoAgentPanel({
     onSuccess: () => {
       setConfirmDisconnect(false)
       toast.success('Auto Agent disconnected', {
-        description: 'The watcher was stopped and the shared Claude credential removed.',
+        description: 'The shared Claude credential was removed from this machine.',
       })
       refreshStatus()
       void queryClient.invalidateQueries({ queryKey: ['auto-agent-login'] })
@@ -228,7 +223,7 @@ function AutoAgentPanel({
     lastJobState.current = job.state
     if (before !== 'running' || job.state === 'running') return
     if (job.state === 'succeeded') {
-      toast.success('Auto Agent connected', { description: 'The credential watcher is running.' })
+      toast.success('Auto Agent connected', { description: 'The shared Claude credential was pulled.' })
     } else if (job.state === 'failed') {
       toast.error('Auto Agent sign-in failed', { description: job.error ?? undefined })
     }
@@ -270,7 +265,6 @@ function AutoAgentPanel({
                   value={`${expiry} (${new Date(status!.expiresAt!).toLocaleTimeString()})`}
                 />
               )}
-              <Field label="Watcher" value={status?.watcherRunning ? 'Running' : 'Not running'} />
               <Field label="CLI" value={status?.cliPath ?? 'Not installed on this machine'} />
               {status?.lastError && (
                 <p className="pt-1 text-xs text-amber-600 dark:text-amber-400">
