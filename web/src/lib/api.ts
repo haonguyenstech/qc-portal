@@ -8,6 +8,10 @@ import type {
   RunSummary,
   SkillFile,
   SkillSummary,
+  SystemReport,
+  ResponsiveDeviceSpec,
+  ResponsiveJob,
+  ResponsiveUrlProbe,
 } from './types'
 import type { SchemaTable } from './sql-complete'
 
@@ -3800,6 +3804,8 @@ export interface Chat {
   sessionId: string | null
   /** Starred — the rail pins it above the date groups. */
   pinned?: boolean
+  /** Archived — out of the rail's normal list, still on disk and still resumable. */
+  archived?: boolean
   /**
    * Temporary — kept in the server's memory only: no transcript file in testing/chats, and
    * never listed in the history rail. Set when the conversation is created; a follow-up
@@ -3828,6 +3834,8 @@ export interface ChatSummary {
   messageCount: number
   preview: string
   pinned?: boolean
+  /** Archived — the rail hides it behind its "Archived" toggle. */
+  archived?: boolean
   /** A reply is in flight for this conversation — the rail marks it. */
   running?: boolean
 }
@@ -3860,6 +3868,24 @@ export function pinChat(projectId: string, slug: string, pinned: boolean): Promi
   return request(`/api/chat/${encodeURIComponent(slug)}/pin`, {
     method: 'POST',
     body: JSON.stringify({ projectId, pinned }),
+  })
+}
+
+/**
+ * Archive / un-archive a conversation — the rail stops listing it, nothing else changes.
+ *
+ * Like `pinChat` this leaves `updatedAt` alone server-side, so putting a chat away (or
+ * bringing it back weeks later) doesn't rewrite when it was last worked on. It also leaves
+ * any star in place: the two are independent choices.
+ */
+export function archiveChat(
+  projectId: string,
+  slug: string,
+  archived: boolean,
+): Promise<Chat> {
+  return request(`/api/chat/${encodeURIComponent(slug)}/archive`, {
+    method: 'POST',
+    body: JSON.stringify({ projectId, archived }),
   })
 }
 
@@ -4690,4 +4716,121 @@ export function saveRemoteAccessOptions(patch: {
 /** Rotate the session key — every already-unlocked device has to enter the password again. */
 export function revokeRemoteSessions(): Promise<{ ok: true }> {
   return request('/api/remote/sessions/revoke', { method: 'POST' })
+}
+
+// ---- system report (/reports) ----
+
+/**
+ * The whole QC picture for one project in one call — ticket -> test cases -> run
+ * -> defects, joined server-side (see server/src/reportData.ts for why it is one
+ * request and not six). `from`/`to` window the runs and defects only; the ticket
+ * backlog is never date-filtered.
+ */
+export function getSystemReport(
+  projectId: string,
+  range?: { from?: string | null; to?: string | null },
+): Promise<SystemReport> {
+  const q = new URLSearchParams({ projectId })
+  if (range?.from) q.set('from', range.from)
+  if (range?.to) q.set('to', range.to)
+  return request(`/api/reports/summary?${q.toString()}`)
+}
+
+/** Reveal a ticket folder or a run's output folder in the OS file manager. */
+export function openReportFolder(
+  projectId: string,
+  kind: 'ticket' | 'run',
+  target: string,
+): Promise<{ ok: true; path: string }> {
+  return request('/api/reports/open', {
+    method: 'POST',
+    body: JSON.stringify({ projectId, kind, target }),
+  })
+}
+
+/**
+ * Convert the report to PDF or Word. Same split as the Performance page: the HTML
+ * is built in the browser (that is where the formatting lives) and the server only
+ * converts it — printing needs a real Chrome, .docx needs a zip writer.
+ */
+export async function exportSystemReport(
+  format: 'pdf' | 'docx',
+  html: string,
+  fileName: string,
+  footer = '',
+): Promise<Blob> {
+  const res = await fetch(`/api/reports/export/${format}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ html, fileName, footer }),
+  })
+  if (!res.ok) {
+    const text = await res.text().catch(() => '')
+    let message = text || `${res.status} ${res.statusText}`
+    try {
+      const parsed = JSON.parse(text) as { error?: string }
+      if (parsed.error) message = parsed.error
+    } catch {
+      /* not JSON — show what came back */
+    }
+    throw new Error(message)
+  }
+  return res.blob()
+}
+
+// ---- Responsive testing (/responsive) ----
+
+/** Whether a real browser can be driven here — the capture half needs Chrome. */
+export function getResponsiveAvailability(): Promise<{
+  browser: { ok: boolean; error?: string }
+}> {
+  return request('/api/responsive/available')
+}
+
+/**
+ * Reach the URL server-side and report what the live iframe cannot find out for
+ * itself: whether the page allows being framed at all, and whether it declares a
+ * viewport meta tag. A refused frame produces no event in the browser — only a
+ * blank rectangle — so without this the live preview's failure mode is silent.
+ */
+export function probeResponsiveUrl(url: string): Promise<ResponsiveUrlProbe> {
+  return request('/api/responsive/probe', { method: 'POST', body: JSON.stringify({ url }) })
+}
+
+/** Start a device-capture sweep. Returns the job to poll. */
+export function startResponsiveCapture(
+  projectId: string,
+  input: {
+    url: string
+    devices: ResponsiveDeviceSpec[]
+    fullPage: boolean
+    useProfile: boolean
+    waitMs: number
+  },
+): Promise<ResponsiveJob> {
+  return request(`/api/responsive/captures?projectId=${encodeURIComponent(projectId)}`, {
+    method: 'POST',
+    body: JSON.stringify(input),
+  })
+}
+
+export function getResponsiveJob(id: string): Promise<ResponsiveJob> {
+  return request(`/api/responsive/jobs/${encodeURIComponent(id)}`)
+}
+
+export function listResponsiveJobs(projectId: string): Promise<ResponsiveJob[]> {
+  return request(`/api/responsive/jobs?projectId=${encodeURIComponent(projectId)}`)
+}
+
+export function cancelResponsiveJob(id: string): Promise<ResponsiveJob> {
+  return request(`/api/responsive/jobs/${encodeURIComponent(id)}/cancel`, { method: 'POST' })
+}
+
+export function deleteResponsiveJob(id: string): Promise<{ deleted: boolean }> {
+  return request(`/api/responsive/jobs/${encodeURIComponent(id)}`, { method: 'DELETE' })
+}
+
+/** Where one device's screenshot is served from — an <img src>, not a fetch. */
+export function responsiveShotUrl(jobId: string, file: string): string {
+  return `/api/responsive/jobs/${encodeURIComponent(jobId)}/shot/${encodeURIComponent(file)}`
 }

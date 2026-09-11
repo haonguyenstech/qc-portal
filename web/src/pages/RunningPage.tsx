@@ -556,12 +556,12 @@ export default function RunningPage() {
   return (
     <div className="mx-auto max-w-6xl space-y-6">
       <header className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-2.5">
-          <span className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-foreground text-background">
-            <RadioTower className="size-4" />
+        <div className="flex items-start gap-3">
+          <span className="mt-0.5 flex size-11 shrink-0 items-center justify-center rounded-2xl bg-foreground text-background">
+            <RadioTower className="size-5" />
           </span>
-          <div className="space-y-0.5">
-            <h1 className="flex items-center gap-2 text-xl font-semibold tracking-tight">
+          <div className="space-y-1">
+            <h1 className="flex items-center gap-2 text-3xl font-semibold tracking-tight">
               Running tests
               {liveCount > 0 && (
                 <Badge variant="secondary" className="gap-1 font-normal">

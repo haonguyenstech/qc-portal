@@ -25,6 +25,14 @@ const MAX_CONTEXT_CHARS = 24_000
 const MAX_FEEDBACK_ITEMS = 2
 /** Question + answer the vote was about, capped — the tail of a long answer is dropped. */
 const MAX_FEEDBACK_CHARS = 6_000
+/**
+ * A whole QUIET conversation is a wider signal than one vote but a much narrower one than
+ * a finished QC run, so it sits between them — and low, because chat is the input that
+ * arrives most often. Two notes is enough for "that exchange settled something".
+ */
+const MAX_CHAT_ITEMS = 2
+/** The exchange(s) reflected on, capped — the oldest turns are dropped by the caller first. */
+const MAX_CHAT_CHARS = 12_000
 
 export interface LearnResult {
   memory: string[] // names of memory notes written/updated
@@ -297,4 +305,87 @@ Rules: at most ${MAX_FEEDBACK_ITEMS} items; description ≤ 1 line; be specific 
   if (!items.length) return { memory: [], skipped: 'nothing worth remembering' }
   const applied = applyItems(opts.rootPath, opts.source, items)
   return { memory: applied.memory }
+}
+
+/**
+ * WHAT AN ANSWERED CHAT EXCHANGE TEACHES THE PROJECT.
+ *
+ * A QC run and a test-case job capture on their own (`runKnowledgeUpdate`); chat used to
+ * capture only when somebody pressed 👍/👎. But most of what an engineer learns about a
+ * system they learn by ASKING — "which env is staging?", "why does the OTP mail land in
+ * the catcher?" — and none of it survived the conversation it was asked in. This is the
+ * same auto-capture, over a chat exchange instead of a run report.
+ *
+ * It is deliberately the SMALLEST of the three captures, because chat is the most frequent
+ * and the most casual of the three inputs:
+ * - at most `MAX_CHAT_ITEMS` items per capture, not six;
+ * - one capture per QUIET conversation (see `chatLearn.ts`), never one per message — a
+ *   reflection after every turn would cost a model call per message and bury the memory
+ *   page under a note for each half of a back-and-forth;
+ * - knowledge is allowed but discouraged in the prompt: a chat answer is a fact far more
+ *   often than it is a reference document.
+ *
+ * Gated on the project's auto-learn toggle by its caller, unlike `runFeedbackCapture` —
+ * this one happens on its own, which is exactly what that setting governs.
+ *
+ * Never throws; a failure comes back as `skipped`.
+ */
+export async function runChatCapture(opts: {
+  rootPath: string
+  projectName: string
+  source: string
+  /** The exchange(s) to reflect on, already formatted and ordered oldest → newest. */
+  transcript: string
+  model?: string
+}): Promise<LearnResult> {
+  const transcript = (opts.transcript ?? '').trim().slice(0, MAX_CHAT_CHARS)
+  if (!transcript) return { memory: [], knowledge: [], skipped: 'nothing to reflect on' }
+
+  const model = opts.model?.trim() || AUTO_LEARN_MODEL
+  const existingMemory = listNotes(opts.rootPath).map((n) => ({ name: n.name, description: n.description }))
+  const existingKnowledge = listDocs(opts.rootPath).map((d) => d.name)
+  const memList = existingMemory.length
+    ? existingMemory.map((m) => `- ${m.name}: ${m.description || '(no description)'}`).join('\n')
+    : '(none yet)'
+  const knowList = existingKnowledge.length ? existingKnowledge.map((k) => `- ${k}`).join('\n') : '(none yet)'
+
+  const prompt = `You are the memory keeper for the QC project "${opts.projectName}". A QC engineer just had this conversation with the project's chat assistant. You decide what — if anything — the project should REMEMBER so future work is better informed.
+
+--- CONVERSATION START ---
+${transcript}
+--- CONVERSATION END ---
+
+The project already remembers these MEMORY notes (name: description):
+${memList}
+
+And these KNOWLEDGE documents:
+${knowList}
+
+Capture ONLY what will still be true and useful next week, for ANY future question — never a summary of this conversation, never what the engineer was doing today.
+- A durable FACT about this project or the system under test ("staging login needs an OTP from the mail catcher", "the orders API is v2; v1 was removed") goes to MEMORY.
+- A longer reference write-up that genuinely deserves its own page goes to KNOWLEDGE. This is RARE from a chat — prefer memory unless the answer really is a document.
+
+Do NOT capture: a restatement of the question, what the assistant did (files it read, commands it ran), this conversation's one-off details, anything the assistant was unsure about, or anything already covered by the lists above. NEVER copy a credential, token, OTP, cookie or personal data into a note, even if one appears above. Most conversations carry nothing durable — output {"items":[]} then. That is a normal, common and acceptable outcome, and far better than a note nobody needed.
+
+Use mode "update" with the EXISTING name when it refines an entry listed above (your body REPLACES the old one, so restate the whole thing). Otherwise mode "create" with a new short kebab-case name.
+
+Output ONLY a JSON object, no prose, no code fence:
+{"items":[{"target":"memory","mode":"create","name":"orders-api-is-v2","description":"one line","body":"the fact in markdown"}]}
+Rules: at most ${MAX_CHAT_ITEMS} items; description ≤ 1 line; be specific and executable; never placeholders like "TBD".`
+
+  let asked: Awaited<ReturnType<typeof askForItems>>
+  try {
+    asked = await askForItems({
+      rootPath: opts.rootPath,
+      model,
+      prompt,
+      usageSource: 'chat-learn',
+      maxItems: MAX_CHAT_ITEMS,
+    })
+  } catch {
+    return { memory: [], knowledge: [], skipped: 'no AI response' }
+  }
+  if ('skipped' in asked) return { memory: [], knowledge: [], skipped: asked.skipped }
+  if (!asked.items.length) return { memory: [], knowledge: [], skipped: 'nothing worth remembering' }
+  return applyItems(opts.rootPath, opts.source, asked.items)
 }

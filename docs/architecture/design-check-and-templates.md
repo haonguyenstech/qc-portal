@@ -8,13 +8,26 @@ once in the project dir (tools enabled so it can open the design via Figma/Playw
 structured `findings` bucketed into `match` / `mismatch` / `concern` / `unsure` / `discuss`, rendered as
 grouped cards. Output shape is fixed by the prompt's JSON contract — don't reshape it into a template.
 
-The page is one **setup card with three numbered steps** (what to check → criteria → run),
-then live progress, then the findings. The steps exist because the three inputs are not
+The page is one **setup card — two numbered steps (what to check → criteria) over a welded run
+bar** — then live progress, then the findings. The steps exist because the inputs are not
 interchangeable: the ticket and the Figma link are required, the checklist and instructions
-shape what is judged, and the model only changes how hard it looks. The run button says what is
-still MISSING instead of sitting greyed out, the Figma field warns on a non-`figma.com` URL
-(the model can't open what isn't a design), and the instructions box stays collapsed until
-asked for — it was the least-used field taking the most vertical space.
+shape what is judged, and the model only changes how hard it looks. The Figma field warns on a
+non-`figma.com` URL (the model can't open what isn't a design), and the instructions box stays
+collapsed until asked for — it was the least-used field taking the most vertical space.
+
+The **run bar** is a tinted footer strip on the card, not a third numbered step. Running was
+previously a `Verify design` button floating in the card's whitespace with its "what's missing"
+note in 11px grey underneath, and the control that starts a two-minute AI job should not be the
+quietest thing on the page. Readiness is now stated as **pills** — Ticket / Figma link /
+Checklist·optional, each satisfied one turning green — so a disabled button is never
+unexplained, and the checklist being optional is visible rather than inferred. Give the strip
+`rounded-b-3xl`: the card deliberately has **no** `overflow-hidden` (the ticket picker's popover
+is absolutely positioned inside it and must escape the card's edges), so a tinted footer would
+otherwise square off the bottom corners.
+
+The header bar above it answers the only question askable before a ticket is picked: **is there
+a project checklist?** It used to read "Checklist for `<project>`" over a templates path, naming
+neither the thing nor its state.
 
 **Findings are filed to ClickUp exactly like a QC run's issues** (`FindingsPanel` →
 `components/ClickupFilingBar.tsx`, shared with `RunDetailPage`'s Issues tab — see "Filing a
@@ -39,8 +52,37 @@ run's issues to ClickUp" in `runs.md` for the rules that panel enforces). Design
 - **A saved check can still be filed.** History rows open the SAME `FindingsPanel`, because the
   follow-up conversation usually happens later than the check itself.
 
-Count chips double as **filters** and the list has a search box: 26 findings across five buckets
-is a scroll, and the question being asked of it is almost always "show me the ones that failed".
+### Reading 26 findings
+
+A real check returns ~26 findings across five buckets, and everything below is there because
+that volume broke the first version on screen:
+
+- **A verdict, not five numbers** (`verdictOf`). One mismatch outranks any number of matches, so
+  the ladder is severity-ordered: *Gaps found* → *Needs attention* → *Questions to resolve* →
+  *Matches the design*. The same function labels the **history rows**, so "did this ticket pass?"
+  is answerable from the list without opening anything — five counts per row is arithmetic, not
+  an answer.
+- **A proportional bar** under the summary. Count chips say how many of each; only the bar says
+  whether this is mostly fine with two gaps or mostly gaps. Its segments filter, like the chips.
+- **A finding row is a NEUTRAL card with a coloured rail**, never a coloured card. Tinting each
+  row by bucket (`bg-amber-50/40` + `border-amber-300/60`) made 26 findings a wall of
+  highlighter — and in dark mode the tint vanished entirely, leaving 26 hard yellow outlines with
+  nothing inside them. Bucket colour lives in `bg-<c>-500/10 text-<c>-600 dark:text-<c>-400`,
+  which is a tint OF the surface and therefore works on both grounds.
+- **The detail clamps to two lines**, and whether the clamp is hiding anything is **measured**
+  (`scrollHeight > clientHeight`, re-measured on resize), not guessed from a character count — a
+  "Show more" that reveals nothing is worse than no toggle. Unclamped, one report was a 3,500px
+  scroll and the buckets past "Doesn't match" were never reached.
+- **The severity picker appears only on a TICKED row.** A dropdown on every row is 16 dropdowns
+  on screen, all inert until something is selected; showing it only when the finding is actually
+  going to ClickUp says what it is for. An unticked row shows the severity it *would* file with,
+  on hover.
+- **Groups fold, and each carries its own All/None.** "Matches" starts folded — routinely the
+  biggest bucket and the only one with nothing to do in it — and "file every mismatch" is the
+  most common batch there is.
+
+Count chips double as **filters** and the list has a search box: the question being asked of
+26 findings is almost always "show me the ones that failed".
 
 **Project templates (`/templates` → `ProjectSettingsPage.tsx`, `routes/templates.ts`)** — plain-text
 files under `testing/templates/<key>.md`. The UI owns the catalog in `TEMPLATE_KINDS`; add a kind there

@@ -14,6 +14,7 @@ import * as hub from './hub.js'
 import { shutdownActiveRuns } from './runManager.js'
 import { shutdownAuthSession } from './authSession.js'
 import { shutdownPerfJobs } from './perfJobs.js'
+import { shutdownResponsiveJobs } from './responsiveJobs.js'
 import { remoteAccessGuard, wsUpgradeAllowed } from './remoteAccess.js'
 import { autoStartTunnel, reapOrphanedTunnel, shutdownTunnel } from './tunnel.js'
 import {
@@ -49,6 +50,8 @@ import { chatRouter } from './routes/chat.js'
 import { performanceRouter } from './routes/performance.js'
 import { versionRouter } from './routes/version.js'
 import { remoteRouter } from './routes/remote.js'
+import { reportsRouter } from './routes/reports.js'
+import { responsiveRouter } from './routes/responsive.js'
 
 // Optionally seed a default project from QC_REPO_ROOT (no-op if unset / already seeded).
 const defaultProject = seedDefaultProject()
@@ -158,6 +161,8 @@ app.use('/api/browser', browserRouter)
 app.use('/api/mailbox', mailboxRouter)
 app.use('/api/version', versionRouter)
 app.use('/api/remote', remoteRouter)
+app.use('/api/reports', reportsRouter)
+app.use('/api/responsive', responsiveRouter)
 
 // JSON error handler for /api routes: turn body-parser failures (notably
 // PayloadTooLargeError, which otherwise returns an HTML page) into a clean JSON
@@ -290,6 +295,10 @@ function gracefulExit(signal: NodeJS.Signals) {
   // their own kill or a restart orphans a 5-minute load test.
   const p = shutdownPerfJobs()
   if (p) console.log(`Stopped ${p} performance job(s) on ${signal}`)
+  // Same reasoning for a responsive sweep: its Chromes are launched by
+  // responsiveCapture, not runManager, so a restart mid-sweep would orphan them.
+  const r = shutdownResponsiveJobs()
+  if (r) console.log(`Stopped ${r} responsive sweep(s) on ${signal}`)
   // A forgotten sign-in window holds the Chrome profile lock, which would make
   // every audit after the restart fail with "profile already open".
   if (shutdownAuthSession()) console.log(`Closed the sign-in window on ${signal}`)

@@ -1594,11 +1594,11 @@ export default function DatabasePage() {
     <div className="space-y-6">
       <header className="space-y-4">
         <div className="flex items-start gap-3">
-          <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-foreground text-background">
-            <Database className="h-5 w-5" />
+          <span className="mt-0.5 flex size-11 shrink-0 items-center justify-center rounded-2xl bg-foreground text-background">
+            <Database className="size-5" />
           </span>
-          <div className="min-w-0">
-            <h1 className="text-xl font-semibold tracking-tight">Database</h1>
+          <div className="min-w-0 space-y-1">
+            <h1 className="text-3xl font-semibold tracking-tight">Database</h1>
             <p className="text-sm text-muted-foreground">
               Connect this project's databases — tag each one (Backend DB, Analytics DB, …). On every
               sync the portal reads the schema and writes a{' '}

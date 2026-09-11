@@ -10,6 +10,7 @@ import { revealFolderNative } from '../folderPicker.js'
 import { runClaudeStream, CRAWL_SUMMARY_MODELS, type StreamResult } from '../claudeExec.js'
 import { listTestcaseVersions } from '../testcaseGen.js'
 import { runFeedbackCapture } from '../learn.js'
+import { forgetChatLearning, noteChatTurn } from '../chatLearn.js'
 import { missingRefs } from '../answerCheck.js'
 import { runAnswerAudit, type AuditResult } from '../answerAudit.js'
 
@@ -298,6 +299,15 @@ interface Chat {
   /** Starred — sorted above everything else in the rail, whatever its date. */
   pinned?: boolean
   /**
+   * ARCHIVED — out of the rail's normal list, kept on disk in full.
+   *
+   * The opposite of a star, and NOT a soft delete: nothing about the transcript changes,
+   * it can still be opened, searched and resumed, it simply stops competing for room in a
+   * list that grows for ever. Deliberately independent of `pinned` — archiving does not
+   * clear a star, so un-archiving gives back exactly the conversation that was put away.
+   */
+  archived?: boolean
+  /**
    * TEMPORARY — this conversation is never written to testing/chats and never appears in
    * the history rail. It lives in the `temp` registry below for as long as it's being used
    * and is then dropped. See that registry for what "temporary" does and doesn't cover.
@@ -318,6 +328,7 @@ interface ChatSummary {
   messageCount: number
   preview: string
   pinned?: boolean
+  archived?: boolean
   /** A turn is in flight for this conversation (see LiveTurn). */
   running?: boolean
 }
@@ -819,6 +830,7 @@ function listChats(root: string): ChatSummary[] {
       messageCount: c.messages.length,
       preview: (last?.text ?? '').replace(/\s+/g, ' ').trim().slice(0, 120),
       pinned: c.pinned || undefined,
+      archived: c.archived || undefined,
       // A reply is being generated in this one right now — the rail marks it, which is
       // how the engineer knows an answer is still coming after leaving the page.
       running: live.has(liveKey(root, c.slug)) || undefined,
@@ -1744,6 +1756,11 @@ chatRouter.post('/stream', async (req, res) => {
   // Bind the root once: the turn runner below is a hoisted function declaration, which
   // doesn't inherit the `project` narrowing from the guard above.
   const root = project.rootPath
+  // Bound here for the same reason as `root` — and read NOW rather than when the turn
+  // ends, so a toggle flipped mid-answer doesn't change what this turn agreed to.
+  const projectName = project.name
+  const autoLearn = project.autoLearn
+  const autoLearnModel = project.autoLearnModel
   const b = (req.body ?? {}) as Record<string, unknown>
   const typed = typeof b.prompt === 'string' ? b.prompt.trim() : ''
   const hasImages = Array.isArray(b.images) && b.images.length > 0
@@ -2452,6 +2469,27 @@ chatRouter.post('/stream', async (req, res) => {
     rescueTurn = () => {}
     const dropped = r.isError ? dropRemaining() : []
     send({ type: 'done', chat, ...(dropped.length ? { dropped } : {}) })
+    // AI auto-capture, in the background: once this conversation goes quiet, reflect on it
+    // and persist durable facts into testing/memory (see `chatLearn.ts`). AFTER `done` and
+    // never awaited — the reader is not waiting on a reflection, and the queue behind this
+    // turn must not be either.
+    //
+    // Not for a TEMPORARY conversation: "temporary" means it leaves nothing behind, and a
+    // note on the Memory page sourced to a chat that was never written to disk is exactly
+    // the trace the engineer chose not to keep. Not for a failed turn either — there is no
+    // answer to learn from, only the error notice `appendTurn` wrote in its place.
+    if (autoLearn && !r.isError && !chat.temporary && !t.discarded) {
+      noteChatTurn({
+        rootPath: root,
+        projectName,
+        slug: chat.slug,
+        model: autoLearnModel,
+        question: s.prompt,
+        // The SAVED answer, not the raw buffer: the suggestion chips are chrome, and the
+        // capture should read what the transcript reads.
+        answer: splitSuggestions(text).text,
+      })
+    }
     return r.isError ? 'error' : 'done'
   }
 
@@ -2861,6 +2899,32 @@ chatRouter.post('/:slug/pin', (req, res) => {
 })
 
 /**
+ * POST /api/chat/:slug/archive — put away / bring back. Body: { archived: boolean }.
+ *
+ * Like `/pin`, it deliberately does NOT touch `updatedAt`: that field orders the rail's
+ * date groups, and tidying a conversation away must not rewrite when it was last worked
+ * on — un-archiving it a month later would otherwise drop it into "Today".
+ *
+ * A star is left alone. The two flags answer different questions ("keep this in front of
+ * me" vs "get this out of my way"), and clearing one from the other would silently lose a
+ * choice the engineer made.
+ */
+chatRouter.post('/:slug/archive', (req, res) => {
+  const project = resolveProject(req)
+  if (!project) return res.status(400).json({ error: 'project not found' })
+  const chat = loadChat(project.rootPath, req.params.slug)
+  if (!chat) return res.status(404).json({ error: 'chat not found' })
+  // Same refusal as starring: a temporary conversation is never in history, so there is
+  // nothing to archive it out of.
+  if (chat.temporary) {
+    return res.status(400).json({ error: 'a temporary conversation is not kept in history' })
+  }
+  chat.archived = req.body?.archived === true ? true : undefined
+  saveChat(project.rootPath, chat)
+  res.json(chat)
+})
+
+/**
  * DELETE /api/chat/:slug — remove the conversation.
  *
  * For a temporary one this is "end chat": it is forgotten from the registry along with any
@@ -2884,6 +2948,11 @@ chatRouter.delete('/:slug', (req, res) => {
   // loop would answer into a deleted transcript.
   queues.delete(key)
   discardTemp(key)
+  // Deleting has to take the UNWRITTEN memory with it too: a background capture is armed
+  // for up to ninety seconds after the last answer, and a note appearing on the Memory
+  // page a minute later — sourced to a conversation that no longer exists — is the exact
+  // trace the engineer just chose not to keep.
+  forgetChatLearning(project.rootPath, req.params.slug)
   try {
     fs.rmSync(f, { force: true })
   } catch (err) {

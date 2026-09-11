@@ -52,6 +52,8 @@ import {
   Sparkles,
   Square,
   Workflow,
+  Archive,
+  ArchiveRestore,
   Star,
   Telescope,
   TerminalSquare,
@@ -60,7 +62,6 @@ import {
   Ticket,
   Trash2,
   TriangleAlert,
-  User,
   Wand2,
   Wrench,
   X,
@@ -97,6 +98,7 @@ import {
   projectImageUrl,
   resolveProjectImages,
   createWorkspaceNote,
+  archiveChat,
   deleteChat,
   getChat,
   getDatabases,
@@ -1239,7 +1241,30 @@ function railTime(iso: string): string {
   if (hrs < 24) return `${hrs}h ago`
   const days = Math.round(hrs / 24)
   if (days <= 7) return `${days}d ago`
-  return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+  // Anything past a week gets the year too: "7 Aug" alone is ambiguous the moment a project
+  // has conversations from more than one year, and the rail is exactly where an old one is
+  // being told apart from a recent one.
+  return new Date(iso).toLocaleDateString(undefined, {
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric',
+  })
+}
+
+/**
+ * The last thing said in a conversation, as one rail line.
+ *
+ * `preview` is raw markdown off the last message, so it arrives with `**bold**`, backticks
+ * and heading hashes in it — printed as-is the rail reads like source, not like a reply.
+ * Only the inline noise is stripped; the words are left exactly as written.
+ */
+function railSnippet(preview: string): string {
+  return preview
+    .replace(/`+/g, '')
+    .replace(/\*\*/g, '')
+    .replace(/^#{1,6}\s+/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
 }
 
 /**
@@ -1308,14 +1333,19 @@ function readRailFolded(): boolean {
  */
 function RowMenu({
   pinned,
+  archived,
   onPin,
+  onArchive,
   onRename,
   onDelete,
   onExport,
   always,
 }: {
   pinned: boolean
+  archived?: boolean
   onPin: () => void
+  /** Put away / bring back. Absent on a temporary chat, which is not in history at all. */
+  onArchive?: () => void
   onRename: () => void
   onDelete: () => void
   /** Only the header offers this — a rail row doesn't need a download in a two-item menu. */
@@ -1371,6 +1401,23 @@ function RowMenu({
             <PenLine className="size-3.5" />
             Rename
           </button>
+          {onArchive && (
+            <button
+              type="button"
+              onClick={() => {
+                setOpen(false)
+                onArchive()
+              }}
+              className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm transition-colors hover:bg-accent"
+            >
+              {archived ? (
+                <ArchiveRestore className="size-3.5" />
+              ) : (
+                <Archive className="size-3.5" />
+              )}
+              {archived ? 'Unarchive' : 'Archive'}
+            </button>
+          )}
           {onExport && (
             <button
               type="button"
@@ -1575,6 +1622,7 @@ function ChatRail({
   onNew,
   onNewTemporary,
   onPin,
+  onArchive,
   onRename,
   onDelete,
 }: {
@@ -1584,10 +1632,16 @@ function ChatRail({
   onNew: () => void
   onNewTemporary: () => void
   onPin: (slug: string, pinned: boolean) => void
+  onArchive: (slug: string, archived: boolean) => void
   onRename: (slug: string, current: string) => void
   onDelete: (slug: string) => void
 }) {
   const [q, setQ] = useState('')
+  // Archived conversations are hidden behind one line at the bottom of the list. Component
+  // state on purpose, unlike the group folds: "show me the old ones" is something you want
+  // for the next thirty seconds, not something to still be true next week.
+  const [showArchived, setShowArchived] = useState(false)
+  const archivedCount = chats.filter((c) => c.archived).length
   const groups = useMemo(() => {
     const match = q.trim().toLowerCase()
     const shown = match
@@ -1596,16 +1650,38 @@ function ChatRail({
             c.name.toLowerCase().includes(match) || c.preview.toLowerCase().includes(match),
         )
       : chats
+    /*
+     * Archived conversations leave the dated list entirely — that IS archiving. Two
+     * exceptions, both cases where hiding it would look like a bug:
+     *  - the one that is OPEN, because you can archive from the chat header and the row
+     *    you are reading must not vanish out from under you;
+     *  - every match while SEARCHING — a search that hides its own hits is the same bug
+     *    the group folds already had, and "where did that chat go?" is precisely when you
+     *    search for an archived one.
+     */
+    const listed = shown.filter((c) => !c.archived || c.slug === activeSlug)
+    const put = shown.filter((c) => c.archived)
+    /*
+     * The shelf is a VIEW, not an extra group appended to the list. Appended, it landed
+     * under sixty conversations: you clicked "Archived" and the rail did not visibly
+     * change. Switching the list to the archive instead answers the click on the spot,
+     * and the same button — now "Hide archived" — is the way back.
+     */
+    if (showArchived && !match) return [{ label: 'Archived', items: put }].filter((g) => g.items.length)
     // Starred first, as its own group — a starred conversation is one you keep coming back
     // to, so it must outrank its own date instead of sinking into "Older" after a week.
     return [
-      { label: 'Starred', items: shown.filter((c) => c.pinned) },
+      { label: 'Starred', items: listed.filter((c) => c.pinned) },
       ...BUCKETS.map((label) => ({
         label,
-        items: shown.filter((c) => !c.pinned && bucketOf(c.updatedAt) === label),
+        items: listed.filter((c) => !c.pinned && bucketOf(c.updatedAt) === label),
       })),
+      // While SEARCHING, archived hits come back as their own group at the bottom: a
+      // search that hides its own hits is a bug, and "where did that chat go?" is exactly
+      // when an archived one is being looked for.
+      ...(match ? [{ label: 'Archived', items: put.filter((c) => c.slug !== activeSlug) }] : []),
     ].filter((g) => g.items.length)
-  }, [chats, q])
+  }, [chats, q, activeSlug, showArchived])
 
   const [collapsed, setCollapsed] = useState<string[]>(readCollapsedGroups)
   const toggleGroup = (label: string) =>
@@ -1735,7 +1811,11 @@ function ChatRail({
           </div>
         </div>
 
-        <div className="grow space-y-4 overflow-y-auto p-4 lg:space-y-8">
+        {/* space-y-5, not the reference's space-y-8: 32px between groups is a whole row's
+            worth of nothing, and with four groups the rail could show seven conversations
+            on a laptop. The mask fades the last visible row instead of slicing it — a row
+            cut in half against the New Chat block reads as a broken list, not as "scroll". */}
+        <div className="grow space-y-5 overflow-y-auto p-4 [mask-image:linear-gradient(to_bottom,transparent,#000_1rem,#000_calc(100%-1.5rem),transparent)]">
           {groups.length === 0 ? (
             <p className="px-3 text-xs text-muted-foreground">
               {q.trim() ? 'No conversation matches that.' : 'No conversations yet.'}
@@ -1776,9 +1856,18 @@ function ChatRail({
                          * A one-line row of bare text said only the name — not when it was last
                          * worked on, not which one is open — and the menu button shared the
                          * row's width, so every title truncated 36px early even when nothing
-                         * was hovered. Now the button owns the full row (`pe-10` keeps the text
-                         * clear of the menu) and the second line carries the time, or
-                         * "Answering…" while a reply is still being written.
+                         * was hovered. So the button owns the full row and the "…" overlays it.
+                         *
+                         * What each line carries changed once there were enough conversations to
+                         * scroll: the time moved UP beside the title (it is short — "3d ago",
+                         * "7 Aug") and line two became the LAST MESSAGE. The date was the weaker
+                         * of the two facts, because the group header above already says the
+                         * bucket — "Older" followed by five rows all reading "7 Aug" spent a
+                         * whole line to repeat it. Measured on this project: three separate
+                         * conversations are named `hi`, so the name alone cannot tell them
+                         * apart, while their last messages differ completely. The snippet is
+                         * dropped when it only repeats the title, and a row with nothing to add
+                         * collapses to one line rather than padding itself out.
                          */
                         <div key={c.slug} className="group relative">
                           {active && (
@@ -1792,51 +1881,70 @@ function ChatRail({
                             onClick={() => onSelect(c.slug)}
                             title={c.preview || c.name}
                             className={cn(
-                              'w-full min-w-0 rounded-xl px-3 py-2 pe-10 text-start transition-colors hover:bg-muted',
+                              'w-full min-w-0 rounded-xl px-3 py-2 text-start transition-colors hover:bg-muted',
                               active && 'bg-muted',
                             )}
                           >
-                            <div className="flex min-w-0 items-center gap-1.5">
+                            <div className="flex min-w-0 items-baseline gap-1.5">
                               {/* The star stays on the row itself, not only in the group header:
                                   once a search filters the list the group is off screen, and
                                   "why is this one first?" needs an answer on the row. */}
                               {c.pinned && (
-                                <Star className="size-3 shrink-0 fill-amber-400 text-amber-500" />
+                                <Star className="size-3 shrink-0 self-center fill-amber-400 text-amber-500" />
+                              )}
+                              {/* Same reasoning as the star: once a search or the open
+                                  conversation lifts an archived row back into the list, the
+                                  row itself has to say why it looks different. */}
+                              {c.archived && (
+                                <Archive className="size-3 shrink-0 self-center text-muted-foreground" />
                               )}
                               <span
                                 className={cn(
                                   'min-w-0 flex-1 truncate text-sm',
                                   active && 'font-medium',
+                                  c.archived && !active && 'text-muted-foreground',
                                 )}
                               >
                                 {railTitle(c.name)}
                               </span>
+                              {/* Hidden while the row is hovered, because that is when the "…"
+                                  moves in over exactly this spot. */}
+                              <time
+                                dateTime={c.updatedAt}
+                                title={new Date(c.updatedAt).toLocaleString()}
+                                className="shrink-0 text-[11px] tabular-nums text-muted-foreground transition-opacity md:group-hover:opacity-0"
+                              >
+                                {railTime(c.updatedAt)}
+                              </time>
                             </div>
-                            <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[11px] text-muted-foreground">
-                              {/* Still generating — the answer keeps being written even when
-                                  you leave the page, so the rail has to say which one. */}
-                              {c.running ? (
-                                <>
-                                  <span className="qc-pulse size-1.5 shrink-0 rounded-full bg-emerald-500" />
-                                  <span className="truncate text-emerald-600 dark:text-emerald-400">
-                                    Answering…
-                                  </span>
-                                </>
-                              ) : (
-                                <time
-                                  dateTime={c.updatedAt}
-                                  title={new Date(c.updatedAt).toLocaleString()}
-                                  className="tabular-nums"
-                                >
-                                  {railTime(c.updatedAt)}
-                                </time>
-                              )}
-                            </div>
+                            {c.running ? (
+                              /* Still generating — the answer keeps being written even when you
+                                 leave the page, so the rail has to say which one. Status outranks
+                                 the snippet and takes its line. */
+                              <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[11px]">
+                                <span className="qc-pulse size-1.5 shrink-0 rounded-full bg-emerald-500" />
+                                <span className="truncate text-emerald-600 dark:text-emerald-400">
+                                  Answering…
+                                </span>
+                              </div>
+                            ) : (
+                              (() => {
+                                const snippet = railSnippet(c.preview ?? '')
+                                if (!snippet || snippet === railTitle(c.name).trim()) return null
+                                return (
+                                  <p className="mt-0.5 truncate text-[11px] text-muted-foreground">
+                                    {snippet}
+                                  </p>
+                                )
+                              })()
+                            )}
                           </button>
                           <div className="absolute right-0.5 top-1.5">
                             <RowMenu
                               pinned={!!c.pinned}
+                              archived={!!c.archived}
                               onPin={() => onPin(c.slug, !c.pinned)}
+                              onArchive={() => onArchive(c.slug, !c.archived)}
                               onRename={() => onRename(c.slug, c.name)}
                               onDelete={() => onDelete(c.slug)}
                             />
@@ -1850,6 +1958,27 @@ function ChatRail({
             })
           )}
         </div>
+
+        {/* The archived shelf: OUTSIDE the scroller, pinned just above New Chat.
+            Inside it, this line landed after all 60 conversations — a control for the
+            hidden pile that you have to scroll a screenful of the visible pile to reach.
+            Hidden while searching: the archived hits are already listed by then, so the
+            toggle would offer to reveal what is on screen. */}
+        {archivedCount > 0 && !searching && (
+          <button
+            type="button"
+            onClick={() => setShowArchived((v) => !v)}
+            aria-expanded={showArchived}
+            className={cn(
+              'flex shrink-0 items-center gap-2 border-t border-border/60 px-4 py-2 text-xs transition-colors hover:bg-muted',
+              showArchived ? 'text-foreground' : 'text-muted-foreground',
+            )}
+          >
+            <Archive className="size-3.5 shrink-0" aria-hidden />
+            <span className="truncate">{showArchived ? 'Hide archived' : 'Archived'}</span>
+            <span className="ms-auto tabular-nums opacity-70">{archivedCount}</span>
+          </button>
+        )}
 
         <div className="space-y-2 border-t border-border/60 p-4">
           <Button onClick={onNew} className="w-full">
@@ -2603,32 +2732,32 @@ function useSmoothReveal(full: string, enabled: boolean): string {
  * `aria-hidden`, because `RowName` beside it says the same thing in text — labelling both
  * makes a screen reader announce every turn's speaker twice.
  */
-function RowAvatar({ who }: { who: 'user' | 'assistant' }) {
-  const assistant = who === 'assistant'
+function RowAvatar() {
   return (
     <div
       aria-hidden
-      className={cn(
-        // No top margin: it lines up with the NAME line, Slack-style, so the mark and the
-        // word it stands for read as one unit.
-        'flex size-8 shrink-0 select-none items-center justify-center rounded-xl border',
-        assistant
-          ? 'border-transparent bg-foreground text-background'
-          : 'border-border/60 bg-muted/60 text-foreground/70',
-      )}
+      className={
+        // Only the ANSWER side has a mark now. The question side is right-aligned and
+        // filled, which says who wrote it without spending 44px per turn saying it again.
+        'mt-0.5 flex size-8 shrink-0 select-none items-center justify-center rounded-xl bg-foreground text-background'
+      }
     >
-      {assistant ? <Sparkles className="size-4" /> : <User className="size-4" />}
+      <Sparkles className="size-4" />
     </div>
   )
 }
 
-/** The speaker's name over the bubble. Paired with the avatar, never instead of it. */
-function RowName({ who, className }: { who: 'user' | 'assistant'; className?: string }) {
-  return (
-    <div className={cn('mb-1 text-xs font-medium text-foreground/70', className)}>
-      {who === 'assistant' ? 'AI Assistant' : 'Me'}
-    </div>
-  )
+/**
+ * The speaker's name — for a SCREEN READER only.
+ *
+ * "Me" over a right-aligned blue bubble and "AI Assistant" over the one with the mark
+ * beside it both say what the layout has already said, once per turn, down the whole
+ * transcript. Printed, they were a third of the chrome around every message. They stay in
+ * the DOM because the avatar is `aria-hidden`, so this is the only thing that names the
+ * speaker to a reader that cannot see the alignment.
+ */
+function RowName({ who }: { who: 'user' | 'assistant' }) {
+  return <div className="sr-only">{who === 'assistant' ? 'AI Assistant' : 'Me'}</div>
 }
 
 /**
@@ -2698,22 +2827,42 @@ function ContextRows({ blocks }: { blocks: ContextBlock[] }) {
  * is exactly the kind of per-frame work the transcript's memoisation exists to avoid.
  */
 function TurnStatsLine({ stats }: { stats: TurnStats }) {
-  const parts: string[] = [`Ran ${fmtDuration(stats.ms)}`]
-  if (stats.ttftMs !== undefined) parts.push(`first token ${fmtDuration(stats.ttftMs)}`)
+  const cost = stats.costUsd
+    ? stats.costUsd < 0.01
+      ? '<$0.01'
+      : `$${stats.costUsd.toFixed(2)}`
+    : null
+  // On the line: the two numbers people actually scan a transcript for — how long, how
+  // much. Everything else is a detail you go looking for once you have picked a turn.
+  const summary = [fmtDuration(stats.ms), cost].filter(Boolean).join(' · ')
+
+  // In the tooltip: the diagnosis. Five facts joined by dots wrapped onto a second line
+  // under every single answer and made the footer louder than the reply above it — but
+  // they are also the only place "why was that one slow / expensive?" can still be
+  // answered a week later, so they are one hover away, not gone.
+  const detail: string[] = [`Ran ${fmtDuration(stats.ms)}`]
+  if (stats.ttftMs !== undefined) detail.push(`first token ${fmtDuration(stats.ttftMs)}`)
   if (stats.inputTokens !== undefined || stats.outputTokens !== undefined) {
-    parts.push(`${fmtTokens(stats.inputTokens ?? 0)} in / ${fmtTokens(stats.outputTokens ?? 0)} out`)
+    detail.push(`${fmtTokens(stats.inputTokens ?? 0)} in / ${fmtTokens(stats.outputTokens ?? 0)} out`)
   }
   // Share of the input that the provider served from its warm prefix cache — the reason a
   // long conversation doesn't cost its whole history again on every turn.
   if (stats.cacheReadTokens && stats.inputTokens) {
-    parts.push(`${Math.round((stats.cacheReadTokens / stats.inputTokens) * 100)}% cached`)
+    detail.push(`${Math.round((stats.cacheReadTokens / stats.inputTokens) * 100)}% cached`)
   }
-  // Sub-cent turns round to $0.00, which reads as free; show them as a floor instead.
-  if (stats.costUsd) parts.push(stats.costUsd < 0.01 ? '<$0.01' : `$${stats.costUsd.toFixed(2)}`)
+  if (cost) detail.push(cost)
+
   return (
     <>
       <span className="px-1.5 text-[11px] text-muted-foreground">•</span>
-      <span className="text-[11px] text-muted-foreground">{parts.join(' · ')}</span>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <span className="cursor-default text-[11px] tabular-nums text-muted-foreground underline decoration-dotted decoration-muted-foreground/40 underline-offset-2">
+            {summary}
+          </span>
+        </TooltipTrigger>
+        <TooltipContent className="text-[11px]">{detail.join(' · ')}</TooltipContent>
+      </Tooltip>
     </>
   )
 }
@@ -2753,13 +2902,13 @@ function QueuedRows({
   return (
     <div className="flex flex-col gap-2">
       {items.map((m, i) => (
-        <div key={m.id} className="flex justify-end gap-3">
+        <div key={m.id} className="flex justify-end">
           <div className="max-w-[85%] flex-1 justify-end text-end sm:max-w-[75%]">
             <div className="mb-1 flex items-center justify-end gap-1.5 pe-1 text-[11px] text-muted-foreground">
               <Clock className="size-3" />
               <span>{i === 0 ? 'Next in this conversation' : `Waiting · ${i + 1}`}</span>
             </div>
-            <div className="inline-flex items-start gap-2 rounded-lg border border-dashed border-border/70 bg-muted/40 p-3 text-start text-sm text-muted-foreground">
+            <div className="inline-flex items-start gap-2 rounded-2xl rounded-br-md border border-dashed border-border/70 bg-muted/40 px-4 py-2.5 text-start text-sm text-muted-foreground">
               <span className="whitespace-pre-wrap break-words">{m.prompt}</span>
               <button
                 type="button"
@@ -2771,7 +2920,6 @@ function QueuedRows({
               </button>
             </div>
           </div>
-          <RowAvatar who="user" />
         </div>
       ))}
     </div>
@@ -2800,9 +2948,14 @@ function UserRow({
   const meta = action ? actionMeta(action) : null
   const srcs = previews ?? (images && projectId ? images.map((n) => chatImageUrl(projectId, n)) : [])
   return (
-    <div className="flex justify-end gap-3">
+    /*
+     * No avatar on this side. Right-alignment plus the filled bubble already say "you
+     * wrote this" — the 32px mark said it a second time and pushed every question 44px
+     * further from the edge the answers are read against.
+     */
+    <div className="group/msg flex justify-end">
       <div className="max-w-[85%] flex-1 justify-end text-end sm:max-w-[75%]">
-        <RowName who="user" className="pe-1" />
+        <RowName who="user" />
         {meta && (
           <div className="mb-1.5 flex justify-end">
             <span className="inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11px] text-muted-foreground">
@@ -2824,13 +2977,19 @@ function UserRow({
             ))}
           </div>
         )}
-        <div className="inline-flex whitespace-pre-wrap break-words rounded-lg bg-primary p-4 text-start text-sm text-primary-foreground">
+        <div className="inline-flex whitespace-pre-wrap break-words rounded-2xl rounded-br-md bg-primary px-4 py-2.5 text-start text-sm leading-relaxed text-primary-foreground">
           {text}
         </div>
         {context && context.length > 0 && <ContextRows blocks={context} />}
-        <MessageTime at={at} className="mt-1 block pe-1" />
+        {/* On hover, not always. In a scrolled transcript a timestamp under every question
+            is a column of numbers nobody reads; the one time it IS wanted ("when did I ask
+            this?") you are already pointing at the message. Touch has no hover, so there it
+            stays visible. */}
+        <MessageTime
+          at={at}
+          className="mt-1 block pe-1 transition-opacity md:opacity-0 md:group-hover/msg:opacity-100"
+        />
       </div>
-      <RowAvatar who="user" />
     </div>
   )
 }
@@ -2996,7 +3155,7 @@ function SaveToNoteButton({
           type="button"
           disabled={save.isPending}
           onClick={() => save.mutate()}
-          className="flex size-9 items-center justify-center rounded-full transition-colors hover:bg-accent hover:text-accent-foreground disabled:opacity-60"
+          className="flex size-8 items-center justify-center rounded-full transition-colors hover:bg-accent hover:text-accent-foreground disabled:opacity-60"
         >
           {save.isPending ? (
             <Loader2 className="size-4 animate-spin" />
@@ -3088,7 +3247,7 @@ function AnswerFeedback({
   const busy = rate.isPending
   const btn = (active: boolean) =>
     cn(
-      'flex size-9 items-center justify-center rounded-full transition-colors hover:bg-accent hover:text-accent-foreground disabled:opacity-60',
+      'flex size-8 items-center justify-center rounded-full transition-colors hover:bg-accent hover:text-accent-foreground disabled:opacity-60',
       active && 'text-emerald-500 hover:text-emerald-500',
     )
   return (
@@ -3124,7 +3283,7 @@ function AnswerFeedback({
             // Undoing needs no reason; giving one does — hence the dialog on the way in only.
             onClick={() => (vote === 'down' ? rate.mutate({ vote: null }) : setAsking(true))}
             className={cn(
-              'flex size-9 items-center justify-center rounded-full transition-colors hover:bg-accent hover:text-accent-foreground disabled:opacity-60',
+              'flex size-8 items-center justify-center rounded-full transition-colors hover:bg-accent hover:text-accent-foreground disabled:opacity-60',
               vote === 'down' && 'text-amber-600 hover:text-amber-600 dark:text-amber-500',
             )}
           >
@@ -3589,16 +3748,20 @@ function AssistantRow({
   const canAudit = !!projectId && !!slug && index !== undefined && !failed
   return (
     <div className="group flex justify-start gap-3">
-      <RowAvatar who="assistant" />
+      <RowAvatar />
       <div className="max-w-[85%] flex-1 sm:max-w-[75%]">
-        <RowName who="assistant" className="ps-1" />
+        <RowName who="assistant" />
         <div className="space-y-2">
           <div
             className={cn(
               // w-fit so the bubble hugs its content: on a wide screen the column is ~1300px,
               // and a one-line answer stretched across 75% of that read as a layout bug.
-              'w-fit min-w-0 max-w-full rounded-lg border p-4',
-              failed ? 'border-destructive/30 bg-destructive/5 text-destructive' : 'bg-muted text-foreground',
+              // Borderless on a tint: a border AND a fill draw the box twice, and the box
+              // is not the point — the answer is.
+              'w-fit min-w-0 max-w-full rounded-2xl rounded-tl-md px-4 py-3',
+              failed
+                ? 'border border-destructive/30 bg-destructive/5 text-destructive'
+                : 'bg-muted/60 text-foreground',
             )}
           >
             {/* Not while streaming: the waiting indicator below already lists the same
@@ -3643,7 +3806,37 @@ function AssistantRow({
               line, in the slot the chips will take, so the reply itself reads as finished. */}
           {answerSettled && <SuggestingChips />}
           {!live && body && (
-            <div className="flex items-center gap-0 text-muted-foreground opacity-100 transition-opacity duration-150">
+            /* One footer line per answer: time · model · what it took, then the actions.
+               The buttons are 32px rather than 36 — that alone took the row's height back
+               without hiding anything. */
+            <div className="flex flex-wrap items-center gap-0 text-muted-foreground">
+              <MessageTime at={at} />
+              {model && (
+                <>
+                  <span className="px-1.5 text-[11px] text-muted-foreground">•</span>
+                  <span className="text-[11px] text-muted-foreground" title={model}>
+                    {shortModel(model)}
+                  </span>
+                  {/* Muted and unlabelled next to the model, the way the CLI itself shows
+                      it — an absent effort means "your own default", not "unknown". */}
+                  {effort && effort !== 'default' && effort !== DEFAULT_EFFORT && (
+                    <span
+                      className="ps-1 text-[11px] text-muted-foreground/70"
+                      title={`Reasoning effort: ${effortLabel(effort)}`}
+                    >
+                      {effortLabel(effort).toLowerCase()}
+                    </span>
+                  )}
+                </>
+              )}
+              {stats && <TurnStatsLine stats={stats} />}
+              {/* ALWAYS VISIBLE. Hover-to-reveal was tried and rejected: an action you
+                  cannot see is one you have to already know is there, and Copy / save as
+                  a note / rate / fact-check are the reasons people scroll back to an
+                  answer at all. They sit after the meta so the line starts with the same
+                  words on every turn. */}
+              <div className="ms-1 flex items-center">
+
               <Tooltip>
                 <TooltipTrigger asChild>
                   <button
@@ -3655,9 +3848,9 @@ function AssistantRow({
                         ok ? toast.success('Answer copied') : toast.error('Could not copy'),
                       )
                     }
-                    className="flex size-9 items-center justify-center rounded-full transition-colors hover:bg-accent hover:text-accent-foreground"
+                    className="flex size-8 items-center justify-center rounded-full transition-colors hover:bg-accent hover:text-accent-foreground"
                   >
-                    <Copy className="size-4" />
+                    <Copy className="size-3.5" />
                   </button>
                 </TooltipTrigger>
                 <TooltipContent>Copy this answer</TooltipContent>
@@ -3690,7 +3883,7 @@ function AssistantRow({
                       onClick={() => auditRun.mutate()}
                       disabled={auditRun.isPending}
                       aria-label="Fact-check this answer"
-                      className="flex size-9 items-center justify-center rounded-full transition-colors hover:bg-accent hover:text-accent-foreground disabled:opacity-60"
+                      className="flex size-8 items-center justify-center rounded-full transition-colors hover:bg-accent hover:text-accent-foreground disabled:opacity-60"
                     >
                       {auditRun.isPending ? (
                         <Loader2 className="size-4 animate-spin" />
@@ -3708,26 +3901,7 @@ function AssistantRow({
                   </TooltipContent>
                 </Tooltip>
               )}
-              <MessageTime at={at} />
-              {model && (
-                <>
-                  <span className="px-1.5 text-[11px] text-muted-foreground">•</span>
-                  <span className="text-[11px] text-muted-foreground" title={model}>
-                    {shortModel(model)}
-                  </span>
-                  {/* Muted and unlabelled next to the model, the way the CLI itself shows
-                      it — an absent effort means "your own default", not "unknown". */}
-                  {effort && effort !== 'default' && effort !== DEFAULT_EFFORT && (
-                    <span
-                      className="ps-1 text-[11px] text-muted-foreground/70"
-                      title={`Reasoning effort: ${effortLabel(effort)}`}
-                    >
-                      {effortLabel(effort).toLowerCase()}
-                    </span>
-                  )}
-                </>
-              )}
-              {stats && <TurnStatsLine stats={stats} />}
+            </div>
             </div>
           )}
         </div>
@@ -3845,6 +4019,8 @@ function ChatHeader({
   tools,
   temporary,
   onPin,
+  archived,
+  onArchive,
   onRename,
   onDelete,
   onExport,
@@ -3856,6 +4032,8 @@ function ChatHeader({
   temporary: boolean
   pinned: boolean
   onPin?: () => void
+  archived?: boolean
+  onArchive?: () => void
   onRename?: () => void
   onDelete?: () => void
   onExport?: () => void
@@ -3923,6 +4101,8 @@ function ChatHeader({
           <RowMenu
             always
             pinned={pinned}
+            archived={archived}
+            onArchive={onArchive}
             onPin={() => onPin?.()}
             onRename={() => onRename?.()}
             onDelete={() => onDelete?.()}
@@ -4871,6 +5051,25 @@ function ChatWorkspace({
     onError: (e: Error) => toast.error('Could not star', { description: e.message }),
   })
 
+  const archive = useMutation({
+    mutationFn: (v: { slug: string; archived: boolean }) =>
+      archiveChat(projectId, v.slug, v.archived),
+    onSuccess: (saved) => {
+      queryClient.setQueryData(['chat', projectId, saved.slug], saved)
+      void queryClient.invalidateQueries({ queryKey: ['chats', projectId] })
+      // Say it, and offer the way back in the same breath: archiving is the one action
+      // here that makes a row disappear, and undo has to be closer than "find it again".
+      toast.success(saved.archived ? 'Conversation archived' : 'Conversation unarchived', {
+        description: saved.name,
+        action: {
+          label: 'Undo',
+          onClick: () => archive.mutate({ slug: saved.slug, archived: !saved.archived }),
+        },
+      })
+    },
+    onError: (e: Error) => toast.error('Could not archive', { description: e.message }),
+  })
+
   return (
     <div className="relative flex h-svh min-h-[34rem]">
       <ChatRail
@@ -4897,6 +5096,7 @@ function ChatWorkspace({
           startNew(true)
         }}
         onPin={(s, pinned) => pin.mutate({ slug: s, pinned })}
+        onArchive={(s, archived) => archive.mutate({ slug: s, archived })}
         onRename={(s, current) => setRenaming({ slug: s, name: current })}
         onDelete={(s) =>
           setDeleting({ slug: s, name: chats.find((c) => c.slug === s)?.name ?? 'this conversation' })
@@ -4926,6 +5126,14 @@ function ChatWorkspace({
           temporary={isTemporary && !!openSlug}
           pinned={!!chat?.pinned}
           onPin={openSlug ? () => pin.mutate({ slug: openSlug, pinned: !chat?.pinned }) : undefined}
+          archived={!!chat?.archived}
+          onArchive={
+            // A temporary conversation is never in history, so there is nothing to archive
+            // it out of — the server refuses it too.
+            openSlug && !isTemporary
+              ? () => archive.mutate({ slug: openSlug, archived: !chat?.archived })
+              : undefined
+          }
           onRename={
             openSlug
               ? () => setRenaming({ slug: openSlug, name: chat?.name ?? '' })

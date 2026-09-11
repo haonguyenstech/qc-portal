@@ -75,15 +75,20 @@ export default function RemoteAccessPage() {
   const refresh = () => queryClient.invalidateQueries({ queryKey: ['remote'] })
 
   return (
-    <div className="mx-auto w-full max-w-4xl space-y-5 p-4 sm:p-6">
-      <div className="space-y-1">
-        <h1 className="text-2xl font-semibold tracking-tight">Remote access</h1>
-        <p className="max-w-2xl text-sm text-muted-foreground">
-          Publish this portal to a public HTTPS address through a Cloudflare Tunnel, so you can run
-          and review QC work from another machine or a phone. Nothing is opened on your network —
-          cloudflared dials out, and the portal keeps listening on localhost only.
-        </p>
-      </div>
+    <div className="mx-auto max-w-6xl space-y-6">
+      <header className="flex items-start gap-3">
+        <span className="mt-0.5 flex size-11 shrink-0 items-center justify-center rounded-2xl bg-foreground text-background">
+          <Globe className="size-5" />
+        </span>
+        <div className="space-y-1">
+          <h1 className="text-3xl font-semibold tracking-tight">Remote access</h1>
+          <p className="max-w-2xl text-sm text-muted-foreground">
+            Publish this portal to a public HTTPS address through a Cloudflare Tunnel, so you can
+            run and review QC work from another machine or a phone. Nothing is opened on your
+            network — cloudflared dials out, and the portal keeps listening on localhost only.
+          </p>
+        </div>
+      </header>
 
       {data?.viewingRemotely && (
         <Notice tone="amber" icon={<Globe className="h-4 w-4" />}>

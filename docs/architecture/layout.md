@@ -116,6 +116,24 @@ server/src/
                     is screenshotted at 2x and swapped for a data-URI <img>, in the DOM rather
                     than by regex. An optional running footer is stripped to plain text
                     (footerText) and printed on EVERY page.
+  responsiveCapture.ts  Responsive › Capture: one URL on N REAL emulated devices (viewport +
+                    deviceScaleFactor + mobile UA + isMobile + hasTouch), a screenshot each,
+                    and the layout findings measured IN the page (AUDIT_SCRIPT — a string, not
+                    a function, because this workspace has no DOM lib). Devices run in
+                    SEQUENCE: six Chromes on one CPU time the slowest one out, which reads as
+                    "that device is broken". One device failing is recorded on that device; only
+                    a browser that cannot launch throws (the route turns that into a 400, so a
+                    launch failure is an inline message and not a job that exists to say it
+                    never started). Shares `loadChromium()` with pageAudit.ts. The UA is built
+                    from the INSTALLED Chrome's version, never shipped in the web bundle. Also
+                    `probeUrl`: whether the page allows being framed at all — a refused iframe
+                    raises no event in the browser, so the live tab could not find out for
+                    itself. Screenshots go BESIDE THE DB (data/responsive-runs/<jobId>/).
+  responsiveJobs.ts in-memory job registry for those sweeps (logs + progress + cancel), the
+                    same shape as perfJobs.ts. Its own registry, not a third `kind` there:
+                    every Performance poll would otherwise ship a payload it never reads.
+                    Pruning a job deletes its screenshots — an evicted row leaves them
+                    unreachable.
   crawl.ts          core single-ticket crawl: download detail+comments+attachments (+ optional summary.md)
   crawlJobs.ts      in-memory background-job registry for ticket crawling (logs + per-item status)
   sourceRepo.ts     git plumbing for the Source Code page: clone/adopt/pull a GitHub/Bitbucket
@@ -245,6 +263,17 @@ server/src/
                     model uses real project terms/rules even when there's no project cwd
   learn.ts          AI auto-capture: reflect on a finished QC run / test-case gen and persist
                     durable facts into memory (+ knowledge), tagged with a source provenance
+                    Also runFeedbackCapture (a chat 👍/👎) and runChatCapture (a quiet chat
+                    conversation) — same machinery, much smaller allowances
+  chatLearn.ts      the scheduler that makes /chat auto-capture bearable: an answered turn
+                    arms a 90s QUIET timer on that conversation and each new turn RESETS it,
+                    so one reflection reads the last few exchanges instead of one per
+                    message. Fired AFTER the turn's `done` frame and never awaited — nothing
+                    the reader is watching may wait on a model call — and captures are
+                    serialised process-wide, or two of them would read the same memory folder
+                    and each create the note the other was writing. forgetChatLearning() is
+                    what DELETE /api/chat/:slug calls so deleting a chat also cancels the
+                    memory it had not written yet
   groundingCheck.ts independent post-write audit (anti-hallucination): groundTestcases (cases vs
                     ticket) + groundReport (report verdicts vs documented evidence); auto-revises
                     in place. Cheap (haiku), best-effort, never throws — see section below

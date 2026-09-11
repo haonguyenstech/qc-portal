@@ -10,6 +10,8 @@ import {
   Clock,
   Copy,
   Cpu,
+  Eye,
+  EyeOff,
   Download,
   FileArchive,
   Gauge,
@@ -29,9 +31,11 @@ import {
   Plus,
   Power,
   RotateCw,
+  RotateCcw,
   Search,
   Settings,
   ShieldCheck,
+  SidebarClose,
   Sparkles,
   Terminal,
   Trash2,
@@ -80,6 +84,7 @@ import {
   updateProject,
 } from '@/lib/api'
 import { useProjects } from '@/lib/project-context'
+import { NAV_ALWAYS_VISIBLE, navGroups, useHiddenNav } from '@/lib/nav'
 import { relativeTime } from '@/lib/format'
 import type { Project } from '@/lib/types'
 
@@ -1893,11 +1898,13 @@ export default function ProjectsPage() {
   })
   const { activeProjectId } = useProjects()
   const [query, setQuery] = useState('')
+  const { hidden: hiddenNav } = useHiddenNav()
   const tabParam = searchParams.get('tab')
-  const activeTab = tabParam === 'models' ? 'models' : 'projects'
+  const activeTab =
+    tabParam === 'models' ? 'models' : tabParam === 'sidebar' ? 'sidebar' : 'projects'
 
   function onTabChange(value: string) {
-    if (value !== 'projects' && value !== 'models') return
+    if (value !== 'projects' && value !== 'models' && value !== 'sidebar') return
     const next = new URLSearchParams(searchParams)
     next.set('tab', value)
     setSearchParams(next)
@@ -1943,7 +1950,7 @@ export default function ProjectsPage() {
       </header>
 
       <Tabs value={activeTab} onValueChange={onTabChange} className="space-y-6">
-        <TabsList data-tour="settings-tabs" className="grid h-auto w-full grid-cols-1 gap-3 rounded-none bg-transparent p-0 sm:grid-cols-2">
+        <TabsList data-tour="settings-tabs" className="grid h-auto w-full grid-cols-1 gap-3 rounded-none bg-transparent p-0 sm:grid-cols-3">
           <TabsTrigger
             value="projects"
             className="group h-auto justify-start gap-3 rounded-2xl border border-border/60 bg-card px-4 py-3 text-left shadow-none transition-all duration-200 hover:-translate-y-0.5 hover:border-border hover:bg-muted/60 hover:shadow-sm data-[state=active]:border-foreground data-[state=active]:bg-muted/60 data-[state=active]:text-foreground data-[state=active]:shadow-none"
@@ -1977,6 +1984,23 @@ export default function ProjectsPage() {
             </span>
             <Badge variant="secondary" className="shrink-0 text-[10px]">
               3 models
+            </Badge>
+          </TabsTrigger>
+          <TabsTrigger
+            value="sidebar"
+            className="group h-auto justify-start gap-3 rounded-2xl border border-border/60 bg-card px-4 py-3 text-left shadow-none transition-all duration-200 hover:-translate-y-0.5 hover:border-border hover:bg-muted/60 hover:shadow-sm data-[state=active]:border-foreground data-[state=active]:bg-muted/60 data-[state=active]:text-foreground data-[state=active]:shadow-none"
+          >
+            <span className="flex size-10 shrink-0 items-center justify-center rounded-xl border border-border/60 bg-muted/60 text-muted-foreground transition-colors group-data-[state=active]:border-transparent group-data-[state=active]:bg-foreground group-data-[state=active]:text-background">
+              <SidebarClose className="size-5" />
+            </span>
+            <span className="min-w-0 flex-1 space-y-0.5">
+              <span className="block text-sm font-semibold tracking-tight">Sidebar</span>
+              <span className="block truncate text-xs font-normal text-muted-foreground">
+                Show or hide menu items
+              </span>
+            </span>
+            <Badge variant="secondary" className="shrink-0 text-[10px]">
+              {hiddenNav.length > 0 ? `${hiddenNav.length} hidden` : 'All shown'}
             </Badge>
           </TabsTrigger>
         </TabsList>
@@ -2106,8 +2130,161 @@ export default function ProjectsPage() {
           <AiRuntimeCard />
           <AiAutomationCard />
         </TabsContent>
+
+        <TabsContent value="sidebar" className="space-y-6">
+          <SidebarMenuCard />
+        </TabsContent>
       </Tabs>
     </div>
+  )
+}
+
+/**
+ * Show / hide the sidebar's menu rows.
+ *
+ * A view preference on THIS machine (localStorage, via `lib/nav.ts`), not project
+ * data — nothing is written to the repo or the DB, and another engineer opening
+ * the same project sees their own rail. Hiding removes the ROW only: the route
+ * stays mounted, so a hidden page is still reachable by its URL and by links
+ * from other pages. Settings itself cannot be hidden — it is where hiding is
+ * undone, and a rail without it would be a one-way door.
+ */
+function SidebarMenuCard() {
+  const { hidden, toggle, showAll } = useHiddenNav()
+  const off = new Set(hidden)
+  const total = navGroups.flatMap((g) => g.items).length
+
+  return (
+    <Card className="overflow-hidden rounded-3xl border-border/60 py-0 shadow-none">
+      <CardContent className="space-y-4 p-4">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div className="flex min-w-0 items-start gap-3">
+            <span className="flex size-11 shrink-0 items-center justify-center rounded-2xl bg-foreground text-background shadow-none">
+              <SidebarClose className="h-5 w-5" />
+            </span>
+            <div className="min-w-0 space-y-1">
+              <div className="flex flex-wrap items-center gap-2">
+                <h2 className="text-base font-semibold tracking-tight">Sidebar menu</h2>
+                <Badge variant="secondary" className="font-medium">
+                  {total - hidden.length} of {total} shown
+                </Badge>
+              </div>
+              <p className="max-w-xl text-sm text-muted-foreground">
+                Switch off the pages this machine never uses to shorten the rail. Nothing is
+                deleted — a hidden page still works from its URL and from links on other pages,
+                it just stops taking up a row. Saved on this computer only.
+              </p>
+            </div>
+          </div>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={showAll}
+            disabled={hidden.length === 0}
+            className="shrink-0 gap-2 rounded-full transition-all duration-200 active:scale-[0.98]"
+          >
+            <RotateCcw className="h-3.5 w-3.5" />
+            Show all
+          </Button>
+        </div>
+
+        <div className="space-y-4">
+          {navGroups.map((group) => {
+            const shown = group.items.filter((i) => !off.has(i.to)).length
+            return (
+              <div key={group.label} className="space-y-2">
+                <div className="flex items-center gap-2 px-1">
+                  <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/70">
+                    {group.label}
+                  </span>
+                  <span className="text-[10px] tabular-nums text-muted-foreground/60">
+                    {shown}/{group.items.length}
+                  </span>
+                  {/* A group whose every row is off vanishes from the rail entirely —
+                      say so here, or it reads as a bug rather than a choice. */}
+                  {shown === 0 && (
+                    <Badge variant="secondary" className="h-4 px-1.5 text-[9px] font-medium">
+                      group hidden
+                    </Badge>
+                  )}
+                </div>
+                <div className="grid gap-2 sm:grid-cols-2">
+                  {group.items.map((item) => {
+                    const Icon = item.icon
+                    const locked = NAV_ALWAYS_VISIBLE.includes(item.to)
+                    const visible = !off.has(item.to)
+                    return (
+                      <div
+                        key={item.to}
+                        className={cn(
+                          'flex items-center gap-3 rounded-2xl border border-border/60 px-3 py-2.5 transition-colors',
+                          visible ? 'bg-muted/60' : 'bg-card',
+                        )}
+                      >
+                        <span
+                          className={cn(
+                            'flex size-8 shrink-0 items-center justify-center rounded-xl',
+                            visible
+                              ? 'bg-background text-muted-foreground'
+                              : 'bg-muted/60 text-muted-foreground/50',
+                          )}
+                        >
+                          <Icon className="h-4 w-4" />
+                        </span>
+                        <div className="min-w-0 flex-1">
+                          <div
+                            className={cn(
+                              'truncate text-sm font-medium tracking-tight',
+                              !visible && 'text-muted-foreground',
+                            )}
+                          >
+                            {item.label}
+                          </div>
+                          <div className="truncate font-mono text-[10px] text-muted-foreground/70">
+                            {item.to}
+                          </div>
+                        </div>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={locked}
+                          onClick={() => toggle(item.to)}
+                          title={
+                            locked
+                              ? 'Settings is always shown — it is where hidden pages come back'
+                              : visible
+                                ? `Hide ${item.label} from the sidebar`
+                                : `Show ${item.label} in the sidebar`
+                          }
+                          className={cn(
+                            'h-8 w-[76px] shrink-0 gap-1.5 rounded-full px-3 text-xs transition-all duration-200 active:scale-[0.98]',
+                            visible
+                              ? 'border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 dark:border-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-300'
+                              : 'text-muted-foreground',
+                          )}
+                        >
+                          {visible ? (
+                            <>
+                              <Eye className="h-3.5 w-3.5" />
+                              Shown
+                            </>
+                          ) : (
+                            <>
+                              <EyeOff className="h-3.5 w-3.5" />
+                              Hidden
+                            </>
+                          )}
+                        </Button>
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      </CardContent>
+    </Card>
   )
 }
 

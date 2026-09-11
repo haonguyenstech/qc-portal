@@ -566,9 +566,16 @@ export default function ProjectSettingsPage() {
   if (!activeProjectId) {
     return (
       <div className="mx-auto max-w-6xl space-y-6">
-        <header className="space-y-1">
-          <h1 className="text-3xl font-semibold tracking-tight">Templates</h1>
-          <p className="text-sm text-muted-foreground">Per-project file templates and preferences.</p>
+        <header className="flex items-start gap-3">
+          <span className="mt-0.5 flex size-11 shrink-0 items-center justify-center rounded-2xl bg-foreground text-background">
+            <Settings className="size-5" />
+          </span>
+          <div className="space-y-1">
+            <h1 className="text-3xl font-semibold tracking-tight">Templates</h1>
+            <p className="text-sm text-muted-foreground">
+              Per-project file templates and preferences.
+            </p>
+          </div>
         </header>
         <Card className="rounded-3xl border-dashed border-border/60 shadow-none">
           <CardContent className="flex flex-col items-center justify-center gap-3 py-20 text-center">

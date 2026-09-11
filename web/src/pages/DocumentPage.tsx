@@ -1288,8 +1288,11 @@ five tabs so guidance stays organized instead of crammed into one giant file:
    once created** (make a new note to rename), and each carries an **AI** or **Manual** badge showing who
    wrote it. The list is **searchable and paged**, since auto-capture keeps adding notes.
 4. **Accounts** — the project's app URLs and **test-account logins** (see below).
-5. **AI Brain** — a visual map of everything Claude knows about the project: how \`CLAUDE.md\`,
-   Knowledge, and Memory connect and feed each QC run. Read-only — nothing to edit here.
+5. **AI Brain** — everything Claude knows about the project, in one place: the pipeline that
+   carries it into a run (\`CLAUDE.md\` and its managed pointer block), a constellation with one
+   dot per item — **filled = the AI captured it, hollow = you wrote it** — and a **searchable
+   inventory** showing where each item came from (a run, a chat, a 👍/👎, or you), its size and
+   when it changed. Read-only: each item opens for reading, with a link to the tab that edits it.
 
 ### Accounts — environments & test logins
 Keep your app **environment URLs** and **test-account credentials** in one place: upload a CSV/Excel

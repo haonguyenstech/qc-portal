@@ -13,6 +13,7 @@
   "dependencies": {
     "@radix-ui/react-dialog": "^1.1.17",
     "@radix-ui/react-label": "^2.1.1",
+    "@radix-ui/react-popover": "^1.1.23",
     "@radix-ui/react-scroll-area": "^1.2.2",
     "@radix-ui/react-select": "^2.1.4",
     "@radix-ui/react-separator": "^1.1.1",
@@ -40,6 +41,7 @@
     "mermaid": "^11.15.0",
     "pdfjs-dist": "^6.1.200",
     "react": "^19.2.6",
+    "react-day-picker": "^10.0.1",
     "react-dom": "^19.2.6",
     "react-markdown": "^9.0.1",
     "react-router-dom": "^7.1.1",

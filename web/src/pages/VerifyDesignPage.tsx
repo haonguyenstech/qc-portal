@@ -16,7 +16,6 @@ import {
   Eye,
   FileText,
   FileUp,
-  FolderGit2,
   FolderTree,
   HelpCircle,
   History,
@@ -200,11 +199,21 @@ const MODELS: { value: string; label: string; description: string }[] = [
 
 interface CategoryMeta {
   label: string
+  /** One line naming what the bucket MEANS — the group header's subtitle. */
+  blurb: string
   icon: typeof CheckCircle2
-  // tile/badge classes
+  /**
+   * The bucket's colour, in the three places it is allowed to appear. A finding row
+   * is a NEUTRAL card: colour arrives as a 3px rail down its left edge and a small
+   * icon, never as the row's fill. The previous version tinted every card
+   * (`bg-amber-50/40` + `border-amber-300/60`), and 26 findings then read as a wall
+   * of highlighter — and in dark mode the tint disappeared entirely, leaving 26
+   * hard yellow outlines with nothing inside them. `bg-<c>-500/10` works on both
+   * grounds because it is a tint OF the surface, not a fixed light colour.
+   */
   text: string
   chip: string
-  ring: string
+  rail: string
   /**
    * Whether a finding in this bucket can become a ClickUp bug. "match" cannot —
    * filing the things that are FINE is how a bug list stops being read.
@@ -222,46 +231,51 @@ interface CategoryMeta {
 const CATEGORY: Record<FindingCategory, CategoryMeta> = {
   match: {
     label: 'Matches',
+    blurb: 'Built as designed — nothing to do.',
     icon: CheckCircle2,
-    text: 'text-emerald-700',
-    chip: 'bg-emerald-100 text-emerald-700 ring-emerald-600/20',
-    ring: 'border-emerald-300/60 bg-emerald-50/40',
+    text: 'text-emerald-600 dark:text-emerald-400',
+    chip: 'bg-emerald-500/10 text-emerald-600 ring-emerald-500/20 dark:text-emerald-400',
+    rail: 'bg-emerald-500',
     filable: false,
     severity: 'low',
   },
   mismatch: {
     label: "Doesn't match",
+    blurb: 'The design and the ticket disagree. File these.',
     icon: XCircle,
-    text: 'text-red-700',
-    chip: 'bg-red-100 text-red-700 ring-red-600/20',
-    ring: 'border-red-300/60 bg-red-50/40',
+    text: 'text-red-600 dark:text-red-400',
+    chip: 'bg-red-500/10 text-red-600 ring-red-500/20 dark:text-red-400',
+    rail: 'bg-red-500',
     filable: true,
     severity: 'high',
   },
   concern: {
     label: 'Concern',
+    blurb: 'Not a clear breach, but worth raising before build.',
     icon: AlertTriangle,
-    text: 'text-amber-700',
-    chip: 'bg-amber-100 text-amber-700 ring-amber-600/20',
-    ring: 'border-amber-300/60 bg-amber-50/40',
+    text: 'text-amber-600 dark:text-amber-400',
+    chip: 'bg-amber-500/10 text-amber-600 ring-amber-500/20 dark:text-amber-400',
+    rail: 'bg-amber-500',
     filable: true,
     severity: 'medium',
   },
   unsure: {
     label: 'Not sure',
+    blurb: 'The model could not see enough to judge.',
     icon: HelpCircle,
-    text: 'text-slate-600',
-    chip: 'bg-slate-100 text-slate-600 ring-slate-500/20',
-    ring: 'border-slate-300/60 bg-slate-50/60',
+    text: 'text-muted-foreground',
+    chip: 'bg-muted text-muted-foreground ring-border/60',
+    rail: 'bg-muted-foreground/50',
     filable: true,
     severity: 'low',
   },
   discuss: {
     label: 'Needs discussion',
+    blurb: 'A question for the designer or the BA.',
     icon: MessageCircleQuestion,
-    text: 'text-violet-700',
-    chip: 'bg-violet-100 text-violet-700 ring-violet-600/20',
-    ring: 'border-violet-300/60 bg-violet-50/40',
+    text: 'text-violet-600 dark:text-violet-400',
+    chip: 'bg-violet-500/10 text-violet-600 ring-violet-500/20 dark:text-violet-400',
+    rail: 'bg-violet-500',
     filable: true,
     severity: 'low',
   },
@@ -274,6 +288,58 @@ const CATEGORY_ORDER: FindingCategory[] = ['mismatch', 'concern', 'discuss', 'un
  * and a batch that quietly files every question is one the engineer stops trusting.
  */
 const DEFAULT_FILED: FindingCategory[] = ['mismatch', 'concern']
+
+/**
+ * The one-line answer to "how did this check go?", from the counts alone.
+ *
+ * A pile of five numbers is not a verdict — the engineer opening a saved report has
+ * to add them up before they know whether to worry. The ladder is severity-ordered:
+ * one mismatch outranks any number of matches, because the mismatch is the reason
+ * the check was run.
+ */
+function verdictOf(counts: Record<string, number>): {
+  label: string
+  line: string
+  text: string
+  chip: string
+  icon: typeof CheckCircle2
+} {
+  const bad = counts.mismatch ?? 0
+  const warn = counts.concern ?? 0
+  const ask = (counts.discuss ?? 0) + (counts.unsure ?? 0)
+  const ok = counts.match ?? 0
+  if (bad > 0)
+    return {
+      label: 'Gaps found',
+      line: `${bad} thing${bad === 1 ? '' : 's'} the design and the ticket disagree on`,
+      text: 'text-red-600 dark:text-red-400',
+      chip: 'bg-red-500/10 text-red-600 dark:text-red-400',
+      icon: XCircle,
+    }
+  if (warn > 0)
+    return {
+      label: 'Needs attention',
+      line: `no outright mismatch, ${warn} concern${warn === 1 ? '' : 's'} to weigh`,
+      text: 'text-amber-600 dark:text-amber-400',
+      chip: 'bg-amber-500/10 text-amber-600 dark:text-amber-400',
+      icon: AlertTriangle,
+    }
+  if (ask > 0)
+    return {
+      label: 'Questions to resolve',
+      line: `nothing wrong, ${ask} open question${ask === 1 ? '' : 's'}`,
+      text: 'text-violet-600 dark:text-violet-400',
+      chip: 'bg-violet-500/10 text-violet-600 dark:text-violet-400',
+      icon: MessageCircleQuestion,
+    }
+  return {
+    label: 'Matches the design',
+    line: ok > 0 ? `all ${ok} checked point${ok === 1 ? '' : 's'} line up` : 'nothing to flag',
+    text: 'text-emerald-600 dark:text-emerald-400',
+    chip: 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400',
+    icon: CheckCircle2,
+  }
+}
 
 /** The severity words offered per finding, and the ClickUp priority each produces. */
 const SEVERITY_CHOICES: { value: string; label: string; priority: string }[] = [
@@ -321,7 +387,17 @@ function findingBody(
   return lines.join('\n')
 }
 
-/** One finding row: selection (when filable), verdict badge, text, severity picker. */
+/**
+ * One finding row.
+ *
+ * A NEUTRAL card with a coloured rail, not a coloured card — see `CategoryMeta.text`.
+ * Two more things earn their keep at 26 findings:
+ *  - the detail CLAMPS to two lines. Unclamped, this one report was a 3,500px scroll
+ *    and the buckets below "Doesn't match" were never reached.
+ *  - the severity picker appears only on a TICKED row. A dropdown on every row is 16
+ *    dropdowns on screen, all of them inert until something is selected; showing it
+ *    only when the finding is actually going to ClickUp says what it is for.
+ */
 function FindingRow({
   finding,
   selectable,
@@ -339,14 +415,39 @@ function FindingRow({
 }) {
   const meta = CATEGORY[finding.category]
   const Icon = meta.icon
+  const [expanded, setExpanded] = useState(false)
+  // Whether the clamp is actually HIDING anything. A character-count guess offers
+  // "Show more" on a detail that already fits in its two lines at this width, and a
+  // toggle that reveals nothing is worse than no toggle — so it is measured, and
+  // re-measured on resize, because the answer changes with the column width.
+  const detailRef = useRef<HTMLParagraphElement>(null)
+  const [overflowing, setOverflowing] = useState(false)
+  useEffect(() => {
+    const el = detailRef.current
+    if (!el || expanded) return
+    const measure = () => setOverflowing(el.scrollHeight > el.clientHeight + 1)
+    measure()
+    const ro = new ResizeObserver(measure)
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [expanded, finding.detail])
+  const severityLabel =
+    SEVERITY_CHOICES.find((s) => s.value === severity)?.label ?? severity
+
   return (
     <div
       className={cn(
-        'group flex gap-3 rounded-2xl border px-3 py-2.5 transition-colors',
-        meta.ring,
-        selectable && checked && 'ring-1 ring-primary/40',
+        'group relative flex gap-3 overflow-hidden rounded-2xl border py-2.5 pl-4 pr-3 transition-colors',
+        checked
+          ? 'border-primary/30 bg-primary/[0.04]'
+          : 'border-border/60 bg-card hover:border-border hover:bg-muted/40',
       )}
     >
+      {/* The bucket's colour, as a rail — enough to scan by, quiet enough to read past. */}
+      <span
+        aria-hidden
+        className={cn('absolute inset-y-2 left-0 w-[3px] rounded-r-full', meta.rail)}
+      />
       {selectable ? (
         <button
           type="button"
@@ -363,14 +464,33 @@ function FindingRow({
       <div className="min-w-0 flex-1 space-y-0.5">
         <p className="text-sm font-medium leading-snug">{finding.title}</p>
         {finding.detail && (
-          <p className="text-[13px] leading-snug text-muted-foreground">{finding.detail}</p>
+          <>
+            <p
+              ref={detailRef}
+              className={cn(
+                'text-[13px] leading-snug text-muted-foreground',
+                !expanded && 'line-clamp-2',
+              )}
+            >
+              {finding.detail}
+            </p>
+            {(overflowing || expanded) && (
+              <button
+                type="button"
+                onClick={() => setExpanded((e) => !e)}
+                className="text-[11px] font-medium text-muted-foreground underline-offset-2 transition-colors hover:text-foreground hover:underline"
+              >
+                {expanded ? 'Show less' : 'Show more'}
+              </button>
+            )}
+          </>
         )}
       </div>
-      {selectable && (
-        <div className={cn('shrink-0 self-start transition-opacity', checked ? '' : 'opacity-50')}>
+      {selectable &&
+        (checked ? (
           <Select value={severity} onValueChange={onSeverity}>
             <SelectTrigger
-              className="h-7 w-[6.5rem] gap-1 rounded-full border-border/60 bg-background/80 px-2.5 text-[11px] shadow-none"
+              className="h-7 w-[6.5rem] shrink-0 gap-1 self-start rounded-full border-border/60 bg-background/80 px-2.5 text-[11px] shadow-none"
               title="Severity — sets the ClickUp priority of the filed bug"
             >
               <SelectValue />
@@ -383,8 +503,14 @@ function FindingRow({
               ))}
             </SelectContent>
           </Select>
-        </div>
-      )}
+        ) : (
+          <span
+            className="shrink-0 self-start rounded-full px-2 py-1 text-[11px] text-muted-foreground/60 opacity-0 transition-opacity group-hover:opacity-100"
+            title="Tick this finding to file it — the severity is then editable"
+          >
+            {severityLabel}
+          </span>
+        ))}
     </div>
   )
 }
@@ -428,6 +554,16 @@ function FindingsPanel({
       ),
   )
   const [severities, setSeverities] = useState<Record<string, string>>({})
+  // "Matches" starts folded: it is routinely the biggest bucket and the only one with
+  // nothing to do in it, so open it costs every other bucket a screen of scrolling.
+  const [folded, setFolded] = useState<Set<FindingCategory>>(() => new Set(['match'] as const))
+  const toggleFold = (c: FindingCategory) =>
+    setFolded((prev) => {
+      const next = new Set(prev)
+      if (next.has(c)) next.delete(c)
+      else next.add(c)
+      return next
+    })
 
   const filable = findings
     .map((finding, index) => ({ finding, index }))
@@ -473,47 +609,31 @@ function FindingsPanel({
   }
 
   const allFilableSelected = filable.length > 0 && filingItems.length === filable.length
+  const verdict = verdictOf(counts)
 
   return (
     <div className="space-y-4">
-      {/* Verdict + per-category tally (the chips filter the list below) */}
-      <Card className="rounded-3xl border-border/60 shadow-none">
-        <CardContent className="space-y-3 py-4">
-          <div className="flex items-start gap-2">
-            <Sparkles className="mt-0.5 size-4 shrink-0 text-primary" />
+      {/* The verdict, then the shape of the result, then the filters. */}
+      <Card className="overflow-hidden rounded-3xl border-border/60 shadow-none">
+        <CardContent className="space-y-4 p-5">
+          <div className="flex items-start gap-3">
+            <span
+              className={cn(
+                'flex size-10 shrink-0 items-center justify-center rounded-2xl',
+                verdict.chip,
+              )}
+            >
+              <verdict.icon className="size-5" />
+            </span>
             <div className="min-w-0 flex-1 space-y-1">
-              <p className="text-sm font-medium leading-snug">
+              <div className="flex flex-wrap items-baseline gap-x-2">
+                <h3 className={cn('text-base font-semibold tracking-tight', verdict.text)}>
+                  {verdict.label}
+                </h3>
+                <span className="text-xs text-muted-foreground">{verdict.line}</span>
+              </div>
+              <p className="text-[13px] leading-snug text-muted-foreground">
                 {result.summary || 'Verification complete.'}
-              </p>
-              <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-muted-foreground">
-                <span>
-                  {findings.length} finding{findings.length === 1 ? '' : 's'}
-                </span>
-                <span aria-hidden>·</span>
-                <span>model {result.model}</span>
-                {figmaUrl && (
-                  <>
-                    <span aria-hidden>·</span>
-                    <a
-                      href={figmaUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="inline-flex items-center gap-1 text-primary underline-offset-2 hover:underline"
-                    >
-                      <ExternalLink className="size-3" />
-                      Figma design
-                    </a>
-                  </>
-                )}
-                {result.savedPath && (
-                  <>
-                    <span aria-hidden>·</span>
-                    <span className="inline-flex min-w-0 items-center gap-1 font-mono">
-                      <FileText className="size-3 shrink-0" />
-                      <span className="truncate">{result.savedPath}</span>
-                    </span>
-                  </>
-                )}
               </p>
             </div>
             <CopyButton
@@ -522,6 +642,34 @@ function FindingsPanel({
                 .join('\n')}
             />
           </div>
+
+          {/* The SHAPE of the result in one line. Five count chips say how many of
+              each; only a proportional bar says whether this check is mostly fine
+              with two gaps, or mostly gaps. Each segment is also a filter. */}
+          {findings.length > 0 && (
+            <div className="flex h-2 w-full overflow-hidden rounded-full bg-muted" role="presentation">
+              {CATEGORY_ORDER.map((c) => {
+                const n = counts[c] ?? 0
+                if (n === 0) return null
+                const on = filter.size === 0 || filter.has(c)
+                return (
+                  <button
+                    key={c}
+                    type="button"
+                    onClick={() => toggleFilter(c)}
+                    title={`${n} ${CATEGORY[c].label} — click to filter`}
+                    style={{ width: `${(n / findings.length) * 100}%` }}
+                    className={cn(
+                      'h-full transition-opacity',
+                      CATEGORY[c].rail,
+                      on ? 'opacity-100' : 'opacity-25',
+                    )}
+                  />
+                )
+              })}
+            </div>
+          )}
+
           <div className="flex flex-wrap gap-2">
             {CATEGORY_ORDER.map((c) => {
               const meta = CATEGORY[c]
@@ -559,6 +707,39 @@ function FindingsPanel({
               </button>
             )}
           </div>
+
+          {/* Provenance, demoted: which model judged it, against what, and where the
+              report landed. It is what you check once, not what you read first. */}
+          <p className="flex flex-wrap items-center gap-x-2 gap-y-1 border-t border-border/60 pt-3 text-[11px] text-muted-foreground">
+            <span>
+              {findings.length} finding{findings.length === 1 ? '' : 's'}
+            </span>
+            <span aria-hidden>·</span>
+            <span>model {result.model}</span>
+            {figmaUrl && (
+              <>
+                <span aria-hidden>·</span>
+                <a
+                  href={figmaUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1 text-primary underline-offset-2 hover:underline"
+                >
+                  <ExternalLink className="size-3" />
+                  Figma design
+                </a>
+              </>
+            )}
+            {result.savedPath && (
+              <>
+                <span aria-hidden>·</span>
+                <span className="inline-flex min-w-0 items-center gap-1 font-mono">
+                  <FileText className="size-3 shrink-0" />
+                  <span className="truncate">{result.savedPath}</span>
+                </span>
+              </>
+            )}
+          </p>
         </CardContent>
       </Card>
 
@@ -616,7 +797,11 @@ function FindingsPanel({
             </div>
           </div>
 
-          {/* The findings themselves, grouped by verdict, most actionable first */}
+          {/* The findings themselves, grouped by verdict, most actionable first.
+              Each group FOLDS: "Matches" is the biggest bucket on a healthy check and
+              the least likely to be read, and folding it is how the gaps stay on one
+              screen. Group headers carry a select-all for their own bucket, because
+              "file every mismatch" is the most common batch there is. */}
           {visible.length === 0 ? (
             <p className="rounded-2xl border border-dashed border-border/60 px-3 py-8 text-center text-xs text-muted-foreground">
               No findings match {q ? `“${query}”` : 'this filter'}.
@@ -627,37 +812,84 @@ function FindingsPanel({
               if (items.length === 0) return null
               const meta = CATEGORY[c]
               const Icon = meta.icon
+              const open = !folded.has(c)
+              const groupIds = items.map(({ index }) => findingId(index))
+              const groupAllOn =
+                meta.filable && groupIds.length > 0 && groupIds.every((id) => selected.has(id))
               return (
                 <section key={c} className="space-y-2 pt-1">
                   <div className="flex items-center gap-2">
-                    <Icon className={cn('size-4', meta.text)} />
-                    <h4 className="text-sm font-semibold tracking-tight">{meta.label}</h4>
-                    <span className="text-xs text-muted-foreground">{items.length}</span>
+                    <button
+                      type="button"
+                      onClick={() => toggleFold(c)}
+                      aria-expanded={open}
+                      className="group/h flex min-w-0 items-center gap-2 rounded-full py-0.5 pr-2 text-left"
+                    >
+                      <ChevronDown
+                        className={cn(
+                          'size-3.5 shrink-0 text-muted-foreground transition-transform',
+                          !open && '-rotate-90',
+                        )}
+                      />
+                      <Icon className={cn('size-4 shrink-0', meta.text)} />
+                      <h4 className="text-sm font-semibold tracking-tight">{meta.label}</h4>
+                      <span
+                        className={cn(
+                          'rounded-full px-1.5 py-0.5 text-[10px] font-semibold tabular-nums ring-1',
+                          meta.chip,
+                        )}
+                      >
+                        {items.length}
+                      </span>
+                      <span className="hidden truncate text-[11px] text-muted-foreground lg:inline">
+                        {meta.blurb}
+                      </span>
+                    </button>
                     <span className="h-px flex-1 bg-border/60" aria-hidden />
-                  </div>
-                  <div className="space-y-2">
-                    {items.map(({ finding, index }) => (
-                      <FindingRow
-                        key={findingId(index)}
-                        finding={finding}
-                        selectable={meta.filable}
-                        checked={selected.has(findingId(index))}
-                        onToggle={() =>
+                    {meta.filable && (
+                      <button
+                        type="button"
+                        onClick={() =>
                           setSelected((prev) => {
                             const next = new Set(prev)
-                            const id = findingId(index)
-                            if (next.has(id)) next.delete(id)
-                            else next.add(id)
+                            for (const id of groupIds) {
+                              if (groupAllOn) next.delete(id)
+                              else next.add(id)
+                            }
                             return next
                           })
                         }
-                        severity={severityOf(index)}
-                        onSeverity={(value) =>
-                          setSeverities((prev) => ({ ...prev, [findingId(index)]: value }))
-                        }
-                      />
-                    ))}
+                        className="shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                      >
+                        {groupAllOn ? 'None' : 'All'}
+                      </button>
+                    )}
                   </div>
+                  {open && (
+                    <div className="space-y-2">
+                      {items.map(({ finding, index }) => (
+                        <FindingRow
+                          key={findingId(index)}
+                          finding={finding}
+                          selectable={meta.filable}
+                          checked={selected.has(findingId(index))}
+                          onToggle={() =>
+                            setSelected((prev) => {
+                              const next = new Set(prev)
+                              const id = findingId(index)
+                              if (next.has(id)) next.delete(id)
+                              else next.add(id)
+                              return next
+                            })
+                          }
+                          severity={severityOf(index)}
+                          onSeverity={(value) =>
+                            setSeverities((prev) => ({ ...prev, [findingId(index)]: value }))
+                          }
+                        />
+                      ))}
+                    </div>
+                  )}
                 </section>
               )
             })
@@ -811,7 +1043,13 @@ function HistoryCountChips({ counts }: { counts: DesignCheckRecord['counts'] }) 
   )
 }
 
-/** Saved Design Check history — one row per recorded run (DB + on-disk report). */
+/**
+ * Saved Design Check history — one row per recorded run (DB + on-disk report).
+ *
+ * The rows carry the same verdict vocabulary as a fresh result (`verdictOf`), so
+ * "did this ticket pass?" is answerable from the list without opening anything. Chips
+ * alone did not answer it: five numbers per row, five rows, is arithmetic.
+ */
 function HistoryCard({
   records,
   projectId,
@@ -822,7 +1060,6 @@ function HistoryCard({
   onSelect: (record: DesignCheckRecord) => void
 }) {
   const [query, setQuery] = useState('')
-  if (records.length === 0) return null
   const q = query.trim().toLowerCase()
   const shown = q
     ? records.filter((r) => `${r.folder} ${r.summary}`.toLowerCase().includes(q))
@@ -849,49 +1086,77 @@ function HistoryCard({
           <OpenFolderButton open={() => openDesignCheckFolder(projectId)} label="design checks" />
         </div>
       </div>
-      <ul className="divide-y">
-        {shown.length === 0 && (
-          <li className="px-4 py-6 text-center text-xs text-muted-foreground">
-            No saved check matches “{query}”.
-          </li>
-        )}
-        {shown.map((r) => (
-          <li key={r.id}>
-            <button
-              type="button"
-              onClick={() => onSelect(r)}
-              className="flex w-full flex-col gap-1.5 px-4 py-3 text-left transition-colors hover:bg-muted/40"
-              title="Open the report — findings can still be filed to ClickUp"
-            >
-              <div className="flex w-full items-center gap-2">
-                <Ticket className="size-3.5 shrink-0 text-muted-foreground" />
-                <span className="min-w-0 flex-1 truncate font-mono text-xs font-medium">
-                  {r.folder}
-                </span>
-                <span className="flex shrink-0 items-center gap-1 text-[11px] text-muted-foreground">
-                  <Clock className="size-3" />
-                  {new Date(r.createdAt).toLocaleString()}
-                </span>
-                <Eye className="size-3.5 shrink-0 text-muted-foreground" />
-              </div>
-              {r.summary && (
-                <p className="line-clamp-2 text-[13px] leading-snug text-muted-foreground">
-                  {r.summary}
-                </p>
-              )}
-              <div className="flex w-full flex-wrap items-center gap-x-3 gap-y-1">
-                <HistoryCountChips counts={r.counts} />
-                {r.filePath && (
-                  <span className="inline-flex min-w-0 items-center gap-1 font-mono text-[10px] text-muted-foreground/70">
-                    <FileText className="size-3 shrink-0" />
-                    <span className="truncate">{r.filePath}</span>
+      {records.length === 0 ? (
+        <div className="flex flex-col items-center justify-center gap-2 px-4 py-12 text-center">
+          <span className="flex size-10 items-center justify-center rounded-2xl bg-muted text-muted-foreground">
+            <ScanSearch className="size-5" />
+          </span>
+          <p className="text-sm font-medium">No design checks yet</p>
+          <p className="max-w-sm text-xs leading-relaxed text-muted-foreground">
+            Every check is saved here with its findings — reopen one later and its gaps can
+            still be filed to ClickUp.
+          </p>
+        </div>
+      ) : (
+        <ul className="divide-y">
+          {shown.length === 0 && (
+            <li className="px-4 py-6 text-center text-xs text-muted-foreground">
+              No saved check matches “{query}”.
+            </li>
+          )}
+          {shown.map((r) => {
+            const v = verdictOf(r.counts)
+            return (
+              <li key={r.id}>
+                <button
+                  type="button"
+                  onClick={() => onSelect(r)}
+                  className="flex w-full gap-3 px-4 py-3 text-left transition-colors hover:bg-muted/40"
+                  title="Open the report — findings can still be filed to ClickUp"
+                >
+                  <span
+                    className={cn(
+                      'mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-xl',
+                      v.chip,
+                    )}
+                  >
+                    <v.icon className="size-4" />
                   </span>
-                )}
-              </div>
-            </button>
-          </li>
-        ))}
-      </ul>
+                  <span className="flex min-w-0 flex-1 flex-col gap-1.5">
+                    <span className="flex w-full items-center gap-2">
+                      <span className="min-w-0 flex-1 truncate font-mono text-xs font-medium">
+                        {r.folder}
+                      </span>
+                      <span className={cn('shrink-0 text-[11px] font-semibold', v.text)}>
+                        {v.label}
+                      </span>
+                      <span className="flex shrink-0 items-center gap-1 text-[11px] text-muted-foreground">
+                        <Clock className="size-3" />
+                        {new Date(r.createdAt).toLocaleString()}
+                      </span>
+                      <Eye className="size-3.5 shrink-0 text-muted-foreground" />
+                    </span>
+                    {r.summary && (
+                      <span className="line-clamp-2 text-[13px] leading-snug text-muted-foreground">
+                        {r.summary}
+                      </span>
+                    )}
+                    <span className="flex w-full flex-wrap items-center gap-x-3 gap-y-1">
+                      <HistoryCountChips counts={r.counts} />
+                      {r.filePath && (
+                        <span className="inline-flex min-w-0 items-center gap-1 font-mono text-[10px] text-muted-foreground/70">
+                          <FileText className="size-3 shrink-0" />
+                          <span className="truncate">{r.filePath}</span>
+                        </span>
+                      )}
+                    </span>
+                  </span>
+                </button>
+              </li>
+            )
+          })}
+        </ul>
+      )}
     </Card>
   )
 }
@@ -1366,11 +1631,16 @@ export default function VerifyDesignPage() {
   if (!activeProjectId) {
     return (
       <div className="mx-auto max-w-6xl space-y-6">
-        <header className="space-y-1">
-          <h1 className="text-3xl font-semibold tracking-tight">Design Check</h1>
-          <p className="text-sm text-muted-foreground">
-            Verify a ticket against its Figma design with AI.
-          </p>
+        <header className="flex items-start gap-3">
+          <span className="mt-0.5 flex size-11 shrink-0 items-center justify-center rounded-2xl bg-foreground text-background">
+            <ScanSearch className="size-5" />
+          </span>
+          <div className="space-y-1">
+            <h1 className="text-3xl font-semibold tracking-tight">Design Check</h1>
+            <p className="text-sm text-muted-foreground">
+              Verify a ticket against its Figma design with AI.
+            </p>
+          </div>
         </header>
         <Card className="rounded-3xl border-dashed border-border/60 shadow-none">
           <CardContent className="flex flex-col items-center justify-center gap-3 py-20 text-center">
@@ -1403,18 +1673,29 @@ export default function VerifyDesignPage() {
           </div>
         </div>
 
+        {/* What the NEXT check will judge against. The bar used to be headed
+            "Checklist for <project>" over a templates path, which named neither the
+            thing nor its state; it now leads with whether a project checklist exists,
+            because that is the only question it can answer before a ticket is picked. */}
         {activeProject && (
           <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-2xl border border-border/60 bg-card px-4 py-3 shadow-none">
             <span className="flex items-center gap-2">
-              <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-border/60 bg-muted/60 text-muted-foreground">
-                <FolderGit2 className="h-4 w-4" />
+              <span
+                className={cn(
+                  'flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border',
+                  hasChecklist
+                    ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'
+                    : 'border-border/60 bg-muted/60 text-muted-foreground',
+                )}
+              >
+                <ListChecks className="h-4 w-4" />
               </span>
               <span className="leading-tight">
                 <span className="block text-[11px] uppercase tracking-wide text-muted-foreground">
-                  Checklist for
+                  Project checklist
                 </span>
                 <span className="block text-sm font-semibold tracking-tight">
-                  {activeProject.name}
+                  {hasChecklist ? 'Applied to every check' : 'None saved yet'}
                 </span>
               </span>
             </span>
@@ -1425,14 +1706,6 @@ export default function VerifyDesignPage() {
               >
                 <FolderTree className="h-3.5 w-3.5 shrink-0 text-primary/70" />
                 <span className="truncate">{activeProject.rootPath}/testing/templates</span>
-                <span
-                  className={cn(
-                    'ml-1 shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium',
-                    hasChecklist ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700',
-                  )}
-                >
-                  {hasChecklist ? 'exists' : 'new'}
-                </span>
               </span>
               <OpenFolderButton
                 open={() => openTemplatesFolder(activeProjectId)}
@@ -1667,77 +1940,104 @@ export default function VerifyDesignPage() {
             )}
           </div>
 
-          {/* 3 — model + run */}
-          <div className="space-y-3 border-t border-border/60 pt-4">
-            <StepLabel n={3} title="Run the check" />
-            <div className="flex flex-wrap items-end justify-between gap-3">
-              <div className="space-y-1.5">
-                <label className="text-xs font-medium text-muted-foreground">AI model</label>
-                <Select
-                  value={model}
-                  onValueChange={chooseModel}
-                  disabled={start.isPending || isRunning}
-                >
-                  <SelectTrigger className="h-10 w-56 gap-2">
-                    <Sparkles className="size-3.5 shrink-0 text-primary" />
-                    <SelectValue>
-                      <span className="text-sm font-medium">{modelInfo.label}</span>
-                    </SelectValue>
-                  </SelectTrigger>
-                  <SelectContent className="max-w-[20rem]">
-                    {MODELS.map((m) => (
-                      <SelectItem key={m.value} value={m.value} className="items-start py-2">
-                        <span className="flex flex-col gap-0.5">
-                          <span className="text-xs font-medium">{m.label}</span>
-                          <span className="text-[11px] leading-snug text-muted-foreground">
-                            {m.description}
-                          </span>
-                        </span>
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="flex flex-col items-end gap-1.5">
-                <Button
-                  onClick={() => start.mutate()}
-                  disabled={!canRun}
-                  size="lg"
-                  className="rounded-full transition-all duration-200 active:scale-[0.98]"
-                >
-                  {start.isPending || isRunning ? (
-                    <>
-                      <Loader2 className="size-4 animate-spin" />
-                      Verifying…
-                    </>
-                  ) : (
-                    <>
-                      <ScanSearch className="size-4" />
-                      Verify design
-                    </>
+        </CardContent>
+
+        {/* 3 — the run bar.
+            A tinted footer welded to the card, not a third numbered step: the button
+            used to float in the card's whitespace with its "what's missing" note in
+            11px grey beneath it, and a control that starts a two-minute AI job should
+            not be the quietest thing on the page. Readiness is stated as pills — what
+            is satisfied, what is still needed, and that the checklist is optional —
+            so the disabled button is never unexplained. `rounded-b-3xl` because the
+            card deliberately has no overflow-hidden (the ticket popover escapes it). */}
+        <div className="flex flex-col gap-3 rounded-b-3xl border-t border-border/60 bg-muted/60 px-5 py-4 lg:flex-row lg:items-center lg:justify-between">
+          <div className="min-w-0 space-y-1.5">
+            <div className="flex flex-wrap items-center gap-1.5">
+              {[
+                { ok: !!folder, label: 'Ticket', optional: false },
+                { ok: !!figmaUrl.trim(), label: 'Figma link', optional: false },
+                { ok: !!effectiveChecklist, label: 'Checklist', optional: true },
+              ].map((step) => (
+                <span
+                  key={step.label}
+                  className={cn(
+                    'inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-medium',
+                    step.ok
+                      ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'
+                      : step.optional
+                        ? 'text-muted-foreground/70'
+                        : 'bg-background text-muted-foreground ring-1 ring-border/60',
                   )}
-                </Button>
-                {/* Say what's still missing rather than leaving a dead button. */}
-                {!isRunning && (!folder || !figmaUrl.trim()) && (
-                  <p className="text-[11px] text-muted-foreground">
-                    {!folder && !figmaUrl.trim()
-                      ? 'Pick a ticket and paste the Figma link.'
-                      : !folder
-                        ? 'Pick a crawled ticket.'
-                        : 'Paste the Figma design link.'}
-                  </p>
-                )}
-              </div>
+                >
+                  {step.ok ? (
+                    <Check className="size-3" />
+                  ) : (
+                    <span
+                      aria-hidden
+                      className="size-2 rounded-full ring-1 ring-current ring-offset-0"
+                    />
+                  )}
+                  {step.label}
+                  {!step.ok && step.optional && ' · optional'}
+                </span>
+              ))}
             </div>
-            <p className="flex items-start gap-1.5 text-[11px] leading-snug text-muted-foreground">
-              <Sparkles className="mt-0.5 size-3 shrink-0 text-primary/70" />
-              <span>
-                {modelInfo.description} The model opens the Figma link with the project&apos;s tools
-                (Figma / Playwright MCP) if available; otherwise it flags items as “not sure”.
-              </span>
+            <p className="text-[11px] leading-snug text-muted-foreground">
+              {isRunning
+                ? 'Running — you can leave this page, it keeps going.'
+                : !folder && !figmaUrl.trim()
+                  ? 'Pick a crawled ticket and paste the Figma link to run.'
+                  : !folder
+                    ? 'Pick a crawled ticket to run.'
+                    : !figmaUrl.trim()
+                      ? 'Paste the Figma design link to run.'
+                      : 'The model opens the Figma link with the project’s tools (Figma / Playwright MCP); without them it flags items as “not sure”.'}
             </p>
           </div>
-        </CardContent>
+          <div className="flex shrink-0 items-center gap-2">
+            <Select value={model} onValueChange={chooseModel} disabled={start.isPending || isRunning}>
+              <SelectTrigger
+                className="h-10 w-[13rem] gap-2 rounded-full border-border/60 bg-background shadow-none"
+                title={modelInfo.description}
+              >
+                <Sparkles className="size-3.5 shrink-0 text-primary" />
+                <SelectValue>
+                  <span className="text-sm font-medium">{modelInfo.label}</span>
+                </SelectValue>
+              </SelectTrigger>
+              <SelectContent className="max-w-[20rem]">
+                {MODELS.map((m) => (
+                  <SelectItem key={m.value} value={m.value} className="items-start py-2">
+                    <span className="flex flex-col gap-0.5">
+                      <span className="text-xs font-medium">{m.label}</span>
+                      <span className="text-[11px] leading-snug text-muted-foreground">
+                        {m.description}
+                      </span>
+                    </span>
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Button
+              onClick={() => start.mutate()}
+              disabled={!canRun}
+              size="lg"
+              className="rounded-full transition-all duration-200 active:scale-[0.98]"
+            >
+              {start.isPending || isRunning ? (
+                <>
+                  <Loader2 className="size-4 animate-spin" />
+                  Verifying…
+                </>
+              ) : (
+                <>
+                  <ScanSearch className="size-4" />
+                  Verify design
+                </>
+              )}
+            </Button>
+          </div>
+        </div>
       </Card>
 
       {/* Live progress — the verify runs server-side, so this survives reload and

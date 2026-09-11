@@ -12,6 +12,108 @@
   on the page label **and** its group name, so "testing" finds the whole Testing group. Both shortcuts
   are skipped while typing in a field so they can't hijack a page's own input, and Enter opens the
   first match. Collapsed, the input is replaced by a button that expands the rail and focuses it.
+- **The footer is ONE card in three tiers** (`VersionFooter` + `AutoAgentStatusIndicator`):
+  version, health, links. Two earlier shapes failed the same way — they were a PILE. First three
+  bordered cards (~150px, louder than the nav above them), then three loose rows, which fixed the
+  height but left mono version text, a tiny green word and an icon button floating with nothing
+  holding them together. What makes it read as designed is the grouping: a hairline box on a
+  tinted surface, the version + re-check button as its header, two status lines beneath it, and
+  Docs / Releases split 50/50 on their own hairline at the bottom.
+  - **Both status lines are the same KIND of statement in the same shape** — icon, one sentence —
+    so `Auto Agent · Connected` and `Up to date` scan as one health block rather than two widgets.
+  - **Healthy is QUIET: the icon carries "fine", the text stays `muted-foreground`.** Two green
+    sentences stacked read as a success banner, and then a real drop no longer stands out. Only a
+    problem gets the coloured sentence (`status.ok` for Auto Agent, amber for an update).
+  - **An available update tints the whole card amber** and adds the labelled `Update now` button;
+    it is the one action here, and an icon-only version of it would be a bare arrow that
+    reinstalls the app.
+  - **"Last checked 8m ago" lives in the refresh button's tooltip**, where it was already
+    duplicated. The collapsed rail's footer is unchanged — icons with tooltips, since 72px has no
+    room for a label.
+- **The project picker is a Popover, NOT a `Select`** (`ProjectPicker`), and that is the whole
+  reason it was rebuilt: on a real machine this list is 10+ repos, and a `Select` cannot hold a
+  text input — Radix routes every keystroke to its own typeahead, so a filter box inside one eats
+  itself. With a popover the panel can carry what actually picks a project apart:
+  - **the filter matches NAME *and* PATH** — two repos called `web` are told apart only by where
+    they live — and the header shows `matches/total`;
+  - **the folder path under every name**, ellipsised in FRONT (`shortPath`): `truncate` cuts the
+    tail, which is backwards for a path where every entry starts `/Users/<me>/…` and the end is
+    the part that says which repo. The full path stays in the `title`;
+  - **pinned projects first**, and the state that decides whether a run will work at all —
+    `missing` (red) when the folder is gone, `setup` (amber) when the skill / `.mcp.json` /
+    `CLAUDE.md` trio is incomplete. Picking a dead project and learning it from a failed run is
+    the failure this replaces;
+  - **hand-rolled keyboard**: ↑/↓ walk the FILTERED list, Enter picks, Escape closes (Radix). The
+    cursor is an index into that flattened list, so it is re-aimed at the first match whenever the
+    query changes and clamped whenever the list shrinks — otherwise Enter picks whatever happens
+    to sit under a stale index.
+  The trigger keeps the initial-chip + name, but its second line is now the PATH, not "10
+  projects" (the count moved into the panel): which folder a run will spawn in is the useful fact.
+  The collapsed rail is unchanged — one square that expands the rail, because a 72px column has
+  nowhere to put a filter.
+- **Collapsing the rail does not cost you the labels: hovering it PEEKS.** A collapsed rail trades
+  every label for width, and the usual click-to-expand/click-to-collapse makes you pay for one
+  label with two clicks and a reflow of the page you were reading. So hovering the collapsed rail
+  opens it as an OVERLAY (`peek` in `AppShell`): `<aside>` is `fixed` and `<main>`'s padding
+  follows `collapsed` ALONE, so the peek floats over the content and **nothing on the page moves**
+  — that is the whole trick, and it breaks the moment `main`'s padding is made to follow the peek.
+  The parts that took measuring:
+  - **`showExpanded = !collapsed || peek` is what every child reads**, not `collapsed` — brand
+    block, project picker, filter, nav, footer. Miss one and the rail is 240px wide with an
+    icon-only column inside it.
+  - **Both edges are delayed** (~120ms in, ~180ms out): without the first, a pointer crossing the
+    rail on its way elsewhere flashes it open; without the second, clipping a corner of the panel
+    on the way to a row snaps it shut.
+  - **A portalled menu keeps it open.** The project picker's panel lives outside the aside, so
+    moving into it fires `mouseleave` and would yank the trigger away mid-click; `menuOpenRef`
+    blocks the retreat while it is open. That flag is a **ref**, not state — it is read by the
+    close path that the same handler triggers, and as state it read stale, leaving the rail
+    peeked open for ever after Escape.
+  - **On menu close the retreat is always SCHEDULED**, never conditioned on "is the pointer still
+    over the rail?" (coordinates we don't have, and a `hovering` flag went stale exactly when it
+    mattered). Scheduling is self-healing: if the pointer really is over the rail, the browser
+    re-dispatches `mouseenter` when the panel unmounts and that cancels the pending close; if it
+    is not, the rail retreats and one pixel of movement brings it back. Sticking open is the
+    failure to avoid, not retreating a moment early.
+  - **While peeking, the toggle says "Keep expanded"** (it pins: `setCollapsed(false)`), because
+    "Expand sidebar" on a rail that is visibly open reads as a no-op. ⌘/Ctrl+B still does both.
+- **The expanded rail is an ACCORDION, and its rows are short.** 23 pages in six groups did not
+  fit a 13" laptop, so: rows are `h-8` with a 13px label (the icon-only rail keeps its 40px
+  squares — there the square IS the touch target), groups sit 6px apart instead of 16px, and each
+  group header (`NavGroup`) folds. Folded state is `qc.sidebar.foldedGroups` in localStorage
+  (`useFoldedNavGroups`) — a third, independent thing from `qc.sidebar.collapsed` (whole rail to
+  icons) and `qc.sidebar.hidden` (pages switched off in Settings): "not right now" vs "make it
+  narrow" vs "I never use this". Three deliberate details:
+  - **A folded group still renders the row that owns the current URL**, and tints its header —
+    the page you are standing on must never vanish from the rail, or a fold reads as "I got
+    logged out of this section".
+  - **Fold-all rides on the search row**, not a row of its own: a dedicated toolbar would spend
+    the vertical space the folding exists to win back. It flips to expand-all once every group
+    is shut.
+  - **Only the expanded rail folds.** The icon-only rail has no headers to click, so it keeps the
+    hairline dividers, and the fade masks are re-measured on fold (`updateFade`) or the top/bottom
+    gradients claim an overflow that is no longer there.
+- **The page list itself lives in `lib/nav.ts`, not `App.tsx`** — `navGroups` plus the show/hide
+  state, because **Settings -> Sidebar draws its switches from the same array** and importing it
+  back out of `App.tsx` would be a cycle (App imports the page, the page imports App). Add a page
+  in one place and it appears in the rail AND in Settings.
+
+  Hiding a row (`useHiddenNav`, `qc.sidebar.hidden` in localStorage, `SidebarMenuCard` in
+  `ProjectsPage.tsx` under `?tab=sidebar`) is a per-MACHINE VIEW preference: nothing is written to
+  the repo, the DB or the project, so two engineers on the same project keep their own rails.
+  Three things that are deliberate:
+  - **It removes the ROW, never the route.** Every `<Route>` stays mounted, so a hidden page is
+    still reachable by URL and from links on other pages — this is a shorter rail, not a feature
+    flag, and must not become one (a "disabled" page that still answers is worse than either).
+  - **`/settings` cannot be hidden** (`NAV_ALWAYS_VISIBLE`) — it is where hiding is undone, so
+    hiding it would be a one-way door out of the UI. The filter and the rail both read
+    `visibleNavGroups()`, so a hidden page doesn't come back through ⌘K, and a group whose every
+    row is off disappears entirely (the Settings card labels that "group hidden", or it reads as
+    a bug).
+  - **The write fires a `qc:nav-hidden` window event.** The rail and the Settings card are on
+    screen together, and the `storage` event only fires in the OTHER tabs — without it a toggle
+    would land on the next reload. `readHiddenNav()` also drops entries for routes that no longer
+    exist, so a renamed page can't stay hidden by a stale key.
 - **`AppLogo` is a solid with negative space** — a scalloped certification seal with the check knocked
   out through a `<mask>`, not a lucide-weight line drawing (a line icon reads as one item borrowed
   from an icon set, and hairlines dissolve at 16px). The mask id comes from `useId` because two can

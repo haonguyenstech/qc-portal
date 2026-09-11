@@ -87,6 +87,45 @@ turn via the managed pointer block, so rating an answer is the shortest path the
 wrong" to "later answers know better". Details and the two write races in
 `docs/architecture/chat.md`.
 
+**Chat conversations → memory (`chatLearn.ts`, `learn.ts` `runChatCapture`)** — a *fourth* writer,
+and the only one that needs nobody to press anything. Most of what an engineer learns about a system
+they learn by asking, and until this existed none of it survived the conversation. Every answered turn
+arms a 90-second quiet timer on that conversation; when it fires, the last 6 exchanges are reflected on
+in one pass (**at most 2 items**, memory strongly preferred over knowledge) and stamped
+`source: chat · <slug> · <date>`. Three properties are the whole design: it is fired **after** the
+turn's `done` frame and never awaited (nothing the reader is watching waits on a model call); it is
+**one capture per quiet conversation, not one per message** (a chat is a back-and-forth, and its
+conclusion is at the end); and captures are **serialised process-wide**, because two of them reading
+the same memory folder at once would each create the note the other was writing. Gated on the
+project's auto-learn toggle — unlike the vote above, this one happens on its own, which is exactly
+what that setting governs. Skipped for temporary conversations and failed turns, and `DELETE
+/api/chat/:slug` calls `forgetChatLearning` so deleting a chat also cancels the memory it had not
+written yet. Details in `docs/architecture/chat.md`.
+
+**AI Brain (`components/AiBrainMap.tsx`, Instructions → `?tab=brain`)** — the read-only overview of
+everything above, and the only screen that shows Knowledge and Memory *together with where each item
+came from*. Three panels: the **pipeline** (source folders → the managed CLAUDE.md pointer → the
+surfaces that spawn `claude`), a **constellation** with one dot per item — grouped into a wedge per
+kind, filled when the AI captured it and hollow when a person wrote it, hover to identify, click to
+read. Its motion is four things, each of which means one: a slow breath + two ripples on the
+core (this is being read right now), a comet arc sweeping the outer ring, a staggered arrival
+when the panel mounts, and travelling pulses running INWARD along a capped rotating subset of
+spokes (`MAX_PULSES` = 8 — context being pulled in, which is the true direction: these files are
+read, never written, by a run). No SVG blur filters and no per-item SMIL, and
+`prefers-reduced-motion` stops all of it — the first version of this tab paid for a starfield,
+two orbits and 24 dashed edges to say nothing. Two things measured on screen and fixed: a FILLED
+wedge for the sweep rendered as a hard-edged blue pie slice (a radial gradient fades a wedge
+along its radius but not along its straight edges — a stroked arc has no edges to give away),
+and a flat low-opacity disc for the core halo read as a pale ball stuck on the page rather than
+a light source (it is a radial gradient now). Below it, a **searchable inventory** with an origin chip (`You` / `Run` / `Chat` / `Rating`), size
+and mtime. Origin is parsed from the `source` stamp's first segment (`originOf`), so a new writer
+only has to keep stamping to appear here. What the rebuild fixed, measured on a 51-item project: the
+old version capped the map at 24 nodes and printed "+27 more not shown", truncated every label to 22
+characters (three notes rendered as `notification-…`), and could not be searched or filtered — a map
+of the AI's knowledge that hid half of it and identified none of the rest. The dots carry no label at
+all now, which is precisely why the panel scales: the readout under it has room for a full name and
+description. Read-only on purpose — the editors are one tab away, and the preview links to them.
+
 **Chat's own accuracy layers** — a chat turn is the one AI surface here that reads project context and
 answers **without** anything auto-revising it afterwards, so it carries three cheap defences of its own
 instead: an always-on prompt block (`FACTS_BLOCK`) that forbids the four measured causes of a wrong

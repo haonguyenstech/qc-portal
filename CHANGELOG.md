@@ -3,6 +3,86 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.12.3 — 2026-09-11
+
+**Two new pages: where the project stands, and how it looks on a phone**
+
+### Added
+
+- **Responsive — one URL on many devices at once** (Testing › Responsive). Paste a URL and
+  see it side by side on up to **eight** live device frames, with the drawn phone chrome, a
+  zoom slider and a rotate button. **53 devices** in five groups — iPhone, Android, Foldable,
+  Tablet, Desktop — and a Custom size panel for the exact viewport a bug report names. Search
+  the picker by device *or* by size: typing `412` answers "which phones are 412 wide?".
+  - **Sync actions** replays what you do on one device onto all the others — clicks, typing,
+    scrolling. Do it once, watch it happen everywhere. It says how many frames it can actually
+    reach, because a page on another domain cannot be driven from here at all.
+  - **The camera button captures the evidence.** That runs the page on a *real* emulated
+    device on your machine — right viewport, right pixel ratio, mobile user agent, touch — so
+    a phone-detecting app serves its phone layout instead of the desktop one an iframe gets.
+    You get a screenshot per device plus findings that are **measured in the page**: "the body
+    scrolls 74px wider than the viewport, because `table.lines` is 448px" is something a
+    developer can fix; a picture of a scrollbar is not. Tap targets under 44px, text under
+    12px, missing viewport meta, blocked pinch-zoom, clipped text, oversized images, fixed
+    bars eating the screen. Copy the whole sweep as Markdown straight into a ticket.
+  - **Via portal** loads a site that refuses to be framed ("X-Frame-Options"), through the
+    portal's own server. It sends no cookies, so a login-walled page shows its login screen —
+    use the capture button for those. A local dev server never needs it, and the page says so.
+- **Reports — where does this project stand?** (Report › Reports). The one page that reads
+  across the others, joining **ticket → test cases → run → defects** into a single status
+  report with a verdict, coverage, pass rate, open defects and the ones that keep coming
+  back. Export it as Markdown, PDF or Word in the client report format.
+  - A ticket's result is its **latest** run, never a sum across re-runs — the naive version
+    reported "842 of 331 test cases executed" on a ticket that had been run 22 times.
+  - Blocked and not-tested cases stay **out** of the pass rate, a ticket edited since it was
+    crawled is flagged **stale** rather than silently refreshed, and "open defects" (latest
+    run per ticket) and "recurring" (across every run) are deliberately two different lists.
+- **Chat now learns from the questions you ask.** Most of what you find out about a system
+  you find out by asking, and until now none of it survived the conversation. When a chat
+  goes quiet for 90 seconds, the last few exchanges are reflected on once and what matters is
+  written to the project's memory — so later answers, on this page and in every run, already
+  know it. It never runs on the path of an answer you are waiting for, it is one capture per
+  conversation rather than one per message, it respects the project's auto-learn switch, and
+  deleting a chat also cancels the memory it had not written yet. Temporary chats leave
+  nothing behind, as before.
+- **Archive a conversation** from the chat list or the chat header. It is not a delete: the
+  transcript is untouched, still openable, still searchable — it just stops competing for
+  room in a list that only ever grows. One line above **New Chat** swaps the list for the
+  archive and back, a search still finds archived chats, and the toast carries **Undo**.
+- **AI Brain** (Instructions › AI Brain) — the read-only picture of everything the AI knows
+  about this project and **where each piece came from**: the pipeline from your folders into
+  every run, a dot per item (filled when the AI captured it, hollow when a person wrote it),
+  and a searchable inventory with a `You` / `Run` / `Chat` / `Rating` origin chip, size and
+  date. The old version capped the map at 24 items and cut every name to 22 characters.
+- **Show or hide sidebar rows** (Settings › Sidebar). A per-machine view preference — it
+  removes the row, never the page, so a hidden page is still reachable by its URL. Settings
+  itself can't be hidden, since that is where hiding is undone.
+- **Notes get labels and a list view** — filter by label, and switch between cards and rows.
+
+### Changed
+
+- **Design Check was rebuilt around what a real check returns.** A setup card with two
+  numbered steps over a welded run bar whose **readiness pills** (Ticket / Figma link /
+  Checklist) say exactly what is still missing, so a greyed-out button is never unexplained.
+  Then a **verdict** instead of five numbers, a proportional bar, a search box, count chips
+  that filter, folding groups with their own All/None, and findings that clamp to two lines —
+  a 26-finding report used to be a 3,500px scroll of highlighter-yellow cards, and the
+  buckets past the first were never reached.
+- **The chat transcript is the answers now.** Names, a second avatar, a timestamp under every
+  question and a five-part stats line were, down a 60-message conversation, more chrome than
+  content. The timestamp appears on hover, the stats read `27s · $0.41` with the rest one
+  hover away, and the answer's actions stay visible — Copy, save as a note, rate and
+  fact-check are the reason an answer gets scrolled back to.
+- **The project picker is searchable**, and it matches the **path** as well as the name — two
+  repos called `web` are told apart only by where they live. Pinned projects come first, a
+  missing folder is red and an incomplete setup amber, so picking a dead project is no longer
+  something you find out from a failed run. Arrow keys and Enter work.
+- **The sidebar footer is one card instead of a pile** — version, health, links, in that
+  order. Healthy is quiet; only a real problem gets a coloured line, and an available update
+  tints the whole card with the one button that matters.
+- **MailBox reads like a mail client**, and every page now wears the same header — a larger
+  title and mark, consistent from Database to Remote access.
+
 ## 0.12.2 — 2026-09-10
 
 **The macOS installer is a double-click again**

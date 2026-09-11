@@ -185,6 +185,13 @@ server/src/
                     step is a loopback OAuth flow in the user's browser); the watcher the
                     CLI starts is detached, so no terminal has to stay open. Output is
                     ANSI-stripped, scrubbed and kept in memory only.
+  reportData.ts     /reports: ONE server-side pass joining tickets -> test cases -> runs ->
+                    defects into the project's QC status. A ticket's result is its LATEST
+                    reporting run, NEVER a sum across re-runs (22 runs x 331 cases summed to
+                    "842 of 331 executed"); blocked/not-tested stay OUT of the pass rate; and
+                    it never re-queries the tracker - a ticket edited since its crawl is
+                    flagged `stale`, not refreshed. Open defects (latest run per ticket) and
+                    `recurring` (over ALL runs) are deliberately two different lists.
   k6.ts pageAudit.ts perfJobs.ts   Performance page: k6 load tests + browser page-load
                     audits (+ their shared job registry). The generated k6 script and its
                     summary live BESIDE THE DB, never in a repo, and credentials reach k6
@@ -211,6 +218,20 @@ server/src/
                     `w:w` widths and `w:*="undefined"` page margins, and OOXML
                     measurements are integers — Word refuses the whole file over
                     either, while `textutil`/XML parsers read it happily).
+  responsiveCapture.ts responsiveJobs.ts   Responsive: one URL on many devices. The
+                    LIVE side is iframes in the browser; this side drives a REAL
+                    emulated device (viewport + DPR + mobile UA + touch) because an
+                    iframe can fake none of those, cannot be screenshotted
+                    cross-origin, and is refused outright by any page that sends
+                    X-Frame-Options. Findings are measured IN the page
+                    (`AUDIT_SCRIPT`) — "the body scrolls 74px wider than the
+                    viewport, because table.lines is 448px" is actionable and a
+                    picture of a scrollbar is not. Devices run in SEQUENCE (six
+                    Chromes fighting for one CPU times out the slowest and reads
+                    as "that device is broken"), a device that fails is recorded
+                    rather than failing the sweep, and screenshots live BESIDE THE
+                    DB, never in a repo. A redirected sweep and a device that
+                    could not be captured are never reported as clean
   crawl.ts crawlJobs.ts            ticket crawling (+ in-memory job registry)
   testcaseGen.ts testcaseJobs.ts   test-case generation (+ in-memory job registry)
   sourceRepo.ts sourceJobs.ts sourceMap.ts   Source Code page: clone/sync + AI source map
@@ -221,6 +242,9 @@ server/src/
   memoryStore.ts knowledgeStore.ts overviewDocs.ts notesStore.ts   testing/* storage primitives
   docReview.ts      "AI review & format" of an uploaded doc — refuses rather than degrades
   learn.ts          AI auto-capture after a run       groundingCheck.ts  anti-hallucination audit
+  chatLearn.ts      the same auto-capture for /chat: an answered turn arms a 90s QUIET timer on
+                    that conversation, then ONE reflection over the last few exchanges, fired
+                    after the turn's `done` frame and never awaited. Serialised process-wide
   answerCheck.ts    free existsSync check of the paths a chat answer cited (every turn)
   answerAudit.ts    on-demand fact check of ONE chat answer by an independent cheap model
   mailbox.ts        MailBox: a disposable inbox (Guerrilla Mail's JSON API — YOPmail has no
@@ -229,9 +253,20 @@ server/src/
                     `check_email` is a delta and answers empty on the second call
   totp.ts apiAccounts.ts   2FA seeds + API login accounts — stored BESIDE THE DB, never in a repo
   clickup.ts folderPicker.ts projectScope.ts toolPath.ts mobileDevices.ts
+  routes/responsive.ts  also holds the FRAMING PROXY: /frame/<base64url origin><path>.
+                    The path carries the target because a `?url=` query cannot host a real
+                    app — its module scripts stay cross-origin (module fetches are always
+                    CORS, so an app without ACAO renders NOTHING) and a proxied module's
+                    relative imports resolve to /api/responsive/*. It also injects a
+                    bootstrap that replaceStates to the target's path (an SPA routes on
+                    location.pathname, so otherwise it matches no route and renders blank)
+                    and patches fetch/XHR back through the proxy (else the app's /api calls
+                    hit the PORTAL). No cookies, and it never rewrites an absolute-path
+                    import inside module code — a dev server needs no proxy at all, and the
+                    page says so when the probe reports the URL is framable
   routes/           projects, qc, files, skills, mcp, clickup, source, ai, templates,
                     knowledge, memory, notes, database, diagrams, prototype, chat,
-                    performance, version, remote
+                    performance, reports, responsive, version, remote
 
 web/src/
   App.tsx           two branches: `/ai-labs` renders BARE, everything else via AppShell; the job
@@ -239,6 +274,8 @@ web/src/
   main.tsx  index.css (Tailwind v4 oklch tokens, light + .dark)
   pages/ components/ components/ui/ (shadcn primitives)
   lib/  api.ts (ALL backend calls) types.ts project-context.tsx notifications.tsx theme.ts
+        nav.ts (the sidebar's page list + the hidden-row preference, SHARED with Settings ->
+        Sidebar so adding a page touches one array; `/settings` can never be hidden)
         pwa.ts (registers the service worker that makes the portal installable —
         it caches NOTHING on purpose; see docs/architecture/pwa.md)
         testRules.ts highlight.ts apiAssert.ts devices.ts sql-complete.ts noteHtml.ts
@@ -261,6 +298,30 @@ web/src/
         loadEndpoint.ts  (Performance: a pasted cURL or a saved API Testing request →
         one load-test endpoint. Query rows fold into the URL; {{variables}} survive
         encoding and are resolved SERVER-SIDE at run start, never in the browser)
+        responsiveDevices.ts responsiveFindings.ts  (Responsive: THE device catalog —
+        one list of 53 presets in five groups (iPhone/Android/Foldable/Tablet/
+        Desktop), the picker reads it and a capture request SENDS it, because two
+        catalogs drift and the label under a screenshot then names a device nobody
+        picked. Nothing in it is ESTIMATED - a viewport that could not be confirmed
+        is left out, and so is any DPR above 4, which the server would silently
+        clamp. The picker searches the SIZE as well as the name (`matchesDevice`):
+        a bug report quotes 412px and the question is which phones are 412 wide. Sizes are CSS-pixel VIEWPORTS, the drawn phone chrome grows the
+        bezel and never eats the iframe, zoom is a `transform` so the viewport
+        stays truthful, and orientation rotates the preset AS AUTHORED — the
+        "portrait = taller side" rule rendered a 1280x800 laptop as an 800x1280
+        window. Plus the severity/wording, the verdict, and the Markdown export —
+        ONE source for screen and ticket. `useMirror` (in the page) replays one
+        device's clicks/typing/scroll onto the others and is CAPABILITY-detected,
+        never flag-gated: a cross-origin frame cannot be driven at all, so it says
+        how many frames it can reach. Its loop guard releases SYNCHRONOUSLY — an
+        rAF release latches forever in a hidden tab and swallows every action after
+        the first)
+        dates.ts  (parseDay/formatDay: `YYYY-MM-DD` <-> Date in LOCAL time only.
+        `new Date('2026-09-01')` is UTC midnight, so the naive version shows and
+        stores the day BEFORE the one clicked. Used by components/DatePicker.tsx)
+        systemReport.ts systemReportHtml.ts  (/reports: the verdict + its thresholds, the
+        formatting, and the printable document. ONE source for screen, Markdown, PDF and
+        Word - a PDF mailed to a client must not disagree with the page it came from)
         nfrReport.ts nfrReportHtml.ts  (Performance: the NFR deliverable — requirements
         judged across one or MORE runs, PASS/FAILED/MIXED/PERFORMANCE RISK/PENDING,
         rendered in the client report format. Paired with components/NfrReportPanel.tsx.
@@ -289,11 +350,14 @@ Four module-level rules that bite mid-edit, so they stay here:
 
 ## Routing note
 
-`/settings` renders `ProjectsPage.tsx` (the file name predates the rename). It has two tabs driven
-by the `?tab=` query param: `?tab=projects` (default) and `?tab=models`. `/projects` redirects to
-`/settings`. When editing "the settings page," edit `web/src/pages/ProjectsPage.tsx`. The `models` tab
+`/settings` renders `ProjectsPage.tsx` (the file name predates the rename). It has three tabs driven
+by the `?tab=` query param: `?tab=projects` (default), `?tab=models` and `?tab=sidebar`.
+`/projects` redirects to `/settings`. When editing "the settings page," edit `web/src/pages/ProjectsPage.tsx`. The `models` tab
 holds `ClaudeUsageCard` + `AiRuntimeCard` (global) and `AiAutomationCard` (the active project's
 per-project grounding-check / auto-learn toggles — see "Per-project control" in `docs/architecture/instructions-context.md`).
+The `sidebar` tab holds `SidebarMenuCard`, which shows/hides the rail's menu rows — a per-machine
+view preference in localStorage that removes the ROW and never the route; the page list it and the
+sidebar share lives in `web/src/lib/nav.ts`. See "Shell chrome" in `docs/architecture/shell-and-ai-labs.md`.
 
 ## Feature notes — read the file before touching the feature
 
@@ -311,6 +375,8 @@ commit when the behaviour changes.
 | `/testcases`, background jobs, notifications/watchers, spec upload | `testcase-generation.md` |
 | `/api-testing` — saved requests, flows, per-step data/check overrides, "Run as" accounts, assertions | `api-testing.md` |
 | `/performance` — k6 load tests, browser page-load audits, duplicate-API detection, the NFR report | `performance.md` |
+| `/reports` — the QC status report (ticket -> test cases -> run -> defects) | `reports.md` |
+| `/responsive` — the multi-device live preview, mirrored actions, the framing proxy, the capture sweep | `responsive.md` |
 | `/qc-run` — the E2E flow canvas, run output folders (`runs.outDirToken`), busy-ticket pruning, mobile device picking, filing issues to ClickUp | `runs.md` |
 | `/verify` (Design Check) or project templates (`testing/templates`, bundled template sync) | `design-check-and-templates.md` |
 | `/prototype` — builds, revisions, decisions ledger, design system, comment mode | `prototype.md` |
@@ -341,6 +407,14 @@ polish: `transition-all duration-200 active:scale-[0.98]`, hover lift (`hover:-t
 hover:shadow-sm`), and `Loader2 className="animate-spin"` for pending states. Icons come from
 `lucide-react`. The **`system-style-ui` project skill** (`.claude/skills/system-style-ui/`) carries
 the full recipe and `McpPage.tsx` is the canonical reference implementation.
+
+**`npx shadcn@latest add <component>` OVERWRITES `button.tsx`** — and its current registry version
+does not fit this repo. Adding the date picker, it rewrote the imports to `cn` (an unrelated npm
+package the CLI then installs) and to the `radix-ui` umbrella, and changed the base button from
+**`rounded-full` to `rounded-md`** — silently un-pilling every button in the app and breaking the
+design language above. So after ANY `shadcn add`: `git checkout web/src/components/ui/button.tsx`,
+repoint the generated files at `@/lib/utils` and the per-package `@radix-ui/react-*` this repo
+already uses, and uninstall the `cn` / `radix-ui` / `date-fns` deps it added.
 
 **Component shape** — pages are single files that define small local sub-components (e.g.
 `ProjectCard`, `AiRuntimeCard`, `ConnectServices`, `StatTile`) above the default export. Follow that

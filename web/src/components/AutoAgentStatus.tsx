@@ -521,31 +521,28 @@ export function AutoAgentStatusIndicator({ collapsed }: { collapsed: boolean }) 
             type="button"
             onClick={() => setPanelOpen(true)}
             aria-label={`Auto Agent: ${look.label} — open the connection panel`}
-            className={cn(
-              'w-full rounded-2xl border px-2 py-1.5 text-left transition-all duration-200 hover:border-border hover:shadow-sm active:scale-[0.98]',
-              look.border,
-            )}
+            /* A CHECKLIST LINE, not a card. This lives inside the footer's status
+               card next to "Up to date", and the two have to read as the same kind
+               of statement — icon, one sentence, colour carrying the verdict. The
+               old bordered card with its own 28px chip competed with the nav. */
+            className="flex h-6 w-full items-center gap-1.5 rounded-md px-1.5 text-left transition-colors hover:bg-muted"
           >
-            <div className="flex items-center gap-2">
-              <span className="flex size-7 shrink-0 items-center justify-center rounded-lg border border-sidebar-border/60 bg-background">
-                <look.Icon className={cn('size-3.5', look.text)} />
-              </span>
-              <span className="min-w-0 flex-1 leading-tight">
-                <span className="block truncate font-medium text-foreground">Auto Agent AI</span>
-                <span className={cn('flex items-center gap-1 text-[10px]', look.text)}>
-                  {isLoading ? (
-                    <>
-                      <Loader2 className="size-2.5 animate-spin" /> Checking…
-                    </>
-                  ) : (
-                    <>
-                      <span className={cn('size-1.5 rounded-full', look.dot)} aria-hidden />
-                      {look.label}
-                    </>
-                  )}
-                </span>
-              </span>
-            </div>
+            {isLoading ? (
+              <Loader2 className="size-3 shrink-0 animate-spin text-muted-foreground" />
+            ) : (
+              <look.Icon className={cn('size-3 shrink-0', look.text)} />
+            )}
+            {/* Healthy is QUIET — the icon carries "fine", and only a problem gets
+                the coloured sentence. Two green lines stacked in a footer read as a
+                success banner, and then a real drop no longer stands out. */}
+            <span
+              className={cn(
+                'min-w-0 flex-1 truncate text-[11px] font-medium',
+                status?.ok ? 'text-muted-foreground' : look.text,
+              )}
+            >
+              Auto Agent · {isLoading ? 'Checking…' : look.label}
+            </span>
           </button>
         </TooltipTrigger>
         <TooltipContent side="right">{detail}</TooltipContent>

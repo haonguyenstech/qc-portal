@@ -6,55 +6,40 @@ import { toast } from 'sonner'
 import {
   ArrowRight,
   ArrowUpCircle,
-  BookOpen,
-  BookText,
   CheckCircle2,
-  ClipboardList,
-  Code2,
-  Database,
-  FileCog,
-  FileText,
+  BookText,
+  Check,
+  ChevronRight,
+  ChevronsDownUp,
+  ChevronsUpDown,
   FolderGit2,
-  Gauge,
-  Globe,
-  History,
   Loader2,
-  Layout,
   PanelLeftClose,
   PanelLeftOpen,
-  PlayCircle,
-  Plug,
   Plus,
-  RadioTower,
   RefreshCw,
-  ScanSearch,
   ScrollText,
   Search,
   Settings,
-  TerminalSquare,
-  MessagesSquare,
-  Inbox,
-  NotebookPen,
-  Ticket,
   Upload,
-  Wrench,
   X,
-  Zap,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { RouteGuideTour } from '@/components/RouteGuideTour'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectSeparator,
-  SelectTrigger,
-} from '@/components/ui/select'
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { checkForUpdate, getUpdateLog, getVersion, triggerUpdate } from '@/lib/api'
 import { listRuns } from '@/lib/api'
 import { useProjects } from '@/lib/project-context'
+import type { Project } from '@/lib/types'
+import {
+  useFoldedNavGroups,
+  useHiddenNav,
+  visibleNavGroups,
+  type NavGroupDef,
+  type NavItemDef,
+} from '@/lib/nav'
 import NotificationBell from '@/components/NotificationBell'
 import ThemeToggle from '@/components/ThemeToggle'
 import { AutoAgentStatusIndicator } from '@/components/AutoAgentStatus'
@@ -67,12 +52,14 @@ import PerfJobWatcher from '@/components/PerfJobWatcher'
 import RunPage from '@/pages/RunPage'
 import RunningPage from '@/pages/RunningPage'
 import HistoryPage from '@/pages/HistoryPage'
+import ReportsPage from '@/pages/ReportsPage'
 import RunDetailPage from '@/pages/RunDetailPage'
 import SkillsPage from '@/pages/SkillsPage'
 import TicketsPage from '@/pages/TicketsPage'
 import TestCasePage from '@/pages/TestCasePage'
 import ApiTestingPage from '@/pages/ApiTestingPage'
 import PerformancePage from '@/pages/PerformancePage'
+import ResponsivePage from '@/pages/ResponsivePage'
 import PrototypePage from '@/pages/PrototypePage'
 import ChatPage from '@/pages/ChatPage'
 import AiLabsPage from '@/pages/AiLabsPage'
@@ -155,69 +142,6 @@ function AppLogo({ className }: { className?: string }) {
   )
 }
 
-interface NavItemDef {
-  to: string
-  label: string
-  icon: typeof BookOpen
-  end: boolean
-}
-
-const navGroups: { label: string; items: NavItemDef[] }[] = [
-  {
-    label: 'Project',
-    items: [
-      { to: '/overview', label: 'Overview', icon: BookOpen, end: false },
-      { to: '/source', label: 'Source Code', icon: Code2, end: false },
-      { to: '/database', label: 'Database', icon: Database, end: false },
-      // Diagrams hidden temporarily — restore this entry to bring it back.
-      // { to: '/diagrams', label: 'Diagrams', icon: Workflow, end: false },
-    ],
-  },
-  {
-    label: 'Testing',
-    items: [
-      { to: '/tickets', label: 'Tickets', icon: Ticket, end: false },
-      { to: '/testcases', label: 'TestCase', icon: ClipboardList, end: false },
-      { to: '/qc-run', label: 'Run', icon: PlayCircle, end: false },
-      { to: '/running', label: 'Running', icon: RadioTower, end: false },
-      { to: '/history', label: 'History', icon: History, end: false },
-      { to: '/verify', label: 'Design Check', icon: ScanSearch, end: false },
-      { to: '/api-testing', label: 'API Testing', icon: Zap, end: false },
-      { to: '/performance', label: 'Performance', icon: Gauge, end: false },
-    ],
-  },
-  {
-    label: 'Configure',
-    items: [
-      { to: '/instructions', label: 'Instructions', icon: FileText, end: false },
-      { to: '/skills', label: 'Skills', icon: Wrench, end: false },
-      { to: '/mcp', label: 'MCP', icon: Plug, end: false },
-      { to: '/templates', label: 'Templates', icon: FileCog, end: false },
-    ],
-  },
-  {
-    label: 'Tools',
-    items: [
-      { to: '/chat', label: 'Chat', icon: MessagesSquare, end: false },
-      { to: '/prototype', label: 'Prototype', icon: Layout, end: false },
-      { to: '/terminal', label: 'Terminal', icon: TerminalSquare, end: false },
-      { to: '/notes', label: 'Note', icon: NotebookPen, end: false },
-      { to: '/mailbox', label: 'MailBox', icon: Inbox, end: false },
-      // A reading page, not a project tool — it's here because Tools is where an engineer
-      // looks when asking "what else can I use?".
-      // Temporarily hidden from the sidebar; the /ai-labs routes still work by URL.
-      // { to: '/ai-labs', label: 'QC AI Labs', icon: FlaskConical, end: false },
-    ],
-  },
-  {
-    label: 'System',
-    items: [
-      { to: '/settings', label: 'Settings', icon: Settings, end: false },
-      { to: '/remote', label: 'Remote access', icon: Globe, end: false },
-    ],
-  },
-]
-
 const SIDEBAR_KEY = 'qc.sidebar.collapsed'
 
 /** Sidebar collapsed/expanded state, persisted across reloads. */
@@ -258,6 +182,15 @@ function RunningBadge({ count, active }: { count: number; active: boolean }) {
   )
 }
 
+/**
+ * Does this row own the current URL? Nested paths count (`/run/42` lights up Run),
+ * except for an `end` row. Shared by `NavItem` and `NavGroup` — a folded group has
+ * to know whether the active page is inside it.
+ */
+function routeMatches(pathname: string, item: NavItemDef) {
+  return item.end ? pathname === item.to : pathname === item.to || pathname.startsWith(`${item.to}/`)
+}
+
 /** A single sidebar link. Collapsed → icon-only square with a right-side tooltip. */
 function NavItem({
   item,
@@ -277,7 +210,7 @@ function NavItem({
   // Compute active state ourselves rather than via NavLink's className/children
   // render-props: when collapsed the link is wrapped in <TooltipTrigger asChild>,
   // whose Radix Slot stringifies a function className. A plain string is Slot-safe.
-  const isActive = end ? pathname === to : pathname === to || pathname.startsWith(`${to}/`)
+  const isActive = routeMatches(pathname, item)
 
   // Scroll the active row into view when the nav is taller than the pane — landing
   // on a route from a page link or a reload shouldn't leave its row off screen.
@@ -295,7 +228,10 @@ function NavItem({
       ref={linkRef}
       className={cn(
         'group relative flex items-center text-sm font-medium transition-all duration-200 active:scale-[0.98]',
-        collapsed ? 'h-10 w-10 justify-center rounded-xl' : 'gap-3 rounded-xl px-3 py-1.5',
+        // Expanded rows are deliberately SHORT (h-8): with 23 pages a 40px row put
+        // half the rail below the fold on a 13" laptop. The collapsed rail keeps its
+        // 40px squares — they are the touch target there, not a label.
+        collapsed ? 'h-10 w-10 justify-center rounded-xl' : 'h-8 gap-2.5 rounded-lg px-2.5 text-[13px]',
         isActive
           ? collapsed
             ? 'bg-primary/10 text-primary ring-1 ring-inset ring-primary/25'
@@ -355,6 +291,64 @@ function NavItem({
   )
 }
 
+/**
+ * One group in the expanded rail: a foldable header plus its rows.
+ *
+ * Folding is the answer to "23 pages don't fit", so the header has to stay CHEAP —
+ * 24px, no border, the same uppercase caption it always was, just clickable with a
+ * chevron. Two details that matter:
+ *  - a FOLDED group still renders the row that owns the current URL (dimmed context
+ *    is better than the page you are on vanishing from the rail), and its header
+ *    stays coloured so the fold reads as "the rest is hidden", not "you left";
+ *  - the item count only shows while folded — expanded, the rows are the count.
+ */
+function NavGroup({
+  group,
+  folded,
+  onToggle,
+  liveCount,
+}: {
+  group: NavGroupDef
+  folded: boolean
+  onToggle: () => void
+  liveCount: number
+}) {
+  const { pathname } = useLocation()
+  const activeItem = group.items.find((i) => routeMatches(pathname, i))
+
+  return (
+    <div className="flex flex-col">
+      <button
+        type="button"
+        onClick={onToggle}
+        aria-expanded={!folded}
+        title={folded ? `Expand ${group.label}` : `Collapse ${group.label}`}
+        className={cn(
+          'flex h-6 w-full items-center gap-1 rounded-lg pl-1.5 pr-2 text-[10px] font-semibold uppercase tracking-wider transition-colors',
+          'hover:bg-muted/60 hover:text-muted-foreground',
+          folded && activeItem ? 'text-primary/70' : 'text-muted-foreground/55',
+        )}
+      >
+        <ChevronRight
+          className={cn(
+            'size-3 shrink-0 transition-transform duration-200',
+            !folded && 'rotate-90',
+          )}
+        />
+        <span className="truncate">{group.label}</span>
+        {folded && (
+          <span className="ml-auto text-[10px] font-medium tabular-nums text-muted-foreground/45">
+            {group.items.length}
+          </span>
+        )}
+      </button>
+      {(folded ? (activeItem ? [activeItem] : []) : group.items).map((item) => (
+        <NavItem key={item.to} item={item} collapsed={false} liveCount={liveCount} />
+      ))}
+    </div>
+  )
+}
+
 /** True on a Mac, so shortcut hints read ⌘ rather than Ctrl. */
 const IS_MAC =
   typeof navigator !== 'undefined' && /mac|iphone|ipad/i.test(navigator.platform || navigator.userAgent)
@@ -411,14 +405,20 @@ function NavFilter({
   onChange,
   inputRef,
   onSubmit,
+  allFolded,
+  onToggleAll,
 }: {
   value: string
   onChange: (v: string) => void
   inputRef: RefObject<HTMLInputElement | null>
   onSubmit: () => void
+  /** Every group is folded — the button then offers "expand", not "collapse". */
+  allFolded: boolean
+  onToggleAll: () => void
 }) {
   return (
-    <div className="relative mx-3 mb-2 shrink-0">
+    <div className="mx-3 mb-2 flex shrink-0 items-center gap-1.5">
+      <div className="relative min-w-0 flex-1">
       <Search className="pointer-events-none absolute left-3 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground/70" />
       <input
         ref={inputRef}
@@ -456,15 +456,54 @@ function NavFilter({
           <Kbd>{MOD_KEY}K</Kbd>
         </span>
       )}
+      </div>
+      {/* Fold/unfold every group. It rides on the search row on purpose: a row of
+          its own would cost the vertical space the folding is meant to win back. */}
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            type="button"
+            onClick={onToggleAll}
+            aria-label={allFolded ? 'Expand all groups' : 'Collapse all groups'}
+            className="flex size-9 shrink-0 items-center justify-center rounded-full border border-sidebar-border/70 bg-muted/50 text-muted-foreground transition-colors hover:border-border hover:bg-muted hover:text-foreground"
+          >
+            {allFolded ? (
+              <ChevronsUpDown className="size-3.5" />
+            ) : (
+              <ChevronsDownUp className="size-3.5" />
+            )}
+          </button>
+        </TooltipTrigger>
+        <TooltipContent side="right" className="font-medium">
+          {allFolded ? 'Expand all groups' : 'Collapse all groups'}
+        </TooltipContent>
+      </Tooltip>
     </div>
   )
 }
 
-function ProjectSwitcher({ collapsed, onExpand }: { collapsed: boolean; onExpand: () => void }) {
+function ProjectSwitcher({
+  collapsed,
+  onExpand,
+  onMenuOpenChange,
+}: {
+  collapsed: boolean
+  onExpand: () => void
+  /** So the rail's hover-peek can refuse to close under an open picker. */
+  onMenuOpenChange?: (open: boolean) => void
+}) {
   const { projects, activeProjectId, setActiveProjectId, isLoading } = useProjects()
   const navigate = useNavigate()
   const [open, setOpen] = useState(false)
   const activeProject = projects.find((p) => p.id === activeProjectId)
+
+  /* Every open/close goes through here — picking, adding and managing all close
+     the picker too, and the rail's hover-peek has to hear about ALL of them or it
+     stays pinned open by a menu that is no longer there. */
+  const setMenuOpen = (v: boolean) => {
+    setOpen(v)
+    onMenuOpenChange?.(v)
+  }
   const initial = (activeProject?.name ?? '?').trim().charAt(0).toUpperCase() || '?'
 
   // Collapsed: a compact square showing the project initial. Clicking expands the
@@ -494,77 +533,299 @@ function ProjectSwitcher({ collapsed, onExpand }: { collapsed: boolean; onExpand
     )
   }
 
+  const pinned = projects.filter((p) => p.pinned)
+  const rest = projects.filter((p) => !p.pinned)
+
   return (
     <div className="mx-3 mb-2 shrink-0 border-b border-sidebar-border/60 pb-3">
       <div className="mb-1.5 flex items-center gap-1.5 px-0.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/70">
         <FolderGit2 className="h-3 w-3" />
         Workspace
       </div>
-      <Select
+      <ProjectPicker
         open={open}
-        onOpenChange={setOpen}
-        value={activeProjectId ?? undefined}
-        onValueChange={setActiveProjectId}
-        disabled={isLoading}
-      >
-        <SelectTrigger className="h-auto! w-full gap-2 border-sidebar-border/70 bg-muted/50 py-2 pl-2 shadow-none transition-all duration-200 hover:border-border hover:bg-muted data-[state=open]:border-border data-[state=open]:bg-muted">
-          <span className="flex min-w-0 flex-1 items-center gap-2 text-left">
-            <span className="relative flex size-7 shrink-0 items-center justify-center rounded-lg bg-foreground text-xs font-semibold text-background">
-              {initial}
-              {activeProject?.exists === false && (
-                <span className="absolute -right-0.5 -top-0.5 size-2.5 rounded-full border-2 border-sidebar bg-destructive" />
-              )}
+        onOpenChange={setMenuOpen}
+        pinned={pinned}
+        rest={rest}
+        activeProject={activeProject}
+        isLoading={isLoading}
+        onPick={(id) => {
+          setActiveProjectId(id)
+          setMenuOpen(false)
+        }}
+        onAdd={() => {
+          setMenuOpen(false)
+          navigate('/settings?tab=projects&add=1')
+        }}
+        onManage={() => {
+          setMenuOpen(false)
+          navigate('/settings?tab=projects')
+        }}
+      />
+    </div>
+  )
+}
+
+/**
+ * A path short enough for a 320px panel: the last two segments, ellipsised in
+ * FRONT. `truncate` cuts the tail, which is exactly backwards for a path — every
+ * repo here starts `/Users/<me>/…`, and the part that says WHICH repo is the end.
+ * The full path stays in the `title`.
+ */
+function shortPath(full?: string) {
+  if (!full) return ''
+  const parts = full.split(/[\\/]+/).filter(Boolean)
+  if (parts.length <= 2) return full
+  return `…/${parts.slice(-2).join('/')}`
+}
+
+/**
+ * The project picker: the trigger in the rail plus the panel it opens.
+ *
+ * It is a **Popover, not a `Select`**, and that is the whole point — this list is
+ * 10+ repos on a real machine, and a `Select` cannot hold a text input (Radix
+ * routes every keystroke to its own typeahead, so a filter box inside one eats
+ * itself). With a popover the panel gets: a filter matching NAME **and PATH**
+ * (two repos called `web` are told apart only by where they live), the folder path
+ * under every name, pinned projects first, and the state that decides whether a QC
+ * run will even work — `missing` when the folder is gone, `setup` when the skill /
+ * `.mcp.json` / `CLAUDE.md` trio is incomplete. Picking a dead project and finding
+ * out from a failed run is the failure this replaces.
+ *
+ * Keyboard is hand-rolled for the same reason: ↑/↓ move a cursor over the FILTERED
+ * list, Enter picks it, Escape closes (Radix). The cursor is an index into that
+ * flattened list, so it must be re-clamped whenever the filter changes or it points
+ * past the end.
+ */
+function ProjectPicker({
+  open,
+  onOpenChange,
+  pinned,
+  rest,
+  activeProject,
+  isLoading,
+  onPick,
+  onAdd,
+  onManage,
+}: {
+  open: boolean
+  onOpenChange: (v: boolean) => void
+  pinned: Project[]
+  rest: Project[]
+  activeProject?: Project
+  isLoading: boolean
+  onPick: (id: string) => void
+  onAdd: () => void
+  onManage: () => void
+}) {
+  const [query, setQuery] = useState('')
+  const [cursor, setCursor] = useState(0)
+  const listRef = useRef<HTMLDivElement>(null)
+  const total = pinned.length + rest.length
+
+  const q = query.trim().toLowerCase()
+  const match = (p: Project) =>
+    !q || p.name.toLowerCase().includes(q) || p.rootPath.toLowerCase().includes(q)
+  const sections = [
+    { label: 'Pinned', items: pinned.filter(match) },
+    { label: pinned.length > 0 ? 'All projects' : '', items: rest.filter(match) },
+  ].filter((s) => s.items.length > 0)
+  // Flat order = what ↑/↓ walk, so it has to be built from the SAME sections that
+  // are rendered, not from `projects` (whose order the pinned split changes).
+  const flat = sections.flatMap((s) => s.items)
+
+  // The cursor is CLAMPED on read, not corrected in an effect: the list shrinks as
+  // you type, and a stored index would spend a render pointing past the end (and
+  // trip the no-setState-in-effect rule getting fixed up).
+  const at = flat.length === 0 ? 0 : Math.min(cursor, flat.length - 1)
+
+  useEffect(() => {
+    listRef.current?.querySelector(`[data-index="${at}"]`)?.scrollIntoView({ block: 'nearest' })
+  }, [at, open])
+
+  /** A fresh open starts clean, on the project you are already in. */
+  function handleOpenChange(v: boolean) {
+    if (v) {
+      setQuery('')
+      const i = [...pinned, ...rest].findIndex((p) => p.id === activeProject?.id)
+      setCursor(i < 0 ? 0 : i)
+    }
+    onOpenChange(v)
+  }
+
+  function onKeyDown(e: React.KeyboardEvent) {
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault()
+      if (flat.length === 0) return
+      setCursor((at + (e.key === 'ArrowDown' ? 1 : -1) + flat.length) % flat.length)
+    } else if (e.key === 'Enter') {
+      e.preventDefault()
+      const p = flat[at]
+      if (p) onPick(p.id)
+    }
+  }
+
+  const initial = (name?: string) => (name ?? '?').trim().charAt(0).toUpperCase() || '?'
+  let i = -1
+
+  return (
+    <Popover open={open} onOpenChange={handleOpenChange}>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          disabled={isLoading}
+          aria-label="Switch project"
+          className="flex w-full items-center gap-2 rounded-xl border border-sidebar-border/70 bg-muted/50 py-2 pl-2 pr-2 text-left transition-all duration-200 hover:border-border hover:bg-muted data-[state=open]:border-border data-[state=open]:bg-muted"
+        >
+          <span className="relative flex size-7 shrink-0 items-center justify-center rounded-lg bg-foreground text-xs font-semibold text-background">
+            {initial(activeProject?.name)}
+            {activeProject?.exists === false && (
+              <span className="absolute -right-0.5 -top-0.5 size-2.5 rounded-full border-2 border-sidebar bg-destructive" />
+            )}
+          </span>
+          <span className="min-w-0 flex-1 leading-tight">
+            <span className="block truncate text-sm font-medium text-foreground">
+              {activeProject?.name ?? (isLoading ? 'Loading…' : 'Select project')}
             </span>
-            <span className="min-w-0 flex-1 leading-tight">
-              <span className="block truncate text-sm font-medium text-foreground">
-                {activeProject?.name ?? (isLoading ? 'Loading…' : 'Select project')}
-              </span>
-              <span className="block truncate text-[11px] text-muted-foreground">
-                {isLoading
-                  ? 'Loading projects…'
-                  : `${projects.length} project${projects.length === 1 ? '' : 's'}`}
-              </span>
+            {/* The PATH, not "10 projects" — the count is on the panel's own header,
+                and which folder a run will spawn in is the thing worth showing. */}
+            <span
+              className="block truncate font-mono text-[10px] text-muted-foreground/70"
+              title={activeProject?.rootPath}
+            >
+              {activeProject ? shortPath(activeProject.rootPath) : isLoading ? 'Loading projects…' : 'None selected'}
             </span>
           </span>
-        </SelectTrigger>
-        <SelectContent className="min-w-[var(--radix-select-trigger-width)]">
-          {projects.length === 0 ? (
-            <div className="px-2 py-2 text-xs text-muted-foreground">No projects yet</div>
+          <ChevronsUpDown className="size-3.5 shrink-0 text-muted-foreground/70" />
+        </button>
+      </PopoverTrigger>
+
+      <PopoverContent
+        align="start"
+        sideOffset={6}
+        className="w-[min(20rem,calc(100vw-2rem))] overflow-hidden rounded-2xl border-border/60 p-0 shadow-lg"
+      >
+        <div className="flex items-center gap-2 border-b border-border/60 px-2.5 py-2">
+          <Search className="size-3.5 shrink-0 text-muted-foreground/70" />
+          <input
+            autoFocus
+            value={query}
+            onChange={(e) => {
+              setQuery(e.target.value)
+              // Re-aim at the FIRST match: leaving the cursor mid-list means Enter
+              // picks whatever sits under it, not what you searched for.
+              setCursor(0)
+            }}
+            onKeyDown={onKeyDown}
+            placeholder="Filter by name or path…"
+            aria-label="Filter projects"
+            className="min-w-0 flex-1 bg-transparent text-[13px] text-foreground outline-none placeholder:text-muted-foreground/70"
+          />
+          <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground/60">
+            {q ? `${flat.length}/${total}` : total}
+          </span>
+        </div>
+
+        <div ref={listRef} className="max-h-[19rem] overflow-y-auto p-1.5">
+          {total === 0 ? (
+            <p className="px-2 py-6 text-center text-xs text-muted-foreground">
+              No projects yet. Add the first repo folder to start.
+            </p>
+          ) : flat.length === 0 ? (
+            <p className="px-2 py-6 text-center text-xs text-muted-foreground">
+              No project matches “{query.trim()}”.
+            </p>
           ) : (
-            projects.map((p) => (
-              <SelectItem key={p.id} value={p.id} className="rounded-lg py-1.5 pl-2">
-                <span className="flex items-center gap-2">
-                  <span className="flex size-6 shrink-0 items-center justify-center rounded-lg bg-muted text-[11px] font-semibold text-foreground">
-                    {(p.name ?? '?').trim().charAt(0).toUpperCase() || '?'}
-                  </span>
-                  <span className="min-w-0 truncate">{p.name}</span>
-                  {p.exists === false && (
-                    <span
-                      className="size-2 shrink-0 rounded-full bg-destructive"
-                      aria-label="Folder not found"
-                    />
-                  )}
-                </span>
-              </SelectItem>
+            sections.map((section) => (
+              <div key={section.label || 'all'} className="mb-1 last:mb-0">
+                {section.label && (
+                  <div className="px-2 pb-1 pt-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/50">
+                    {section.label}
+                  </div>
+                )}
+                {section.items.map((p) => {
+                  i += 1
+                  const idx = i
+                  const isActive = p.id === activeProject?.id
+                  const missing = p.exists === false
+                  const needsSetup =
+                    !missing && !(p.hasSkills && p.hasMcp && p.hasClaudeMd)
+                  return (
+                    <button
+                      key={p.id}
+                      type="button"
+                      data-index={idx}
+                      onClick={() => onPick(p.id)}
+                      onMouseMove={() => setCursor(idx)}
+                      className={cn(
+                        'flex w-full items-center gap-2 rounded-xl px-2 py-1.5 text-left transition-colors',
+                        idx === at ? 'bg-accent' : 'hover:bg-accent/60',
+                      )}
+                    >
+                      <span
+                        className={cn(
+                          'flex size-7 shrink-0 items-center justify-center rounded-lg text-[11px] font-semibold',
+                          isActive
+                            ? 'bg-foreground text-background'
+                            : 'bg-muted text-foreground',
+                        )}
+                      >
+                        {initial(p.name)}
+                      </span>
+                      <span className="min-w-0 flex-1 leading-tight">
+                        <span className="flex items-center gap-1.5">
+                          <span className="truncate text-[13px] font-medium text-foreground">
+                            {p.name}
+                          </span>
+                          {missing && (
+                            <span className="shrink-0 rounded-md bg-destructive/10 px-1 py-px text-[9px] font-semibold uppercase tracking-wide text-destructive">
+                              missing
+                            </span>
+                          )}
+                          {needsSetup && (
+                            <span className="shrink-0 rounded-md bg-amber-500/10 px-1 py-px text-[9px] font-semibold uppercase tracking-wide text-amber-600 dark:text-amber-400">
+                              setup
+                            </span>
+                          )}
+                        </span>
+                        <span
+                          className="block truncate font-mono text-[10px] text-muted-foreground/70"
+                          title={p.rootPath}
+                        >
+                          {shortPath(p.rootPath)}
+                        </span>
+                      </span>
+                      {isActive && <Check className="size-3.5 shrink-0 text-primary" />}
+                    </button>
+                  )
+                })}
+              </div>
             ))
           )}
-          <SelectSeparator />
+        </div>
+
+        <div className="flex items-center gap-1 border-t border-border/60 p-1.5">
           <button
             type="button"
-            onClick={() => {
-              setOpen(false)
-              navigate('/settings?tab=projects&add=1')
-            }}
-            className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-sm font-medium text-primary outline-none transition-colors hover:bg-accent focus-visible:bg-accent"
+            onClick={onAdd}
+            className="flex flex-1 items-center gap-2 rounded-xl px-2 py-1.5 text-[13px] font-medium text-primary outline-none transition-colors hover:bg-accent focus-visible:bg-accent"
           >
-            <span className="flex size-6 shrink-0 items-center justify-center rounded-lg border border-dashed border-primary/40 text-primary">
+            <span className="flex size-6 shrink-0 items-center justify-center rounded-lg border border-dashed border-primary/40">
               <Plus className="size-3.5" />
             </span>
-            Add new project
+            Add project
           </button>
-        </SelectContent>
-      </Select>
-    </div>
+          <button
+            type="button"
+            onClick={onManage}
+            className="flex shrink-0 items-center gap-1.5 rounded-xl px-2.5 py-1.5 text-[13px] font-medium text-muted-foreground outline-none transition-colors hover:bg-accent hover:text-foreground focus-visible:bg-accent"
+          >
+            <Settings className="size-3.5" />
+            Manage
+          </button>
+        </div>
+      </PopoverContent>
+    </Popover>
   )
 }
 
@@ -885,120 +1146,159 @@ function VersionFooter({ collapsed }: { collapsed: boolean }) {
   }
 
   return (
-    <div className="mt-auto flex shrink-0 flex-col gap-1.5 border-t border-sidebar-border/60 px-3 py-3.5 text-xs text-muted-foreground">
-      {/* Auto Agent credential status — every AI feature shells out to `claude`, so
-          this sits above Release notes where it's always in view. */}
-      <AutoAgentStatusIndicator collapsed={false} />
-
-      {/* Version + live update status */}
+    /*
+     * ONE card, in three tiers: what you are running, whether it is healthy, and
+     * where to read about it.
+     *
+     * The two shapes this replaced both failed for the same reason — they were a
+     * PILE. First three bordered cards (~150px, louder than the nav above them),
+     * then three loose rows, which fixed the height but left the version's mono
+     * text, a tiny green word and an icon button floating with nothing holding
+     * them together. Grouping is what makes it read as designed: a hairline box
+     * on a tinted surface, a version header, two status lines that state the same
+     * KIND of thing in the same way, and the two links split evenly at the bottom
+     * where a footer's links belong.
+     */
+    <div className="mt-auto shrink-0 border-t border-sidebar-border/60 px-2.5 py-2.5">
       <div
         className={cn(
-          'rounded-2xl border p-1.5 transition-colors',
+          'overflow-hidden rounded-2xl border transition-colors',
           updateAvailable
             ? 'border-amber-500/40 bg-amber-500/5'
             : 'border-sidebar-border/60 bg-muted/40',
         )}
       >
-        <div className="flex items-center gap-1">
-          <NavLink
-            to="/releases"
-            className={({ isActive }) =>
-              cn(
-                'flex min-w-0 flex-1 items-center gap-2 rounded-xl px-2 py-1.5 transition-colors hover:bg-muted hover:text-foreground',
-                isActive && 'bg-muted text-foreground',
-              )
-            }
-          >
-            <span className="flex size-7 shrink-0 items-center justify-center rounded-lg border border-sidebar-border/60 bg-background text-muted-foreground">
-              <ScrollText className="size-3.5" />
-            </span>
-            <span className="min-w-0 leading-tight">
-              <span className="block truncate font-medium text-foreground">Release notes</span>
-              <span className="block font-mono text-[10px] text-muted-foreground">v{version}</span>
-            </span>
-          </NavLink>
+        {/* Tier 1 — the version, and the only control that changes it. */}
+        <div className="flex h-8 items-center gap-2 px-2">
+          <AppLogo className="size-3.5 shrink-0 text-muted-foreground/70" />
+          <span className="min-w-0 flex-1 truncate font-mono text-[12px] font-medium text-foreground">
+            v{version}
+          </span>
           <button
             type="button"
             onClick={() => runCheck()}
             disabled={checking || updating}
-            title={
-              checkedAgo ? `Last checked ${checkedAgo} — click to re-check` : 'Check for updates'
-            }
+            title={checkedAgo ? `Last checked ${checkedAgo} — click to re-check` : 'Check for updates'}
             aria-label="Check for updates"
-            className="inline-flex size-7 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-all duration-200 hover:bg-muted hover:text-foreground active:scale-95 disabled:opacity-50"
+            className="inline-flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-all duration-200 hover:bg-muted hover:text-foreground active:scale-95 disabled:opacity-50"
           >
             <RefreshCw className={cn('h-3.5 w-3.5', checking && 'animate-spin')} />
           </button>
         </div>
 
-        {/* Status line — auto-updates from the background check. */}
-        <div className="flex items-center gap-1.5 px-2 pb-0.5 pt-1 text-[10px]">
-          {checking ? (
-            <span className="flex items-center gap-1 text-muted-foreground">
-              <Loader2 className="size-3 animate-spin" /> Checking for updates…
-            </span>
-          ) : updateAvailable ? (
-            <span className="flex items-center gap-1 font-medium text-amber-600 dark:text-amber-400">
-              <ArrowUpCircle className="size-3" /> Update available → v{latest}
-            </span>
-          ) : checkData ? (
-            <span className="flex items-center gap-1 text-emerald-600 dark:text-emerald-400">
-              <CheckCircle2 className="size-3" /> Up to date
-            </span>
-          ) : (
-            <span className="text-muted-foreground">Checking…</span>
-          )}
-          {!checking && checkedAgo && (
-            <span className="ml-auto text-muted-foreground/60">{checkedAgo}</span>
-          )}
-        </div>
-
-        {updateAvailable && (
-          <button
-            type="button"
-            onClick={() => update.mutate()}
-            disabled={updating}
-            className="mt-1 flex w-full items-center justify-center gap-1.5 rounded-xl bg-amber-500/15 px-3 py-1.5 text-xs font-medium text-amber-600 transition-all duration-200 hover:bg-amber-500/25 active:scale-[0.98] disabled:opacity-60 dark:text-amber-400"
-          >
-            {updating ? (
+        {/* Tier 2 — health. Both lines are the same statement in the same shape:
+            an icon, one sentence, the colour carrying the verdict. */}
+        <div className="flex flex-col gap-px px-1 pb-1">
+          <AutoAgentStatusIndicator collapsed={false} />
+          <div className="flex h-6 items-center gap-1.5 px-1.5">
+            {checking ? (
               <>
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                Updating…
+                <Loader2 className="size-3 shrink-0 animate-spin text-muted-foreground" />
+                <span className="text-[11px] font-medium text-muted-foreground">
+                  Checking for updates…
+                </span>
+              </>
+            ) : updateAvailable ? (
+              <>
+                <ArrowUpCircle className="size-3 shrink-0 text-amber-600 dark:text-amber-400" />
+                <span className="min-w-0 flex-1 truncate text-[11px] font-medium text-amber-600 dark:text-amber-400">
+                  v{latest} available
+                </span>
+              </>
+            ) : checkData ? (
+              <>
+                <CheckCircle2 className="size-3 shrink-0 text-emerald-600 dark:text-emerald-400" />
+                <span className="text-[11px] font-medium text-muted-foreground">Up to date</span>
               </>
             ) : (
               <>
-                <ArrowUpCircle className="h-3.5 w-3.5" />
-                Update now → v{latest}
+                <RefreshCw className="size-3 shrink-0 text-muted-foreground/60" />
+                <span className="text-[11px] font-medium text-muted-foreground/60">
+                  Not checked yet
+                </span>
               </>
             )}
-          </button>
-        )}
-      </div>
+          </div>
+        </div>
 
-      <NavLink
-        to="/document"
-        className={({ isActive }) =>
-          cn(
-            'flex min-w-0 items-center gap-2 rounded-xl px-2.5 py-1.5 font-medium transition-colors hover:bg-muted hover:text-foreground',
-            isActive && 'bg-muted text-foreground',
-          )
-        }
-      >
-        <BookText className="size-3.5 shrink-0" />
-        Documentation
-      </NavLink>
+        {/* The one action in this card, and it exists only when there is something
+            to do. Labelled, because an icon-only version of it reinstalls the app. */}
+        {updateAvailable && (
+          <div className="px-1 pb-1">
+            <button
+              type="button"
+              onClick={() => update.mutate()}
+              disabled={updating}
+              className="flex h-7 w-full items-center justify-center gap-1.5 rounded-xl bg-amber-500/20 text-[12px] font-medium text-amber-700 transition-all duration-200 hover:bg-amber-500/30 active:scale-[0.98] disabled:opacity-60 dark:text-amber-300"
+            >
+              {updating ? (
+                <>
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  Updating…
+                </>
+              ) : (
+                <>
+                  <ArrowUpCircle className="h-3.5 w-3.5" />
+                  Update now
+                </>
+              )}
+            </button>
+          </div>
+        )}
+
+        {/* Tier 3 — the two reading pages, split evenly on their own hairline. */}
+        <div className="grid grid-cols-2 border-t border-sidebar-border/60 divide-x divide-sidebar-border/60">
+          <NavLink
+            to="/document"
+            className={({ isActive }) =>
+              cn(
+                'flex h-8 items-center justify-center gap-1.5 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground',
+                isActive && 'bg-muted text-foreground',
+              )
+            }
+          >
+            <BookText className="size-3.5 shrink-0" />
+            Docs
+          </NavLink>
+          <NavLink
+            to="/releases"
+            className={({ isActive }) =>
+              cn(
+                'flex h-8 items-center justify-center gap-1.5 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground',
+                isActive && 'bg-muted text-foreground',
+              )
+            }
+          >
+            <ScrollText className="size-3.5 shrink-0" />
+            Releases
+          </NavLink>
+        </div>
+      </div>
     </div>
   )
 }
 
-/** Collapse/expand toggle. Tooltip only appears when collapsed (label is hidden then). */
-function SidebarToggle({ collapsed, onToggle }: { collapsed: boolean; onToggle: () => void }) {
+/**
+ * Collapse/expand toggle. While PEEKING the rail is already open, so the button
+ * offers to keep it that way — "Keep expanded", not "Expand sidebar", which would
+ * read as a no-op on a rail that is visibly open.
+ */
+function SidebarToggle({
+  collapsed,
+  peeking,
+  onToggle,
+}: {
+  collapsed: boolean
+  peeking: boolean
+  onToggle: () => void
+}) {
   const Icon = collapsed ? PanelLeftOpen : PanelLeftClose
+  const label = peeking ? 'Keep expanded' : collapsed ? 'Expand sidebar' : 'Collapse sidebar'
   const button = (
     <button
       type="button"
       onClick={onToggle}
-      aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+      aria-label={label}
       className="flex size-8 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-all duration-200 hover:bg-muted hover:text-foreground active:scale-95"
     >
       <Icon className="size-4" />
@@ -1008,7 +1308,7 @@ function SidebarToggle({ collapsed, onToggle }: { collapsed: boolean; onToggle: 
     <Tooltip>
       <TooltipTrigger asChild>{button}</TooltipTrigger>
       <TooltipContent side="right" className="flex items-center gap-1.5 font-medium">
-        {collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+        {label}
         <Kbd>{MOD_KEY}B</Kbd>
       </TooltipContent>
     </Tooltip>
@@ -1103,7 +1403,69 @@ function AppShell() {
   const { pathname } = useLocation()
   const navigate = useNavigate()
   const [collapsed, setCollapsed] = useSidebarCollapsed()
+  /*
+   * HOVER PEEK. A collapsed rail trades every label for width, and the usual fix
+   * — click to expand, click to collapse again — makes you pay for a label with
+   * two clicks and a reflow of the page you were reading. So: hovering the
+   * collapsed rail opens it as an OVERLAY. `<aside>` is `fixed` and `<main>`'s
+   * padding follows `collapsed` alone, so the peek floats over the content and
+   * nothing on the page moves. The toggle then means "keep it open" (pin), and
+   * ⌘/Ctrl+B still does both.
+   *
+   * Both edges are delayed: ~120ms in, so a pointer crossing the rail on its way
+   * somewhere else doesn't flash it open, and ~180ms out, so clipping a corner
+   * of the panel on the way to a row doesn't snap it shut.
+   */
+  const [peek, setPeek] = useState(false)
+  const peekTimer = useRef<number | null>(null)
+  // A REF, not state: it is read inside the close path, which is called from the
+  // very handler that changes it. As state it read stale — Escape closing the
+  // picker left the rail peeked open for ever, because the handler's `menuOpen`
+  // was still `true` at the moment it asked.
+  const menuOpenRef = useRef(false)
+  const showExpanded = !collapsed || peek
+
+  const clearPeekTimer = () => {
+    if (peekTimer.current !== null) window.clearTimeout(peekTimer.current)
+    peekTimer.current = null
+  }
+  const openPeek = () => {
+    if (!collapsed) return
+    clearPeekTimer()
+    peekTimer.current = window.setTimeout(() => setPeek(true), 120)
+  }
+  const closePeek = () => {
+    clearPeekTimer()
+    // A portalled menu (the project picker) lives OUTSIDE the aside, so moving
+    // into it fires mouseleave. Closing the rail from under an open menu would
+    // yank its trigger away mid-click.
+    if (menuOpenRef.current) return
+    peekTimer.current = window.setTimeout(() => setPeek(false), 180)
+  }
+  /**
+   * The picker opened or closed. A close ALWAYS schedules the retreat — asking
+   * "is the pointer still over the rail?" needs coordinates we don't have, and a
+   * `hovering` flag went stale exactly when it mattered (leaving the rail for the
+   * portalled panel, then closing it from out there, left the rail stuck open).
+   * Scheduling instead is self-healing: if the pointer really is over the rail,
+   * the browser re-dispatches `mouseenter` the moment the panel unmounts and the
+   * rail is the topmost element again, and that cancels the pending close.
+   */
+  const onMenuOpenChange = (v: boolean) => {
+    menuOpenRef.current = v
+    if (!v) closePeek()
+  }
+  useEffect(() => clearPeekTimer, [])
+
   const [query, setQuery] = useState('')
+  // Rows the engineer switched off in Settings -> Sidebar. Every route stays
+  // mounted; this only decides what the rail draws (and what the filter finds).
+  const { hidden } = useHiddenNav()
+  const groups = useMemo(() => visibleNavGroups(hidden), [hidden])
+  // Which groups are folded shut. Only meaningful in the expanded rail — the
+  // icon-only rail has no headers to fold.
+  const { folded, toggleGroup, foldAll, unfoldAll } = useFoldedNavGroups()
+  const allFolded = groups.length > 0 && groups.every((g) => folded.includes(g.label))
   const filterRef = useRef<HTMLInputElement>(null)
   const { ref: navRef, fade, update: updateFade } = useScrollFade<HTMLElement>()
   const { data: runs } = useQuery({
@@ -1121,12 +1483,12 @@ function AppShell() {
   const q = query.trim().toLowerCase()
   const matches = useMemo(() => {
     if (!q) return []
-    return navGroups.flatMap((g) =>
+    return groups.flatMap((g) =>
       g.items
         .filter((i) => i.label.toLowerCase().includes(q) || g.label.toLowerCase().includes(q))
         .map((i) => ({ item: i, group: g.label })),
     )
-  }, [q])
+  }, [q, groups])
 
   /** Focus the filter, expanding the rail first when it's collapsed. */
   const focusFilter = useCallback(() => {
@@ -1161,27 +1523,33 @@ function AppShell() {
   // The nav's content height changes with the filter, so re-measure the fades.
   useEffect(() => {
     updateFade()
-  }, [q, collapsed, updateFade])
+  }, [q, showExpanded, folded, updateFade])
 
   return (
     <div className="min-h-svh text-foreground">
       <NotificationBell />
       <ThemeToggle />
       <aside
+        onMouseEnter={openPeek}
+        onMouseLeave={closePeek}
         className={cn(
-          'fixed inset-y-0 left-0 z-20 hidden flex-col border-r border-sidebar-border bg-sidebar/80 backdrop-blur-xl transition-[width] duration-200 ease-out lg:flex',
-          collapsed ? 'w-[72px]' : 'w-60',
+          'fixed inset-y-0 left-0 z-20 hidden flex-col border-r border-sidebar-border bg-sidebar/80 backdrop-blur-xl transition-[width,box-shadow] duration-200 ease-out lg:flex',
+          showExpanded ? 'w-60' : 'w-[72px]',
+          // Peeking floats over the page, so it needs an edge the docked rail
+          // doesn't: a real shadow and an opaque ground (the content scrolling
+          // underneath would otherwise show through the blur).
+          peek && 'bg-sidebar shadow-2xl',
         )}
       >
         {/* Brand + collapse toggle */}
-        {collapsed ? (
+        {!showExpanded ? (
           <div className="flex shrink-0 flex-col items-center gap-2 px-3 py-5">
             <NavLink to="/overview" aria-label="QC Portal home — project overview" className="group">
               <span className="flex h-10 w-10 items-center justify-center rounded-2xl bg-gradient-to-br from-primary to-primary/75 text-primary-foreground shadow-sm ring-1 ring-inset ring-white/15 transition-all duration-200 group-hover:-translate-y-0.5 group-hover:shadow-md group-active:scale-95">
                 <AppLogo className="h-6 w-6" />
               </span>
             </NavLink>
-            <SidebarToggle collapsed={collapsed} onToggle={() => setCollapsed((c) => !c)} />
+            <SidebarToggle collapsed peeking={false} onToggle={() => setCollapsed(false)} />
           </div>
         ) : (
           <div className="flex shrink-0 items-center gap-2.5 py-5 pl-4 pr-2">
@@ -1204,14 +1572,25 @@ function AppShell() {
               </span>
             </NavLink>
             <div className="-mr-1 ml-auto">
-              <SidebarToggle collapsed={collapsed} onToggle={() => setCollapsed((c) => !c)} />
+              <SidebarToggle
+                collapsed={collapsed}
+                peeking={peek}
+                onToggle={() => {
+                  setPeek(false)
+                  setCollapsed((c) => !c)
+                }}
+              />
             </div>
           </div>
         )}
 
-        <ProjectSwitcher collapsed={collapsed} onExpand={() => setCollapsed(false)} />
+        <ProjectSwitcher
+          collapsed={!showExpanded}
+          onExpand={() => setCollapsed(false)}
+          onMenuOpenChange={onMenuOpenChange}
+        />
 
-        {collapsed ? (
+        {!showExpanded ? (
           <div className="mb-1 flex shrink-0 justify-center px-2">
             <CollapsedSearchButton onClick={focusFilter} />
           </div>
@@ -1220,6 +1599,8 @@ function AppShell() {
             value={query}
             onChange={setQuery}
             inputRef={filterRef}
+            allFolded={allFolded}
+            onToggleAll={() => (allFolded ? unfoldAll() : foldAll(groups.map((g) => g.label)))}
             onSubmit={() => {
               const first = matches[0]
               if (!first) return
@@ -1237,7 +1618,7 @@ function AppShell() {
             ref={navRef}
             className={cn(
               'flex min-h-0 flex-1 flex-col overflow-y-auto py-3',
-              collapsed ? 'items-center gap-3 px-2' : 'gap-4 px-3',
+              showExpanded ? 'gap-1.5 px-2.5' : 'items-center gap-3 px-2',
             )}
           >
             {q ? (
@@ -1259,23 +1640,26 @@ function AppShell() {
                 </div>
               )
             ) : (
-              navGroups.map((group, gi) => (
-                <div
-                  key={group.label}
-                  className={cn('flex flex-col', collapsed ? 'items-center gap-1.5' : 'gap-0.5')}
-                >
-                  {collapsed ? (
-                    gi > 0 && <span className="mb-1.5 h-px w-6 rounded-full bg-sidebar-border/70" />
-                  ) : (
-                    <div className="px-3 pb-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/55">
-                      {group.label}
-                    </div>
-                  )}
-                  {group.items.map((item) => (
-                    <NavItem key={item.to} item={item} collapsed={collapsed} liveCount={liveCount} />
-                  ))}
-                </div>
-              ))
+              groups.map((group, gi) =>
+                !showExpanded ? (
+                  // Icon-only rail: no header to click, so groups are separated by a
+                  // hairline instead of being foldable.
+                  <div key={group.label} className="flex flex-col items-center gap-1.5">
+                    {gi > 0 && <span className="mb-1.5 h-px w-6 rounded-full bg-sidebar-border/70" />}
+                    {group.items.map((item) => (
+                      <NavItem key={item.to} item={item} collapsed liveCount={liveCount} />
+                    ))}
+                  </div>
+                ) : (
+                  <NavGroup
+                    key={group.label}
+                    group={group}
+                    folded={folded.includes(group.label)}
+                    onToggle={() => toggleGroup(group.label)}
+                    liveCount={liveCount}
+                  />
+                ),
+              )
             )}
           </nav>
           <span
@@ -1294,7 +1678,7 @@ function AppShell() {
           />
         </div>
 
-        <VersionFooter collapsed={collapsed} />
+        <VersionFooter collapsed={!showExpanded} />
       </aside>
 
       <main
@@ -1307,12 +1691,16 @@ function AppShell() {
           className={cn(
             'mx-auto',
             // The Prototype workspace (chat + live preview), Chat (history rail +
-            // transcript) and API Testing (collection rail + request builder + result
-            // panel) need the full width; every other page stays comfortably capped.
+            // transcript), API Testing (collection rail + request builder + result
+            // panel) and Responsive (a ROW of device frames at their true viewport
+            // widths — one tablet is already 1024px, so a 1152px cap fits barely
+            // one and a half of them) need the full width; every other page stays
+            // comfortably capped.
             pathname === '/prototype' ||
             pathname === '/chat' ||
             pathname === '/notes' ||
-            pathname === '/api-testing'
+            pathname === '/api-testing' ||
+            pathname === '/responsive'
               ? 'max-w-none'
               : 'max-w-6xl',
             // Chat is full-bleed: its shell has no outer border, so page padding would
@@ -1332,12 +1720,14 @@ function AppShell() {
             <Route path="/diagrams" element={<DiagramsPage />} />
             <Route path="/running" element={<RunningPage />} />
             <Route path="/history" element={<HistoryPage />} />
+            <Route path="/reports" element={<ReportsPage />} />
             <Route path="/run/:id" element={<RunDetailPage />} />
             <Route path="/tickets" element={<TicketsPage />} />
             <Route path="/testcases" element={<TestCasePage />} />
             <Route path="/verify" element={<VerifyDesignPage />} />
             <Route path="/api-testing" element={<ApiTestingPage />} />
             <Route path="/performance" element={<PerformancePage />} />
+            <Route path="/responsive" element={<ResponsivePage />} />
             <Route path="/chat" element={<ChatPage />} />
             <Route path="/prototype" element={<PrototypePage />} />
              <Route path="/terminal" element={<TerminalPage />} />

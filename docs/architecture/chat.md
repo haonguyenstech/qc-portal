@@ -282,6 +282,30 @@ does this endpoint validate?").
   sides (`MAX_DOCS` = 4, `MAX_DOC_BYTES` = 4 MB of markdown each) and both sides **refuse rather
   than drop** — the client says it at the paperclip, the server 413s naming the file. **An
   attachment with no text is a valid message**, like an image; the server supplies the wording.
+- **Archive / unarchive, because a chat list only grows.** `POST /api/chat/:slug/archive`
+  (`archived` on the record and the summary), the row "…" menu and the chat header's menu. It is
+  **not a soft delete**: the transcript is untouched, still openable, still resumable, still
+  searchable — it just stops competing for room in a list this project already has 60 rows of.
+  - **Independent of the star.** The two answer different questions ("keep this in front of me"
+    vs "get this out of my way"), so archiving does not clear `pinned` and un-archiving gives
+    back exactly the conversation that was put away.
+  - **Like `/pin`, it does NOT touch `updatedAt`** — that field orders the date groups, and
+    tidying something away must not rewrite when it was last worked on, or un-archiving a
+    month-old chat would drop it into "Today".
+  - **The shelf is a VIEW, not a group appended to the list.** Appended, it landed under sixty
+    conversations: you clicked "Archived" and the rail did not visibly change. The one-line
+    toggle sits OUTSIDE the scroller, pinned above New Chat (inside it, the control for the
+    hidden pile was a screenful of the visible pile away), and switching it replaces the list
+    with the archive; the same line, now "Hide archived", is the way back.
+  - **A search still finds archived chats**, as their own group at the bottom — a search that
+    hides its own hits is the bug the group folds already had, and "where did that chat go?" is
+    exactly when an archived one is being looked for. The toggle hides itself while searching,
+    since nothing is hidden then.
+  - **The open conversation is never hidden**, even when archived: you can archive from the chat
+    header, and the row you are reading must not vanish out from under you.
+  - **Archiving is the one action here that makes a row disappear, so the toast carries Undo**,
+    and a temporary conversation is refused by the server the same way starring is — it is not
+    in history, so there is nothing to archive it out of.
 - **The whole rail folds too, and it is the app sidebar's control** — `PanelLeftClose` /
   `PanelLeftOpen` with a right-side tooltip, kept in `localStorage` under
   `qc.chat.railFolded`. Same gesture one panel over, because on a laptop the sidebar and the
@@ -303,6 +327,32 @@ does this endpoint validate?").
   item **count** shows only while folded (open, the rows are the count), and **a search
   force-opens every group** — a search that hides its own hits is a bug, not a preference, and
   the remembered fold comes back when the box is cleared.
+- **The transcript is the ANSWERS, and everything else got out of their way.** A turn used to
+  carry, around the words: a name label ("Me" / "AI Assistant"), an avatar on both sides, a
+  timestamp under every question, four 36px buttons under every answer, and a five-part stats
+  string that wrapped onto a second line. Down a 60-message conversation that chrome outweighed
+  the content. What changed, and why each is safe:
+  - **The name labels are `sr-only`.** Right-alignment plus a filled bubble already say "you
+    wrote this"; the mark beside the other side says the rest. They stay in the DOM because the
+    avatar is `aria-hidden`, so this is the only thing that names the speaker to a screen reader.
+  - **Only the assistant has an avatar.** The question side's 32px mark said what the alignment
+    said and pushed every question 44px off the edge the answers are read against. `RowAvatar`
+    is now the answer's mark, full stop — the queued rows lost theirs with it, since they are
+    drawn as the questions they are.
+  - **A question's timestamp appears on hover** (`md:group-hover/msg`, so touch keeps it): a
+    column of times down a scrolled transcript is read by nobody, and the one moment it is
+    wanted you are already pointing at the message.
+  - **The answer's actions stay VISIBLE** — hover-to-reveal was tried here and rejected: an
+    action you cannot see is one you have to already know is there, and Copy / save as a note /
+    rate / fact-check are the reasons an answer gets scrolled back to at all. 32px instead of 36
+    took the row's height back without hiding anything. They sit AFTER the meta so every
+    footer line starts with the same words.
+  - **The stats line is `27s · $0.41`, with the rest in its tooltip.** How long and how much are
+    what a transcript is scanned for; first-token, tokens in/out and cache share are the
+    diagnosis you go looking for once you have picked a turn, and they are still the only place
+    "why was that one slow?" can be answered a week later — one hover away, not gone.
+  - Bubbles are `rounded-2xl` with a flattened corner on the speaker's side, and the answer's is
+    borderless on a tint: a border AND a fill draw the box twice, and the box is not the point.
 - **UI is a port of shadcnuikit's "AI Chat v2"** (bordered shell, w-72 rail with search + Today /
   Yesterday / 7 Days Ago groups + footer nav + New Chat, centered column, gradient
   greeting, tinted composer well with a hint strip). It deliberately uses the reference's **small
@@ -749,6 +799,44 @@ does this endpoint validate?").
     separate ledger could not be lined up with the answer it was about. Only a STORED answer
     gets the buttons — a rating addresses a message by its index, and the streaming turn has
     no index yet, so they appear when the finished transcript is refetched.
+- **A QUIET CONVERSATION TEACHES THE PROJECT BY ITSELF** (`chatLearn.ts`, `learn.ts`
+  `runChatCapture`, `usageSource: 'chat-learn'`). 👍/👎 only captures what somebody bothered
+  to rate, and most of what an engineer learns about a system they learn by ASKING — "which
+  environment is staging?", "why does the OTP land in the catcher?" — none of which used to
+  survive the conversation it was asked in. So an answered turn now arms the same reflection
+  a finished QC run does, and the note it writes is in scope for every later turn through the
+  managed CLAUDE.md pointer, on this page and everywhere else `claude` runs in the project.
+  - **Never on the turn's path.** The capture is a whole extra model call. It is fired
+    **after** the `done` frame and never awaited, so nothing the reader is watching — the
+    streamed answer, the composer, the queued follow-ups — waits on it.
+  - **One capture per quiet CONVERSATION, not one per message.** Each answered turn RESETS a
+    90 s timer; the capture then reads the last `MAX_TURNS` = 6 exchanges at once. Reflecting
+    per message would spend a model call per message, reflect on half-finished thoughts ("do
+    that for staging too"), and write a note for each half of an exchange whose conclusion
+    only arrives at the end. A chat still being typed into simply keeps pushing its own
+    capture forward — that is correct, not a delay to work around.
+  - **One capture at a time, process-wide** (the `chain` promise). Two conversations going
+    quiet together would otherwise spawn two `claude` processes beside whatever the engineer
+    is running, and both would read the SAME memory folder to decide what already exists —
+    so the second would happily create a note the first was mid-write on.
+  - **Gated on the project's auto-learn toggle**, unlike the vote: this is capture that
+    happens on its own, which is exactly what that setting governs. It uses the same
+    `autoLearnModel`.
+  - **Not for a temporary conversation, and not for a failed turn.** "Temporary" means it
+    leaves nothing behind, and a note sourced to a chat that was never written to disk is
+    precisely the trace the engineer chose not to keep. A failed turn has no answer to learn
+    from, only the error notice `appendTurn` wrote in its place.
+  - **DELETE takes the unwritten memory with it** (`forgetChatLearning`, called from
+    `DELETE /:slug`). The capture is armed for up to 90 s after the last answer; a note
+    appearing on the Memory page a minute later, sourced to a conversation that no longer
+    exists, is the opposite of deleting it.
+  - **Small on purpose**: `MAX_CHAT_ITEMS` = 2, knowledge allowed but discouraged in the
+    prompt (a chat answer is a fact far more often than a reference document), an answer
+    under 200 characters doesn't arm anything on its own, and the transcript is trimmed from
+    the FRONT to `MAX_TRANSCRIPT_CHARS` — `runChatCapture`'s own cap would slice the tail,
+    which is where the conversation reached its conclusion. Provenance is `chat · <slug> ·
+    <date>`, so every note it writes is findable, editable and deletable on the Memory tab
+    like any other auto-captured one.
 - **ACCURATE ANSWERS ABOUT TICKETS, TEST CASES AND RUNS — three layers, and only one of them
   costs anything** (`FACTS_BLOCK` in `routes/chat.ts`, `answerCheck.ts`, `answerAudit.ts`). The
   complaint that produced this: chat answers that pulled ticket / test-case / test-run detail

@@ -11,12 +11,14 @@ import {
   Grid2X2,
   List,
   MoreHorizontal,
+  NotebookPen,
   Pencil,
   Plus,
   RotateCcw,
   Search,
   Tags,
   Trash2,
+  X,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -553,26 +555,38 @@ export default function NotesPage() {
 
   return (
     <div className="min-h-[calc(100svh-4rem)] bg-background">
-      {/* sm:pe-24: this page is max-w-none, so the header reaches the window edge — where the
-          fixed notification bell and theme toggle sit (right-6 / right-[4.25rem]) and would
-          cover the view-toggle pill. Same treatment as the Prototype header's pe-12. */}
-      <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:pe-24">
-        <button type="button" onClick={openAddDialog} className="flex h-10 items-center justify-center gap-2 rounded-full bg-foreground px-6 text-sm font-medium text-background transition-all hover:opacity-90 active:scale-[0.98] sm:w-64">
-          <Edit3 className="size-4" />
-          Add Note
-        </button>
-        <label className="relative block sm:w-52">
+      {/* The page had no identity at all — it opened on a bare toolbar while every other
+          page names itself. Icon and scale match the rest (see `lib/nav.ts`), and the
+          description is capped so it cannot slide under the fixed top-right controls. */}
+      <header className="mb-5 flex items-start gap-3">
+        <span className="mt-0.5 flex size-11 shrink-0 items-center justify-center rounded-2xl bg-foreground text-background">
+          <NotebookPen className="size-5" />
+        </span>
+        <div className="space-y-1">
+          <h1 className="text-3xl font-semibold tracking-tight">Notes</h1>
+          <p className="max-w-2xl text-sm text-muted-foreground">
+            A scratchpad that travels with the project — a checklist for today, a scratch
+            repro, a reminder before the next release. Nothing here is read by an AI run.
+          </p>
+        </div>
+      </header>
+
+      {/* Search only — the grid/list toggle moved down beside the notes it switches, which
+          also retired this row's `pe-24`: nothing here reaches the window edge any more,
+          so nothing can slide under the fixed bell and theme toggle. */}
+      <div className="mb-5">
+        <label className="relative block min-w-0 sm:max-w-md">
           <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
           <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search notes" className="h-10 w-full rounded-full border border-border/70 bg-background pl-9 pr-3 text-sm outline-none transition-colors placeholder:text-muted-foreground focus:border-foreground" />
         </label>
-        <div className="ml-auto flex rounded-lg border border-border/70 bg-card p-0.5">
-          <button type="button" onClick={() => setView('grid')} aria-label="Grid view" className={cn('rounded-md p-2', view === 'grid' ? 'bg-foreground text-background' : 'text-muted-foreground hover:text-foreground')}><Grid2X2 className="size-4" /></button>
-          <button type="button" onClick={() => setView('list')} aria-label="List view" className={cn('rounded-md p-2', view === 'list' ? 'bg-foreground text-background' : 'text-muted-foreground hover:text-foreground')}><List className="size-4" /></button>
-        </div>
       </div>
 
-      <div className="grid gap-5 lg:grid-cols-[16rem_minmax(0,1fr)]">
-        <aside className="h-fit rounded-xl border border-border/70 bg-card p-2.5">
+      <div className="grid gap-5 lg:grid-cols-[14rem_minmax(0,1fr)]">
+        {/* No card chrome: the rail's content is ~300px tall and the grid beside it is
+            several times that, so a bordered panel drew a box around 200px of nothing and
+            read as a broken empty card. Sticky instead, so it stays reachable while the
+            wall of notes scrolls, and 2rem narrower to hand the width to the cards. */}
+        <aside className="h-fit lg:sticky lg:top-4">
           <button type="button" onClick={() => { setActiveSection('notes'); setActiveLabel(null) }} className={cn('flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors', activeSection === 'notes' && !activeLabel ? 'bg-muted text-foreground' : 'text-foreground hover:bg-muted')}>
             <CheckSquare className="size-4" /> Notes
             {counts.notes > 0 && <span className="ml-auto rounded-full bg-foreground/10 px-2 py-0.5 text-[11px] font-semibold tabular-nums text-muted-foreground">{counts.notes}</span>}
@@ -616,6 +630,71 @@ export default function NotesPage() {
         </aside>
 
         <div className="min-w-0">
+          {/* The compose affordance is the width of the grid instead of a 16rem pill up in
+              the toolbar: it reads as "the next card", which is where a note actually goes.
+              Hidden in Archive and Trash, where creating one makes no sense. */}
+          {activeSection === 'notes' && (
+            <button
+              type="button"
+              onClick={openAddDialog}
+              className="mb-4 flex h-12 w-full items-center gap-3 rounded-2xl border border-border/70 bg-card px-4 text-left text-sm text-muted-foreground transition-colors hover:border-border hover:bg-muted/40 hover:text-foreground"
+            >
+              <Edit3 className="size-4 shrink-0" />
+              Take a note…
+              <span className="ml-auto inline-flex shrink-0 items-center gap-1.5 rounded-full bg-foreground px-3 py-1 text-xs font-medium text-background">
+                <Plus className="size-3.5" />
+                Add note
+              </span>
+            </button>
+          )}
+
+          {/* Which pile am I looking at, and how big is it — the rail says what is SELECTED,
+              not what is on screen, and once a search or a label filter is on those differ. */}
+          {/* `pl-1` not `px-1`: the left inset is optical alignment for the label text, but
+              any right inset would leave the toggle 4px short of the cards' edge. */}
+          <div className="mb-3 flex flex-wrap items-center gap-2 pl-1">
+            <span className="text-xs font-medium text-muted-foreground">
+              {activeSection === 'archive' ? 'Archive' : activeSection === 'trash' ? 'Trash' : 'Notes'}
+              {' · '}
+              {filteredNotes.length} note{filteredNotes.length === 1 ? '' : 's'}
+            </span>
+            {activeLabel && (
+              <button
+                type="button"
+                onClick={() => setActiveLabel(null)}
+                title="Clear label filter"
+                className="inline-flex items-center gap-1.5 rounded-full border border-border/70 bg-card px-2 py-0.5 text-xs text-muted-foreground transition-colors hover:text-foreground"
+              >
+                <span
+                  className={cn(
+                    'size-2 rounded-full',
+                    labels.find((l) => l.name === activeLabel)?.color,
+                  )}
+                />
+                {activeLabel}
+                <X className="size-3" />
+              </button>
+            )}
+            {query && (
+              <button
+                type="button"
+                onClick={() => setQuery('')}
+                title="Clear the search"
+                className="inline-flex items-center gap-1.5 rounded-full border border-border/70 bg-card px-2 py-0.5 text-xs text-muted-foreground transition-colors hover:text-foreground"
+              >
+                “{query}”
+                <X className="size-3" />
+              </button>
+            )}
+
+            {/* Right-aligned inside THIS column, so it lines up with the right edge of the
+                cards it reshapes rather than floating above the label rail too. */}
+            <div className="ml-auto flex shrink-0 rounded-lg border border-border/70 bg-card p-0.5">
+              <button type="button" onClick={() => setView('grid')} aria-label="Grid view" className={cn('rounded-md p-1.5', view === 'grid' ? 'bg-foreground text-background' : 'text-muted-foreground hover:text-foreground')}><Grid2X2 className="size-4" /></button>
+              <button type="button" onClick={() => setView('list')} aria-label="List view" className={cn('rounded-md p-1.5', view === 'list' ? 'bg-foreground text-background' : 'text-muted-foreground hover:text-foreground')}><List className="size-4" /></button>
+            </div>
+          </div>
+
           {activeSection === 'trash' && counts.trash > 0 && (
             <div className="mb-4 flex items-center justify-between rounded-xl border border-border/70 bg-card px-4 py-3">
               <p className="text-sm text-muted-foreground">
