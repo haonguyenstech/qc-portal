@@ -21,6 +21,7 @@ import {
   FolderPlus,
   Info,
   Loader2,
+  MoreHorizontal,
   Pencil,
   Pin,
   PinOff,
@@ -66,6 +67,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
@@ -123,6 +125,26 @@ function withFolderName(fullPath: string, folder: string): string {
  * skills-import flow.)
  */
 /** A compact pill showing whether a given capability is present in the repo. */
+/**
+ * A path shortened from the FRONT, because the tail is what identifies it.
+ *
+ * These are absolute paths in a card three to a row, so CSS `truncate` — which cuts the
+ * end — rendered every project on the page as the same six characters: "/Use…". The head
+ * of a path is the part every project on one machine shares; the basename is the only part
+ * that says which project this is. So: `$HOME` collapses to `~`, and anything deeper than
+ * two segments keeps its parent and basename with the middle elided. The full path stays in
+ * `title` and on the Copy button.
+ */
+function shortPath(full: string): string {
+  const home = full.match(/^(?:\/(?:Users|home)\/[^/]+|[A-Za-z]:\\Users\\[^\\]+)/)
+  const sep = full.includes('\\') ? '\\' : '/'
+  const rest = home ? full.slice(home[0].length) : full
+  const head = home ? '~' : ''
+  const parts = rest.split(sep).filter(Boolean)
+  if (parts.length <= 2) return [head, ...parts].filter(Boolean).join(sep) || sep
+  return [head || parts[0], '…', ...parts.slice(-2)].join(sep)
+}
+
 function HealthChip({ ok, label }: { ok: boolean | undefined; label: string }) {
   return (
     <span
@@ -140,42 +162,6 @@ function HealthChip({ ok, label }: { ok: boolean | undefined; label: string }) {
         <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/30" aria-hidden />
       )}
       {label}
-    </span>
-  )
-}
-
-/** Compact "N/3 ready" pill with a tiny segmented bar summarizing setup. */
-function ReadinessPill({ count }: { count: number }) {
-  const full = count >= 3
-  return (
-    <span
-      className={cn(
-        'inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11px] font-medium',
-        full
-          ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
-          : count === 0
-            ? 'border-border bg-muted/50 text-muted-foreground'
-            : 'border-amber-200 bg-amber-50 text-amber-700',
-      )}
-      title={`${count} of 3 capabilities configured`}
-    >
-      {full ? <Sparkles className="h-3 w-3" /> : null}
-      <span className="flex gap-0.5" aria-hidden>
-        {Array.from({ length: 3 }).map((_, i) => (
-          <span
-            key={i}
-            className={cn(
-              'h-2.5 w-1 rounded-full transition-colors',
-              i < count
-                ? full
-                  ? 'bg-emerald-500'
-                  : 'bg-amber-500'
-                : 'bg-muted-foreground/25',
-            )}
-          />
-        ))}
-      </span>
-      {full ? 'Ready' : `${count}/3`}
     </span>
   )
 }
@@ -213,6 +199,121 @@ function StatTile({
         <div className="truncate text-xs text-muted-foreground">{label}</div>
       </div>
     </div>
+  )
+}
+
+/**
+ * Every per-project action behind ONE trigger.
+ *
+ * These were six always-rendered `size-8` icon buttons in the card header — pin, share,
+ * pull, export, edit, delete — about 200px of the row. They were revealed on hover with
+ * `sm:opacity-0`, which hides them but does NOT give the space back: in a three-column
+ * grid the title column was left with roughly 100px, so every card read "pre-healthc…"
+ * over "/Use…" with "Added 23 Jun 2026" broken across three lines. One 32px trigger
+ * returns that width to the name, which is the thing the card exists to show.
+ *
+ * The menu is a Popover rather than a shadcn dropdown-menu on purpose: this repo has no
+ * dropdown-menu primitive, and `shadcn add` overwrites button.tsx (see CLAUDE.md).
+ */
+function ProjectActionsMenu({
+  project,
+  notFound,
+  exporting,
+  pinPending,
+  onPin,
+  onShare,
+  onPull,
+  onExport,
+  onEdit,
+  onDelete,
+}: {
+  project: Project
+  notFound: boolean
+  exporting: boolean
+  pinPending: boolean
+  onPin: () => void
+  onShare: () => void
+  onPull: () => void
+  onExport: () => void
+  onEdit: () => void
+  onDelete: () => void
+}) {
+  const [open, setOpen] = useState(false)
+  // Every item closes the menu first: a dialog opening under an still-open popover traps
+  // focus in the popover and the dialog cannot be typed into.
+  const run = (fn: () => void) => () => {
+    setOpen(false)
+    fn()
+  }
+  const item =
+    'flex w-full items-center gap-2.5 rounded-xl px-2.5 py-2 text-left text-[13px] transition-colors duration-150 hover:bg-muted disabled:pointer-events-none disabled:opacity-40'
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <Button
+          variant="ghost"
+          size="icon"
+          aria-label={`Actions for ${project.name}`}
+          className={cn(
+            'size-8 shrink-0 rounded-full text-muted-foreground transition-all duration-200 hover:text-foreground active:scale-[0.98]',
+            open && 'bg-muted text-foreground',
+          )}
+        >
+          {pinPending || exporting ? (
+            <Loader2 className="h-4 w-4 animate-spin" />
+          ) : (
+            <MoreHorizontal className="h-4 w-4" />
+          )}
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent align="end" className="w-64 rounded-2xl p-1.5">
+        <button type="button" onClick={run(onPin)} disabled={pinPending} className={item}>
+          {project.pinned ? (
+            <PinOff className="size-4 text-muted-foreground" />
+          ) : (
+            <Pin className="size-4 text-muted-foreground" />
+          )}
+          {project.pinned ? 'Unpin' : 'Pin to top'}
+        </button>
+        <button type="button" onClick={run(onEdit)} className={item}>
+          <Pencil className="size-4 text-muted-foreground" />
+          Edit name &amp; path
+        </button>
+
+        <div className="my-1 h-px bg-border/60" />
+        <p className="px-2.5 pb-1 pt-0.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground/70">
+          AI Sync
+        </p>
+        <button type="button" onClick={run(onShare)} disabled={notFound} className={item}>
+          <Radio className="size-4 text-muted-foreground" />
+          <span className="min-w-0 flex-1 whitespace-nowrap">Open to another machine</span>
+        </button>
+        <button type="button" onClick={run(onPull)} disabled={notFound} className={item}>
+          <CloudDownload className="size-4 text-muted-foreground" />
+          <span className="min-w-0 flex-1 whitespace-nowrap">Pull from another machine</span>
+        </button>
+        <button
+          type="button"
+          onClick={run(onExport)}
+          disabled={exporting || notFound}
+          className={item}
+          title={notFound ? 'Folder not found on disk' : undefined}
+        >
+          <Download className="size-4 text-muted-foreground" />
+          Export as .zip
+        </button>
+
+        <div className="my-1 h-px bg-border/60" />
+        <button
+          type="button"
+          onClick={run(onDelete)}
+          className={cn(item, 'text-destructive hover:bg-destructive/10')}
+        >
+          <Trash2 className="size-4" />
+          Delete project
+        </button>
+      </PopoverContent>
+    </Popover>
   )
 }
 
@@ -348,7 +449,10 @@ function ProjectCard({ project }: { project: Project }) {
       className={cn(
         'group relative flex flex-col gap-0 overflow-hidden rounded-3xl py-0 shadow-none transition-all duration-200',
         isActive
-          ? 'border-2 border-sky-500 bg-sky-50/40 shadow-sm ring-2 ring-sky-500/20'
+          // A TRANSLUCENT tint, not a light one: `bg-sky-50/40` is a fixed near-white, so
+          // on the dark theme the active card rendered as a grey slab — the one card meant
+          // to stand out was the one that looked switched off.
+          ? 'border-2 border-sky-500 bg-sky-500/[0.06] shadow-sm ring-1 ring-sky-500/20'
           : 'border border-border/60 hover:-translate-y-0.5 hover:border-border hover:shadow-sm',
         notFound && !isActive && 'border-destructive/30',
       )}
@@ -411,10 +515,13 @@ function ProjectCard({ project }: { project: Project }) {
             </div>
           ) : (
             <>
-              <CardTitle className="flex flex-wrap items-center gap-2 text-sm">
+              {/* The mark and the name are ONE line that owns the whole card width; the
+                  badges sit under it rather than beside it, because "active" + "Pinned"
+                  next to a name is what pushed the name itself down to six characters. */}
+              <CardTitle className="flex items-center gap-2.5 text-sm">
                 <span
                   className={cn(
-                    'flex h-7 w-7 shrink-0 items-center justify-center rounded-xl border transition-all duration-200',
+                    'flex size-8 shrink-0 items-center justify-center rounded-xl border transition-all duration-200',
                     isActive
                       ? 'border-transparent bg-foreground text-background'
                       : notFound
@@ -422,29 +529,21 @@ function ProjectCard({ project }: { project: Project }) {
                         : 'border-border/60 bg-muted/60 text-muted-foreground group-hover:border-border group-hover:text-foreground',
                   )}
                 >
-                  <FolderGit2 className="h-3.5 w-3.5" />
+                  <FolderGit2 className="h-4 w-4" />
                 </span>
-                <span className="truncate font-semibold tracking-tight">{project.name}</span>
-                {isActive && <Badge className="shrink-0">active</Badge>}
-                {project.pinned && (
-                  <Badge variant="secondary" className="shrink-0 gap-1">
-                    <Pin className="h-3 w-3" />
-                    Pinned
-                  </Badge>
-                )}
-                {notFound && (
-                  <Badge variant="destructive" className="shrink-0 gap-1">
-                    <AlertCircle className="h-3 w-3" />
-                    Not found
-                  </Badge>
-                )}
+                <span
+                  className="min-w-0 flex-1 truncate text-[15px] font-semibold tracking-tight"
+                  title={project.name}
+                >
+                  {project.name}
+                </span>
               </CardTitle>
-              <div className="flex items-center gap-1 pl-9">
+              <div className="flex items-center gap-1 pl-[42px]">
                 <span
                   className="truncate font-mono text-xs text-muted-foreground"
                   title={project.rootPath}
                 >
-                  {project.rootPath}
+                  {shortPath(project.rootPath)}
                 </span>
                 <button
                   type="button"
@@ -455,10 +554,22 @@ function ProjectCard({ project }: { project: Project }) {
                   <Copy className="h-3 w-3" />
                 </button>
               </div>
-              <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 pl-9 pt-0.5">
-                <ReadinessPill count={readiness} />
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5 pl-[42px] pt-1">
+                {isActive && <Badge className="h-5 px-2 text-[11px]">Active</Badge>}
+                {project.pinned && (
+                  <Badge variant="secondary" className="h-5 gap-1 px-2 text-[11px]">
+                    <Pin className="h-3 w-3" />
+                    Pinned
+                  </Badge>
+                )}
+                {notFound && (
+                  <Badge variant="destructive" className="h-5 gap-1 px-2 text-[11px]">
+                    <AlertCircle className="h-3 w-3" />
+                    Not found
+                  </Badge>
+                )}
                 <span
-                  className="flex items-center gap-1 text-[11px] text-muted-foreground"
+                  className="flex items-center gap-1 whitespace-nowrap text-[11px] text-muted-foreground"
                   title={new Date(project.createdAt).toLocaleString()}
                 >
                   <Clock className="h-3 w-3" />
@@ -504,180 +615,18 @@ function ProjectCard({ project }: { project: Project }) {
               </Button>
             </>
           ) : (
-            <div
-              className={cn(
-                'flex items-center gap-1 transition-opacity duration-200',
-                // Keep actions visible when pinned so the pin state is always togglable.
-                project.pinned
-                  ? 'opacity-100'
-                  : 'sm:opacity-0 sm:group-hover:opacity-100 sm:focus-within:opacity-100',
-              )}
-            >
-              <Button
-                variant="ghost"
-                size="icon"
-                onClick={() => pinMutation.mutate()}
-                disabled={pinMutation.isPending}
-                aria-label={project.pinned ? 'Unpin project' : 'Pin project to top'}
-                title={project.pinned ? 'Unpin' : 'Pin to top'}
-                className={cn(
-                  'size-8 rounded-full transition-all duration-200 active:scale-[0.98]',
-                  project.pinned
-                    ? 'text-primary hover:text-primary'
-                    : 'text-muted-foreground hover:text-foreground',
-                )}
-              >
-                {pinMutation.isPending ? (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                ) : project.pinned ? (
-                  <PinOff className="h-3.5 w-3.5" />
-                ) : (
-                  <Pin className="h-3.5 w-3.5" />
-                )}
-              </Button>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    onClick={() => setShareOpen(true)}
-                    disabled={notFound}
-                    aria-label="Open this project to AI Sync"
-                    className="size-8 rounded-full text-muted-foreground transition-all duration-200 hover:text-foreground active:scale-[0.98] disabled:opacity-50"
-                  >
-                    <Radio className="h-3.5 w-3.5" />
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent side="top" className="max-w-none rounded-xl whitespace-nowrap">
-                  AI Sync &mdash; give another machine a code to pull this project
-                </TooltipContent>
-              </Tooltip>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    onClick={() => setPullOpen(true)}
-                    disabled={notFound}
-                    aria-label="Sync this project from another machine"
-                    className="size-8 rounded-full text-muted-foreground transition-all duration-200 hover:text-foreground active:scale-[0.98] disabled:opacity-50"
-                  >
-                    <CloudDownload className="h-3.5 w-3.5" />
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent side="top" className="max-w-none rounded-xl whitespace-nowrap">
-                  AI Sync &mdash; pull into this project from another machine
-                </TooltipContent>
-              </Tooltip>
-              <Button
-                variant="ghost"
-                size="icon"
-                onClick={doExport}
-                disabled={exporting || notFound}
-                aria-label="Export project as .zip"
-                title={notFound ? 'Folder not found on disk' : 'Export as .zip'}
-                className="size-8 rounded-full text-muted-foreground transition-all duration-200 hover:text-foreground active:scale-[0.98] disabled:opacity-50"
-              >
-                {exporting ? (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                ) : (
-                  <Download className="h-3.5 w-3.5" />
-                )}
-              </Button>
-              <Button
-                variant="ghost"
-                size="icon"
-                onClick={() => setEditing(true)}
-                aria-label="Edit"
-                className="size-8 rounded-full text-muted-foreground transition-all duration-200 hover:text-foreground active:scale-[0.98]"
-              >
-                <Pencil className="h-3.5 w-3.5" />
-              </Button>
-              {(
-                <Dialog
-                  open={deleteOpen}
-                  onOpenChange={(open) => {
-                    setDeleteOpen(open)
-                    if (!open) setDeleteConfirmName('')
-                  }}
-                >
-                  <DialogTrigger asChild>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      disabled={deleteMutation.isPending}
-                      aria-label="Delete"
-                      className="size-8 rounded-full text-muted-foreground transition-all duration-200 hover:bg-destructive/10 hover:text-destructive active:scale-[0.98] disabled:opacity-50"
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </Button>
-                  </DialogTrigger>
-                  <DialogContent className="sm:max-w-md">
-                    <DialogHeader>
-                      <div className="flex items-start gap-3">
-                        <span className="flex size-10 shrink-0 items-center justify-center rounded-2xl border border-destructive/20 bg-destructive/10 text-destructive">
-                          <Trash2 className="size-5" />
-                        </span>
-                        <div className="space-y-1 text-left">
-                          <DialogTitle>Delete project?</DialogTitle>
-                          <DialogDescription>
-                            Permanently delete this project from QC Portal and remove its local
-                            folder from disk.
-                          </DialogDescription>
-                        </div>
-                      </div>
-                    </DialogHeader>
-                    <div className="rounded-2xl border border-destructive/25 bg-destructive/10 p-3 text-sm text-destructive">
-                      This deletes the folder recursively on this machine. Export the project first
-                      if you need a backup.
-                    </div>
-                    <div className="rounded-2xl border border-border/60 bg-muted/60 p-3">
-                      <div className="truncate text-sm font-semibold">{project.name}</div>
-                      <div className="mt-1 truncate font-mono text-xs text-muted-foreground">
-                        {project.rootPath}
-                      </div>
-                    </div>
-                    <div className="space-y-2">
-                      <Label htmlFor={`delete-confirm-${project.id}`}>
-                        Type project name to confirm
-                      </Label>
-                      <Input
-                        id={`delete-confirm-${project.id}`}
-                        value={deleteConfirmName}
-                        onChange={(e) => setDeleteConfirmName(e.target.value)}
-                        placeholder={project.name}
-                        autoComplete="off"
-                        disabled={deleteMutation.isPending}
-                      />
-                    </div>
-                    <DialogFooter>
-                      <DialogClose asChild>
-                        <Button
-                          variant="outline"
-                          disabled={deleteMutation.isPending}
-                          className="rounded-full transition-all duration-200 active:scale-[0.98]"
-                        >
-                          Cancel
-                        </Button>
-                      </DialogClose>
-                      <Button
-                        variant="destructive"
-                        onClick={() => deleteMutation.mutate()}
-                        disabled={deleteMutation.isPending || !canDelete}
-                        className="rounded-full transition-all duration-200 active:scale-[0.98]"
-                      >
-                        {deleteMutation.isPending ? (
-                          <Loader2 className="size-4 animate-spin" />
-                        ) : (
-                          <Trash2 className="size-4" />
-                        )}
-                        Delete project
-                      </Button>
-                    </DialogFooter>
-                  </DialogContent>
-                </Dialog>
-              )}
-            </div>
+            <ProjectActionsMenu
+              project={project}
+              notFound={notFound}
+              exporting={exporting}
+              pinPending={pinMutation.isPending}
+              onPin={() => pinMutation.mutate()}
+              onShare={() => setShareOpen(true)}
+              onPull={() => setPullOpen(true)}
+              onExport={doExport}
+              onEdit={() => setEditing(true)}
+              onDelete={() => setDeleteOpen(true)}
+            />
           )}
         </div>
       </CardHeader>
@@ -736,6 +685,78 @@ function ProjectCard({ project }: { project: Project }) {
           </div>
         </CardContent>
       )}
+
+      {/* Delete is opened from the actions menu, so the dialog is controlled and lives
+          out here beside the others rather than wrapping a trigger button. */}
+      <Dialog
+        open={deleteOpen}
+        onOpenChange={(open) => {
+          setDeleteOpen(open)
+          if (!open) setDeleteConfirmName('')
+        }}
+      >
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <div className="flex items-start gap-3">
+              <span className="flex size-10 shrink-0 items-center justify-center rounded-2xl border border-destructive/20 bg-destructive/10 text-destructive">
+                <Trash2 className="size-5" />
+              </span>
+              <div className="space-y-1 text-left">
+                <DialogTitle>Delete project?</DialogTitle>
+                <DialogDescription>
+                  Permanently delete this project from QC Portal and remove its local folder
+                  from disk.
+                </DialogDescription>
+              </div>
+            </div>
+          </DialogHeader>
+          <div className="rounded-2xl border border-destructive/25 bg-destructive/10 p-3 text-sm text-destructive">
+            This deletes the folder recursively on this machine. Export the project first if you
+            need a backup.
+          </div>
+          <div className="rounded-2xl border border-border/60 bg-muted/60 p-3">
+            <div className="truncate text-sm font-semibold">{project.name}</div>
+            <div className="mt-1 truncate font-mono text-xs text-muted-foreground">
+              {project.rootPath}
+            </div>
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor={`delete-confirm-${project.id}`}>Type project name to confirm</Label>
+            <Input
+              id={`delete-confirm-${project.id}`}
+              value={deleteConfirmName}
+              onChange={(e) => setDeleteConfirmName(e.target.value)}
+              placeholder={project.name}
+              autoComplete="off"
+              disabled={deleteMutation.isPending}
+            />
+          </div>
+          <DialogFooter>
+            <DialogClose asChild>
+              <Button
+                variant="outline"
+                disabled={deleteMutation.isPending}
+                className="rounded-full transition-all duration-200 active:scale-[0.98]"
+              >
+                Cancel
+              </Button>
+            </DialogClose>
+            <Button
+              variant="destructive"
+              onClick={() => deleteMutation.mutate()}
+              disabled={deleteMutation.isPending || !canDelete}
+              className="rounded-full transition-all duration-200 active:scale-[0.98]"
+            >
+              {deleteMutation.isPending ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : (
+                <Trash2 className="size-4" />
+              )}
+              Delete project
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <AiSyncShareDialog
         projectId={project.id}
@@ -1990,7 +2011,7 @@ export default function ProjectsPage() {
           )}
 
           {hasProjects && filtered.length > 0 && (
-            <div data-tour="project-cards" className="grid gap-3 sm:grid-cols-2 2xl:grid-cols-3">
+            <div data-tour="project-cards" className="grid gap-4 sm:grid-cols-2 2xl:grid-cols-3">
               {filtered.map((p) => (
                 <ProjectCard key={p.id} project={p} />
               ))}

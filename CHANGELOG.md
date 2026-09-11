@@ -3,6 +3,38 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.12.5 — 2026-09-11
+
+**Project cards you can actually read**
+
+### Fixed
+
+- **The project cards on Settings › Projects were unreadable.** Every card showed a clipped
+  name over a clipped path — "pre-healthc…" above "/Use…" — with "Added 23 Jun 2026" broken
+  across three lines. The six action buttons in each card's corner were reserving about 200px
+  whether or not they were visible, which left the name roughly a hundred pixels to live in.
+  They now sit behind one **"…" menu**, and the name gets the width back.
+
+- **The path is shortened from the front, not the end.** Cutting the tail rendered every
+  project on the machine as the same six characters, because the head of an absolute path is
+  the part they all share. A card now reads `~/…/test-qc-portal/pre-healthcare` — your home
+  folder as `~`, and the parent plus the folder that actually names the project. The full path
+  is still in the tooltip and on the Copy button.
+
+- **The active project no longer looks switched off in dark mode.** Its highlight was a fixed
+  near-white tint, so on the dark theme the one card meant to stand out rendered as a grey
+  slab. It is a translucent blue now and reads correctly in both themes.
+
+### Changed
+
+- **Every per-project action is in one place.** Pin, edit, the two AI Sync directions, export
+  and delete are grouped in the card's "…" menu — AI Sync under its own heading, delete
+  separated at the bottom — instead of six unlabelled icons that appeared on hover.
+
+- **Dropped the duplicate readiness pill.** The "Ready" / "2/3" badge in the card header said
+  exactly what the Skills / MCP / CLAUDE.md chips below it already say, and it was what pushed
+  the date onto its own line.
+
 ## 0.12.4 — 2026-09-11
 
 **Work the portal does while nobody is watching, and a project that follows you between laptops**
