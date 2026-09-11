@@ -1002,7 +1002,7 @@ const ACTION_BLOCKS: Record<ChatAction, string> = {
  * All the list flags are variadic; the prompt is delivered over STDIN (never as a trailing
  * positional), so a tool name can't swallow it.
  */
-function toolArgs(tools: ChatTools, action: ChatAction | null): string[] {
+export function toolArgs(tools: ChatTools, action: ChatAction | null): string[] {
   if (tools === 'full') return ['--permission-mode', 'bypassPermissions']
   const allowed = ['Read', 'Grep', 'Glob']
   // Workspace write: the edit tools by name, because the allow-list is the only thing that
@@ -1023,7 +1023,7 @@ function toolArgs(tools: ChatTools, action: ChatAction | null): string[] {
  * trips plus the writing, and cutting it off at the ordinary budget would reliably produce
  * half a report.
  */
-function timeoutFor(tools: ChatTools, action: ChatAction | null): number {
+export function timeoutFor(tools: ChatTools, action: ChatAction | null): number {
   // `write` gets the full ceiling too: it is the mode you pick to have work DONE, and a
   // multi-file edit spends as long as a full-tools question — cutting it off mid-edit
   // would leave the project half-changed, the one outcome worse than a slow turn.
@@ -2877,6 +2877,79 @@ chatRouter.post('/:slug/rename', (req, res) => {
 })
 
 /**
+ * Star or archive ONE conversation — the whole of what `/pin` and `/archive` do, and what
+ * the bulk route repeats forty times over.
+ *
+ * It lives here rather than inline in the routes because the bulk route is a third caller,
+ * and the refusals are the part that must not drift: a temporary conversation is not in
+ * history at all, so neither flag has anything to mean on it, and neither flag may touch
+ * `updatedAt` (see the route comments below).
+ */
+function setChatFlag(
+  root: string,
+  slug: string,
+  flag: 'pinned' | 'archived',
+  on: boolean,
+): Chat {
+  const chat = loadChat(root, slug)
+  if (!chat) throw new HttpError(404, 'chat not found')
+  // Starring means "keep this where I can find it again" and archiving "get this out of
+  // my way"; a temporary conversation is never in the list either is about. Refuse rather
+  // than write a flag nothing will ever read.
+  if (chat.temporary) {
+    throw new HttpError(400, 'a temporary conversation is not kept in history')
+  }
+  chat[flag] = on ? true : undefined
+  saveChat(root, chat)
+  return chat
+}
+
+/**
+ * Remove ONE conversation — every side effect of deleting, in one place.
+ *
+ * Shared with the bulk route for the reason the comments below spell out: each of these
+ * four steps exists because skipping it RESURRECTS the conversation (a running turn saves
+ * it again when it finishes, a queued message answers into it, an armed learning capture
+ * writes a memory sourced to it a minute later). A second copy of this that forgot one of
+ * them would only be found by the engineer who deleted forty chats and watched one come
+ * back.
+ */
+function removeChat(root: string, slug: string): void {
+  const f = itemFile(root, slug)
+  if (!f) throw new HttpError(400, 'invalid slug')
+  const key = liveKey(root, slug)
+  // A reply still being written to a conversation being deleted would resurrect it in the
+  // registry when it finished, so stop it first.
+  const turn = live.get(key)
+  if (turn) {
+    turn.discarded = true
+    turn.abort.abort()
+  }
+  // Anything waiting for a conversation that no longer exists must go too, or the drain
+  // loop would answer into a deleted transcript.
+  queues.delete(key)
+  discardTemp(key)
+  // Deleting has to take the UNWRITTEN memory with it too: a background capture is armed
+  // for up to ninety seconds after the last answer, and a note appearing on the Memory
+  // page a minute later — sourced to a conversation that no longer exists — is the exact
+  // trace the engineer just chose not to keep.
+  forgetChatLearning(root, slug)
+  // `fs.rmSync` with `force` is a no-op on a missing path, so the disk half stays
+  // unconditional and covers a temporary chat (no file) and a stale/half state too.
+  fs.rmSync(f, { force: true })
+}
+
+/** An error that already knows which status it is. Only the helpers above throw it. */
+class HttpError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message)
+  }
+}
+
+/**
  * POST /api/chat/:slug/pin — star / unstar. Body: { pinned: boolean }.
  *
  * Deliberately does NOT touch `updatedAt`: that field orders the rail's date groups, so
@@ -2886,16 +2959,12 @@ chatRouter.post('/:slug/rename', (req, res) => {
 chatRouter.post('/:slug/pin', (req, res) => {
   const project = resolveProject(req)
   if (!project) return res.status(400).json({ error: 'project not found' })
-  const chat = loadChat(project.rootPath, req.params.slug)
-  if (!chat) return res.status(404).json({ error: 'chat not found' })
-  // Starring means "keep this where I can find it again", which is the opposite of what a
-  // temporary conversation is. Refuse rather than write a pin nothing will ever read.
-  if (chat.temporary) {
-    return res.status(400).json({ error: 'a temporary conversation is not kept in history' })
+  try {
+    res.json(setChatFlag(project.rootPath, req.params.slug, 'pinned', req.body?.pinned === true))
+  } catch (err) {
+    const status = err instanceof HttpError ? err.status : 500
+    res.status(status).json({ error: err instanceof Error ? err.message : String(err) })
   }
-  chat.pinned = req.body?.pinned === true ? true : undefined
-  saveChat(project.rootPath, chat)
-  res.json(chat)
 })
 
 /**
@@ -2912,16 +2981,14 @@ chatRouter.post('/:slug/pin', (req, res) => {
 chatRouter.post('/:slug/archive', (req, res) => {
   const project = resolveProject(req)
   if (!project) return res.status(400).json({ error: 'project not found' })
-  const chat = loadChat(project.rootPath, req.params.slug)
-  if (!chat) return res.status(404).json({ error: 'chat not found' })
-  // Same refusal as starring: a temporary conversation is never in history, so there is
-  // nothing to archive it out of.
-  if (chat.temporary) {
-    return res.status(400).json({ error: 'a temporary conversation is not kept in history' })
+  try {
+    res.json(
+      setChatFlag(project.rootPath, req.params.slug, 'archived', req.body?.archived === true),
+    )
+  } catch (err) {
+    const status = err instanceof HttpError ? err.status : 500
+    res.status(status).json({ error: err instanceof Error ? err.message : String(err) })
   }
-  chat.archived = req.body?.archived === true ? true : undefined
-  saveChat(project.rootPath, chat)
-  res.json(chat)
 })
 
 /**
@@ -2934,29 +3001,59 @@ chatRouter.post('/:slug/archive', (req, res) => {
 chatRouter.delete('/:slug', (req, res) => {
   const project = resolveProject(req)
   if (!project) return res.status(400).json({ error: 'project not found' })
-  const f = itemFile(project.rootPath, req.params.slug)
-  if (!f) return res.status(400).json({ error: 'invalid slug' })
-  const key = liveKey(project.rootPath, req.params.slug)
-  // A reply still being written to a conversation being deleted would resurrect it in the
-  // registry when it finished, so stop it first.
-  const turn = live.get(key)
-  if (turn) {
-    turn.discarded = true
-    turn.abort.abort()
-  }
-  // Anything waiting for a conversation that no longer exists must go too, or the drain
-  // loop would answer into a deleted transcript.
-  queues.delete(key)
-  discardTemp(key)
-  // Deleting has to take the UNWRITTEN memory with it too: a background capture is armed
-  // for up to ninety seconds after the last answer, and a note appearing on the Memory
-  // page a minute later — sourced to a conversation that no longer exists — is the exact
-  // trace the engineer just chose not to keep.
-  forgetChatLearning(project.rootPath, req.params.slug)
   try {
-    fs.rmSync(f, { force: true })
+    removeChat(project.rootPath, req.params.slug)
   } catch (err) {
-    return res.status(500).json({ error: err instanceof Error ? err.message : String(err) })
+    const status = err instanceof HttpError ? err.status : 500
+    return res.status(status).json({ error: err instanceof Error ? err.message : String(err) })
   }
   res.json({ ok: true })
+})
+
+/**
+ * POST /api/chat/bulk — one action over MANY conversations.
+ * Body: `{ projectId, slugs: string[], action: 'delete' | 'pin' | 'unpin' | 'archive' | 'unarchive' }`.
+ *
+ * Why a route at all, when the browser could just fire forty DELETEs: a bulk action has to
+ * be reportable as ONE outcome. Forty requests give forty independent failures, forty
+ * toasts, and a rail that re-fetches in the middle of them so the list re-orders under the
+ * selection the engineer is still looking at. Here the whole set is applied in one pass and
+ * answered in one line — "12 deleted", or "9 deleted, 3 could not be".
+ *
+ * It is deliberately NOT all-or-nothing. Deleting is not reversible, so refusing the whole
+ * batch because one slug was already gone would be the worse failure: the eleven the
+ * engineer asked for stay, and they have to find which one broke it. Every slug is attempted
+ * and the ones that failed come back NAMED, with their reason.
+ *
+ * There is no bulk rename: a name is per-conversation by definition.
+ */
+chatRouter.post('/bulk', (req, res) => {
+  const project = resolveProject(req)
+  if (!project) return res.status(400).json({ error: 'project not found' })
+  const action = String(req.body?.action ?? '')
+  if (!['delete', 'pin', 'unpin', 'archive', 'unarchive'].includes(action)) {
+    return res.status(400).json({ error: `unknown action: ${action || '(none)'}` })
+  }
+  const raw: unknown = req.body?.slugs
+  const slugs = Array.isArray(raw) ? raw.filter((s): s is string => typeof s === 'string') : []
+  if (!slugs.length) return res.status(400).json({ error: 'no conversations selected' })
+  // A cap, because this body is attacker-shaped in exactly one way: the whole batch runs
+  // synchronously (every step of it is filesystem work), so an unbounded list would block
+  // the single Node thread the streaming turns also live on. 200 is far past any real rail.
+  if (slugs.length > 200) return res.status(400).json({ error: 'too many conversations at once' })
+
+  const done: string[] = []
+  const failed: { slug: string; error: string }[] = []
+  for (const slug of new Set(slugs)) {
+    try {
+      if (action === 'delete') removeChat(project.rootPath, slug)
+      else if (action === 'pin' || action === 'unpin')
+        setChatFlag(project.rootPath, slug, 'pinned', action === 'pin')
+      else setChatFlag(project.rootPath, slug, 'archived', action === 'archive')
+      done.push(slug)
+    } catch (err) {
+      failed.push({ slug, error: err instanceof Error ? err.message : String(err) })
+    }
+  }
+  res.json({ done, failed })
 })

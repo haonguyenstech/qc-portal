@@ -17,6 +17,7 @@ import {
   Blocks,
   Brain,
   Bug,
+  AlarmClock,
   Check,
   ChevronDown,
   CircleCheck,
@@ -34,6 +35,7 @@ import {
   History,
   ImageIcon,
   Library,
+  ListChecks,
   ListTodo,
   Loader2,
   MessageSquareDashed,
@@ -99,12 +101,16 @@ import {
   resolveProjectImages,
   createWorkspaceNote,
   archiveChat,
+  bulkChatAction,
   deleteChat,
   getChat,
   getDatabases,
   listChats,
   listCrawledTickets,
   listSkills,
+  createSchedule,
+  deleteSchedule,
+  parseSchedule,
   pinChat,
   rateChatAnswer,
   renameChat,
@@ -113,6 +119,7 @@ import {
   stopChat,
   type Chat,
   type ChatAction,
+  type ChatBulkAction,
   type ChatMention,
   type CrawledTicket,
   type ChatMessage,
@@ -130,6 +137,7 @@ import {
   type DatabaseConn,
 } from '@/lib/api'
 import type { SkillSummary } from '@/lib/types'
+import { formatWhen } from '@/lib/schedule'
 
 /**
  * Chat — ask Claude Code about this project in plain language and read the answer as a
@@ -531,11 +539,20 @@ interface StagedMention {
   skill?: string
 }
 
-/** One row of the `@` / `/` menu. */
-interface MentionOption extends StagedMention {
-  label: string
-  detail: string
-}
+/**
+ * One row of the `@` / `/` menu: an artifact to tag, or a composer COMMAND.
+ *
+ * A command is not a `StagedMention` — nothing about it reaches the model or rides along in
+ * `mentions`. It changes what pressing Enter DOES (see `scheduleMode`), which is why it is
+ * a separate arm of the union rather than a fourth `kind` on the staged type: widening
+ * `StagedMention` would have let a command leak into the `ChatMention[]` the turn is sent
+ * with, where the server has no such kind.
+ */
+type SlashCommand = 'scheduled'
+
+type MentionOption =
+  | (StagedMention & { label: string; detail: string; command?: undefined })
+  | { kind: 'command'; command: SlashCommand; token: string; label: string; detail: string }
 
 const MAX_MENTION_ROWS = 8
 
@@ -619,6 +636,31 @@ function mentionOptions(
     if (ticketRows.length >= MAX_MENTION_ROWS * 2) break
   }
   return [...out, ...ticketRows].slice(0, MAX_MENTION_ROWS + out.length)
+}
+
+/**
+ * The `/` menu's COMMANDS, above the skills.
+ *
+ * `/scheduled` is the one that exists so far, and it mirrors the Scheduled page's own box:
+ * pick it, then type one sentence ("every weekday at 9am, summarise new tickets"). Enter
+ * then proposes a task instead of sending a message — and proposing is as far as it goes,
+ * because the confirmation dialog is what turns a sentence into something that runs on its
+ * own every morning.
+ */
+const SLASH_COMMANDS: { command: SlashCommand; token: string; label: string; detail: string }[] = [
+  {
+    command: 'scheduled',
+    token: '/scheduled',
+    label: 'scheduled',
+    detail: 'Schedule this as a recurring task — “every weekday at 9am, summarise new tickets”',
+  },
+]
+
+function commandOptions(query: string): MentionOption[] {
+  const q = query.trim().toLowerCase()
+  return SLASH_COMMANDS.filter(
+    (c) => !q || c.command.startsWith(q) || 'schedule'.startsWith(q),
+  ).map((c) => ({ kind: 'command' as const, command: c.command, token: c.token, label: c.label, detail: c.detail }))
 }
 
 /**
@@ -1339,6 +1381,7 @@ function RowMenu({
   onRename,
   onDelete,
   onExport,
+  onSelect,
   always,
 }: {
   pinned: boolean
@@ -1350,6 +1393,15 @@ function RowMenu({
   onDelete: () => void
   /** Only the header offers this — a rail row doesn't need a download in a two-item menu. */
   onExport?: () => void
+  /**
+   * Enter multi-select with THIS row already ticked. Rail rows only.
+   *
+   * The header button that turns selection on is not where the thought starts: you are
+   * looking at a row you want gone, and the second one occurs to you after that. Making the
+   * engineer find a mode switch first, then come back and tick the row they were already
+   * pointing at, is the step this removes.
+   */
+  onSelect?: () => void
   /** The rail reveals the trigger on row hover; the header's is always there. */
   always?: boolean
 }) {
@@ -1401,6 +1453,19 @@ function RowMenu({
             <PenLine className="size-3.5" />
             Rename
           </button>
+          {onSelect && (
+            <button
+              type="button"
+              onClick={() => {
+                setOpen(false)
+                onSelect()
+              }}
+              className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm transition-colors hover:bg-accent"
+            >
+              <ListChecks className="size-3.5" />
+              Select
+            </button>
+          )}
           {onArchive && (
             <button
               type="button"
@@ -1546,6 +1611,62 @@ function DeleteChatDialog({
 }
 
 /**
+ * Delete MANY conversations, as its own dialog.
+ *
+ * Not the single one with a different sentence: the thing that has to be on screen here is
+ * WHICH conversations are about to go. A count alone ("Delete 12 conversations?") is not
+ * reviewable — the selection was built over a scrolling list, possibly across a search, and
+ * the only moment it can still be checked is this one. So it lists the names, capped, with
+ * the rest counted.
+ */
+function DeleteChatsDialog({
+  names,
+  busy,
+  onCancel,
+  onConfirm,
+}: {
+  names: string[] | null
+  busy: boolean
+  onCancel: () => void
+  onConfirm: () => void
+}) {
+  const shown = (names ?? []).slice(0, 8)
+  const rest = (names?.length ?? 0) - shown.length
+  return (
+    <Dialog open={!!names?.length} onOpenChange={(o) => !o && onCancel()}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>
+            Delete {names?.length} conversation{names?.length === 1 ? '' : 's'}?
+          </DialogTitle>
+          <DialogDescription>
+            Their transcript files are removed from{' '}
+            <span className="font-mono text-xs">testing/chats</span>. This can&apos;t be undone.
+          </DialogDescription>
+        </DialogHeader>
+        <ul className="max-h-52 space-y-1 overflow-y-auto rounded-xl border border-border/60 bg-muted/40 p-3 text-sm">
+          {shown.map((n) => (
+            <li key={n} className="truncate">
+              {railTitle(n)}
+            </li>
+          ))}
+          {rest > 0 && <li className="text-xs text-muted-foreground">and {rest} more</li>}
+        </ul>
+        <DialogFooter>
+          <Button variant="outline" onClick={onCancel} disabled={busy}>
+            Cancel
+          </Button>
+          <Button variant="destructive" onClick={onConfirm} disabled={busy}>
+            {busy && <Loader2 className="size-4 animate-spin" />}
+            Delete {names?.length}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+/**
  * The temporary-chat notice.
  *
  * A conversation here normally becomes part of the project: `testing/chats/<slug>.json` is
@@ -1625,6 +1746,11 @@ function ChatRail({
   onArchive,
   onRename,
   onDelete,
+  selection,
+  onSelectionChange,
+  onBulk,
+  onBulkDelete,
+  bulkBusy,
 }: {
   chats: ChatSummary[]
   activeSlug: string | null
@@ -1635,6 +1761,22 @@ function ChatRail({
   onArchive: (slug: string, archived: boolean) => void
   onRename: (slug: string, current: string) => void
   onDelete: (slug: string) => void
+  /**
+   * The multi-select. `null` is "not selecting" — distinct from `[]`, which is selection
+   * mode with nothing ticked yet, and the two have to look different on screen (one shows
+   * the rail's normal footer, the other an action bar with everything disabled).
+   *
+   * It lives in the PAGE rather than here because deleting is confirmed in a dialog the
+   * page owns, and the selection has to survive that round trip and be cleared by whatever
+   * comes back from the server — not by this component unmounting a row.
+   */
+  selection: string[] | null
+  onSelectionChange: (next: string[] | null) => void
+  /** Star / archive the whole selection. Applied server-side in one pass. */
+  onBulk: (action: ChatBulkAction, slugs: string[]) => void
+  /** Delete needs the page's confirm dialog first, so it gets its own way out. */
+  onBulkDelete: (slugs: string[]) => void
+  bulkBusy: boolean
 }) {
   const [q, setQ] = useState('')
   // Archived conversations are hidden behind one line at the bottom of the list. Component
@@ -1711,6 +1853,88 @@ function ChatRail({
     setRailFolded(false)
     requestAnimationFrame(() => searchRef.current?.focus())
   }
+
+  /*
+   * ------------------------------------------------------------------ multi-select
+   *
+   * Tidying a chat history is a BATCH job — you scroll it once a month and a dozen rows are
+   * throwaway questions. One-at-a-time through the "…" menu is twelve menus, twelve confirm
+   * dialogs and twelve list re-orders, so the rail grows a mode: rows tick instead of open,
+   * and one footer bar applies the action to the lot.
+   *
+   * A mode is a cost, so it stays cheap to leave: Escape, the X in the header, or an action
+   * finishing. It also does NOT take the search box away — selection survives a filter, so
+   * "search, tick two, search again, tick two more" works, which is how a batch is actually
+   * built when the list is long.
+   */
+  const selecting = selection !== null
+  const picked = useMemo(() => new Set(selection ?? []), [selection])
+  /*
+   * The rows as they are READ, top to bottom, collapsed groups left out. Shift-click means
+   * "everything between these two", and BETWEEN can only mean visible order — ranging over
+   * the unfiltered array would silently tick conversations that are not on screen.
+   */
+  const flat = useMemo(
+    () =>
+      groups
+        .filter((g) => searching || !collapsed.includes(g.label))
+        .flatMap((g) => g.items.map((c) => c.slug)),
+    [groups, collapsed, searching],
+  )
+  /*
+   * Where the last tick happened — the other end of a shift-range. State rather than a ref:
+   * it is read while deciding what a click does, and this repo's lint (rightly) treats a ref
+   * read from a render-created handler as a render read.
+   */
+  const [anchor, setAnchor] = useState<string | null>(null)
+  const toggleOne = useCallback(
+    (slug: string, shift: boolean) => {
+    const current = selection ?? []
+    if (shift && anchor && flat.includes(anchor)) {
+      const a = flat.indexOf(anchor)
+      const b = flat.indexOf(slug)
+      const span = flat.slice(Math.min(a, b), Math.max(a, b) + 1)
+      // A range ADDS; it never clears what is already ticked. Shift-clicking a second span
+      // is the normal way to build one selection out of two groups.
+      onSelectionChange([...new Set([...current, ...span])])
+      return
+    }
+    setAnchor(slug)
+    onSelectionChange(
+      current.includes(slug) ? current.filter((x) => x !== slug) : [...current, slug],
+    )
+    },
+    [anchor, selection, flat, onSelectionChange],
+  )
+  const enterSelect = useCallback(
+    (slug?: string) => {
+      setAnchor(slug ?? null)
+      onSelectionChange(slug ? [slug] : [])
+    },
+    [onSelectionChange],
+  )
+  const exitSelect = useCallback(() => onSelectionChange(null), [onSelectionChange])
+  // Escape leaves every other mode on this page (the mention menu, the dialogs, the image
+  // viewer); a mode without a keyboard way out reads as being stuck in it.
+  useEffect(() => {
+    if (!selecting) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') exitSelect()
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [selecting, exitSelect])
+
+  const chosen = useMemo(() => chats.filter((c) => picked.has(c.slug)), [chats, picked])
+  /*
+   * The two flag buttons say what the click will DO, decided by what is already true of the
+   * whole selection: twelve rows of which eleven are starred, under a button reading "Star",
+   * is a button that appears to do nothing. All-starred flips it to "Unstar"; anything else
+   * stars the lot, which is the one reading that changes every row it touches.
+   */
+  const allPinned = chosen.length > 0 && chosen.every((c) => c.pinned)
+  const allArchived = chosen.length > 0 && chosen.every((c) => c.archived)
+  const allVisiblePicked = flat.length > 0 && flat.every((sl) => picked.has(sl))
 
   if (folded) {
     return (
@@ -1804,10 +2028,46 @@ function ChatRail({
               ref={searchRef}
               value={q}
               onChange={(e) => setQ(e.target.value)}
-              placeholder="Search chats..."
+              placeholder={selecting ? 'Search to select more...' : 'Search chats...'}
               className="h-8 border-transparent bg-transparent px-0 text-sm shadow-none focus-visible:border-transparent focus-visible:shadow-none focus-visible:ring-0"
             />
-            <RailFoldButton folded={false} onToggle={() => setRailFolded(true)} />
+            {/* While selecting, the fold control becomes the way OUT of the mode: folding
+                the rail with a selection still live would hide the only thing that says a
+                selection exists, and the X is where the eye already goes for "stop". */}
+            {selecting ? (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    type="button"
+                    onClick={exitSelect}
+                    aria-label="Leave multi-select"
+                    className="flex size-8 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-all duration-200 hover:bg-muted hover:text-foreground active:scale-95"
+                  >
+                    <X className="size-4" />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent side="right">Leave multi-select (Esc)</TooltipContent>
+              </Tooltip>
+            ) : (
+              <>
+                {chats.length > 1 && (
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <button
+                        type="button"
+                        onClick={() => enterSelect()}
+                        aria-label="Select multiple conversations"
+                        className="flex size-8 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-all duration-200 hover:bg-muted hover:text-foreground active:scale-95"
+                      >
+                        <ListChecks className="size-4" />
+                      </button>
+                    </TooltipTrigger>
+                    <TooltipContent side="right">Select multiple</TooltipContent>
+                  </Tooltip>
+                )}
+                <RailFoldButton folded={false} onToggle={() => setRailFolded(true)} />
+              </>
+            )}
           </div>
         </div>
 
@@ -1870,7 +2130,7 @@ function ChatRail({
                          * collapses to one line rather than padding itself out.
                          */
                         <div key={c.slug} className="group relative">
-                          {active && (
+                          {active && !selecting && (
                             <span
                               className="absolute inset-y-2 left-0 w-0.5 rounded-full bg-primary"
                               aria-hidden
@@ -1878,14 +2138,35 @@ function ChatRail({
                           )}
                           <button
                             type="button"
-                            onClick={() => onSelect(c.slug)}
+                            // In select mode the row TICKS instead of opening. It is the same
+                            // button on purpose: a checkbox you have to hit exactly, next to a
+                            // row that still navigates, is how you lose a selection by
+                            // mis-clicking at the twelfth row.
+                            onClick={(e) =>
+                              selecting ? toggleOne(c.slug, e.shiftKey) : onSelect(c.slug)
+                            }
+                            aria-pressed={selecting ? picked.has(c.slug) : undefined}
                             title={c.preview || c.name}
                             className={cn(
                               'w-full min-w-0 rounded-xl px-3 py-2 text-start transition-colors hover:bg-muted',
-                              active && 'bg-muted',
+                              active && !selecting && 'bg-muted',
+                              selecting && picked.has(c.slug) && 'bg-muted',
                             )}
                           >
                             <div className="flex min-w-0 items-baseline gap-1.5">
+                              {selecting && (
+                                <span
+                                  aria-hidden
+                                  className={cn(
+                                    'flex size-4 shrink-0 items-center justify-center self-center rounded-full border transition-colors',
+                                    picked.has(c.slug)
+                                      ? 'border-primary bg-primary text-primary-foreground'
+                                      : 'border-border',
+                                  )}
+                                >
+                                  {picked.has(c.slug) && <Check className="size-3" />}
+                                </span>
+                              )}
                               {/* The star stays on the row itself, not only in the group header:
                                   once a search filters the list the group is off screen, and
                                   "why is this one first?" needs an answer on the row. */}
@@ -1939,16 +2220,23 @@ function ChatRail({
                               })()
                             )}
                           </button>
-                          <div className="absolute right-0.5 top-1.5">
-                            <RowMenu
-                              pinned={!!c.pinned}
-                              archived={!!c.archived}
-                              onPin={() => onPin(c.slug, !c.pinned)}
-                              onArchive={() => onArchive(c.slug, !c.archived)}
-                              onRename={() => onRename(c.slug, c.name)}
-                              onDelete={() => onDelete(c.slug)}
-                            />
-                          </div>
+                          {/* The per-row menu is gone while selecting: every one of its
+                              items now has a batch equivalent in the footer, and a menu that
+                              acts on ONE row inside a mode about many is the click that
+                              deletes the wrong thing. */}
+                          {!selecting && (
+                            <div className="absolute right-0.5 top-1.5">
+                              <RowMenu
+                                pinned={!!c.pinned}
+                                archived={!!c.archived}
+                                onPin={() => onPin(c.slug, !c.pinned)}
+                                onArchive={() => onArchive(c.slug, !c.archived)}
+                                onRename={() => onRename(c.slug, c.name)}
+                                onDelete={() => onDelete(c.slug)}
+                                onSelect={() => enterSelect(c.slug)}
+                              />
+                            </div>
+                          )}
                         </div>
                       )
                     })}
@@ -1980,6 +2268,88 @@ function ChatRail({
           </button>
         )}
 
+        {/**
+         * The multi-select action bar — the whole point of the mode, so it takes the spot
+         * the primary button had rather than floating over the list.
+         *
+         * It answers three questions at once: how many are ticked, how to tick the rest (or
+         * none), and what can be done to them. With nothing ticked the actions are disabled
+         * rather than hidden — a bar that appears only once you succeed at the gesture does
+         * not teach the gesture.
+         */}
+        {selecting && (
+          <div className="shrink-0 space-y-2 border-t border-border/60 p-4">
+            <div className="flex items-center gap-2 px-1 text-xs">
+              <span className="font-medium tabular-nums">
+                {chosen.length} chat{chosen.length === 1 ? '' : 's'} selected
+              </span>
+              <button
+                type="button"
+                onClick={() =>
+                  onSelectionChange(
+                    allVisiblePicked ? [] : [...new Set([...(selection ?? []), ...flat])],
+                  )
+                }
+                // "All" is all the list is SHOWING — a collapsed group and a filtered-out
+                // conversation are not on screen, and a button that silently ticks 53 rows
+                // you folded away is the one that makes a bulk delete unsafe.
+                title={
+                  allVisiblePicked ? 'Clear the selection' : 'Select everything the list is showing'
+                }
+                className="ms-auto rounded-full px-2 py-0.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+              >
+                {allVisiblePicked ? 'Clear' : 'Select all'}
+              </button>
+            </div>
+            <div className="flex items-center gap-1">
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={!chosen.length || bulkBusy}
+                onClick={() => onBulk(allPinned ? 'unpin' : 'pin', selection ?? [])}
+                className="flex-1 px-2 text-xs"
+              >
+                <Star className={cn('size-3.5', allPinned && 'fill-amber-400 text-amber-500')} />
+                {allPinned ? 'Unstar' : 'Star'}
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={!chosen.length || bulkBusy}
+                onClick={() => onBulk(allArchived ? 'unarchive' : 'archive', selection ?? [])}
+                className="flex-1 px-2 text-xs"
+              >
+                {allArchived ? (
+                  <ArchiveRestore className="size-3.5" />
+                ) : (
+                  <Archive className="size-3.5" />
+                )}
+                {allArchived ? 'Unarchive' : 'Archive'}
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={!chosen.length || bulkBusy}
+                onClick={() => onBulkDelete(selection ?? [])}
+                className="flex-1 px-2 text-xs text-destructive hover:bg-destructive/10 hover:text-destructive"
+              >
+                {bulkBusy ? (
+                  <Loader2 className="size-3.5 animate-spin" />
+                ) : (
+                  <Trash2 className="size-3.5" />
+                )}
+                Delete
+              </Button>
+            </div>
+            {/* Said once, here, rather than as a tooltip nobody opens: it is the only part of
+                the mode that is not visible in it. */}
+            <p className="px-1 text-[11px] text-muted-foreground">
+              Shift-click a row to take everything in between.
+            </p>
+          </div>
+        )}
+
+        {!selecting && (
         <div className="space-y-2 border-t border-border/60 p-4">
           <Button onClick={onNew} className="w-full">
             <span className="text-base leading-none">+</span>
@@ -2028,6 +2398,7 @@ function ChatRail({
             ))}
           </div>
         </div>
+        )}
       </div>
     </div>
   )
@@ -2045,133 +2416,412 @@ function ChatRail({
  * animation runtime, nothing copied. Everything sits inside one clipped circle so the
  * blurred colour lobes still give a clean sphere edge for the rim to sit on.
  */
-function HeroOrb() {
+/**
+ * What the hero mark says, now and then.
+ *
+ * Two kinds on purpose, alternating. A stream of pure encouragement turns into a fortune
+ * cookie you stop reading by the third day; a stream of pure advice reads as a lint rule
+ * nagging you on your own home screen. One of each, in turn, keeps both worth a glance —
+ * and the craft lines are the ones an engineer might actually repeat to a colleague.
+ *
+ * Rules for adding a line: it has to fit ONE short line at 208px, it has to be true (no
+ * "you've got this!" for a run that is failing), and a craft line has to say something a QC
+ * engineer could act on this afternoon. No exclamation marks past one per screen.
+ */
+const HERO_LINES: { kind: 'lift' | 'craft'; text: string }[] = [
+  { kind: 'lift', text: 'Keep going — a bug you can reproduce is already half fixed.' },
+  { kind: 'craft', text: 'A bug report without steps is an opinion.' },
+  { kind: 'lift', text: 'Slow is smooth, and smooth is fast.' },
+  { kind: 'craft', text: 'Test the empty state. Almost nobody does.' },
+  { kind: 'lift', text: 'Effort compounds: today’s careful test is next month’s calm release.' },
+  { kind: 'craft', text: 'Check the boundary, not the middle.' },
+  { kind: 'lift', text: 'You don’t have to be sure to start. Start, then find out.' },
+  { kind: 'craft', text: 'Reproduce it twice before you file it.' },
+  { kind: 'lift', text: 'Nice work getting this far. One small step is enough.' },
+  { kind: 'craft', text: 'Severity is about the user. Priority is about the plan.' },
+  { kind: 'lift', text: 'Tired? Finish the small thing, write it down, stop.' },
+  { kind: 'craft', text: 'A test you never watched fail proves nothing.' },
+  { kind: 'lift', text: 'The careful question is worth more than the fast answer.' },
+  { kind: 'craft', text: 'Re-test the fix, then test what it touched.' },
+  { kind: 'lift', text: 'Every bug you find today is one a customer won’t.' },
+  { kind: 'craft', text: 'Write the report for the developer who has never seen this screen.' },
+  { kind: 'craft', text: 'If it isn’t written down, it wasn’t tested.' },
+  { kind: 'craft', text: 'Ask “what else broke?” before “is it fixed?”' },
+]
+
+/** How long a line stays, and how long the mark is quiet between two of them. */
+const WHISPER_FIRST_MS = 3800
+const WHISPER_SHOW_MS = 7000
+const WHISPER_GAP_MS = 11000
+
+/**
+ * The speech bubble beside the hero mark.
+ *
+ * It speaks SOMETIMES, which is the whole design: a permanent caption under a logo is
+ * decoration nobody reads twice, and a line that arrives while you are deciding what to ask
+ * is read every time. So it waits, says one thing, and goes quiet again.
+ *
+ * Three things it deliberately does not do:
+ * - **It never moves the layout.** Absolutely positioned and `pointer-events-none`, so a
+ *   line appearing cannot nudge the greeting under a cursor already heading for a button.
+ * - **It is `aria-hidden`.** As a live region it would announce a new fortune every eleven
+ *   seconds over whatever a screen-reader user is actually doing; as decoration beside a
+ *   decorative mark it is silent, which is the honest reading.
+ * - **Under reduced motion it says ONE line and stops.** Text that appears and vanishes on a
+ *   timer is motion whether or not it fades, so the cycle is the part that goes — not the
+ *   content, which was never the problem.
+ */
+function HeroWhisper({ reduced }: { reduced: boolean }) {
+  /*
+   * The line and whether it is showing are separate, and that is not incidental: collapsing
+   * them into one nullable index blanked the TEXT the instant the fade-out began, so what you
+   * watched fade was an empty bubble. The words stay put; only the opacity moves.
+   */
+  const [said, setSaid] = useState({ i: 0, on: false })
+
+  useEffect(() => {
+    if (reduced) return
+    let timer = 0
+    // Walks the array, which is authored lift → craft → lift, so the two kinds alternate.
+    // The start is random — `Math.random()` is fine HERE, in an effect; in render it is an
+    // impure call that would re-roll on every keystroke this page re-renders for.
+    let i = Math.floor(Math.random() * HERO_LINES.length)
+    const speak = () => {
+      setSaid({ i, on: true })
+      timer = window.setTimeout(() => {
+        setSaid({ i, on: false })
+        i = (i + 1) % HERO_LINES.length
+        timer = window.setTimeout(speak, WHISPER_GAP_MS)
+      }, WHISPER_SHOW_MS)
+    }
+    timer = window.setTimeout(speak, WHISPER_FIRST_MS)
+    return () => window.clearTimeout(timer)
+  }, [reduced])
+
+  // Reduced motion gets the FIRST line, fixed and permanent — see the note on `Math.random()`
+  // above for why it isn't a random one.
+  const line = HERO_LINES[reduced ? 0 : said.i]
+  const on = reduced || said.on
+  const Icon = line.kind === 'craft' ? CircleCheck : Sparkles
+
   return (
-    // Mirrors the reference's `mask-b-from-100%`: the sphere fades out toward the
-    // greeting instead of ending on a hard line.
-    <div className="mx-auto -mt-4 hidden w-72 [mask-image:linear-gradient(to_bottom,#000_74%,transparent_100%)] md:block">
-      {/* The reference's hero is a Lottie; this is the same reading done with the SVG we
-          already draw — see the qc-orb-* keyframes in index.css for what moves and why. */}
-      <svg viewBox="0 0 288 288" className="qc-orb-float w-full" aria-hidden="true">
-        <defs>
-          <radialGradient id="orb-base" cx="45%" cy="40%" r="62%">
-            <stop offset="0%" stopColor="#ffffff" />
-            <stop offset="55%" stopColor="#fbeef5" />
-            <stop offset="100%" stopColor="#f1dcea" />
-          </radialGradient>
-          <radialGradient id="orb-violet" cx="27%" cy="20%" r="56%">
-            <stop offset="0%" stopColor="#b478d8" stopOpacity="0.82" />
-            <stop offset="55%" stopColor="#cfa6ea" stopOpacity="0.4" />
-            <stop offset="100%" stopColor="#c79ae8" stopOpacity="0" />
-          </radialGradient>
-          <radialGradient id="orb-peach" cx="81%" cy="66%" r="60%">
-            <stop offset="0%" stopColor="#f78f55" stopOpacity="0.92" />
-            <stop offset="52%" stopColor="#f9b184" stopOpacity="0.46" />
-            <stop offset="100%" stopColor="#f9b184" stopOpacity="0" />
-          </radialGradient>
-          <radialGradient id="orb-pale" cx="64%" cy="24%" r="40%">
-            <stop offset="0%" stopColor="#ffffff" stopOpacity="0.92" />
-            <stop offset="100%" stopColor="#ffffff" stopOpacity="0" />
-          </radialGradient>
-          <radialGradient id="orb-crescent" cx="22%" cy="84%" r="42%">
-            <stop offset="0%" stopColor="#ffffff" stopOpacity="0.9" />
-            <stop offset="100%" stopColor="#ffffff" stopOpacity="0" />
-          </radialGradient>
-          {/* Soft-edged white, for the two swirl bands. */}
-          <radialGradient id="orb-sweep" cx="50%" cy="50%" r="50%">
-            <stop offset="0%" stopColor="#ffffff" stopOpacity="0.88" />
-            <stop offset="60%" stopColor="#ffffff" stopOpacity="0.45" />
-            <stop offset="100%" stopColor="#ffffff" stopOpacity="0" />
-          </radialGradient>
-          {/* The violet comma that curls along the top-left inner wall. */}
-          <radialGradient id="orb-swirl" cx="50%" cy="50%" r="50%">
-            <stop offset="0%" stopColor="#a855dd" stopOpacity="0.62" />
-            <stop offset="60%" stopColor="#bb82e2" stopOpacity="0.3" />
-            <stop offset="100%" stopColor="#bb82e2" stopOpacity="0" />
-          </radialGradient>
-          <radialGradient id="orb-halo" cx="50%" cy="50%" r="50%">
-            <stop offset="70%" stopColor="#f6e7f2" stopOpacity="0" />
-            <stop offset="88%" stopColor="#f3e2f0" stopOpacity="0.5" />
-            <stop offset="100%" stopColor="#f3e2f0" stopOpacity="0" />
-          </radialGradient>
-          <linearGradient id="orb-rim" x1="16%" y1="6%" x2="84%" y2="96%">
-            <stop offset="0%" stopColor="#ffffff" stopOpacity="0.8" />
-            <stop offset="42%" stopColor="#ffffff" stopOpacity="0.16" />
-            <stop offset="100%" stopColor="#ffffff" stopOpacity="0.75" />
-          </linearGradient>
-          <clipPath id="orb-clip">
-            <circle cx="144" cy="146" r="84" />
-          </clipPath>
-          <filter id="orb-soft" x="-30%" y="-30%" width="160%" height="160%">
-            <feGaussianBlur stdDeviation="10" />
-          </filter>
-        </defs>
+    /*
+     * `lg:` and not `md:`: the mark itself appears at `md`, but at that width the column is
+     * narrow enough that a 13rem bubble beside it would sit off the edge — and a motivational
+     * line clipped in half is worse than no line.
+     */
+    <div
+      aria-hidden
+      className={cn(
+        'pointer-events-none absolute -end-4 top-3 hidden w-52 translate-x-full lg:block',
+        // Opacity + a small rise, nothing else: this sits over the transcript column and a
+        // bubble that scales or slides far enough to notice reads as a notification.
+        'transition-all duration-500 ease-out',
+        on ? 'opacity-100' : 'translate-y-1 opacity-0',
+      )}
+    >
+      <div className="relative rounded-2xl border border-border/60 bg-popover/95 px-3 py-2 shadow-sm backdrop-blur">
+        {/* The tail, pointing back at the mark — two borders of a rotated square, so it is
+            the same hairline as the bubble instead of a solid triangle sitting on it. */}
+        <span
+          className="absolute -start-1 top-4 size-2 rotate-45 border-b border-s border-border/60 bg-popover"
+          aria-hidden
+        />
+        <p className="flex items-start gap-1.5 text-start text-[11px] leading-snug text-muted-foreground">
+          <Icon
+            className={cn(
+              'mt-0.5 size-3 shrink-0',
+              line.kind === 'craft' ? 'text-emerald-500' : 'text-violet-500',
+            )}
+          />
+          <span>{line.text}</span>
+        </p>
+      </div>
+    </div>
+  )
+}
 
-        {/* Outer halo, so the sphere sits in light rather than on a flat page. */}
-        <circle cx="144" cy="146" r="99" fill="url(#orb-halo)" />
+/**
+ * The hero's two orbits, authored ONCE each: the drawn ring and the satellite's path have to
+ * be the same curve, or the dot rides a line that isn't there.
+ *
+ * Only the TILT is a transform — a rotation is a similarity, so the dot stays a dot. The
+ * first attempt squashed a circular orbit with `scale(1, 0.34)` and counter-scaled the dot
+ * back; with the travel rotation sitting between the two scales they don't cancel (an
+ * anisotropic scale doesn't commute with a rotation) and the satellite stretched into a
+ * smear that changed shape as it went round. The ellipse belongs in the PATH.
+ */
+const ORBITS = [
+  { rx: 76, ry: 26, tilt: -24, dur: '13s', ring: '#c4b5fd', dot: '#a855f7', r: 3.2, cw: false },
+  { rx: 64, ry: 17, tilt: 28, dur: '9s', ring: '#fdba74', dot: '#fb923c', r: 2.6, cw: true },
+]
 
-        <g clipPath="url(#orb-clip)">
-          <circle cx="144" cy="146" r="84" fill="url(#orb-base)" />
-          {/* The colour is layered as lobes, then two bands sweep across them — that
-              overlap is what reads as liquid swirling inside the glass rather than a
-              plain gradient. Order matters: bands must land ON TOP of the lobes. */}
-          <g filter="url(#orb-soft)">
-            {/* Each drifting layer is WRAPPED in its own <g>: a CSS transform on an element
-                that already carries a `transform=` attribute replaces it, which would flatten
-                the bands' rotations. */}
-            <g className="qc-orb-lobe-a">
-              <circle cx="144" cy="146" r="84" fill="url(#orb-violet)" />
-            </g>
-            <g className="qc-orb-lobe-b">
-              <circle cx="144" cy="146" r="84" fill="url(#orb-peach)" />
-            </g>
-            <circle cx="144" cy="146" r="84" fill="url(#orb-pale)" />
-            <circle cx="144" cy="146" r="84" fill="url(#orb-crescent)" />
-            <g className="qc-orb-swirl">
-              {/* Violet comma curling from the left wall along the top. */}
-              <ellipse cx="130" cy="98" rx="62" ry="26" fill="url(#orb-swirl)" transform="rotate(-16 130 98)" />
-              {/* The pale band cutting diagonally across the middle, which carves the
-                  violet above it into that comma and separates it from the peach. */}
-              <ellipse cx="150" cy="152" rx="94" ry="27" fill="url(#orb-sweep)" transform="rotate(-22 150 152)" />
-              {/* The second, lower band curving along the bottom-left inner wall. */}
-              <ellipse cx="128" cy="206" rx="80" ry="22" fill="url(#orb-sweep)" transform="rotate(-13 128 206)" />
-              {/* Pale crescent hugging the left wall, so the violet reads as floating
-                  INSIDE the glass instead of being painted onto the rim. */}
-              <ellipse cx="74" cy="158" rx="17" ry="56" fill="url(#orb-sweep)" transform="rotate(9 74 158)" />
+/** An ellipse as a closed two-arc path, centred on the sphere. `cw` runs it the other way. */
+function orbitPath(rx: number, ry: number, cw: boolean): string {
+  const [a, b] = [100 - rx, 100 + rx]
+  return cw
+    ? `M${b},100 a${rx},${ry} 0 1,1 ${-2 * rx},0 a${rx},${ry} 0 1,1 ${2 * rx},0`
+    : `M${a},100 a${rx},${ry} 0 1,0 ${2 * rx},0 a${rx},${ry} 0 1,0 ${-2 * rx},0`
+}
+
+/**
+ * Whether the reader asked for less motion.
+ *
+ * The CSS animations all opt out through one `@media (prefers-reduced-motion: reduce)` block
+ * in `index.css`, but SMIL (`<animateMotion>`, which is how the satellites travel) is not
+ * CSS and that block cannot reach it — so the element has to not be rendered at all.
+ */
+function usePrefersReducedMotion(): boolean {
+  const query = '(prefers-reduced-motion: reduce)'
+  const [reduced, setReduced] = useState(() => window.matchMedia(query).matches)
+  useEffect(() => {
+    const mq = window.matchMedia(query)
+    const sync = () => setReduced(mq.matches)
+    mq.addEventListener('change', sync)
+    return () => mq.removeEventListener('change', sync)
+  }, [])
+  return reduced
+}
+
+function HeroOrb() {
+  /*
+   * Pointer parallax — the mark leans toward the cursor.
+   *
+   * Written straight to the DOM through a ref, never through state: this fires on every
+   * pointer frame, and re-rendering the workspace (which owns `input`) on mouse movement
+   * would re-parse every markdown answer on screen. The listener is on the hero itself
+   * rather than the window, so it costs nothing until the pointer is actually over the mark
+   * — and the mark only exists on the empty screen.
+   */
+  const reduced = usePrefersReducedMotion()
+  const shell = useRef<HTMLDivElement | null>(null)
+  const frame = useRef(0)
+  const tilt = (e: React.PointerEvent<HTMLDivElement>) => {
+    const el = shell.current
+    if (!el || frame.current) return
+    const box = el.getBoundingClientRect()
+    // -0.5…0.5 from the centre of the mark.
+    const x = (e.clientX - box.left) / box.width - 0.5
+    const y = (e.clientY - box.top) / box.height - 0.5
+    frame.current = requestAnimationFrame(() => {
+      frame.current = 0
+      el.style.setProperty('--qc-orb-x', x.toFixed(3))
+      el.style.setProperty('--qc-orb-y', y.toFixed(3))
+    })
+  }
+  const level = () => {
+    const el = shell.current
+    if (!el) return
+    el.style.setProperty('--qc-orb-x', '0')
+    el.style.setProperty('--qc-orb-y', '0')
+  }
+  useEffect(() => () => void (frame.current && cancelAnimationFrame(frame.current)), [])
+
+  return (
+    /*
+     * Sized so the WHOLE mark is on screen.
+     *
+     * It used to be a 288px sphere with a bottom mask fade, and in the column it actually
+     * renders in, the scroller cropped it at the equator: what the greeting sat under was the
+     * bottom half of a pastel smudge. A mark you only ever see part of cannot read as a logo.
+     */
+    <div
+      ref={shell}
+      onPointerMove={tilt}
+      onPointerLeave={level}
+      className="qc-orb-enter relative mx-auto mb-1 hidden size-44 md:block"
+    >
+      {/* The aurora: light orbiting BEHIND the glass. A conic gradient — which SVG has no
+          equivalent of — in its own element, blurred and masked to a ring, so it reads as glow
+          AROUND the sphere and never as a coloured disc under it. */}
+      <span className="qc-orb-aurora absolute inset-0 rounded-full" aria-hidden />
+
+      {/* What the mark says, now and then. Outside the parallax layer: a bubble of text that
+          leans with the cursor is a gimmick, and text at 11px cannot afford the rotation. */}
+      <HeroWhisper reduced={reduced} />
+
+      {/* The parallax layer is separate from the floating one: both are transforms, and one
+          element can only carry one of them. */}
+      <div className="qc-orb-parallax absolute inset-0">
+        {/* The reference's hero is a 150 KB Lottie (their artwork). This is the same reading
+            drawn with the SVG we already ship — see the qc-orb-* keyframes in index.css for
+            what moves and why. */}
+        <svg viewBox="0 0 200 200" className="qc-orb-float size-full" aria-hidden="true">
+          <defs>
+            <radialGradient id="orb-base" cx="45%" cy="40%" r="62%">
+              <stop offset="0%" stopColor="#ffffff" />
+              <stop offset="55%" stopColor="#fbeef5" />
+              <stop offset="100%" stopColor="#f1dcea" />
+            </radialGradient>
+            <radialGradient id="orb-violet" cx="27%" cy="20%" r="56%">
+              <stop offset="0%" stopColor="#a855dd" stopOpacity="0.92" />
+              <stop offset="55%" stopColor="#cfa6ea" stopOpacity="0.4" />
+              <stop offset="100%" stopColor="#c79ae8" stopOpacity="0" />
+            </radialGradient>
+            <radialGradient id="orb-peach" cx="74%" cy="70%" r="58%">
+              <stop offset="0%" stopColor="#f97316" stopOpacity="0.95" />
+              <stop offset="52%" stopColor="#fb923c" stopOpacity="0.55" />
+              <stop offset="100%" stopColor="#f9b184" stopOpacity="0" />
+            </radialGradient>
+            <radialGradient id="orb-pale" cx="64%" cy="24%" r="40%">
+              <stop offset="0%" stopColor="#ffffff" stopOpacity="0.92" />
+              <stop offset="100%" stopColor="#ffffff" stopOpacity="0" />
+            </radialGradient>
+            <radialGradient id="orb-crescent" cx="22%" cy="84%" r="42%">
+              <stop offset="0%" stopColor="#ffffff" stopOpacity="0.9" />
+              <stop offset="100%" stopColor="#ffffff" stopOpacity="0" />
+            </radialGradient>
+            {/* Soft-edged white, for the two swirl bands. */}
+            <radialGradient id="orb-sweep" cx="50%" cy="50%" r="50%">
+              <stop offset="0%" stopColor="#ffffff" stopOpacity="0.82" />
+              <stop offset="60%" stopColor="#ffffff" stopOpacity="0.4" />
+              <stop offset="100%" stopColor="#ffffff" stopOpacity="0" />
+            </radialGradient>
+            {/* The violet comma that curls along the top-left inner wall. */}
+            <radialGradient id="orb-swirl" cx="50%" cy="50%" r="50%">
+              <stop offset="0%" stopColor="#a855dd" stopOpacity="0.62" />
+              <stop offset="60%" stopColor="#bb82e2" stopOpacity="0.3" />
+              <stop offset="100%" stopColor="#bb82e2" stopOpacity="0" />
+            </radialGradient>
+            <radialGradient id="orb-halo" cx="50%" cy="50%" r="50%">
+              <stop offset="66%" stopColor="#f6e7f2" stopOpacity="0" />
+              <stop offset="86%" stopColor="#f3e2f0" stopOpacity="0.5" />
+              <stop offset="100%" stopColor="#f3e2f0" stopOpacity="0" />
+            </radialGradient>
+            <linearGradient id="orb-rim" x1="16%" y1="6%" x2="84%" y2="96%">
+              <stop offset="0%" stopColor="#ffffff" stopOpacity="0.8" />
+              <stop offset="42%" stopColor="#ffffff" stopOpacity="0.16" />
+              <stop offset="100%" stopColor="#ffffff" stopOpacity="0.75" />
+            </linearGradient>
+            {/* The specular streak that travels across the glass. Transparent at both ends, or
+                it reads as a white bar sliding over a ball rather than a light passing it. */}
+            <linearGradient id="orb-glint" x1="0%" y1="0%" x2="100%" y2="0%">
+              <stop offset="0%" stopColor="#ffffff" stopOpacity="0" />
+              <stop offset="50%" stopColor="#ffffff" stopOpacity="0.7" />
+              <stop offset="100%" stopColor="#ffffff" stopOpacity="0" />
+            </linearGradient>
+            {/* Contact shade on the lower-right inside wall. Without it the sphere is a flat
+                disc with a bright rim, which is exactly what "not quite glass" looks like. */}
+            <radialGradient id="orb-shade" cx="70%" cy="76%" r="60%">
+              <stop offset="58%" stopColor="#7c3f6b" stopOpacity="0" />
+              <stop offset="100%" stopColor="#7c3f6b" stopOpacity="0.2" />
+            </radialGradient>
+            <clipPath id="orb-clip">
+              <circle cx="100" cy="100" r="58" />
+            </clipPath>
+            {/* A generous region: at -30%/160% the blur was CLIPPED, and a blurred lobe that
+                ends on a straight line reads as a rectangle of colour inside the glass. */}
+            <filter id="orb-soft" x="-60%" y="-60%" width="220%" height="220%">
+              <feGaussianBlur stdDeviation="10" />
+            </filter>
+          </defs>
+
+          {/* Outer halo, so the sphere sits in light rather than on a flat page. */}
+          <circle cx="100" cy="100" r="76" fill="url(#orb-halo)" />
+
+          {/*
+           * The clip is on the OUTER group and the scale on the inner one, and that split is
+           * load-bearing: `clip-path` is resolved in the user space of the element that
+           * carries it, INCLUDING that element's own transform. With both on one group the
+           * clip circle was scaled and shifted with the artwork — it landed at (61,59) r=51,
+           * so the sphere was a crescent in the top-left corner and its whole lower-right was
+           * simply missing, which read as "the orb is washed out".
+           */}
+          {/* The liquid artwork is kept at the coordinates it was composed in and scaled as
+              one group: re-deriving twenty band positions by hand for a new radius is how a
+              composition that worked stops working. */}
+          <g clipPath="url(#orb-clip)">
+            <g transform="translate(100,100) scale(0.74) translate(-144,-146)">
+              <circle cx="144" cy="146" r="84" fill="url(#orb-base)" />
+            {/* The colour is layered as lobes, then two bands sweep across them — that
+                overlap is what reads as liquid swirling inside the glass rather than a
+                plain gradient. Order matters: bands must land ON TOP of the lobes. */}
+            <g filter="url(#orb-soft)">
+              {/* Each drifting layer is WRAPPED in its own <g>, for the same reason the orbits
+                  are: a CSS transform would replace the `transform=` that rotates the band. */}
+              <g className="qc-orb-lobe-a">
+                <circle cx="144" cy="146" r="84" fill="url(#orb-violet)" />
+              </g>
+              <g className="qc-orb-lobe-b">
+                <circle cx="144" cy="146" r="84" fill="url(#orb-peach)" />
+              </g>
+              <circle cx="144" cy="146" r="84" fill="url(#orb-pale)" />
+              <circle cx="144" cy="146" r="84" fill="url(#orb-crescent)" />
+              <g className="qc-orb-swirl">
+                {/* Violet comma curling from the left wall along the top. */}
+                <ellipse cx="130" cy="98" rx="62" ry="26" fill="url(#orb-swirl)" transform="rotate(-16 130 98)" />
+                {/* The pale band cutting diagonally across the middle, which carves the
+                    violet above it into that comma and separates it from the peach. */}
+                <ellipse cx="150" cy="152" rx="94" ry="27" fill="url(#orb-sweep)" transform="rotate(-22 150 152)" />
+                {/* The second, lower band curving along the bottom-left inner wall. */}
+                <ellipse cx="128" cy="206" rx="80" ry="22" fill="url(#orb-sweep)" transform="rotate(-13 128 206)" />
+                {/* Pale crescent hugging the left wall, so the violet reads as floating
+                    INSIDE the glass instead of being painted onto the rim. */}
+                <ellipse cx="74" cy="158" rx="17" ry="56" fill="url(#orb-sweep)" transform="rotate(9 74 158)" />
+              </g>
             </g>
           </g>
-        </g>
+          </g>
 
-        {/* Glass rim — brightest top-left and bottom-right, nearly gone in between. */}
-        <circle cx="144" cy="146" r="83.4" fill="none" stroke="url(#orb-rim)" strokeWidth="1.4" />
+          {/* Shade and glint are drawn in the sphere's own coordinates, clipped to it. */}
+          <g clipPath="url(#orb-clip)">
+            <circle cx="100" cy="100" r="58" fill="url(#orb-shade)" />
+            <g className="qc-orb-glint">
+              <rect x="-16" y="-60" width="32" height="320" fill="url(#orb-glint)" transform="rotate(24)" />
+            </g>
+          </g>
 
-        {/* Sparkles, each on its own phase — in step they'd blink like an indicator. */}
-        <circle className="qc-orb-spark" cx="151" cy="119" r="1.5" fill="#fcd34d" />
-        <circle
-          className="qc-orb-spark"
-          style={{ animationDelay: '1.1s' }}
-          cx="167"
-          cy="171"
-          r="1.5"
-          fill="#fcd34d"
-        />
-        <circle
-          className="qc-orb-spark"
-          style={{ animationDelay: '2.3s' }}
-          cx="136"
-          cy="153"
-          r="1"
-          fill="#e879f9"
-        />
-        <circle
-          className="qc-orb-spark"
-          style={{ animationDelay: '0.6s' }}
-          cx="159"
-          cy="147"
-          r="0.9"
-          fill="#d8b4fe"
-        />
-      </svg>
+          {/*
+           * Two tilted orbits — the motif that reads as a system rather than a bubble, and
+           * the part that gives the mark structure at a glance. The ring and the satellite
+           * share one path (see ORBITS), and the satellite travels with SMIL rather than a
+           * CSS rotation for the reason written there.
+           */}
+          {ORBITS.map((o) => {
+            const d = orbitPath(o.rx, o.ry, o.cw)
+            return (
+              <g key={o.tilt} transform={`rotate(${o.tilt} 100 100)`}>
+                <path d={d} fill="none" stroke={o.ring} strokeOpacity="0.55" strokeWidth="1.2" />
+                <circle r={o.r} fill={o.dot}>
+                  {!reduced && (
+                    <animateMotion dur={o.dur} repeatCount="indefinite" path={d} />
+                  )}
+                </circle>
+              </g>
+            )
+          })}
+
+          {/* Glass rim — brightest top-left and bottom-right, nearly gone in between. */}
+          <circle cx="100" cy="100" r="57.6" fill="none" stroke="url(#orb-rim)" strokeWidth="1.3" />
+
+          {/* Sparkles, each on its own phase — in step they'd blink like an indicator. */}
+          <circle className="qc-orb-spark" cx="105" cy="81" r="1.4" fill="#fcd34d" />
+          <circle
+            className="qc-orb-spark"
+            style={{ animationDelay: '1.1s' }}
+            cx="116"
+            cy="117"
+            r="1.4"
+            fill="#fcd34d"
+          />
+          <circle
+            className="qc-orb-spark"
+            style={{ animationDelay: '2.3s' }}
+            cx="94"
+            cy="105"
+            r="1"
+            fill="#e879f9"
+          />
+          <circle
+            className="qc-orb-spark"
+            style={{ animationDelay: '0.6s' }}
+            cx="110"
+            cy="101"
+            r="0.9"
+            fill="#d8b4fe"
+          />
+        </svg>
+      </div>
     </div>
   )
 }
@@ -2934,6 +3584,7 @@ function UserRow({
   at,
   action,
   context,
+  anchorId,
 }: {
   text: string
   images?: string[]
@@ -2944,6 +3595,12 @@ function UserRow({
   action?: ChatAction | null
   /** Blocks the portal appended to this message before sending it (see ContextRows). */
   context?: ContextBlock[]
+  /**
+   * The id the question navigator jumps to. A DOM id rather than a ref map: the questions
+   * are rendered by a memoised `Turn` the workspace never re-renders, so handing each one a
+   * ref callback would defeat the memo that keeps typing usable in a long conversation.
+   */
+  anchorId?: string
 }) {
   const meta = action ? actionMeta(action) : null
   const srcs = previews ?? (images && projectId ? images.map((n) => chatImageUrl(projectId, n)) : [])
@@ -2953,7 +3610,7 @@ function UserRow({
      * wrote this" — the 32px mark said it a second time and pushed every question 44px
      * further from the edge the answers are read against.
      */
-    <div className="group/msg flex justify-end">
+    <div id={anchorId} className="group/msg flex scroll-mt-6 justify-end">
       <div className="max-w-[85%] flex-1 justify-end text-end sm:max-w-[75%]">
         <RowName who="user" />
         {meta && (
@@ -3920,6 +4577,181 @@ function AssistantRow({
   )
 }
 
+// ------------------------------------------------------------------ question navigator
+
+/** The DOM id of one question. One helper so the row and the navigator can't disagree. */
+function questionAnchorId(index: number | string): string {
+  return `qc-q-${index}`
+}
+
+/** One question as the navigator lists it — one line, no markdown, no newlines. */
+function questionLabel(text: string): string {
+  return text.replace(/`+/g, '').replace(/\s+/g, ' ').trim() || 'Empty question'
+}
+
+interface QuestionAnchor {
+  id: string
+  text: string
+}
+
+/**
+ * The question navigator: every question you asked in this conversation, down the right
+ * edge, each one a jump to that point in the transcript.
+ *
+ * The thing it fixes is specific. An answer here is long — tool trails, code, tables — so a
+ * conversation of eight questions is several screens each, and "what did it say about the
+ * crawl?" means scrolling past four answers looking for your own words. The rail on the
+ * left finds a CONVERSATION; nothing found a TURN inside one.
+ *
+ * Shape, and why:
+ * - **Dashes at rest, labels on hover.** Parked open it is a 14rem column sitting on top of
+ *   the answers at exactly the width they are read at. The dashes still carry the two facts
+ *   that matter at a glance — how many questions, and where in them you are.
+ * - **It tracks the scroll**, so the highlighted dash is the question whose answer is on
+ *   screen. A navigator that only responds to clicks is a menu; this one is also a position.
+ * - **Long conversations collapse in the MIDDLE** (first five, a "more" row, last five, plus
+ *   wherever you currently are). Sixty dashes on a laptop is a solid line, and the ends are
+ *   where you look: the start of the thread and what you just asked.
+ * - **Hidden under two questions and under `lg`.** One question is not a list, and on a
+ *   narrow window this would cover the transcript rather than sit beside it.
+ */
+function QuestionNav({
+  items,
+  scrollerRef,
+}: {
+  items: QuestionAnchor[]
+  scrollerRef: React.RefObject<HTMLDivElement | null>
+}) {
+  const [activeId, setActiveId] = useState<string | null>(null)
+  const [showAll, setShowAll] = useState(false)
+
+  /*
+   * Which question is "current": the LAST one whose row starts above the reading line (a
+   * little below the top of the scroller). Measured on scroll rather than with an
+   * IntersectionObserver because the thing being tracked is not "is this question visible" —
+   * a question scrolled off the top is exactly the one whose answer you are reading.
+   *
+   * rAF-throttled: this runs on every scroll frame of a page that is also streaming text.
+   */
+  useEffect(() => {
+    const el = scrollerRef.current
+    if (!el) return
+    let frame = 0
+    const measure = () => {
+      frame = 0
+      const line = el.getBoundingClientRect().top + 96
+      let current: string | null = items.length ? items[0].id : null
+      for (const it of items) {
+        const node = document.getElementById(it.id)
+        if (!node) continue
+        if (node.getBoundingClientRect().top <= line) current = it.id
+        else break
+      }
+      setActiveId((prev) => (prev === current ? prev : current))
+    }
+    const onScroll = () => {
+      if (!frame) frame = requestAnimationFrame(measure)
+    }
+    measure()
+    el.addEventListener('scroll', onScroll, { passive: true })
+    return () => {
+      el.removeEventListener('scroll', onScroll)
+      if (frame) cancelAnimationFrame(frame)
+    }
+    // `items` changes identity when a question is added, which is exactly when this must
+    // re-measure; the effect is cheap and does not re-subscribe anything expensive.
+  }, [items, scrollerRef])
+
+  const ENDS = 5
+  const COLLAPSE_OVER = 12
+  const activeIndex = items.findIndex((i) => i.id === activeId)
+  const shown = useMemo(() => {
+    if (showAll || items.length <= COLLAPSE_OVER) return items.map((_, i) => i)
+    const keep = new Set<number>()
+    for (let i = 0; i < ENDS; i++) keep.add(i)
+    for (let i = items.length - ENDS; i < items.length; i++) keep.add(i)
+    // Where you ARE is never hidden: a navigator that drops the highlighted row is telling
+    // you the current question does not exist.
+    if (activeIndex >= 0) keep.add(activeIndex)
+    return [...keep].sort((a, b) => a - b)
+  }, [items, showAll, activeIndex])
+
+  if (items.length < 2) return null
+
+  const jump = (id: string) => {
+    const node = document.getElementById(id)
+    if (!node) return
+    node.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    setActiveId(id)
+  }
+
+  // Where the collapsed middle sits: the first listed question whose predecessor is not
+  // listed. Computed, not tracked with a flag while rendering — a variable mutated inside a
+  // map is a render that depends on the order React happens to call it in.
+  const gapAt = shown.find((i, n) => n > 0 && i !== shown[n - 1] + 1)
+  return (
+    <nav
+      aria-label="Your questions in this conversation"
+      className="group/qnav absolute end-2 top-1/2 z-10 hidden max-h-[60vh] -translate-y-1/2 flex-col items-end gap-0.5 overflow-y-auto overflow-x-hidden rounded-2xl border border-transparent py-2 pe-1 ps-2 transition-all duration-200 hover:border-border/60 hover:bg-popover/95 hover:shadow-sm hover:backdrop-blur lg:flex"
+    >
+      {shown.map((i) => {
+        const it = items[i]
+        const active = it.id === activeId
+        const gap = i === gapAt
+        return (
+          <div key={it.id} className="flex w-full flex-col items-end">
+            {gap && (
+              <button
+                type="button"
+                onClick={() => setShowAll(true)}
+                className="flex items-center justify-end gap-2 self-end rounded-md px-1.5 py-1 text-xs text-muted-foreground transition-colors hover:text-foreground"
+              >
+                <span className="hidden whitespace-nowrap group-hover/qnav:inline">
+                  {items.length - shown.length} more
+                </span>
+                <span className="h-px w-3 bg-current opacity-40" aria-hidden />
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => jump(it.id)}
+              title={questionLabel(it.text)}
+              aria-current={active ? 'true' : undefined}
+              className={cn(
+                'flex w-full items-center justify-end gap-2 rounded-md px-1.5 py-1 text-xs transition-colors',
+                active
+                  ? 'text-primary'
+                  : 'text-muted-foreground hover:text-foreground',
+              )}
+            >
+              {/* The label exists at rest too — it is what a screen reader reads and what a
+                  `title` would repeat — but it takes no width until the panel is hovered. */}
+              <span
+                className={cn(
+                  'hidden max-w-44 truncate group-hover/qnav:inline',
+                  active && 'font-medium',
+                )}
+              >
+                {questionLabel(it.text)}
+              </span>
+              <span className="sr-only group-hover/qnav:hidden">{questionLabel(it.text)}</span>
+              {/* The dash: longer and solid for where you are, so the column reads as a
+                  position even with every label hidden. */}
+              <span
+                aria-hidden
+                className={cn(
+                  'h-0.5 shrink-0 rounded-full transition-all duration-200',
+                  active ? 'w-4 bg-primary' : 'w-3 bg-current opacity-40',
+                )}
+              />
+            </button>
+          </div>
+        )
+      })}
+    </nav>
+  )
+}
+
 /**
  * MEMOISED, and it has to stay that way.
  *
@@ -3952,6 +4784,7 @@ const Turn = memo(function Turn({
       at={m.at}
       action={m.action}
       context={m.context}
+      anchorId={questionAnchorId(index ?? 0)}
     />
   ) : (
     <AssistantRow
@@ -4190,6 +5023,14 @@ function ChatWorkspace({
   /** `@`-tagged artifacts and `/`-picked skills staged for the next message (StagedMention). */
   const [mentions, setMentions] = useState<StagedMention[]>([])
   /**
+   * The composer is in `/scheduled` mode: Enter proposes a recurring task instead of
+   * sending a message. It is a MODE rather than a magic prefix so the composer can say so
+   * on screen — the one thing that must never happen here is an automation the engineer
+   * did not knowingly create. Escape, the chip's X, and a saved task all leave it.
+   */
+  const [scheduleMode, setScheduleMode] = useState(false)
+  const [scheduleParsing, setScheduleParsing] = useState(false)
+  /**
    * The `+` menu action armed for the NEXT message (web search / deep research / diagram),
    * or null for an ordinary turn. Per message on purpose — it's cleared on send, so the
    * follow-up after a web answer goes back to reading the project unless you ask again.
@@ -4363,7 +5204,12 @@ function ChatWorkspace({
     // conversation's turn finished. Idle, it doesn't poll at all.
     refetchInterval: (q) => (q.state.data?.chats.some((c) => c.running) ? 4000 : false),
   })
-  const chats = railData?.chats ?? []
+  /*
+   * Memoised because it is a dependency now: `railData?.chats ?? []` is a FRESH array on
+   * every render, so an effect keyed on it (the multi-select prune, below) would run after
+   * every render and its setState would loop.
+   */
+  const chats = useMemo(() => railData?.chats ?? [], [railData])
 
   /**
    * The conversation on screen. Nothing picked yet (a fresh mount, i.e. a reload) falls
@@ -4510,14 +5356,33 @@ function ChatWorkspace({
   })
   const mentionRows = useMemo(() => {
     if (!mention) return []
+    // Commands sit ABOVE the skills: `/scheduled` is not a skill, and a project with a
+    // dozen skills would otherwise bury it.
     return mention.char === '/'
-      ? skillOptions(skills ?? [], mention.query)
+      ? [...commandOptions(mention.query), ...skillOptions(skills ?? [], mention.query)]
       : mentionOptions(crawled ?? [], dbInfo?.databases ?? [], mention.query)
   }, [crawled, dbInfo, skills, mention])
 
-  const messages = chat?.messages ?? []
+  // Memoised: it is a dependency of the question navigator's list, and `chat?.messages ?? []`
+  // is a fresh array on every render — which would rebuild that list (and re-run its scroll
+  // measurement) on every keystroke in the composer.
+  const messages = useMemo(() => chat?.messages ?? [], [chat])
   const streaming = pending !== null
   const empty = !openSlug && !pending
+
+  /*
+   * The questions in this conversation, for the navigator down the right edge. The one in
+   * flight is included: it is already on screen above a streaming answer, and a list that
+   * silently omitted the newest question would be wrong for the whole minute you are most
+   * likely to look at it.
+   */
+  const questions = useMemo<QuestionAnchor[]>(() => {
+    const out = messages.flatMap((m, i) =>
+      m.role === 'user' ? [{ id: questionAnchorId(i), text: m.text }] : [],
+    )
+    if (pending) out.push({ id: questionAnchorId('pending'), text: pending.prompt })
+    return out
+  }, [messages, pending])
 
   // Follow-ups belong to the NEWEST answer only — the ones from four turns ago are about a
   // question that's already been moved on from, and a strip after every turn would double
@@ -4590,6 +5455,22 @@ function ChatWorkspace({
   const pickMention = useCallback(
     (opt: MentionOption) => {
       if (!mention) return
+      // A command leaves NO token behind: `/scheduled` is a mode the composer enters, not a
+      // reference the model reads, and a leftover token would be sent as part of the task
+      // text ("/scheduled every day at 9am…") the moment the sentence is parsed.
+      if (opt.kind === 'command') {
+        const rest = `${input.slice(0, mention.start)}${input.slice(mention.end)}`.trimStart()
+        setInput(rest)
+        setMention(null)
+        setScheduleMode(true)
+        requestAnimationFrame(() => {
+          const el = taRef.current
+          if (!el) return
+          el.focus()
+          el.setSelectionRange(rest.length, rest.length)
+        })
+        return
+      }
       const next = `${input.slice(0, mention.start)}${opt.token} ${input.slice(mention.end)}`.slice(
         0,
         MAX_PROMPT,
@@ -4622,8 +5503,85 @@ function ChatWorkspace({
     [input, mention],
   )
 
+  /**
+   * `/scheduled` — turn the typed sentence into a recurring task, in one step.
+   *
+   * Parse then create, both server-side (`/api/schedules/parse`: a deterministic reader
+   * first, a cheap model only when it finds no timing). There is **no confirmation dialog**:
+   * the composer is where the sentence was typed, so making the engineer re-approve their
+   * own words in a form is a step that only slows down the thing they already said. What
+   * replaces it is the toast — it reads back the schedule the server understood ("Every
+   * weekday at 9:00 AM · next Mon 14 Sept, 9:00") and carries **Undo**, which deletes the
+   * task outright. A wrong schedule is therefore one click from gone, and everything else
+   * about it is editable on /scheduled.
+   *
+   * A sentence with no time in it is still a REFUSAL — the text stays in the composer and
+   * the toast says what is missing, rather than a task quietly appearing at midnight.
+   */
+  const createScheduled = useCallback(
+    async (text: string) => {
+      const sentence = text.trim()
+      if (!projectId) {
+        toast.error('Pick a project first', {
+          description: 'A scheduled task runs inside one project’s folder.',
+        })
+        return
+      }
+      if (!sentence) {
+        toast.error('Say when it should run, and what to do', {
+          description: 'For example: “every weekday at 9am, summarise new tickets”.',
+        })
+        return
+      }
+      setScheduleParsing(true)
+      try {
+        const { draft } = await parseSchedule(sentence)
+        const { schedule } = await createSchedule(projectId, {
+          title: draft.title,
+          prompt: draft.prompt,
+          cron: draft.cron,
+        })
+        void queryClient.invalidateQueries({ queryKey: ['schedules', projectId] })
+        // Only now is the composer cleared: a failure above must leave the sentence where
+        // the engineer can fix it, which is the same rule an oversize message follows.
+        setScheduleMode(false)
+        setInput('')
+        toast.success(`Scheduled — ${schedule.title}`, {
+          description: `${schedule.description} · next ${formatWhen(schedule.nextRunAt)}`,
+          duration: 10_000,
+          action: {
+            label: 'Undo',
+            onClick: () => {
+              void deleteSchedule(schedule.id)
+                .then(() => {
+                  void queryClient.invalidateQueries({ queryKey: ['schedules', projectId] })
+                  toast.success('Scheduled task removed')
+                })
+                .catch((err: Error) =>
+                  toast.error('Could not remove it', { description: err.message }),
+                )
+            },
+          },
+        })
+      } catch (err) {
+        toast.error('I need a time as well as a task', {
+          description: err instanceof Error ? err.message : 'Could not read that schedule.',
+        })
+      } finally {
+        setScheduleParsing(false)
+      }
+    },
+    [projectId, queryClient],
+  )
+
   const send = useCallback(
     (text: string) => {
+      // In `/scheduled` mode Enter means "schedule this", not "ask this". Checked before
+      // anything else in here, because everything below assumes a chat turn.
+      if (scheduleMode) {
+        void createScheduled(text)
+        return
+      }
       const base = text.trim()
       // An image on its own is a real message ("what's wrong here?"), so images alone are
       // enough to send; the server supplies the wording when nothing was typed.
@@ -4816,6 +5774,8 @@ function ChatWorkspace({
       rememberTemp,
       restoreDropped,
       queryClient,
+      scheduleMode,
+      createScheduled,
     ],
   )
 
@@ -5070,6 +6030,102 @@ function ChatWorkspace({
     onError: (e: Error) => toast.error('Could not archive', { description: e.message }),
   })
 
+  /*
+   * ---------------------------------------------------------------- multi-select state
+   *
+   * `null` = not selecting; `[]` = selecting, nothing ticked. It lives here rather than in
+   * the rail because deleting a batch goes out to a dialog and back, and because a stale
+   * selection is a real hazard: the slugs were captured from a list that keeps re-fetching.
+   */
+  const [rawSelection, setSelection] = useState<string[] | null>(null)
+  const [bulkDeleting, setBulkDeleting] = useState<string[] | null>(null)
+
+  /*
+   * The selection, pruned to conversations that still exist — DERIVED, not corrected in an
+   * effect, so there is never a render in which the stale list is the one on screen or the
+   * one a button would send.
+   *
+   * It goes stale for ordinary reasons: the rail re-fetches on a timer and after every turn,
+   * another tab deletes a conversation, or the active project changes underneath it (where
+   * the slugs may even COLLIDE with the new project's). A bulk delete is the one action
+   * where acting on a stale list cannot be undone, so the pruning is not optional.
+   */
+  const selection = useMemo(
+    () => (rawSelection ? rawSelection.filter((s) => chats.some((c) => c.slug === s)) : null),
+    [rawSelection, chats],
+  )
+
+  const nameOf = useCallback(
+    (slug: string) => chats.find((c) => c.slug === slug)?.name ?? slug,
+    [chats],
+  )
+
+  /**
+   * One action over the whole selection.
+   *
+   * The result is reported as it came back, not as it was asked for: the route applies each
+   * conversation independently, so "12 deleted" and "9 deleted, 3 could not be" are both
+   * possible answers and only one of them is true. A batch that half-applied and said
+   * "deleted" is how a conversation reappears an hour later with nobody able to say why.
+   */
+  const bulk = useMutation({
+    mutationFn: (v: { action: ChatBulkAction; slugs: string[] }) =>
+      bulkChatAction(projectId, v.slugs, v.action),
+    onSuccess: (r, v) => {
+      void queryClient.invalidateQueries({ queryKey: ['chats', projectId] })
+      if (v.action === 'delete') {
+        for (const slug of r.done) queryClient.removeQueries({ queryKey: ['chat', projectId, slug] })
+        // The conversation on screen may have been in the batch — it is still readable in the
+        // transcript pane, but its file is gone, so leaving it open is showing a chat that no
+        // longer exists.
+        if (openSlug && r.done.includes(openSlug)) setPicked(null)
+        setBulkDeleting(null)
+        // Deleting empties the selection by definition; the flag actions leave it in place so
+        // the same set can be starred and then archived without ticking it twice.
+        setSelection(null)
+      }
+      const verb =
+        v.action === 'delete'
+          ? 'deleted'
+          : v.action === 'pin'
+            ? 'starred'
+            : v.action === 'unpin'
+              ? 'unstarred'
+              : v.action === 'archive'
+                ? 'archived'
+                : 'unarchived'
+      if (r.failed.length) {
+        toast.warning(`${r.done.length} ${verb}, ${r.failed.length} could not be`, {
+          description: r.failed
+            .slice(0, 3)
+            .map((f) => `${nameOf(f.slug)}: ${f.error}`)
+            .join(' · '),
+        })
+        return
+      }
+      const many = `${r.done.length} conversation${r.done.length === 1 ? '' : 's'} ${verb}`
+      // Archiving is the one batch that makes rows vanish with nothing destroyed, so it is
+      // the one that gets an undo — same as the single-row archive toast.
+      if (v.action === 'archive' || v.action === 'unarchive') {
+        toast.success(many, {
+          action: {
+            label: 'Undo',
+            onClick: () =>
+              bulk.mutate({
+                action: v.action === 'archive' ? 'unarchive' : 'archive',
+                slugs: r.done,
+              }),
+          },
+        })
+      } else {
+        toast.success(many)
+      }
+    },
+    onError: (e: Error) => toast.error('Could not apply that to the selection', {
+      description: e.message,
+    }),
+  })
+
   return (
     <div className="relative flex h-svh min-h-[34rem]">
       <ChatRail
@@ -5101,6 +6157,11 @@ function ChatWorkspace({
         onDelete={(s) =>
           setDeleting({ slug: s, name: chats.find((c) => c.slug === s)?.name ?? 'this conversation' })
         }
+        selection={selection}
+        onSelectionChange={setSelection}
+        onBulk={(action, slugs) => bulk.mutate({ action, slugs })}
+        onBulkDelete={setBulkDeleting}
+        bulkBusy={bulk.isPending}
       />
 
       {/* Keyed on the target so the rename field seeds from the current name on open. */}
@@ -5116,6 +6177,14 @@ function ChatWorkspace({
         busy={removeChat.isPending}
         onCancel={() => setDeleting(null)}
         onConfirm={() => deleting && removeChat.mutate(deleting.slug)}
+      />
+      <DeleteChatsDialog
+        names={bulkDeleting?.map(nameOf) ?? null}
+        busy={bulk.isPending}
+        onCancel={() => setBulkDeleting(null)}
+        onConfirm={() =>
+          bulkDeleting && bulk.mutate({ action: 'delete', slugs: bulkDeleting })
+        }
       />
 
       <div className="flex w-full min-w-0 grow flex-col">
@@ -5267,6 +6336,7 @@ function ChatWorkspace({
                   projectId={projectId}
                   at={pending.at}
                   action={pending.action}
+                  anchorId={questionAnchorId('pending')}
                 />
                 <AssistantRow
                   text={pending.answer}
@@ -5304,6 +6374,10 @@ function ChatWorkspace({
           {/* Highlight a passage in any answer above and this floats in beside it. Portaled to
               the body, so the scroller's `overflow-y-auto` can't clip it. */}
           <SelectionNoteBubble scrollerRef={logRef} projectId={projectId} />
+
+          {/* Your own questions, down the right edge — the way back to one turn inside a
+              long conversation, the way the rail is the way back to a conversation. */}
+          <QuestionNav items={questions} scrollerRef={logRef} />
 
           {/* Jump back to the newest message — only once you've scrolled away from it. */}
           <div className="absolute bottom-28 right-6 z-10">
@@ -5358,7 +6432,9 @@ function ChatWorkspace({
                             i === mentionIndex ? 'bg-accent' : 'hover:bg-accent/60',
                           )}
                         >
-                          {opt.kind === 'skill' ? (
+                          {opt.kind === 'command' ? (
+                            <AlarmClock className="size-4 shrink-0 text-emerald-500" />
+                          ) : opt.kind === 'skill' ? (
                             <Wand2 className="size-4 shrink-0 text-amber-500" />
                           ) : opt.kind === 'database' ? (
                             <Database className="size-4 shrink-0 text-sky-500" />
@@ -5426,7 +6502,8 @@ function ChatWorkspace({
               </span>
               <span>•</span>
               <span>
-                <code className="font-mono text-foreground">/</code> for a skill
+                <code className="font-mono text-foreground">/</code> for a skill or{' '}
+                <code className="font-mono text-foreground">/scheduled</code>
               </span>
               <span>•</span>
               <span>
@@ -5496,6 +6573,37 @@ function ChatWorkspace({
                       </button>
                     </div>
                   ))}
+                </div>
+              )}
+
+              {/* `/scheduled` is armed: say so, say what Enter will do, and stay one click
+                  from leaving. A composer that quietly stopped sending messages would be
+                  read as the chat being broken — and since Enter now CREATES the task
+                  rather than opening a form, saying so here is the only warning there is
+                  (the toast's Undo is the other half). */}
+              {scheduleMode && (
+                <div className="flex flex-wrap items-center gap-2 px-4 pt-3">
+                  <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-500/40 bg-emerald-500/10 px-2.5 py-1 text-xs">
+                    <AlarmClock className="size-3.5 text-emerald-600 dark:text-emerald-400" />
+                    <span className="font-medium">Scheduled task</span>
+                    <span className="hidden text-muted-foreground sm:inline">
+                      Enter creates it — the toast can undo
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setScheduleMode(false)}
+                      aria-label="Cancel scheduling and go back to chatting"
+                      className="text-muted-foreground transition-colors hover:text-foreground"
+                    >
+                      <X className="size-3" />
+                    </button>
+                  </span>
+                  <NavLink
+                    to="/scheduled"
+                    className="text-xs text-muted-foreground underline-offset-2 hover:underline"
+                  >
+                    manage scheduled tasks
+                  </NavLink>
                 </div>
               )}
 
@@ -5589,6 +6697,13 @@ function ChatWorkspace({
                       return
                     }
                   }
+                  // Escape leaves `/scheduled` mode — the mention menu has already had its
+                  // chance at the key above, so this only fires when no menu is open.
+                  if (e.key === 'Escape' && scheduleMode) {
+                    e.preventDefault()
+                    setScheduleMode(false)
+                    return
+                  }
                   // Enter sends, Shift+Enter is a newline. IME composition must never
                   // count as a send.
                   if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
@@ -5598,9 +6713,11 @@ function ChatWorkspace({
                 }}
                 rows={1}
                 placeholder={
-                  action
-                    ? actionMeta(action).placeholder
-                    : 'Ask me anything... (paste a screenshot to attach it)'
+                  scheduleMode
+                    ? 'When, and what? — “every weekday at 9am, summarise new tickets”'
+                    : action
+                      ? actionMeta(action).placeholder
+                      : 'Ask me anything... (paste a screenshot to attach it)'
                 }
                 // text-transparent: the glyphs come from ComposerPaint underneath. The
                 // caret and a translucent selection are what's left visible here, so the
@@ -5787,17 +6904,34 @@ function ChatWorkspace({
                       size="icon"
                       onClick={() => send(input)}
                       disabled={
-                        (!input.trim() && !images.length) ||
-                        !projectId ||
-                        // The split second before a brand-new conversation has a slug: there
-                        // is nothing to queue into yet, and sending would start a SECOND chat.
-                        (streaming && !openSlug) ||
-                        queued.length >= MAX_QUEUED
+                        scheduleMode
+                          ? // Scheduling is not a chat turn: it neither queues behind a
+                            // running answer nor needs a conversation to exist.
+                            !input.trim() || !projectId || scheduleParsing
+                          : (!input.trim() && !images.length) ||
+                            !projectId ||
+                            // The split second before a brand-new conversation has a slug:
+                            // there is nothing to queue into yet, and sending would start a
+                            // SECOND chat.
+                            (streaming && !openSlug) ||
+                            queued.length >= MAX_QUEUED
                       }
-                      aria-label={streaming ? 'Send — waits for the current reply' : 'Send'}
+                      aria-label={
+                        scheduleMode
+                          ? 'Create this scheduled task'
+                          : streaming
+                            ? 'Send — waits for the current reply'
+                            : 'Send'
+                      }
                       className="size-8 rounded-full"
                     >
-                      <ArrowUp className="size-4" />
+                      {scheduleParsing ? (
+                        <Loader2 className="size-4 animate-spin" />
+                      ) : scheduleMode ? (
+                        <AlarmClock className="size-4" />
+                      ) : (
+                        <ArrowUp className="size-4" />
+                      )}
                     </Button>
                   )}
                 </div>
@@ -5807,6 +6941,7 @@ function ChatWorkspace({
 
         </div>
       </div>
+
     </div>
   )
 }

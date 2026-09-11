@@ -13,15 +13,12 @@ import {
   Eye,
   EyeOff,
   Download,
+  CloudDownload,
   FileArchive,
   Gauge,
-  ChevronUp,
-  Folder,
   FolderGit2,
   FolderOpen,
   FolderPlus,
-  HardDrive,
-  Home,
   Info,
   Loader2,
   Pencil,
@@ -30,6 +27,7 @@ import {
   PlayCircle,
   Plus,
   Power,
+  Radio,
   RotateCw,
   RotateCcw,
   Search,
@@ -58,6 +56,9 @@ import {
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Badge } from '@/components/ui/badge'
+import { BrowseButton } from '@/components/FolderBrowser'
+import AiSyncShareDialog from '@/components/AiSyncShareDialog'
+import AiSyncPullDialog from '@/components/AiSyncPullDialog'
 import {
   Select,
   SelectContent,
@@ -69,9 +70,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
 import {
-  browseFolder,
   claudeStatus,
-  createFolder,
   createProject,
   deleteProject,
   exportProject,
@@ -82,11 +81,12 @@ import {
   testClaudeModel,
   triggerRestart,
   updateProject,
+  checkImportTarget,
 } from '@/lib/api'
 import { useProjects } from '@/lib/project-context'
 import { NAV_ALWAYS_VISIBLE, navGroups, useHiddenNav } from '@/lib/nav'
 import { relativeTime } from '@/lib/format'
-import type { Project } from '@/lib/types'
+import type { ImportCheck, Project } from '@/lib/types'
 
 /** Mirror of the server's safeFolderName — turns a display name into a safe
  *  single folder segment, so the UI can preview the renamed path. */
@@ -122,293 +122,6 @@ function withFolderName(fullPath: string, folder: string): string {
  * (`pickFolderNative` / `GET /api/projects/pick-folder` still exist for the
  * skills-import flow.)
  */
-function BrowseButton({ onPick }: { onPick: (path: string) => void }) {
-  const [open, setOpen] = useState(false)
-  return (
-    <div className="flex shrink-0 items-center gap-1.5">
-      <Button
-        type="button"
-        variant="outline"
-        size="sm"
-        onClick={() => setOpen(true)}
-        className="h-11 shrink-0 rounded-full transition-all duration-200 hover:shadow-sm active:scale-[0.98]"
-      >
-        <FolderOpen className="mr-1.5 h-3.5 w-3.5" />
-        Browse…
-      </Button>
-      <FolderBrowserDialog
-        open={open}
-        onOpenChange={setOpen}
-        onPick={(p) => {
-          onPick(p)
-          setOpen(false)
-        }}
-      />
-    </div>
-  )
-}
-
-/** In-app folder browser: navigate the server's filesystem and pick a folder. */
-function FolderBrowserDialog({
-  open,
-  onOpenChange,
-  onPick,
-}: {
-  open: boolean
-  onOpenChange: (v: boolean) => void
-  onPick: (path: string) => void
-}) {
-  // undefined → let the server start at the user's home directory.
-  const [nav, setNav] = useState<string | undefined>(undefined)
-  const [draft, setDraft] = useState('')
-  const [creating, setCreating] = useState(false)
-  const [newName, setNewName] = useState('')
-  const queryClient = useQueryClient()
-
-  const { data, isFetching, isError, error } = useQuery({
-    queryKey: ['browse-folder', nav ?? '~home'],
-    queryFn: () => browseFolder(nav),
-    enabled: open,
-  })
-
-  // Keep the editable path box in step with wherever we navigated to.
-  useEffect(() => {
-    if (data?.path) setDraft(data.path)
-  }, [data?.path])
-
-  const goto = (p: string) => setNav(p)
-  const submitDraft = () => {
-    const p = draft.trim()
-    if (p) setNav(p)
-  }
-
-  const createMutation = useMutation({
-    mutationFn: () => createFolder(data?.path ?? '', newName),
-    onSuccess: (r) => {
-      toast.success('Folder created', { description: r.path })
-      setCreating(false)
-      setNewName('')
-      setDraft(r.path) // select the new folder
-      queryClient.invalidateQueries({ queryKey: ['browse-folder'] })
-    },
-    onError: (err) =>
-      toast.error('Could not create folder', {
-        description: err instanceof Error ? err.message : 'Unknown error',
-      }),
-  })
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-2xl">
-        <DialogHeader>
-          <DialogTitle>Choose a folder</DialogTitle>
-          <DialogDescription>
-            Navigate to the folder on this machine, or type/paste a path below.
-          </DialogDescription>
-        </DialogHeader>
-
-        <div className="space-y-3">
-          {/* Path bar: home, up, editable path, go */}
-          <div className="flex items-center gap-2">
-            <Button
-              type="button"
-              variant="outline"
-              size="icon"
-              title="Home"
-              onClick={() => setNav(undefined)}
-              className="h-9 w-9 shrink-0 rounded-full"
-            >
-              <Home className="h-4 w-4" />
-            </Button>
-            <Button
-              type="button"
-              variant="outline"
-              size="icon"
-              title="Up one level"
-              disabled={!data?.parent}
-              onClick={() => data?.parent && goto(data.parent)}
-              className="h-9 w-9 shrink-0 rounded-full"
-            >
-              <ChevronUp className="h-4 w-4" />
-            </Button>
-            <Input
-              value={draft}
-              onChange={(e) => setDraft(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') {
-                  e.preventDefault()
-                  submitDraft()
-                }
-              }}
-              placeholder="Type or paste a folder path…"
-              className="h-9 font-mono text-xs"
-            />
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={submitDraft}
-              className="h-9 shrink-0 rounded-full"
-            >
-              Go
-            </Button>
-          </div>
-
-          {/* Windows drive chips */}
-          {data?.drives && data.drives.length > 0 && (
-            <div className="flex flex-wrap gap-1.5">
-              {data.drives.map((d) => (
-                <Button
-                  key={d}
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  onClick={() => goto(d)}
-                  className="h-7 rounded-full px-2.5 text-xs"
-                >
-                  <HardDrive className="mr-1 h-3 w-3" />
-                  {d.replace(/\\$/, '')}
-                </Button>
-              ))}
-            </div>
-          )}
-
-          {/* New-folder action / inline creator */}
-          {!creating ? (
-            <div className="flex items-center justify-between gap-2">
-              <span
-                className="min-w-0 flex-1 truncate font-mono text-[11px] text-muted-foreground"
-                title={data?.path}
-              >
-                {data?.path ?? ''}
-              </span>
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                disabled={!data?.path || !!data?.error}
-                onClick={() => {
-                  setNewName('')
-                  setCreating(true)
-                }}
-                className="h-8 shrink-0 rounded-full text-xs"
-              >
-                <FolderPlus className="mr-1.5 h-3.5 w-3.5" />
-                New folder
-              </Button>
-            </div>
-          ) : (
-            <div className="flex items-center gap-1.5">
-              <Input
-                autoFocus
-                value={newName}
-                onChange={(e) => setNewName(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
-                    e.preventDefault()
-                    if (newName.trim() && !createMutation.isPending) createMutation.mutate()
-                  } else if (e.key === 'Escape') {
-                    setCreating(false)
-                  }
-                }}
-                placeholder="New folder name"
-                className="h-8 min-w-0 flex-1 text-xs"
-              />
-              <Button
-                type="button"
-                size="sm"
-                disabled={!newName.trim() || createMutation.isPending}
-                onClick={() => createMutation.mutate()}
-                className="h-8 shrink-0 rounded-full text-xs"
-              >
-                {createMutation.isPending ? (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                ) : (
-                  'Create'
-                )}
-              </Button>
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                onClick={() => setCreating(false)}
-                className="h-8 shrink-0 rounded-full text-xs"
-              >
-                Cancel
-              </Button>
-            </div>
-          )}
-
-          {/* Folder list */}
-          <div className="h-72 overflow-y-auto rounded-2xl border border-border/60 bg-muted/40 p-1.5">
-            {isFetching ? (
-              <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Loading…
-              </div>
-            ) : isError ? (
-              <div className="flex h-full items-center justify-center px-4 text-center text-sm text-destructive">
-                {error instanceof Error ? error.message : 'Could not read this folder'}
-              </div>
-            ) : data?.error ? (
-              <div className="flex h-full items-center justify-center px-4 text-center text-sm text-amber-600 dark:text-amber-500">
-                {data.error}
-              </div>
-            ) : data && data.entries.length === 0 ? (
-              <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
-                No sub-folders here.
-              </div>
-            ) : (
-              <ul className="space-y-0.5">
-                {data?.entries.map((e) => (
-                  <li key={e.path}>
-                    <button
-                      type="button"
-                      onDoubleClick={() => goto(e.path)}
-                      onClick={() => setDraft(e.path)}
-                      className={cn(
-                        'flex w-full items-center gap-2 rounded-xl px-2.5 py-1.5 text-left text-sm transition-colors',
-                        'hover:bg-background',
-                        draft === e.path && 'bg-background ring-1 ring-border',
-                      )}
-                      title="Double-click to open"
-                    >
-                      <Folder className="h-4 w-4 shrink-0 text-muted-foreground" />
-                      <span className="truncate">{e.name}</span>
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
-          <p className="text-xs text-muted-foreground">
-            Click a folder to select it, double-click to open it. Then choose{' '}
-            <span className="font-medium text-foreground">Use this folder</span>.
-          </p>
-        </div>
-
-        <DialogFooter>
-          <Button
-            type="button"
-            variant="ghost"
-            className="rounded-full"
-            onClick={() => onOpenChange(false)}
-          >
-            Cancel
-          </Button>
-          <Button
-            type="button"
-            className="rounded-full"
-            disabled={!draft.trim()}
-            onClick={() => onPick(draft.trim())}
-          >
-            Use this folder
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  )
-}
-
 /** A compact pill showing whether a given capability is present in the repo. */
 function HealthChip({ ok, label }: { ok: boolean | undefined; label: string }) {
   return (
@@ -606,6 +319,12 @@ function ProjectCard({ project }: { project: Project }) {
       toast.error('Could not copy path')
     }
   }
+
+  // AI Sync has two directions on one card, and they are separate buttons rather than
+  // one "Sync" — "let someone read this" and "overwrite this from someone" are not the
+  // same action and must not be one click apart from each other by accident.
+  const [shareOpen, setShareOpen] = useState(false)
+  const [pullOpen, setPullOpen] = useState(false)
 
   const [exporting, setExporting] = useState(false)
   async function doExport() {
@@ -816,6 +535,40 @@ function ProjectCard({ project }: { project: Project }) {
                   <Pin className="h-3.5 w-3.5" />
                 )}
               </Button>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    onClick={() => setShareOpen(true)}
+                    disabled={notFound}
+                    aria-label="Open this project to AI Sync"
+                    className="size-8 rounded-full text-muted-foreground transition-all duration-200 hover:text-foreground active:scale-[0.98] disabled:opacity-50"
+                  >
+                    <Radio className="h-3.5 w-3.5" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="top" className="max-w-none rounded-xl whitespace-nowrap">
+                  AI Sync &mdash; give another machine a code to pull this project
+                </TooltipContent>
+              </Tooltip>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    onClick={() => setPullOpen(true)}
+                    disabled={notFound}
+                    aria-label="Sync this project from another machine"
+                    className="size-8 rounded-full text-muted-foreground transition-all duration-200 hover:text-foreground active:scale-[0.98] disabled:opacity-50"
+                  >
+                    <CloudDownload className="h-3.5 w-3.5" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="top" className="max-w-none rounded-xl whitespace-nowrap">
+                  AI Sync &mdash; pull into this project from another machine
+                </TooltipContent>
+              </Tooltip>
               <Button
                 variant="ghost"
                 size="icon"
@@ -983,6 +736,18 @@ function ProjectCard({ project }: { project: Project }) {
           </div>
         </CardContent>
       )}
+
+      <AiSyncShareDialog
+        projectId={project.id}
+        projectName={project.name}
+        open={shareOpen}
+        onOpenChange={setShareOpen}
+      />
+      <AiSyncPullDialog
+        open={pullOpen}
+        onOpenChange={setPullOpen}
+        preset={{ id: project.id, name: project.name, rootPath: project.rootPath }}
+      />
 
       {/* Confirm + warn before moving the folder on disk. */}
       <Dialog open={renameConfirmOpen} onOpenChange={(o) => !updateMutation.isPending && setRenameConfirmOpen(o)}>
@@ -1224,19 +989,36 @@ function ImportProjectForm({ onDone }: { onDone: () => void }) {
   const [file, setFile] = useState<File | null>(null)
   const [name, setName] = useState('')
   const [parentPath, setParentPath] = useState('')
+  // What GET /import/check found. Non-null => the collision dialog is up and the
+  // engineer picks update / copy / cancel. Asked BEFORE the upload, so a 2 GB zip is
+  // never streamed across only to be refused at the end — which is how people ended
+  // up importing under a slightly different name and owning the project twice.
+  const [conflict, setConflict] = useState<ImportCheck | null>(null)
+  const [checking, setChecking] = useState(false)
 
   const mutation = useMutation({
-    mutationFn: async () => {
+    mutationFn: async (opts?: { mode?: 'new' | 'update'; projectId?: string; name?: string }) => {
       if (!file || file.size === 0) {
         throw new Error('Choose a non-empty .zip exported from QC Portal.')
       }
-      return importProject({ name: name.trim(), parentPath: parentPath.trim(), file })
+      return importProject({
+        name: (opts?.name ?? name).trim(),
+        parentPath: parentPath.trim(),
+        file,
+        mode: opts?.mode,
+        projectId: opts?.projectId,
+      })
     },
     onSuccess: (p) => {
-      toast.success('Project imported', { description: `${p.name} created at ${p.rootPath}.` })
+      toast.success(p.updated ? 'Project updated' : 'Project imported', {
+        description: p.updated
+          ? `${p.name} updated in place at ${p.rootPath}.`
+          : `${p.name} created at ${p.rootPath}.`,
+      })
       setFile(null)
       setName('')
       setParentPath('')
+      setConflict(null)
       queryClient.invalidateQueries({ queryKey: ['projects'] })
       refetchContext()
       onDone()
@@ -1246,6 +1028,26 @@ function ImportProjectForm({ onDone }: { onDone: () => void }) {
         description: err instanceof Error ? err.message : 'Unknown error',
       }),
   })
+
+  /** Check for a collision first; import straight away when there isn't one. */
+  async function submit() {
+    setChecking(true)
+    try {
+      const check = await checkImportTarget(name.trim(), parentPath.trim())
+      if (check.project || check.folderExists || check.nameTaken) {
+        setConflict(check)
+        return
+      }
+      mutation.mutate(undefined)
+    } catch (err) {
+      // A failed check must not block the import — fall through to the server's own
+      // validation, which answers the same questions with the upload in hand.
+      void err
+      mutation.mutate(undefined)
+    } finally {
+      setChecking(false)
+    }
+  }
 
   function chooseFile(f: File | null) {
     setFile(f)
@@ -1257,13 +1059,15 @@ function ImportProjectForm({ onDone }: { onDone: () => void }) {
   const destPreview = trimmedParent
     ? `${trimmedParent}${destSep}${safeFolderName(name) || '…'}`
     : ''
-  const canSubmit = !!file && name.trim() && parentPath.trim() && !mutation.isPending
+  const busy = mutation.isPending || checking
+  const canSubmit = !!file && name.trim() && parentPath.trim() && !busy
 
   return (
+    <>
     <form
       onSubmit={(e) => {
         e.preventDefault()
-        if (canSubmit) mutation.mutate()
+        if (canSubmit) void submit()
       }}
       className="space-y-5"
     >
@@ -1367,10 +1171,10 @@ function ImportProjectForm({ onDone }: { onDone: () => void }) {
           disabled={!canSubmit}
           className="group h-11 rounded-full px-6 text-sm font-semibold shadow-none transition-all duration-200 hover:shadow-sm active:scale-[0.98]"
         >
-          {mutation.isPending ? (
+          {busy ? (
             <>
               <Loader2 className="size-4 animate-spin" />
-              Importing…
+              {checking ? 'Checking…' : 'Importing…'}
             </>
           ) : (
             <>
@@ -1382,6 +1186,119 @@ function ImportProjectForm({ onDone }: { onDone: () => void }) {
         </Button>
       </div>
     </form>
+
+    {/* The duplicate question, asked once, with the two answers that actually differ. */}
+    <Dialog open={!!conflict} onOpenChange={(open) => !open && setConflict(null)}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <div className="flex items-start gap-3">
+            <span className="flex size-10 shrink-0 items-center justify-center rounded-2xl border border-amber-300/40 bg-amber-100 text-amber-700">
+              <AlertCircle className="size-5" />
+            </span>
+            <div className="space-y-1 text-left">
+              <DialogTitle>This already exists here</DialogTitle>
+              <DialogDescription>
+                {conflict?.project
+                  ? 'A project is already registered at that folder. Update it, or import a separate copy.'
+                  : conflict?.folderExists
+                    ? 'That folder already exists on disk but no project is registered against it.'
+                    : 'Another project already uses that name.'}
+              </DialogDescription>
+            </div>
+          </div>
+        </DialogHeader>
+
+        <div className="space-y-2 rounded-2xl border border-border/60 bg-muted/60 p-3 text-xs">
+          <div className="flex items-center gap-2">
+            <span className="w-14 shrink-0 text-muted-foreground">Folder</span>
+            <span className="min-w-0 flex-1 truncate font-mono">{conflict?.dest}</span>
+          </div>
+          {conflict?.project && (
+            <div className="flex items-center gap-2">
+              <span className="w-14 shrink-0 text-muted-foreground">Project</span>
+              <span className="min-w-0 flex-1 truncate font-medium">{conflict.project.name}</span>
+            </div>
+          )}
+          {conflict?.nameTaken && !conflict.project && (
+            <div className="flex items-center gap-2">
+              <span className="w-14 shrink-0 text-muted-foreground">Name</span>
+              <span className="min-w-0 flex-1 truncate font-mono">{conflict.nameTaken.rootPath}</span>
+            </div>
+          )}
+        </div>
+
+        {conflict?.project && (
+          <p className="rounded-2xl border border-border/60 p-3 text-[13px] leading-relaxed text-muted-foreground">
+            Updating writes the zip's files over that folder. Files you have that the zip does
+            not are left alone — nothing is deleted.
+          </p>
+        )}
+
+        <DialogFooter className="flex-col gap-2 sm:flex-row">
+          <Button
+            variant="outline"
+            onClick={() => setConflict(null)}
+            disabled={mutation.isPending}
+            className="rounded-full transition-all duration-200 active:scale-[0.98]"
+          >
+            Cancel
+          </Button>
+          <Button
+            variant="outline"
+            onClick={() => {
+              const suggested = conflict?.suggestedName ?? name
+              setName(suggested)
+              setConflict(null)
+              mutation.mutate({ mode: 'new', name: suggested })
+            }}
+            disabled={mutation.isPending}
+            className="rounded-full transition-all duration-200 active:scale-[0.98]"
+          >
+            <Copy className="size-4" />
+            Import as “{conflict?.suggestedName}”
+          </Button>
+          {conflict?.project && (
+            <Button
+              onClick={() =>
+                mutation.mutate({ mode: 'update', projectId: conflict.project?.id })
+              }
+              disabled={mutation.isPending}
+              className="rounded-full transition-all duration-200 active:scale-[0.98]"
+            >
+              {mutation.isPending ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : (
+                <RotateCw className="size-4" />
+              )}
+              Update “{conflict.project.name}”
+            </Button>
+          )}
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+    </>
+  )
+}
+
+/**
+ * The "I don't have this project at all yet" entry point for AI Sync. The per-card
+ * button is for updating a project that already exists here; this one is beside
+ * Import because that is the other way a project arrives from someone else's machine.
+ */
+function SyncFromMachineButton() {
+  const [open, setOpen] = useState(false)
+  return (
+    <>
+      <Button
+        variant="outline"
+        onClick={() => setOpen(true)}
+        className="h-11 shrink-0 rounded-full px-5 font-semibold shadow-none transition-all duration-200 hover:shadow-sm active:scale-[0.98]"
+      >
+        <CloudDownload className="size-4" />
+        AI Sync
+      </Button>
+      <AiSyncPullDialog open={open} onOpenChange={setOpen} preset={null} />
+    </>
   )
 }
 
@@ -2015,6 +1932,7 @@ export default function ProjectsPage() {
                 </p>
               </div>
               <div data-tour="project-actions" className="flex shrink-0 items-center gap-2">
+                <SyncFromMachineButton />
                 <ImportProjectDialog />
                 <AddProjectDialog watchAddParam />
               </div>
@@ -2108,6 +2026,7 @@ export default function ProjectsPage() {
                 </p>
               </div>
               <div className="flex items-center gap-2">
+                <SyncFromMachineButton />
                 <ImportProjectDialog />
                 <AddProjectDialog />
               </div>

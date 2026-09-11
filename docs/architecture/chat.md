@@ -306,6 +306,47 @@ does this endpoint validate?").
   - **Archiving is the one action here that makes a row disappear, so the toast carries Undo**,
     and a temporary conversation is refused by the server the same way starring is — it is not
     in history, so there is nothing to archive it out of.
+- **Multi-select, because tidying a chat history is a BATCH job.** The rail turns into a mode:
+  rows tick instead of opening, and one footer bar stars / archives / deletes the lot
+  (`POST /api/chat/bulk`, `bulkChatAction`). A history is scrolled once a month and a dozen
+  rows are throwaway questions — one at a time through the "…" menu is twelve menus, twelve
+  confirm dialogs and twelve list re-orders. What the shape is answering:
+  - **The route exists so the outcome is ONE line.** Forty DELETEs from the browser give forty
+    independent failures, forty toasts and a rail that re-fetches mid-batch, re-ordering the
+    list under the selection still on screen. The route applies the set in one pass and answers
+    `{ done, failed }`.
+  - **It is deliberately NOT all-or-nothing**, and the toast says what actually happened —
+    "12 deleted", or "9 deleted, 3 could not be" with the failures NAMED. Refusing the whole
+    batch over one already-gone slug would leave the eleven the engineer asked for, and a batch
+    that half-applied while reporting success is how a conversation reappears an hour later.
+    `removeChat` / `setChatFlag` in `routes/chat.ts` are the single implementation the bulk
+    route and the per-conversation routes share — a second copy that forgot to stop a running
+    turn, drop the queue or forget the armed learning capture would RESURRECT a deleted chat.
+  - **The selection is derived, not corrected in an effect.** The page holds the raw list and
+    filters it to conversations that still exist on every render, so there is never a frame in
+    which a stale slug is on screen or in a button. It goes stale for ordinary reasons: the rail
+    polls, another tab deletes, the active project changes (where slugs may even COLLIDE with the
+    new project's) — and a bulk delete cannot be undone.
+  - **`null` ≠ `[]`.** Not selecting shows the New Chat footer; selecting with nothing ticked
+    shows the action bar with everything disabled. A bar that appears only once you succeed at
+    the gesture does not teach the gesture.
+  - **The whole row is the checkbox**, and **shift-click takes the range** over the rows as
+    READ — collapsed groups and filtered-out rows are not "in between". The same rule makes
+    "Select all" mean *everything the list is showing*: a button that silently ticks 53 rows you
+    folded away is what makes a bulk delete unsafe.
+  - **The search box stays.** Selection survives a filter, so "search, tick two, search again,
+    tick two more" works — which is how a batch is built when the list is long.
+  - **Two ways in, three ways out.** In: the header's `ListChecks` button, or **Select** in a
+    row's "…" menu, which enters with that row already ticked (you are looking at the row you
+    want gone before the second one occurs to you). Out: Escape, the X that replaces the fold
+    control, or a delete finishing. The per-row menu is hidden inside the mode — every item has
+    a batch equivalent, and a one-row action inside a mode about many is the click that deletes
+    the wrong thing.
+  - **Delete gets its own dialog listing the NAMES** (capped, with the rest counted). A count
+    alone is not reviewable, and the selection was built across a scrolling, possibly filtered
+    list — this is the last moment it can be checked. Bulk archive keeps the Undo the single-row
+    one has; the star/archive buttons flip their label on what is already true of the whole
+    selection, so "Star" never means "eleven of these are already starred, nothing will happen".
 - **The whole rail folds too, and it is the app sidebar's control** — `PanelLeftClose` /
   `PanelLeftOpen` with a right-side tooltip, kept in `localStorage` under
   `qc.chat.railFolded`. Same gesture one panel over, because on a laptop the sidebar and the
@@ -327,6 +368,27 @@ does this endpoint validate?").
   item **count** shows only while folded (open, the rows are the count), and **a search
   force-opens every group** — a search that hides its own hits is a bug, not a preference, and
   the remembered fold comes back when the box is cleared.
+- **A question navigator down the right edge of the transcript** (`QuestionNav`) — every
+  question you asked in this conversation, each one a jump to that point. The rail on the left
+  finds a CONVERSATION; nothing found a TURN inside one, and an answer here is several screens
+  (tool trails, code, tables), so "what did it say about the crawl?" meant scrolling past four
+  answers looking for your own words. The details that are load-bearing:
+  - **Dashes at rest, labels on hover.** Parked open it is a 14rem column sitting on the
+    answers at the width they are read at. The dashes still carry the two facts worth a glance:
+    how many questions, and where in them you are.
+  - **It tracks the scroll**, so the lit dash is the question whose answer is on screen — the
+    LAST question whose row is above the reading line, not the first one visible: a question
+    scrolled off the top is precisely the one being read. Measured on `scroll`, rAF-throttled,
+    because this runs while text is streaming.
+  - **Anchors are DOM ids (`qc-q-<index>`), not refs.** `Turn` is memoised and must stay that
+    way (33 ms → 567 ms per keystroke without it), so handing every question a ref callback
+    from the workspace would defeat the memo that keeps typing usable.
+  - **Long conversations collapse in the MIDDLE** — first five, an "N more" row, last five,
+    plus wherever you currently are, which is never hidden. Sixty dashes is a solid line, and
+    the ends are what you look for: the start of the thread, and what you just asked.
+  - **The question in flight is listed**, since it is on screen above a streaming answer; the
+    list is hidden under two questions and under `lg`, where it would cover the transcript
+    rather than sit beside it.
 - **The transcript is the ANSWERS, and everything else got out of their way.** A turn used to
   carry, around the words: a name label ("Me" / "AI Assistant"), an avatar on both sides, a
   timestamp under every question, four 36px buttons under every answer, and a five-part stats
@@ -379,6 +441,69 @@ does this endpoint validate?").
   transform/opacity only + disabled under `prefers-reduced-motion` (the artwork stays, it just stops).
   `ChatWorkspace` is mounted `key={projectId}` so switching project resets cleanly
   **without setState-in-effect**.
+- **The hero mark, second pass — it is the first thing anyone sees on this page, so it earns the
+  detail.** What was added around the sphere, and the traps each one cost:
+  - **It FITS now.** It used to be a 288px sphere with a bottom mask fade, and in the column it
+    actually renders in the scroller cropped it at the equator: the greeting sat under the bottom
+    half of a pastel smudge. A mark you only ever see part of cannot read as a logo. 176px, whole.
+  - **An aurora ring turning behind the glass** — a conic gradient (SVG has no such paint) in its
+    own element, blurred and **masked to a ring**. Unmasked it is a coloured disc behind a
+    translucent sphere, which muddies every colour inside it. Dark mode gets MORE of it, not less:
+    on a near-black page the sphere is the only light source, and at the light-mode opacity the
+    ring vanished into the background instead of ringing it.
+  - **Two tilted orbits with travelling satellites**, which is what makes it read as a system
+    rather than a bubble. The ring and its satellite share ONE path constant (`ORBITS`,
+    `orbitPath`) — two copies and the dot rides a line that isn't there. Only the TILT is a
+    transform, because a rotation is a similarity and the dot stays a dot: the first attempt
+    squashed a circular orbit with `scale(1,0.34)` and counter-scaled the dot back, and with the
+    travel rotation sitting *between* the two scales they don't cancel (anisotropic scale doesn't
+    commute with rotation) — the satellite stretched into a smear that changed shape as it went
+    round. The ellipse belongs in the path.
+  - **The satellites travel with SMIL (`<animateMotion>`)**, so they are the one part
+    `index.css`'s `prefers-reduced-motion` block cannot reach — the element is not rendered at
+    all instead (`usePrefersReducedMotion`).
+  - **`clip-path` is resolved in the user space of the element that carries it, INCLUDING that
+    element's own transform.** The liquid artwork is kept at the coordinates it was composed in
+    and scaled as one group; with the clip on that same group the clip circle was scaled and
+    shifted with it, landing at (61,59) r=51 — the sphere became a crescent in the top-left and
+    its whole lower-right was simply missing, which read as "the orb looks washed out", not as a
+    clipping bug. The clip goes on an OUTER group with no transform.
+  - **A specular glint crosses the glass every ~7s and then waits.** The pause is the effect: a
+    light that sweeps continuously is a scanner, one that catches the surface every few seconds
+    is glass. Its only visible state is mid-animation, so reduced motion has to force it to
+    `opacity: 0` — `animation: none` alone would freeze it mid-sweep.
+  - **Pointer parallax**, written straight to the DOM through a ref. Through state it would
+    re-render the workspace (which owns `input`) on every pointer frame and re-parse every
+    markdown answer on screen; the listener is on the hero, not the window, so it costs nothing
+    until the pointer is over the mark. The vars default to 0, so nothing depends on the handler
+    having run.
+  - **The mark SPEAKS, now and then** (`HeroWhisper`, `HERO_LINES`): a small speech bubble
+    beside it, one short line, then quiet again. Waiting is the design — a permanent caption
+    under a logo is decoration nobody reads twice, while a line that arrives while you are
+    deciding what to ask gets read every time (3.8s in, ~7s on screen, ~11s quiet).
+    - **Two kinds, alternating**: encouragement and QC craft, walked in order through an array
+      authored that way. All encouragement becomes a fortune cookie you stop seeing by the
+      third day; all advice reads as a lint rule nagging you on your own home screen. One of
+      each keeps both worth a glance. Adding a line: one short line at 208px, true (no "you've
+      got this!" over a failing run), and a craft line has to say something actionable today.
+    - **It never moves the layout** — absolutely positioned and `pointer-events-none`, so a
+      line appearing cannot nudge the greeting under a cursor already heading for a button.
+      `lg:` and not `md:`, because at `md` the column is narrow enough that the bubble would
+      sit off the edge, and a motivational line clipped in half is worse than none.
+    - **`aria-hidden`, deliberately.** As a live region it would announce a new fortune every
+      eleven seconds over whatever a screen-reader user is actually doing; as decoration beside
+      a decorative mark it is silent, which is the honest reading.
+    - **The text and the showing are separate state.** Collapsing them into one nullable index
+      blanked the words the instant the fade-out began, so what you watched fade was an empty
+      bubble. Under reduced motion it says ONE fixed line and never cycles — text that appears
+      and vanishes on a timer is motion whether or not it fades, so the cycle is the part that
+      goes, not the content. The line is index 0 rather than a random one because
+      `Math.random()` in render is impure (this page re-renders on every keystroke) and the
+      alternatives are a setState in an effect body or a ref read during render, both of which
+      the repo's lint refuses.
+  - **The entrance plays once**, and its final keyframe equals the element's BASE styles — with
+    animations off the mark is simply present. A `both`-filled entrance whose base state is
+    `opacity: 0` is invisible forever under reduced motion.
 - **The greeting's second line types itself and cycles** (`GREETING_PHRASES`, `useTypewriter`,
   `GreetingHeadline`) — the empty state's job is to say what this page can be asked, and the quick
   chips only cover four categories, so the headline names a few more where the eye already is. It
@@ -493,6 +618,11 @@ does this endpoint validate?").
     needs it. Verified: `and/or`, `https://x.co/y` and `/Users/hao` open nothing.
   - The log frame distinguishes them (`Following skill /x · Tagged: …`), and a skill whose
     folder is gone is dropped and counted like any other stale pick.
+  - **The `/` menu also carries COMMANDS, above the skills** — `/scheduled` so far, which puts
+    the composer into schedule mode (Enter proposes a recurring task instead of sending a
+    message) and leaves NO token in the text, because it is not something the model reads.
+    `MentionOption` is a union for that reason: widening `StagedMention`'s `kind` would let a
+    command leak into the `ChatMention[]` a turn is sent with. See `scheduled.md`.
 - **Width: the column grows past the reference's `max-w-4xl`** (`xl:max-w-5xl 2xl:max-w-[88rem]`) —
   4xl on a 1440px+ screen left the answer in a ribbon between empty gutters. Three pieces make that
   work together, so don't change one alone: the assistant bubble is **`w-fit`** (a one-line answer

@@ -49,6 +49,8 @@ import VerifyJobWatcher from '@/components/VerifyJobWatcher'
 import SourceJobWatcher from '@/components/SourceJobWatcher'
 import DatabaseJobWatcher from '@/components/DatabaseJobWatcher'
 import PerfJobWatcher from '@/components/PerfJobWatcher'
+import ScheduleWatcher from '@/components/ScheduleWatcher'
+import AiSyncWatcher from '@/components/AiSyncWatcher'
 import RunPage from '@/pages/RunPage'
 import RunningPage from '@/pages/RunningPage'
 import HistoryPage from '@/pages/HistoryPage'
@@ -62,6 +64,7 @@ import PerformancePage from '@/pages/PerformancePage'
 import ResponsivePage from '@/pages/ResponsivePage'
 import PrototypePage from '@/pages/PrototypePage'
 import ChatPage from '@/pages/ChatPage'
+import SchedulesPage from '@/pages/SchedulesPage'
 import AiLabsPage from '@/pages/AiLabsPage'
 import AiLabDetailPage from '@/pages/AiLabDetailPage'
 import McpPage from '@/pages/McpPage'
@@ -1729,6 +1732,7 @@ function AppShell() {
             <Route path="/performance" element={<PerformancePage />} />
             <Route path="/responsive" element={<ResponsivePage />} />
             <Route path="/chat" element={<ChatPage />} />
+            <Route path="/scheduled" element={<SchedulesPage />} />
             <Route path="/prototype" element={<PrototypePage />} />
              <Route path="/terminal" element={<TerminalPage />} />
              <Route path="/notes" element={<NotesPage />} />
@@ -1774,6 +1778,9 @@ function App() {
       <SourceJobWatcher />
       <DatabaseJobWatcher />
       <PerfJobWatcher />
+      <ScheduleWatcher />
+      {/* Blocks BOTH machines while a sync writes into a project folder. */}
+      <AiSyncWatcher />
       <Routes>
         <Route path="/ai-labs" element={<AiLabsPage />} />
         <Route path="/ai-labs/:id" element={<AiLabDetailPage />} />

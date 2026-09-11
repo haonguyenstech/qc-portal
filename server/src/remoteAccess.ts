@@ -367,9 +367,25 @@ export function gateVerdict(req: IncomingMessage, pathname: string): GateVerdict
  */
 const PUBLIC_PATHS = new Set(['/api/remote/gate', '/api/remote/unlock'])
 
+/**
+ * The ONE prefix that is reachable through the tunnel without the access password.
+ *
+ * This is a deliberate second door, not an oversight, and it is safe only because of
+ * what is behind it: AI Sync's peer API (`routes/sync.ts`) can pair against a 4-digit
+ * code and then READ files from ONE project that the owner explicitly opened, for a
+ * bounded time, with five wrong codes revoking the whole thing. It cannot list
+ * projects, write a byte, spawn anything, or reach any other route. See the module
+ * note in `aiSync.ts` for the full argument.
+ *
+ * Nothing else may be added here. Everything the portal does that is not that — the
+ * API, the shell, even the JS bundle — stays behind the password.
+ */
+const PUBLIC_PREFIXES = ['/api/sync/peer/']
+
 export function remoteAccessGuard(req: Request, res: Response, next: NextFunction): void {
   const pathname = req.path
   if (PUBLIC_PATHS.has(pathname)) return next()
+  if (PUBLIC_PREFIXES.some((prefix) => pathname.startsWith(prefix))) return next()
 
   const verdict = gateVerdict(req, pathname)
   if (verdict === 'local' || verdict === 'ok') return next()

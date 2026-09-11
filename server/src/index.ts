@@ -7,7 +7,13 @@ import express from 'express'
 import { WebSocketServer } from 'ws'
 import type { WebSocket } from 'ws'
 import { PORT } from './config.js'
-import { getEvents, listProjects, reconcileInterruptedRuns, seedDefaultProject } from './db.js'
+import {
+  getEvents,
+  listProjects,
+  reconcileInterruptedRuns,
+  reconcileInterruptedScheduleRuns,
+  seedDefaultProject,
+} from './db.js'
 import { reconcileBundledSkills } from './skillSync.js'
 import { reconcileBundledTemplates } from './templateSync.js'
 import * as hub from './hub.js'
@@ -17,6 +23,7 @@ import { shutdownPerfJobs } from './perfJobs.js'
 import { shutdownResponsiveJobs } from './responsiveJobs.js'
 import { remoteAccessGuard, wsUpgradeAllowed } from './remoteAccess.js'
 import { autoStartTunnel, reapOrphanedTunnel, shutdownTunnel } from './tunnel.js'
+import { startScheduler, stopScheduler } from './scheduler.js'
 import {
   handleTerminalConnection,
   killAllTerminalSessions,
@@ -52,6 +59,8 @@ import { versionRouter } from './routes/version.js'
 import { remoteRouter } from './routes/remote.js'
 import { reportsRouter } from './routes/reports.js'
 import { responsiveRouter } from './routes/responsive.js'
+import { schedulesRouter } from './routes/schedules.js'
+import { syncRouter } from './routes/sync.js'
 
 // Optionally seed a default project from QC_REPO_ROOT (no-op if unset / already seeded).
 const defaultProject = seedDefaultProject()
@@ -71,6 +80,13 @@ for (const project of listProjects()) {
 const interrupted = reconcileInterruptedRuns()
 if (interrupted) {
   console.log(`Reconciled ${interrupted} interrupted run(s) → error`)
+}
+
+// Same for a scheduled task the shutdown caught mid-run: its claude died with the
+// server, so a row still reading "running" would spin on the Scheduled page for ever.
+const interruptedTasks = reconcileInterruptedScheduleRuns()
+if (interruptedTasks) {
+  console.log(`Reconciled ${interruptedTasks} interrupted scheduled task(s) → error`)
 }
 
 // Keep each project's copy of a portal-bundled skill (qc-testing) in step with the
@@ -163,6 +179,8 @@ app.use('/api/version', versionRouter)
 app.use('/api/remote', remoteRouter)
 app.use('/api/reports', reportsRouter)
 app.use('/api/responsive', responsiveRouter)
+app.use('/api/schedules', schedulesRouter)
+app.use('/api/sync', syncRouter)
 
 // JSON error handler for /api routes: turn body-parser failures (notably
 // PayloadTooLargeError, which otherwise returns an HTML page) into a clean JSON
@@ -276,6 +294,10 @@ server.listen(PORT, '127.0.0.1', () => {
   // Re-publish over Cloudflare Tunnel if the engineer left "publish on start" on.
   // After listen(), so cloudflared never dials the edge for a port nothing answers.
   autoStartTunnel()
+  // Arm the scheduled tasks. After listen() for the same reason: the first tick can
+  // fire a task immediately (one that came due while the machine was off), and that
+  // run should not be racing the server's own startup.
+  startScheduler()
 })
 
 // Kill in-flight claude/Playwright trees before exit so a `tsx watch` restart or
@@ -305,6 +327,10 @@ function gracefulExit(signal: NodeJS.Signals) {
   // cloudflared is a detached-from-the-request child like the rest: left running it
   // would keep a public hostname pointed at a port that no longer answers.
   if (shutdownTunnel()) console.log(`Closed the Cloudflare Tunnel on ${signal}`)
+  // A scheduled task's claude is spawned by the scheduler's own queue, not runManager,
+  // so it needs its own kill or a `tsx watch` restart leaves one running headless.
+  const sch = stopScheduler()
+  if (sch) console.log(`Stopped ${sch} scheduled task(s) on ${signal}`)
   // Re-raise the default behaviour so the process actually exits.
   process.exit(0)
 }

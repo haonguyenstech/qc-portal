@@ -14,6 +14,7 @@
  * rail's own ⌘K filter results are drawn from the visible set only.
  */
 import {
+  AlarmClock,
   BarChart3,
   BookOpen,
   ClipboardList,
@@ -100,6 +101,9 @@ export const navGroups: NavGroupDef[] = [
     label: 'Tools',
     items: [
       { to: '/chat', label: 'Chat', icon: MessagesSquare, end: false },
+      // Next to Chat on purpose: a scheduled task IS a chat turn nobody had to be present
+      // for, and the composer's `/scheduled` command is how most of them get created.
+      { to: '/scheduled', label: 'Scheduled', icon: AlarmClock, end: false },
       { to: '/prototype', label: 'Prototype', icon: Layout, end: false },
       { to: '/terminal', label: 'Terminal', icon: TerminalSquare, end: false },
       { to: '/notes', label: 'Note', icon: NotebookPen, end: false },

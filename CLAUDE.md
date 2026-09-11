@@ -237,11 +237,30 @@ server/src/
   sourceRepo.ts sourceJobs.ts sourceMap.ts   Source Code page: clone/sync + AI source map
   designSystem.ts   AI pass → testing/knowledge/design-system.md (Prototype page)
   projectArchive.ts streaming zip receive/extract for project import (never buffers the archive)
+  aiSync.ts syncPull.ts syncJobs.ts   AI Sync: moving a project between two machines over
+                    the tunnel. `aiSync.ts` is the HOST half — one project, a 4-digit
+                    pairing code, a read-only manifest, and the ONLY prefix allow-listed
+                    past the access gate (`/api/sync/peer/`). Five wrong codes REVOKE the
+                    share; `.mcp.json`'s credentials are blanked unless the owner opts in,
+                    and the manifest hashes the SCRUBBED bytes. `syncPull.ts` is the GUEST
+                    half: sha256 diff, not mtime (two machines don't share a clock, and
+                    copying a file forward resets mtime), so it is ADD AND UPDATE, NEVER
+                    DELETE — a file only the guest has survives. `syncJobs.ts` parks the
+                    paired session in `ready` so the engineer can choose "update the
+                    project I already have" vs "make a new one" BEFORE any bytes move
   projectContext.ts readProjectContext(root): memory + overview + knowledge → one capped
                     prompt block          contextPointer.ts  managed CLAUDE.md pointer block
   memoryStore.ts knowledgeStore.ts overviewDocs.ts notesStore.ts   testing/* storage primitives
   docReview.ts      "AI review & format" of an uploaded doc — refuses rather than degrades
   learn.ts          AI auto-capture after a run       groundingCheck.ts  anti-hallucination audit
+  scheduler.ts cron.ts scheduleLang.ts   Scheduled tasks: the ONE timer that fires them
+                    (serial, portal-wide; a task never runs twice at once, and a window
+                    missed while the laptop slept fires ONCE, late, never as catch-up),
+                    the five-field cron parser + LOCAL-time next-firing + the English
+                    sentence the UI shows, and "every weekday at 9am" / "mỗi thứ 2 lúc 8h"
+                    -> cron. The browser has NO cron parser: `description`/`nextRunAt` and
+                    the dialog's preview all come from here, so the sentence on a card and
+                    the timer cannot disagree. Nothing is ever stored from a sentence alone
   chatLearn.ts      the same auto-capture for /chat: an answered turn arms a 90s QUIET timer on
                     that conversation, then ONE reflection over the last few exchanges, fired
                     after the turn's `done` frame and never awaited. Serialised process-wide
@@ -266,7 +285,7 @@ server/src/
                     page says so when the probe reports the URL is framable
   routes/           projects, qc, files, skills, mcp, clickup, source, ai, templates,
                     knowledge, memory, notes, database, diagrams, prototype, chat,
-                    performance, reports, responsive, version, remote
+                    performance, reports, responsive, schedules, sync, version, remote
 
 web/src/
   App.tsx           two branches: `/ai-labs` renders BARE, everything else via AppShell; the job
@@ -282,6 +301,13 @@ web/src/
         mailbox.ts  (MailBox: OTP/verify-link extraction — RANKED, never filtered, by
         distance to the nearest code word; the mail body itself is rendered in a
         `sandbox=""` iframe and must stay that way)
+        schedule.ts  (Scheduled: the draft shape the dialog takes and the one
+        date format every "when does it run" line uses — deliberately NOT a cron
+        reader; see docs/architecture/scheduled.md)
+        sync.ts  (AI Sync: the vocabulary BOTH machines draw from — stage states,
+        `formatBytes`, and a percentage of BYTES not files (a run's evidence is
+        300 tiny .md files beside one 300MB recording, so a file count races to
+        97% and then hangs). Blocking starts at TRANSFER, never at pairing)
         utils.ts useRunStream.ts useXtermSession.ts
         clickup-filing.ts + components/ClickupFilingBar.tsx  (filing a finding to ClickUp:
         the severity->priority map, the error wording, and the parent field + inherit
@@ -381,6 +407,7 @@ commit when the behaviour changes.
 | `/verify` (Design Check) or project templates (`testing/templates`, bundled template sync) | `design-check-and-templates.md` |
 | `/prototype` — builds, revisions, decisions ledger, design system, comment mode | `prototype.md` |
 | `/chat` — sessions, streaming, `@`/`/` mentions, temporary chats, composer, follow-ups | `chat.md` |
+| `/scheduled` — recurring tasks, the cron layer, the sentence parser, `/scheduled` in chat | `scheduled.md` |
 | `/database` — read-only SQL console, SQL editor, Ask AI | `database.md` |
 | `/notes` | `notes.md` |
 | `/mailbox` — the disposable inbox, OTP/link extraction | `mailbox.md` |
@@ -388,6 +415,7 @@ commit when the behaviour changes.
 | `/terminal` or Continue session (resume a run's session) | `terminal-and-sessions.md` |
 | the portal-owned QC browser / Playwright attach mode | `qc-browser.md` |
 | `/remote` — publishing the portal over a Cloudflare Tunnel, and the access gate in front of it | `remote-access.md` |
+| AI Sync (project card → Open to AI Sync / pull from another machine), or project import/duplicate handling | `ai-sync.md` |
 | installing the portal as a desktop app (the manifest / service worker) | `pwa.md` |
 | the installers, the `.exe` / `.dmg`, desktop shortcuts | `installer.md` |
 

@@ -506,6 +506,119 @@
   animation: qc-orb-spark 3.6s ease-in-out infinite;
 }
 
+/* The mark's entrance. It plays ONCE, on the empty screen only, and it is the reason the
+ * hero reads as an app opening rather than an image that was already there. `both` keeps the
+ * final frame, and the element's BASE styles are that final state — so with animations off
+ * (reduced motion) the mark is simply present, never stuck invisible. */
+@keyframes qc-orb-enter {
+  0% {
+    opacity: 0;
+    transform: scale(0.86) translateY(10px);
+    filter: blur(10px);
+  }
+  60% {
+    opacity: 1;
+    filter: blur(0);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+    filter: blur(0);
+  }
+}
+.qc-orb-enter {
+  animation: qc-orb-enter 900ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+/* The aurora ring behind the glass: a conic gradient (SVG has no such paint) turning slowly,
+ * blurred, and MASKED to a ring — unmasked it is a coloured disc behind a translucent sphere,
+ * which muddies every colour inside it. Two mask properties: the unprefixed one is what
+ * current Chromium uses, the -webkit- one keeps older WebKit honest. */
+@keyframes qc-orb-spin {
+  100% {
+    transform: rotate(360deg);
+  }
+}
+.qc-orb-aurora {
+  background: conic-gradient(
+    from 0deg,
+    #a855f7 0%,
+    #6366f1 22%,
+    #38bdf8 40%,
+    #fb923c 62%,
+    #ec4899 82%,
+    #a855f7 100%
+  );
+  filter: blur(13px);
+  opacity: 0.5;
+  -webkit-mask-image: radial-gradient(closest-side, transparent 63%, #000 79%, transparent 100%);
+  mask-image: radial-gradient(closest-side, transparent 63%, #000 79%, transparent 100%);
+  animation: qc-orb-spin 18s linear infinite;
+  will-change: transform;
+}
+/* Dark mode needs MORE of it, not less: on a near-black page the pastel sphere is the only
+ * light source, and at 0.5 the ring disappeared into the background instead of ringing it. */
+.dark .qc-orb-aurora {
+  opacity: 0.72;
+  filter: blur(16px);
+}
+
+/* Pointer parallax. Degrees and pixels stay small on purpose — this is a mark leaning
+ * toward the cursor, and past ~8px it reads as a bug in the layout. The vars are written by
+ * HeroOrb's pointer handler; unset (touch, or the pointer elsewhere) they resolve to 0, so
+ * nothing depends on the handler ever having run. */
+.qc-orb-parallax {
+  transform: translate3d(
+      calc(var(--qc-orb-x, 0) * 10px),
+      calc(var(--qc-orb-y, 0) * 10px),
+      0
+    )
+    rotate(calc(var(--qc-orb-x, 0) * 4deg));
+  transition: transform 220ms cubic-bezier(0.16, 1, 0.3, 1);
+  will-change: transform;
+}
+
+/* The two orbiting satellites. Different periods and opposite directions, so the pair never
+ * lines up into one blinking ring. `view-box` + an explicit origin: the dot's own bounding
+ * box (fill-box, which the lobes use) would spin it about ITSELF and it would never travel. */
+.qc-orb-orbit-a,
+.qc-orb-orbit-b {
+  transform-box: view-box;
+  transform-origin: 100px 100px;
+  will-change: transform;
+}
+.qc-orb-orbit-a {
+  animation: qc-orb-spin 13s linear infinite;
+}
+.qc-orb-orbit-b {
+  animation: qc-orb-spin 9s linear infinite reverse;
+}
+
+/* The specular glint: a soft streak crossing the glass, then a long wait. The pause is the
+ * whole effect — a light that sweeps continuously is a scanner, one that catches the surface
+ * every few seconds is glass. Held at opacity 0 for most of the cycle. */
+@keyframes qc-orb-glint {
+  0%,
+  100% {
+    opacity: 0;
+    transform: translateX(-70px);
+  }
+  8% {
+    opacity: 0.85;
+  }
+  28% {
+    opacity: 0.85;
+  }
+  36%,
+  99% {
+    opacity: 0;
+    transform: translateX(170px);
+  }
+}
+.qc-orb-glint {
+  animation: qc-orb-glint 7.5s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
 /* Blinking caret for the Chat page's typewriter greeting. `steps(1, end)` so it snaps
    on/off like a terminal cursor instead of fading — a fading caret reads as a glow. */
 @keyframes qc-caret {
@@ -592,8 +705,23 @@
   .qc-orb-lobe-a,
   .qc-orb-lobe-b,
   .qc-orb-swirl,
-  .qc-orb-spark {
+  .qc-orb-spark,
+  .qc-orb-enter,
+  .qc-orb-aurora,
+  .qc-orb-orbit-a,
+  .qc-orb-orbit-b,
+  .qc-orb-glint {
     animation: none;
+  }
+  /* The glint's only visible state is mid-animation, so with the animation off it has to be
+     told to stay away; the parallax lean goes too — a mark that follows the cursor is motion
+     whether or not it is on a timer. */
+  .qc-orb-glint {
+    opacity: 0;
+  }
+  .qc-orb-parallax {
+    transform: none;
+    transition: none;
   }
   *,
   *::before,
@@ -894,4 +1022,132 @@
   width: 10px;
   height: 10px;
   border-radius: 3px;
+}
+
+/* ---------------------------------------------------------------------------
+ * AI Sync — the connection stage (components/SyncStage.tsx).
+ *
+ * Two machines and the link between them. A sync can run for minutes with nothing
+ * to show but a number, so the link itself carries the "it is alive and moving"
+ * signal: a marching dashed path with packets riding along it.
+ *
+ * Everything here animates transform / opacity / stroke-dashoffset only, so a long
+ * transfer costs no layout and no main-thread work while files are being written.
+ * All of it is inside `@media (prefers-reduced-motion: no-preference)`-friendly
+ * territory except the marching dash, which is disabled outright at the bottom —
+ * a travelling line is exactly the kind of motion that setting is asking about.
+ * ------------------------------------------------------------------------- */
+
+/* The link itself: a dash pattern pulled toward the destination. */
+@keyframes qc-sync-dash {
+  to {
+    stroke-dashoffset: -24;
+  }
+}
+.qc-sync-dash {
+  animation: qc-sync-dash 0.9s linear infinite;
+}
+
+/* One packet riding the path. Several of these with staggered delays read as
+ * throughput; `offset-path` keeps them on the curve without any JS per frame. */
+@keyframes qc-sync-packet {
+  0% {
+    offset-distance: 0%;
+    opacity: 0;
+  }
+  12% {
+    opacity: 1;
+  }
+  88% {
+    opacity: 1;
+  }
+  100% {
+    offset-distance: 100%;
+    opacity: 0;
+  }
+}
+.qc-sync-packet {
+  offset-path: path('M 0 28 C 60 28, 90 28, 150 28');
+  offset-rotate: 0deg;
+  animation: qc-sync-packet 1.8s cubic-bezier(0.45, 0, 0.55, 1) infinite;
+}
+
+/* The "listening for a peer" halo on the host tile while nobody has paired yet. */
+@keyframes qc-sync-halo {
+  0% {
+    transform: scale(0.85);
+    opacity: 0.55;
+  }
+  100% {
+    transform: scale(1.6);
+    opacity: 0;
+  }
+}
+.qc-sync-halo {
+  animation: qc-sync-halo 2.2s ease-out infinite;
+}
+
+/* Landing beat when a machine tile becomes active (paired / finished). */
+@keyframes qc-sync-pop {
+  0% {
+    transform: scale(0.9);
+    opacity: 0;
+  }
+  60% {
+    transform: scale(1.04);
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+.qc-sync-pop {
+  animation: qc-sync-pop 0.36s cubic-bezier(0.2, 0.9, 0.3, 1.3) both;
+}
+
+/* A digit of the pairing code, revealed one after another. */
+@keyframes qc-sync-digit {
+  0% {
+    transform: translateY(6px) scale(0.92);
+    opacity: 0;
+    filter: blur(3px);
+  }
+  100% {
+    transform: translateY(0) scale(1);
+    opacity: 1;
+    filter: blur(0);
+  }
+}
+.qc-sync-digit {
+  animation: qc-sync-digit 0.45s cubic-bezier(0.2, 0.9, 0.3, 1.2) both;
+}
+
+/* The blocking overlay's backdrop — fades rather than snaps, so "you are blocked"
+ * arrives as a state change and not as a flash. */
+@keyframes qc-sync-veil {
+  from {
+    opacity: 0;
+    backdrop-filter: blur(0);
+  }
+  to {
+    opacity: 1;
+    backdrop-filter: blur(6px);
+  }
+}
+.qc-sync-veil {
+  animation: qc-sync-veil 0.3s ease-out both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .qc-sync-dash,
+  .qc-sync-packet,
+  .qc-sync-halo,
+  .qc-sync-pop,
+  .qc-sync-digit,
+  .qc-sync-veil {
+    animation: none;
+  }
+  .qc-sync-packet {
+    opacity: 0;
+  }
 }

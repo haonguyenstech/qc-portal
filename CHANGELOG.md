@@ -3,6 +3,73 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.12.4 — 2026-09-11
+
+**Work the portal does while nobody is watching, and a project that follows you between laptops**
+
+### Added
+
+- **Scheduled tasks — a chat turn nobody had to be present for** (Tools › Scheduled). Give it a
+  prompt and a time and the portal runs it on its own: a 9am ticket brief, a nightly coverage
+  check, a Friday status. Same project folder, same tools and models as `/chat`, so anything you
+  can ask in chat you can schedule.
+  - **Say when in plain English — or Vietnamese.** "every weekday at 9am", "mỗi thứ 2 lúc 8h".
+    The dialog also has a builder, and a Custom field for a real cron expression when you want
+    one. Whichever you use, the card shows the **next three firings** before you save — "every
+    day at 9" and "every Monday at 9" look identical from a single next-run line.
+  - **Nothing is ever stored from a sentence alone.** You always see the schedule it understood,
+    in words and as the three dates, and confirm it.
+  - **A window missed while the laptop was asleep fires once, late** — never as 40 catch-up runs
+    the moment the lid opens. Tasks run one at a time, and a task never runs twice at once.
+  - **"Run now" does not move the schedule**, so trying a task is safe. Every run is kept with
+    its output, and a run the portal was killed mid-way through is marked as an error rather
+    than left spinning for ever.
+  - **`/scheduled` in the chat composer** turns the turn you just wrote into a task, which is
+    how most of them get made.
+
+- **AI Sync — move a project between two machines, repeatably.** One laptop opens a project to
+  AI Sync and reads out a link and **four digits**; the other types them in and pulls the QC
+  artifacts across. Run it again next week and it transfers only what changed.
+  - **It updates instead of duplicating.** Export/Import worked exactly once — the second time
+    the same project arrived, the folder was already there, and the only way through was a
+    second copy of the same project quietly diverging from the first. AI Sync asks which project
+    to update, or to make a new one, **before any bytes move**.
+  - **Nothing this machine has is deleted.** Files are compared by content, not by timestamp
+    (two laptops do not share a clock), so it adds and updates and leaves everything else alone.
+  - **Credentials stay put by default.** Your `.mcp.json` API keys are blanked unless you
+    explicitly tick "include credentials".
+  - **Five wrong codes close the share** — not a timed lockout, it is revoked and you have to
+    open a new one. Until you open a share, there is nothing on the other end to find at all.
+  - Progress is a percentage of **bytes**, not files, so it does not race to 97% on 300 small
+    files and then sit there on one large recording.
+
+- **A question navigator down the side of a chat.** Every question you asked in the
+  conversation, each one a jump back to it. An answer runs several screens, so finding your own
+  words was the only way back — now the marks track where you are as you scroll.
+
+- **Tidy a chat history in one go.** Tick rows in the chat rail — shift-click takes a range,
+  "Select all" takes what the list is showing — then star, archive or delete the lot. Delete
+  lists the names before it does it, archive keeps its Undo, and the toast says what actually
+  happened ("9 deleted, 3 could not be"), never a success message over a half-applied batch.
+
+- **A folder browser for "where should this project live?"** — pick the parent folder instead
+  of typing an absolute path.
+
+### Changed
+
+- **The chat welcome mark got a second pass** — it now fits the column whole instead of being
+  cropped at the equator, turns behind its glass, and says a short line now and then: one bit of
+  encouragement, one bit of QC craft, alternating. All of it stops under "reduce motion".
+
+- **The Projects settings page was rebuilt** around the sync/import/duplicate rules above.
+
+### Fixed
+
+- **Import no longer strands you at the end of a 1.87 GB upload.** It checks the destination
+  *before* the transfer, tells you whether the clash is a registered project or just a folder
+  sitting there, and offers "App (2)" rather than leaving you to invent a name. A partial
+  extract is rolled back — but only from a folder the import itself created.
+
 ## 0.12.3 — 2026-09-11
 
 **Two new pages: where the project stands, and how it looks on a phone**

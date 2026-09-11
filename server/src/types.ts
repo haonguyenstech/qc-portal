@@ -36,6 +36,11 @@ export interface Project {
   autoLearnModel: string // model alias for that reflection
   defaultSkill: string // skill auto-selected on the Launch QC Run page ('' = no default)
   persistentBrowser: boolean // drive the portal-owned QC browser over CDP (survives Stop)
+  // Identity that survives a rename or a move, so AI Sync / import can tell "the same
+  // project, on another machine" from "a different project that happens to be called
+  // the same thing". Generated lazily; copied onto the guest's project by the first
+  // sync, which is what makes the SECOND sync an update instead of a duplicate.
+  syncKey: string
 }
 
 /** Where a run drives the product under test. */

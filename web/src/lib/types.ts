@@ -1,5 +1,5 @@
 export type RunStatus = 'queued' | 'running' | 'paused' | 'passed' | 'failed' | 'error' | 'canceled'
-export interface Project { id: string; name: string; rootPath: string; isDefault: boolean; pinned?: boolean; createdAt: string; description?: string; diagram?: string; exists?: boolean; hasSkills?: boolean; hasMcp?: boolean; hasClaudeMd?: boolean; sourceRepoUrl?: string; sourceProvider?: string; sourceBranch?: string; sourcePath?: string; sourceLastSync?: string; sourceLastCommit?: string; groundingCheck?: boolean; groundingCheckModel?: string; autoLearn?: boolean; autoLearnModel?: string; defaultSkill?: string; persistentBrowser?: boolean }
+export interface Project { id: string; name: string; rootPath: string; isDefault: boolean; pinned?: boolean; createdAt: string; description?: string; diagram?: string; exists?: boolean; hasSkills?: boolean; hasMcp?: boolean; hasClaudeMd?: boolean; sourceRepoUrl?: string; sourceProvider?: string; sourceBranch?: string; sourcePath?: string; sourceLastSync?: string; sourceLastCommit?: string; groundingCheck?: boolean; groundingCheckModel?: string; autoLearn?: boolean; autoLearnModel?: string; defaultSkill?: string; persistentBrowser?: boolean; syncKey?: string }
 /** Where a run drove the product under test (desktop browser / device browser / native app). */
 export type TestTarget = 'web' | 'web-mobile' | 'app-mobile'
 /** What a run tested: one ticket's acceptance criteria, or an end-to-end flow (no ticket — `ticketId` is the flow name's slug). */
@@ -287,4 +287,184 @@ export interface ResponsiveUrlProbe {
   frameBlockedBy: string | null
   viewportMeta: string | null
   error: string | null
+}
+
+// ---- Scheduled tasks (/scheduled) ----
+//
+// `description` and `nextRunAt` are computed SERVER-SIDE (server/src/cron.ts) and arrive
+// with every row on purpose: the browser has no cron parser, so the sentence under a task
+// and the timer that fires it cannot drift apart.
+export type ScheduleMode = 'read' | 'write' | 'full'
+export type ScheduleStatus = 'ok' | 'error' | 'running'
+export interface Schedule {
+  id: string
+  projectId: string
+  title: string
+  prompt: string
+  cron: string
+  /** "Every weekday at 9:00 AM" — the human reading of `cron`. */
+  description: string
+  mode: ScheduleMode
+  model: string
+  effort: string
+  enabled: boolean
+  createdAt: string
+  updatedAt: string
+  nextRunAt: string | null
+  lastRunAt: string | null
+  lastStatus: ScheduleStatus | null
+  runCount: number
+  /** True while its claude is actually working right now. */
+  running: boolean
+}
+export interface ScheduleRun {
+  id: string
+  scheduleId: string
+  projectId: string
+  /** The task's title when this run fired — renaming the task never rewrites history. */
+  title: string
+  trigger: 'schedule' | 'manual'
+  status: ScheduleStatus
+  answer: string
+  error: string | null
+  costUsd: number
+  startedAt: string
+  finishedAt: string | null
+}
+/** What `/parse` returns: a schedule proposed, never stored — the engineer confirms it. */
+export interface ScheduleDraft {
+  title: string
+  prompt: string
+  cron: string
+  description: string
+  nextRunAt: string | null
+}
+
+// ---------------------------------------------------------------- AI Sync
+// Mirrors server/src/aiSync.ts + syncJobs.ts. See docs/architecture/ai-sync.md.
+
+/** A machine, as the other side sees it. Named by hostname, disambiguated by LAN IP. */
+export interface MachineIdentity { id: string; name: string; platform: string; ip: string }
+
+/** One tickable slice of a project. The catalog is served by GET /api/sync/groups. */
+export interface SyncGroupDef {
+  key: string
+  label: string
+  description: string
+  entries: string[]
+  heavy?: boolean
+}
+
+export type ShareState = 'waiting' | 'paired' | 'syncing' | 'done' | 'error' | 'revoked'
+
+/** How far the guest has got, pushed up to the host so both sides show one truth. */
+export interface SharePeerProgress {
+  phase: string
+  filesDone: number
+  filesTotal: number
+  bytesDone: number
+  bytesTotal: number
+  message: string
+}
+
+/** The host's view of its own open share — includes the 4-digit code, since it owns it. */
+export interface SyncShare {
+  id: string
+  projectId: string
+  projectName: string
+  code: string
+  state: ShareState
+  offeredGroups: string[]
+  includeMcpSecrets: boolean
+  expiresAt: string
+  failures: number
+  maxFailures: number
+  host: MachineIdentity
+  peer: (MachineIdentity & { pairedAt: string }) | null
+  progress: SharePeerProgress | null
+  filesServed: number
+  bytesServed: number
+  totalBytes: number
+  filesTotal: number
+  summary: string
+  error: string | null
+  finishedAt: string | null
+}
+
+export interface SyncShareStatus {
+  share: SyncShare | null
+  self: MachineIdentity
+  /** The public URL to hand over, or null when no tunnel is running. */
+  endpoint: string | null
+  tunnelState: string
+  tunnelInstalled: boolean
+  hasAccessPassword: boolean
+}
+
+export type SyncJobStatus = 'pairing' | 'ready' | 'running' | 'done' | 'error' | 'cancelled'
+
+export interface SyncLogLine { time: string; level: 'info' | 'success' | 'error'; text: string }
+
+/** A local project the incoming one appears to BE. `syncKey` is certain, `name` a guess. */
+export interface SyncMatch {
+  projectId: string
+  name: string
+  rootPath: string
+  by: 'syncKey' | 'name'
+}
+
+export type SyncTarget =
+  | { mode: 'existing'; projectId: string }
+  | { mode: 'new'; name: string; parentPath: string }
+
+export interface SyncProgress {
+  phase: 'pairing' | 'manifest' | 'compare' | 'transfer' | 'summary' | 'finished'
+  filesDone: number
+  filesTotal: number
+  bytesDone: number
+  bytesTotal: number
+  message: string
+}
+
+/** The guest's pull job. The bearer token stays on the server and is never in here. */
+export interface SyncJob {
+  id: string
+  status: SyncJobStatus
+  endpoint: string
+  host: MachineIdentity | null
+  self: MachineIdentity
+  remoteProjectName: string
+  remoteSyncKey: string
+  offeredGroups: string[]
+  mcpScrubbed: boolean
+  match: SyncMatch | null
+  target: SyncTarget | null
+  projectId: string | null
+  projectName: string
+  rootPath: string
+  groups: string[]
+  plan: {
+    newCount: number
+    changedCount: number
+    sameCount: number
+    transferBytes: number
+    byGroup: { group: string; files: number; bytes: number }[]
+  } | null
+  progress: SyncProgress
+  logs: SyncLogLine[]
+  summary: string
+  failures: string[]
+  error: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+/** What GET /api/projects/import/check answers, so a duplicate is caught before the upload. */
+export interface ImportCheck {
+  dest: string
+  parentExists: boolean
+  folderExists: boolean
+  project: { id: string; name: string; rootPath: string } | null
+  nameTaken: { id: string; name: string; rootPath: string } | null
+  suggestedName: string
 }

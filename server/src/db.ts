@@ -301,6 +301,17 @@ db.exec(`
   }
 }
 
+// Migration: per-project sync identity (AI Sync). A project imported or synced from
+// another machine carries the SOURCE project's key, which is the only reliable way to
+// answer "do I already have this?" — a name can be edited and a folder can be moved,
+// on either side. Empty until something needs one (see `ensureSyncKey`).
+{
+  const cols = db.prepare(`PRAGMA table_info(projects)`).all() as { name: string }[]
+  if (!cols.some((c) => c.name === 'syncKey')) {
+    db.exec(`ALTER TABLE projects ADD COLUMN syncKey TEXT NOT NULL DEFAULT ''`)
+  }
+}
+
 db.exec(`CREATE INDEX IF NOT EXISTS idx_runs_projectId ON runs(projectId)`)
 
 // Multiple named Mermaid diagrams per project (the Overview page lets the user
@@ -382,6 +393,55 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_design_checks_projectId ON design_checks(projectId);
 `)
 
+// ----------------------------------------------------------------- Scheduled tasks
+//
+// A scheduled task is a prompt plus a cron expression: the server fires it on its own,
+// with no browser open. It therefore CANNOT live in the project folder the way notes and
+// chats do — the scheduler has to see every project's tasks at boot, before anyone has
+// picked an active project — so it lives here beside runs, keyed by projectId.
+//
+// `nextRunAt` is DERIVED (cron + now) and stored anyway: it is what the tick loop selects
+// on, so a due task is one indexed comparison rather than 200 cron parses a minute, and
+// the row survives a restart already knowing when it is next due. It is recomputed from
+// the cron on every write and after every fire — never edited on its own.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS schedules (
+    id TEXT PRIMARY KEY,
+    projectId TEXT NOT NULL,
+    title TEXT NOT NULL,
+    prompt TEXT NOT NULL,
+    cron TEXT NOT NULL,
+    mode TEXT NOT NULL DEFAULT 'read',
+    model TEXT NOT NULL DEFAULT 'default',
+    effort TEXT NOT NULL DEFAULT 'medium',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL,
+    nextRunAt TEXT,
+    lastRunAt TEXT,
+    lastStatus TEXT,
+    runCount INTEGER NOT NULL DEFAULT 0
+  );
+  CREATE INDEX IF NOT EXISTS idx_schedules_projectId ON schedules(projectId);
+  CREATE INDEX IF NOT EXISTS idx_schedules_next ON schedules(enabled, nextRunAt);
+
+  CREATE TABLE IF NOT EXISTS schedule_runs (
+    id TEXT PRIMARY KEY,
+    scheduleId TEXT NOT NULL,
+    projectId TEXT NOT NULL,
+    title TEXT NOT NULL,
+    trigger TEXT NOT NULL DEFAULT 'schedule',
+    status TEXT NOT NULL,
+    answer TEXT NOT NULL DEFAULT '',
+    error TEXT,
+    costUsd REAL NOT NULL DEFAULT 0,
+    startedAt TEXT NOT NULL,
+    finishedAt TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_schedule_runs_sched ON schedule_runs(scheduleId, startedAt);
+  CREATE INDEX IF NOT EXISTS idx_schedule_runs_started ON schedule_runs(startedAt);
+`)
+
 function now(): string {
   return new Date().toISOString()
 }
@@ -444,7 +504,31 @@ function rowToProject(row: Record<string, unknown>): Project {
     autoLearnModel: (row.autoLearnModel as string | null) || 'haiku',
     defaultSkill: (row.defaultSkill as string | null) ?? '',
     persistentBrowser: Number(row.persistentBrowser ?? 0) === 1,
+    syncKey: (row.syncKey as string | null) ?? '',
   }
+}
+
+/**
+ * This project's sync identity, minting one on first use. Lazy rather than assigned at
+ * creation so every project that predates AI Sync gets one the moment it is shared or
+ * matched, with no backfill migration over a database we don't own.
+ */
+export function ensureSyncKey(id: string): string {
+  const project = getProject(id)
+  if (!project) return ''
+  if (project.syncKey) return project.syncKey
+  const key = crypto.randomUUID()
+  db.prepare(`UPDATE projects SET syncKey = ? WHERE id = ?`).run(key, id)
+  return key
+}
+
+/** The registered project carrying this sync key, if any. */
+export function findProjectBySyncKey(syncKey: string): Project | undefined {
+  if (!syncKey) return undefined
+  const row = db.prepare(`SELECT * FROM projects WHERE syncKey = ? LIMIT 1`).get(syncKey) as
+    | Record<string, unknown>
+    | undefined
+  return row ? rowToProject(row) : undefined
 }
 
 export function listProjects(): Project[] {
@@ -485,6 +569,9 @@ export function createProject(name: string, rootPath: string, isDefault = false)
     defaultSkill: '',
     // Off by default: attaching changes which browser a run drives, so it's opt-in.
     persistentBrowser: false,
+    // Minted on demand (`ensureSyncKey`), not here — a project that is never shared
+    // never needs one.
+    syncKey: '',
   }
   insertProjectStmt.run(
     project.id,
@@ -516,6 +603,7 @@ export function updateProject(
       | 'autoLearnModel'
       | 'defaultSkill'
       | 'persistentBrowser'
+      | 'syncKey'
     >
   >,
 ): void {
@@ -532,6 +620,7 @@ export function updateProject(
       'autoLearnModel',
       'defaultSkill',
       'persistentBrowser',
+      'syncKey',
     ] as const
   ).filter((k) => k in partial)
   if (keys.length === 0) return
@@ -544,6 +633,10 @@ export function updateProject(
 }
 
 export function deleteProject(id: string): void {
+  // The project's scheduled tasks go with it. They are the one kind of row that keeps
+  // WORKING after the thing it belongs to is gone — the scheduler would spawn claude in a
+  // folder that no longer exists, once a day, for ever — so this cleanup is not tidiness.
+  deleteSchedulesForProject(id)
   deleteProjectStmt.run(id)
 }
 
@@ -1290,4 +1383,274 @@ export function setTemplateInstallHash(
 /** Forget the fingerprint (the template was deleted from the project). */
 export function clearTemplateInstallHash(projectId: string, templateKey: string): void {
   deleteTemplateInstallStmt.run(projectId, templateKey)
+}
+
+// ----------------------------------------------------------------- Scheduled tasks
+//
+// The row as stored. `nextRunAt` is derived from `cron` on every write (see
+// scheduler.ts `reschedule`) — no caller sets it by hand, because a nextRunAt that
+// disagrees with the cron is a task that fires at a time the page does not show.
+
+export type ScheduleMode = 'read' | 'write' | 'full'
+export type ScheduleStatus = 'ok' | 'error' | 'running'
+export type ScheduleTrigger = 'schedule' | 'manual'
+
+export interface ScheduleRow {
+  id: string
+  projectId: string
+  title: string
+  prompt: string
+  cron: string
+  mode: ScheduleMode
+  model: string
+  effort: string
+  enabled: boolean
+  createdAt: string
+  updatedAt: string
+  nextRunAt: string | null
+  lastRunAt: string | null
+  lastStatus: ScheduleStatus | null
+  runCount: number
+}
+
+export interface ScheduleRunRow {
+  id: string
+  scheduleId: string
+  projectId: string
+  /** The task's title AS IT WAS when the run fired — renaming a task must not rewrite history. */
+  title: string
+  trigger: ScheduleTrigger
+  status: ScheduleStatus
+  answer: string
+  error: string | null
+  costUsd: number
+  startedAt: string
+  finishedAt: string | null
+}
+
+function rowToSchedule(r: Record<string, unknown>): ScheduleRow {
+  return {
+    id: r.id as string,
+    projectId: r.projectId as string,
+    title: r.title as string,
+    prompt: r.prompt as string,
+    cron: r.cron as string,
+    mode: (r.mode as ScheduleMode) ?? 'read',
+    model: (r.model as string) ?? 'default',
+    effort: (r.effort as string) ?? 'medium',
+    enabled: Number(r.enabled) === 1,
+    createdAt: r.createdAt as string,
+    updatedAt: r.updatedAt as string,
+    nextRunAt: (r.nextRunAt as string | null) ?? null,
+    lastRunAt: (r.lastRunAt as string | null) ?? null,
+    lastStatus: (r.lastStatus as ScheduleStatus | null) ?? null,
+    runCount: Number(r.runCount ?? 0),
+  }
+}
+
+function rowToScheduleRun(r: Record<string, unknown>): ScheduleRunRow {
+  return {
+    id: r.id as string,
+    scheduleId: r.scheduleId as string,
+    projectId: r.projectId as string,
+    title: (r.title as string) ?? '',
+    trigger: (r.trigger as ScheduleTrigger) ?? 'schedule',
+    status: r.status as ScheduleStatus,
+    answer: (r.answer as string | null) ?? '',
+    error: (r.error as string | null) ?? null,
+    costUsd: Number(r.costUsd ?? 0),
+    startedAt: r.startedAt as string,
+    finishedAt: (r.finishedAt as string | null) ?? null,
+  }
+}
+
+export function listSchedules(projectId?: string): ScheduleRow[] {
+  const rows = projectId
+    ? (db
+        .prepare(`SELECT * FROM schedules WHERE projectId = ? ORDER BY createdAt DESC`)
+        .all(projectId) as Record<string, unknown>[])
+    : (db.prepare(`SELECT * FROM schedules ORDER BY createdAt DESC`).all() as Record<
+        string,
+        unknown
+      >[])
+  return rows.map(rowToSchedule)
+}
+
+export function getSchedule(id: string): ScheduleRow | undefined {
+  const row = db.prepare(`SELECT * FROM schedules WHERE id = ?`).get(id) as
+    | Record<string, unknown>
+    | undefined
+  return row ? rowToSchedule(row) : undefined
+}
+
+/**
+ * Every enabled task whose next firing has already passed.
+ *
+ * "Already passed" and not "is exactly now": the portal is a laptop app, so it gets
+ * suspended, closed and restarted. A task due at 09:00 on a machine that was asleep until
+ * 09:40 still runs — once, at 09:40 — instead of being silently skipped. Catching up on
+ * every missed occurrence would instead fire a 15-minute task 40 times on wake.
+ */
+export function dueSchedules(nowIso: string): ScheduleRow[] {
+  const rows = db
+    .prepare(
+      `SELECT * FROM schedules
+        WHERE enabled = 1 AND nextRunAt IS NOT NULL AND nextRunAt <= ?
+        ORDER BY nextRunAt ASC`,
+    )
+    .all(nowIso) as Record<string, unknown>[]
+  return rows.map(rowToSchedule)
+}
+
+export function insertSchedule(s: ScheduleRow): void {
+  db.prepare(
+    `INSERT INTO schedules
+      (id, projectId, title, prompt, cron, mode, model, effort, enabled,
+       createdAt, updatedAt, nextRunAt, lastRunAt, lastStatus, runCount)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    s.id,
+    s.projectId,
+    s.title,
+    s.prompt,
+    s.cron,
+    s.mode,
+    s.model,
+    s.effort,
+    s.enabled ? 1 : 0,
+    s.createdAt,
+    s.updatedAt,
+    s.nextRunAt,
+    s.lastRunAt,
+    s.lastStatus,
+    s.runCount,
+  )
+}
+
+/** Patch a schedule column-wise. Unknown keys are ignored; `undefined` leaves a column alone. */
+export function updateScheduleRow(
+  id: string,
+  partial: Partial<Omit<ScheduleRow, 'id' | 'projectId' | 'createdAt'>>,
+): ScheduleRow | undefined {
+  const existing = getSchedule(id)
+  if (!existing) return undefined
+  const cols: string[] = []
+  const vals: (string | number | null)[] = []
+  const put = (col: string, v: string | number | null) => {
+    cols.push(`${col} = ?`)
+    vals.push(v)
+  }
+  if (partial.title !== undefined) put('title', partial.title)
+  if (partial.prompt !== undefined) put('prompt', partial.prompt)
+  if (partial.cron !== undefined) put('cron', partial.cron)
+  if (partial.mode !== undefined) put('mode', partial.mode)
+  if (partial.model !== undefined) put('model', partial.model)
+  if (partial.effort !== undefined) put('effort', partial.effort)
+  if (partial.enabled !== undefined) put('enabled', partial.enabled ? 1 : 0)
+  if (partial.nextRunAt !== undefined) put('nextRunAt', partial.nextRunAt)
+  if (partial.lastRunAt !== undefined) put('lastRunAt', partial.lastRunAt)
+  if (partial.lastStatus !== undefined) put('lastStatus', partial.lastStatus)
+  if (partial.runCount !== undefined) put('runCount', partial.runCount)
+  put('updatedAt', partial.updatedAt ?? now())
+  db.prepare(`UPDATE schedules SET ${cols.join(', ')} WHERE id = ?`).run(...vals, id)
+  return getSchedule(id)
+}
+
+export function deleteSchedule(id: string): boolean {
+  const existed = !!getSchedule(id)
+  db.prepare(`DELETE FROM schedules WHERE id = ?`).run(id)
+  db.prepare(`DELETE FROM schedule_runs WHERE scheduleId = ?`).run(id)
+  return existed
+}
+
+/** Drop every task belonging to a project the engineer removed — nothing left to run them in. */
+export function deleteSchedulesForProject(projectId: string): void {
+  db.prepare(`DELETE FROM schedule_runs WHERE projectId = ?`).run(projectId)
+  db.prepare(`DELETE FROM schedules WHERE projectId = ?`).run(projectId)
+}
+
+export function insertScheduleRun(r: ScheduleRunRow): void {
+  db.prepare(
+    `INSERT INTO schedule_runs
+      (id, scheduleId, projectId, title, trigger, status, answer, error, costUsd, startedAt, finishedAt)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    r.id,
+    r.scheduleId,
+    r.projectId,
+    r.title,
+    r.trigger,
+    r.status,
+    r.answer,
+    r.error,
+    r.costUsd,
+    r.startedAt,
+    r.finishedAt,
+  )
+}
+
+export function finishScheduleRun(
+  id: string,
+  patch: { status: ScheduleStatus; answer?: string; error?: string | null; costUsd?: number },
+): void {
+  db.prepare(
+    `UPDATE schedule_runs SET status = ?, answer = ?, error = ?, costUsd = ?, finishedAt = ? WHERE id = ?`,
+  ).run(
+    patch.status,
+    patch.answer ?? '',
+    patch.error ?? null,
+    patch.costUsd ?? 0,
+    now(),
+    id,
+  )
+}
+
+export function listScheduleRuns(scheduleId: string, limit = 30): ScheduleRunRow[] {
+  return (
+    db
+      .prepare(`SELECT * FROM schedule_runs WHERE scheduleId = ? ORDER BY startedAt DESC LIMIT ?`)
+      .all(scheduleId, limit) as Record<string, unknown>[]
+  ).map(rowToScheduleRun)
+}
+
+export function getScheduleRun(id: string): ScheduleRunRow | undefined {
+  const row = db.prepare(`SELECT * FROM schedule_runs WHERE id = ?`).get(id) as
+    | Record<string, unknown>
+    | undefined
+  return row ? rowToScheduleRun(row) : undefined
+}
+
+/**
+ * Finished runs of a project's tasks since `sinceIso` — what the always-mounted watcher
+ * polls so a task that fired while the engineer was on another page still announces itself.
+ */
+export function scheduleRunsSince(projectId: string, sinceIso: string, limit = 20): ScheduleRunRow[] {
+  return (
+    db
+      .prepare(
+        `SELECT * FROM schedule_runs
+          WHERE projectId = ? AND finishedAt IS NOT NULL AND finishedAt > ?
+          ORDER BY finishedAt ASC LIMIT ?`,
+      )
+      .all(projectId, sinceIso, limit) as Record<string, unknown>[]
+  ).map(rowToScheduleRun)
+}
+
+/**
+ * A run left "running" by a shutdown is not running any more — the child died with the
+ * server. Called once at boot, the same reconciliation `reconcileInterruptedRuns` does for
+ * QC runs, so the page never shows a spinner for a process that no longer exists.
+ */
+export function reconcileInterruptedScheduleRuns(): number {
+  const rows = db.prepare(`SELECT id FROM schedule_runs WHERE status = 'running'`).all() as {
+    id: string
+  }[]
+  for (const r of rows) {
+    finishScheduleRun(r.id, {
+      status: 'error',
+      error: 'The portal restarted while this task was running.',
+    })
+  }
+  db.prepare(`UPDATE schedules SET lastStatus = 'error' WHERE lastStatus = 'running'`).run()
+  return rows.length
 }

@@ -6,6 +6,8 @@ import JSZip from 'jszip'
 import {
   createProject,
   deleteProject,
+  ensureSyncKey,
+  findProjectBySyncKey,
   getProject,
   listProjects,
   listRuns,
@@ -24,6 +26,7 @@ import {
   discardUpload,
   extractZipToFolder,
   hasZipSignature,
+  readZipManifest,
   receiveUploadToTempFile,
   UploadTooLargeError,
 } from '../projectArchive.js'
@@ -444,7 +447,15 @@ projectsRouter.get('/:id/export', async (req, res) => {
   zip.file(
     EXPORT_MANIFEST,
     JSON.stringify(
-      { name: project.name, exportedAt: new Date().toISOString(), format: 1 },
+      {
+        name: project.name,
+        exportedAt: new Date().toISOString(),
+        // format 2 adds `syncKey`: the project identity that lets an import on another
+        // machine recognise "I already have this" instead of making a second copy. A
+        // format-1 zip still imports — it just has to fall back to matching by name.
+        format: 2,
+        syncKey: ensureSyncKey(project.id),
+      },
       null,
       2,
     ),
@@ -472,6 +483,64 @@ projectsRouter.get('/:id/export', async (req, res) => {
 })
 
 /**
+ * Would importing here collide with something that already exists?
+ *
+ * Asked BEFORE the upload starts, deliberately. The old flow discovered a collision
+ * only after the engineer had streamed a 1.87 GB zip across, answered 409, and left
+ * them to rename and do the whole transfer again — so in practice people imported
+ * under a slightly different name and ended up with two of the same project, which is
+ * the duplicate this endpoint exists to prevent.
+ *
+ * `folderExists` and `project` are different problems and are reported separately: a
+ * folder can be there with nothing registered against it (a hand-copied checkout), and
+ * a project can be registered with a name that clashes while living somewhere else.
+ */
+projectsRouter.get('/import/check', (req, res) => {
+  const name = typeof req.query.name === 'string' ? req.query.name.trim() : ''
+  const parentPath = typeof req.query.parentPath === 'string' ? req.query.parentPath.trim() : ''
+  if (!name || !parentPath) {
+    return res.status(400).json({ error: 'name and parentPath are required' })
+  }
+  const safe = safeFolderName(name)
+  if (!safe) return res.status(400).json({ error: 'invalid project name' })
+  const parent = path.resolve(parentPath)
+  const dest = path.join(parent, safe)
+  const projects = listProjects()
+
+  // Definitive: a registered project whose folder IS the destination.
+  const atPath = projects.find((p) => path.resolve(p.rootPath) === path.resolve(dest))
+  // Softer: same display name, different folder. Worth showing, not worth acting on.
+  const sameName = projects.find(
+    (p) => p.id !== atPath?.id && p.name.trim().toLowerCase() === name.toLowerCase(),
+  )
+
+  res.json({
+    dest,
+    parentExists: isDir(parent),
+    folderExists: fs.existsSync(dest),
+    /** The project the import would land on top of, if any. */
+    project: atPath ? { id: atPath.id, name: atPath.name, rootPath: atPath.rootPath } : null,
+    nameTaken: sameName ? { id: sameName.id, name: sameName.name, rootPath: sameName.rootPath } : null,
+    suggestedName: suggestFreeName(name, parent, projects),
+  })
+})
+
+/** "App" -> "App (2)" -> "App (3)": the first name whose folder and title are both free. */
+function suggestFreeName(name: string, parent: string, projects: Project[]): string {
+  const taken = new Set(projects.map((p) => p.name.trim().toLowerCase()))
+  const base = name.replace(/\s*\(\d+\)$/, '').trim() || name
+  for (let n = 2; n < 100; n += 1) {
+    const candidate = `${base} (${n})`
+    const folder = safeFolderName(candidate)
+    if (!folder) continue
+    if (taken.has(candidate.toLowerCase())) continue
+    if (fs.existsSync(path.join(parent, folder))) continue
+    return candidate
+  }
+  return `${base} (${Date.now()})`
+}
+
+/**
  * Create a project from an exported .zip. The zip arrives as the **raw request
  * body** (binary) — not base64-in-JSON — and is streamed to a temp file, then
  * extracted member by member, so an export dominated by ticket attachments
@@ -483,22 +552,50 @@ projectsRouter.get('/:id/export', async (req, res) => {
 projectsRouter.post('/import', async (req, res) => {
   const name = typeof req.query.name === 'string' ? req.query.name : ''
   const parentPath = typeof req.query.parentPath === 'string' ? req.query.parentPath : ''
-  if (!name.trim()) {
-    return res.status(400).json({ error: 'name is required' })
-  }
-  if (!parentPath.trim()) {
-    return res.status(400).json({ error: 'parentPath is required' })
-  }
+  // 'new' (default) creates a project; 'update' writes into one that is already
+  // registered. The choice is made in the browser, from GET /import/check, BEFORE a
+  // byte is uploaded — see that route for why.
+  const mode = req.query.mode === 'update' ? 'update' : 'new'
+  const targetId = typeof req.query.projectId === 'string' ? req.query.projectId : ''
 
-  const parent = path.resolve(parentPath.trim())
-  if (!isDir(parent)) {
-    return res.status(400).json({ error: `not a folder: ${parent}` })
-  }
-  const safe = safeFolderName(name)
-  if (!safe) return res.status(400).json({ error: 'invalid project name' })
-  const dest = path.join(parent, safe)
-  if (fs.existsSync(dest)) {
-    return res.status(409).json({ error: `a folder named "${safe}" already exists here` })
+  let dest: string
+  let existing: Project | undefined
+
+  if (mode === 'update') {
+    existing = getProject(targetId)
+    if (!existing) return res.status(404).json({ error: 'project not found' })
+    if (!isDir(existing.rootPath)) {
+      return res.status(400).json({ error: `the project folder is missing: ${existing.rootPath}` })
+    }
+    // Refuse to write into a folder something is actively using — the same rule a
+    // rename follows, for the same reason: files would land under a path in use.
+    const busy = projectBusyReason(existing.id)
+    if (busy) {
+      return res.status(409).json({
+        error: `Cannot import into "${existing.name}" while ${busy}. Wait for it to finish.`,
+      })
+    }
+    dest = existing.rootPath
+  } else {
+    if (!name.trim()) {
+      return res.status(400).json({ error: 'name is required' })
+    }
+    if (!parentPath.trim()) {
+      return res.status(400).json({ error: 'parentPath is required' })
+    }
+    const parent = path.resolve(parentPath.trim())
+    if (!isDir(parent)) {
+      return res.status(400).json({ error: `not a folder: ${parent}` })
+    }
+    const safe = safeFolderName(name)
+    if (!safe) return res.status(400).json({ error: 'invalid project name' })
+    dest = path.join(parent, safe)
+    if (fs.existsSync(dest)) {
+      return res.status(409).json({
+        error: `a folder named "${safe}" already exists here`,
+        folderExists: true,
+      })
+    }
   }
 
   // Validate everything we can BEFORE spending minutes streaming gigabytes to
@@ -532,18 +629,35 @@ projectsRouter.post('/import', async (req, res) => {
       })
     }
 
+    // Read the identity out of the archive before extracting it (one member, not a
+    // second pass over the whole zip).
+    const manifest = await readZipManifest(upload.filePath, EXPORT_MANIFEST)
+    const zipSyncKey = typeof manifest?.syncKey === 'string' ? manifest.syncKey : ''
+
     try {
       // The manifest is metadata, not a project file.
       await extractZipToFolder(upload.filePath, dest, new Set([EXPORT_MANIFEST]))
     } catch (err) {
-      fs.rmSync(dest, { recursive: true, force: true }) // roll back a partial extract
+      // Roll back a partial extract — but only for a folder WE made. Wiping the
+      // destination in update mode would delete the project the user asked to update.
+      if (mode === 'new') fs.rmSync(dest, { recursive: true, force: true })
       return res
         .status(400)
         .json({ error: err instanceof Error ? err.message : 'failed to extract the zip' })
     }
 
-    const project = createProject(name.trim(), dest, false)
-    return res.status(201).json({ ...project, ...rootInfo(project.rootPath) })
+    const project = existing ?? createProject(name.trim(), dest, false)
+    // Adopt the source project's identity, so the NEXT import or AI Sync of the same
+    // project recognises this one instead of offering to make a third copy. Never
+    // stolen from another local project that already carries it.
+    if (zipSyncKey) {
+      const holder = findProjectBySyncKey(zipSyncKey)
+      if (!holder || holder.id === project.id) updateProject(project.id, { syncKey: zipSyncKey })
+    }
+    const refreshed = getProject(project.id) ?? project
+    return res
+      .status(mode === 'update' ? 200 : 201)
+      .json({ ...refreshed, ...rootInfo(refreshed.rootPath), updated: mode === 'update' })
   } finally {
     discardUpload(upload.filePath)
   }

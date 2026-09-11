@@ -12,6 +12,17 @@ import type {
   ResponsiveDeviceSpec,
   ResponsiveJob,
   ResponsiveUrlProbe,
+  Schedule,
+  ScheduleDraft,
+  ScheduleMode,
+  ScheduleRun,
+  ImportCheck,
+  MachineIdentity,
+  SyncGroupDef,
+  SyncJob,
+  SyncShare,
+  SyncShareStatus,
+  SyncTarget,
 } from './types'
 import type { SchemaTable } from './sql-complete'
 
@@ -168,8 +179,16 @@ export async function importProject(body: {
   name: string
   parentPath: string
   file: File | Blob
-}): Promise<Project> {
+  /** 'update' writes into an existing project instead of creating a second one. */
+  mode?: 'new' | 'update'
+  /** Required for 'update' — which registered project the zip lands on. */
+  projectId?: string
+}): Promise<Project & { updated?: boolean }> {
   const qs = new URLSearchParams({ name: body.name, parentPath: body.parentPath })
+  if (body.mode === 'update') {
+    qs.set('mode', 'update')
+    qs.set('projectId', body.projectId ?? '')
+  }
   const res = await fetch(`/api/projects/import?${qs.toString()}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/zip' },
@@ -187,7 +206,7 @@ export async function importProject(body: {
     }
     throw new Error(message)
   }
-  return res.json() as Promise<Project>
+  return res.json() as Promise<Project & { updated?: boolean }>
 }
 
 /**
@@ -4854,4 +4873,160 @@ export function deleteResponsiveJob(id: string): Promise<{ deleted: boolean }> {
 /** Where one device's screenshot is served from — an <img src>, not a fetch. */
 export function responsiveShotUrl(jobId: string, file: string): string {
   return `/api/responsive/jobs/${encodeURIComponent(jobId)}/shot/${encodeURIComponent(file)}`
+}
+
+// ---- Scheduled tasks ----
+
+export function listSchedules(projectId: string): Promise<{ schedules: Schedule[] }> {
+  return request(`/api/schedules?projectId=${encodeURIComponent(projectId)}`)
+}
+
+export function createSchedule(
+  projectId: string,
+  body: {
+    title?: string
+    prompt: string
+    cron: string
+    mode?: ScheduleMode
+    model?: string
+    effort?: string
+    enabled?: boolean
+  },
+): Promise<{ schedule: Schedule }> {
+  return request('/api/schedules', {
+    method: 'POST',
+    body: JSON.stringify({ projectId, ...body }),
+  })
+}
+
+export function updateSchedule(
+  id: string,
+  body: Partial<{
+    title: string
+    prompt: string
+    cron: string
+    mode: ScheduleMode
+    model: string
+    effort: string
+    enabled: boolean
+  }>,
+): Promise<{ schedule: Schedule }> {
+  return request(`/api/schedules/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(body),
+  })
+}
+
+export function deleteSchedule(id: string): Promise<{ ok: boolean }> {
+  return request(`/api/schedules/${encodeURIComponent(id)}`, { method: 'DELETE' })
+}
+
+/** Run it now without moving its next firing. 409 when it is already working. */
+export function runScheduleNow(id: string): Promise<{ runId: string; schedule: Schedule }> {
+  return request(`/api/schedules/${encodeURIComponent(id)}/run`, { method: 'POST' })
+}
+
+export function cancelSchedule(id: string): Promise<{ ok: boolean; stopped: boolean }> {
+  return request(`/api/schedules/${encodeURIComponent(id)}/cancel`, { method: 'POST' })
+}
+
+export function listScheduleRuns(id: string): Promise<{ runs: ScheduleRun[] }> {
+  return request(`/api/schedules/${encodeURIComponent(id)}/runs`)
+}
+
+/** Finished runs since `since` — what the always-mounted watcher polls. */
+export function recentScheduleRuns(
+  projectId: string,
+  since: string,
+): Promise<{ runs: ScheduleRun[]; now: string }> {
+  return request(
+    `/api/schedules/runs/recent?projectId=${encodeURIComponent(projectId)}&since=${encodeURIComponent(since)}`,
+  )
+}
+
+/** One sentence → a proposed schedule. Stores NOTHING; the dialog confirms it. */
+export function parseSchedule(
+  text: string,
+): Promise<{ source: 'local' | 'ai'; draft: ScheduleDraft }> {
+  return request('/api/schedules/parse', { method: 'POST', body: JSON.stringify({ text }) })
+}
+
+/** What a cron expression says and when it fires next — the dialog's live preview. */
+export function previewSchedule(
+  cron: string,
+): Promise<{ valid: boolean; error?: string; description?: string; upcoming?: string[] }> {
+  return request('/api/schedules/preview', { method: 'POST', body: JSON.stringify({ cron }) })
+}
+
+// ---------------------------------------------------------------- AI Sync
+
+export function fetchSyncGroups(): Promise<{ groups: SyncGroupDef[]; self: MachineIdentity }> {
+  return request('/api/sync/groups')
+}
+
+/** The share side of one project, plus whether there is a public URL to hand over yet. */
+export function fetchSyncShare(projectId: string): Promise<SyncShareStatus> {
+  return request(`/api/sync/share?projectId=${encodeURIComponent(projectId)}`)
+}
+
+/** Every open share — what the always-mounted watcher polls. */
+export function fetchSyncShares(): Promise<{ shares: SyncShare[] }> {
+  return request('/api/sync/shares')
+}
+
+export function openSyncShare(body: {
+  projectId: string
+  groups: string[]
+  includeMcpSecrets: boolean
+  ttlMinutes?: number
+}): Promise<{ share: SyncShare }> {
+  return request('/api/sync/share', { method: 'POST', body: JSON.stringify(body) })
+}
+
+export function closeSyncShare(projectId: string): Promise<{ ok: true }> {
+  return request('/api/sync/share', { method: 'DELETE', body: JSON.stringify({ projectId }) })
+}
+
+/**
+ * Pair with the other machine. This BURNS one of its five code attempts, so it is
+ * only ever called from an explicit click — never a retry loop, never a poll.
+ */
+export function connectSync(body: { endpoint: string; code: string }): Promise<{ job: SyncJob }> {
+  return request('/api/sync/connect', { method: 'POST', body: JSON.stringify(body) })
+}
+
+export function startSyncJob(
+  id: string,
+  body: { groups: string[]; target: SyncTarget },
+): Promise<{ job: SyncJob }> {
+  return request(`/api/sync/jobs/${encodeURIComponent(id)}/start`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+}
+
+export function fetchSyncJob(id: string): Promise<{ job: SyncJob }> {
+  return request(`/api/sync/jobs/${encodeURIComponent(id)}`)
+}
+
+export function fetchActiveSyncJob(): Promise<{ job: SyncJob | null }> {
+  return request('/api/sync/active')
+}
+
+export function cancelSyncJob(id: string): Promise<{ ok: boolean; job: SyncJob | null }> {
+  return request(`/api/sync/jobs/${encodeURIComponent(id)}/cancel`, { method: 'POST' })
+}
+
+export function dismissSyncJob(id: string): Promise<{ ok: true }> {
+  return request(`/api/sync/jobs/${encodeURIComponent(id)}/dismiss`, { method: 'POST' })
+}
+
+/**
+ * Ask whether importing under this name/folder would collide — BEFORE the zip is
+ * uploaded, so a duplicate is a question rather than a wasted multi-gigabyte transfer
+ * followed by a 409.
+ */
+export function checkImportTarget(name: string, parentPath: string): Promise<ImportCheck> {
+  const qs = new URLSearchParams({ name, parentPath })
+  return request(`/api/projects/import/check?${qs.toString()}`)
 }

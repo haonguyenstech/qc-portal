@@ -242,3 +242,43 @@ async function extractWithJsZip(
   }
   return written
 }
+
+/**
+ * Read the `qc-portal.json` manifest out of an archive WITHOUT extracting it.
+ *
+ * Import needs the manifest before it decides anything (it carries the source
+ * project's `syncKey`, which is how "you already have this project" is answered
+ * without guessing from the name), and it must not cost a second full extract of a
+ * multi-gigabyte zip. `tar -xOf` writes one member to stdout and stops.
+ *
+ * Returns null for an archive that has no manifest — every export before format 2,
+ * which is a normal thing to import, not an error.
+ */
+export async function readZipManifest(
+  zipPath: string,
+  manifestName: string,
+): Promise<Record<string, unknown> | null> {
+  let text = ''
+  if (await hasBsdtar()) {
+    const out = await run('tar', ['-xOf', zipPath, manifestName])
+    if (out.code !== 0) return null
+    text = out.stdout
+  } else {
+    const { size } = fs.statSync(zipPath)
+    if (size > JSZIP_FALLBACK_MAX_BYTES) return null
+    try {
+      const zip = await JSZip.loadAsync(fs.readFileSync(zipPath))
+      const file = zip.file(manifestName)
+      if (!file) return null
+      text = await file.async('string')
+    } catch {
+      return null
+    }
+  }
+  try {
+    const parsed: unknown = JSON.parse(text)
+    return parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : null
+  } catch {
+    return null
+  }
+}
