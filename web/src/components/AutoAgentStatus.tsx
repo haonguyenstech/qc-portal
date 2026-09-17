@@ -26,6 +26,9 @@ import { useNotifications } from '@/lib/notifications'
 import {
   answerAutoAgentLogin,
   autoAgentLogout,
+  claudeUsage,
+  getAutoAgentUsage,
+  getClaudeTokenUsage,
   cancelAutoAgentLogin,
   getAutoAgentLogin,
   getAutoAgentStatus,
@@ -33,6 +36,7 @@ import {
   type AutoAgentLoginJob,
   type AutoAgentState,
   type AutoAgentStatus,
+  type AutoAgentUsageBucket,
 } from '@/lib/api'
 
 /**
@@ -146,6 +150,355 @@ function Field({ label, value }: { label: string; value: string }) {
 }
 
 /**
+ * The CLI's own number formatting (1.58M, 266.6K, 996), so the dialog reads exactly like
+ * the box `auto-agent-ai login` prints and the two can be compared at a glance.
+ */
+function cliTokens(n: number): string {
+  if (n < 1e3) return String(n)
+  if (n < 1e6) return `${(n / 1e3).toFixed(n < 1e4 ? 2 : 1)}K`
+  return `${(n / 1e6).toFixed(n < 1e7 ? 2 : 1)}M`
+}
+
+/** `claude-opus-4-8-20260101` -> `opus-4-8`: the date stamp is noise in a chip. */
+function shortModel(model: string): string {
+  return model.replace(/^claude-/, '').replace(/-\d{8}$/, '')
+}
+
+function TokenCell({ label, value }: { label: string; value: number }) {
+  return (
+    <div className="flex items-baseline justify-between gap-2">
+      <span className="text-xs text-muted-foreground">{label}</span>
+      <span className="font-mono text-xs tabular-nums">{cliTokens(value)}</span>
+    </div>
+  )
+}
+
+/**
+ * Today's token usage for the whole MACHINE, the box `auto-agent-ai login` shows. Read
+ * from Claude Code's transcripts server-side (`claudeTokenUsage.ts`), so it includes the
+ * terminal and the IDE, not just the portal — which is why it sits above the portal's
+ * own breakdown rather than replacing it.
+ */
+function MachineTokenUsage({ open }: { open: boolean }) {
+  const queryClient = useQueryClient()
+  const { data, isLoading, isError, isFetching } = useQuery({
+    queryKey: ['claude-token-usage'],
+    queryFn: () => getClaudeTokenUsage(),
+    enabled: open,
+    refetchInterval: open ? 60_000 : false,
+  })
+  const refresh = useMutation({
+    mutationFn: () => getClaudeTokenUsage(true),
+    onSuccess: (fresh) => queryClient.setQueryData(['claude-token-usage'], fresh),
+    onError: (err: Error) => toast.error('Could not read token usage', { description: err.message }),
+  })
+
+  return (
+    <div className="space-y-2 rounded-2xl border border-border/60 bg-muted/40 p-3">
+      <div className="flex items-center justify-between gap-2">
+        <div className="min-w-0">
+          <p className="text-xs font-medium">Token usage · today</p>
+          <p className="truncate text-[10px] text-muted-foreground">
+            Every Claude session on this machine{data ? ` · ${data.date} (UTC+7)` : ''}
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={() => refresh.mutate()}
+          disabled={refresh.isPending}
+          aria-label="Re-scan token usage"
+          className="rounded-full p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+        >
+          <RefreshCw className={cn('size-3.5', (refresh.isPending || isFetching) && 'animate-spin')} />
+        </button>
+      </div>
+
+      {isLoading ? (
+        <p className="flex items-center gap-2 text-xs text-muted-foreground">
+          <Loader2 className="size-3.5 animate-spin" /> Scanning Claude transcripts…
+        </p>
+      ) : isError || !data ? (
+        <p className="text-xs text-muted-foreground">Could not read today's token usage.</p>
+      ) : (
+        <>
+          <p className="text-2xl font-semibold tabular-nums tracking-tight">
+            {cliTokens(data.billableTokens)}
+            <span className="ml-1.5 text-xs font-normal text-muted-foreground">billable tokens</span>
+          </p>
+          <div className="grid grid-cols-2 gap-x-6 gap-y-1 rounded-xl border border-border/60 bg-background/60 px-3 py-2">
+            <TokenCell label="Input" value={data.inputTokens} />
+            <TokenCell label="Output" value={data.outputTokens} />
+            <TokenCell label="Cache create" value={data.cacheCreationTokens} />
+            <TokenCell label="Cache read" value={data.cacheReadTokens} />
+          </div>
+          {data.models.length > 0 && (
+            <div className="flex flex-wrap gap-1.5">
+              {data.models.map((m) => (
+                <span
+                  key={m.model}
+                  title={m.model}
+                  className="rounded-xl border border-border/60 bg-background/60 px-2 py-0.5 text-[11px] tabular-nums"
+                >
+                  <span className="font-medium">{shortModel(m.model)}</span>{' '}
+                  <span className="text-muted-foreground">
+                    {cliTokens(m.inputTokens + m.outputTokens + m.cacheCreationTokens)}
+                  </span>
+                </span>
+              ))}
+            </div>
+          )}
+          <p className="text-[10px] leading-relaxed text-muted-foreground">
+            Billable = input + output + cache create; cache reads are listed but not counted.
+            Same figures as the box <code className="font-mono">auto-agent-ai login</code> prints.
+          </p>
+        </>
+      )}
+    </div>
+  )
+}
+
+/** 17416861 -> "17.4M". Token counts span five orders of magnitude on one screen. */
+function compact(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n >= 10_000_000 ? 0 : 1)}M`
+  if (n >= 1_000) return `${(n / 1_000).toFixed(n >= 10_000 ? 0 : 1)}K`
+  return String(n)
+}
+
+function usd(n: number): string {
+  return n >= 100 ? `$${n.toFixed(0)}` : `$${n.toFixed(2)}`
+}
+
+/** Source keys are code identifiers (`grounding-testcases`); show them as words. */
+function sourceLabel(key: string): string {
+  const named: Record<string, string> = {
+    'qc-run': 'QC runs',
+    chat: 'Chat',
+    'mcp-test': 'MCP tests',
+    'api-ai-check': 'API AI checks',
+    testcase: 'Test-case generation',
+    'db-ask': 'Database · Ask AI',
+    schedule: 'Scheduled tasks',
+  }
+  if (named[key]) return named[key]
+  const text = key.replace(/-/g, ' ')
+  return text.charAt(0).toUpperCase() + text.slice(1)
+}
+
+const PERIODS = [
+  { days: 1, label: 'Today' },
+  { days: 7, label: '7 days' },
+  { days: 30, label: '30 days' },
+] as const
+
+function UsageStat({ label, value, sub }: { label: string; value: string; sub?: string }) {
+  return (
+    <div className="rounded-xl border border-border/60 bg-background/60 px-2.5 py-2">
+      <p className="text-[10px] uppercase tracking-wide text-muted-foreground">{label}</p>
+      <p className="text-sm font-semibold tabular-nums tracking-tight">{value}</p>
+      {sub && <p className="truncate text-[10px] text-muted-foreground">{sub}</p>}
+    </div>
+  )
+}
+
+function BreakdownRow({ bucket, max, label }: { bucket: AutoAgentUsageBucket; max: number; label: string }) {
+  const total = bucket.inputTokens + bucket.outputTokens
+  return (
+    <div className="space-y-0.5">
+      <div className="flex items-baseline justify-between gap-3 text-xs">
+        <span className="min-w-0 truncate">{label}</span>
+        <span className="shrink-0 tabular-nums text-muted-foreground">
+          {compact(total)} · {bucket.calls} {bucket.calls === 1 ? 'call' : 'calls'} · {usd(bucket.costUsd)}
+        </span>
+      </div>
+      <div className="h-1 overflow-hidden rounded-full bg-muted">
+        <div
+          className="h-full rounded-full bg-foreground/70"
+          style={{ width: `${max > 0 ? Math.max(2, (total / max) * 100) : 0}%` }}
+        />
+      </div>
+    </div>
+  )
+}
+
+/**
+ * How much the shared credential is being used. Two different sources, kept apart on
+ * purpose: the subscription LIMITS are the credential's own (Claude's `/usage`, every
+ * consumer of it counted), while the token numbers are only what THIS portal spent —
+ * recorded per `claude` call in `usage_events`. Blending them would claim a precision
+ * neither has. The dollar figure is the API-equivalent price the CLI reports, not a bill:
+ * a subscription credential isn't charged per token.
+ */
+function AutoAgentUsageSection({ open }: { open: boolean }) {
+  const [days, setDays] = useState<1 | 7 | 30>(7)
+  const usage = useQuery({
+    queryKey: ['auto-agent-usage', days],
+    queryFn: () => getAutoAgentUsage(days),
+    enabled: open,
+    refetchInterval: open ? 30_000 : false,
+  })
+  // Server-cached for 10 minutes, so opening the dialog doesn't spawn `claude` each time.
+  const limits = useQuery({
+    queryKey: ['claude-usage'],
+    queryFn: claudeUsage,
+    enabled: open,
+    staleTime: 5 * 60_000,
+  })
+
+  const data = usage.data
+  const peakDay = Math.max(0, ...(data?.daily ?? []).map((d) => d.inputTokens + d.outputTokens))
+  const topSources = (data?.bySource ?? []).slice(0, 6)
+  const maxSource = topSources[0] ? topSources[0].inputTokens + topSources[0].outputTokens : 0
+
+  return (
+    <div className="space-y-3 rounded-2xl border border-border/60 bg-muted/40 p-3">
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-xs font-medium">Portal usage</p>
+        <div className="flex rounded-full border border-border/60 bg-background/60 p-0.5">
+          {PERIODS.map((p) => (
+            <button
+              key={p.days}
+              type="button"
+              onClick={() => setDays(p.days)}
+              className={cn(
+                'rounded-full px-2.5 py-0.5 text-[11px] transition-colors',
+                days === p.days
+                  ? 'bg-foreground text-background'
+                  : 'text-muted-foreground hover:text-foreground',
+              )}
+            >
+              {p.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {limits.data?.available && (
+        <div className="space-y-2">
+          {limits.data.windows.map((w) => (
+            <div key={w.label} className="space-y-0.5">
+              <div className="flex items-baseline justify-between gap-3 text-xs">
+                <span className="min-w-0 truncate">{w.label}</span>
+                <span className="shrink-0 tabular-nums text-muted-foreground">
+                  {w.percent}% · resets {w.reset}
+                </span>
+              </div>
+              <div className="h-1.5 overflow-hidden rounded-full bg-muted">
+                <div
+                  className={cn(
+                    'h-full rounded-full',
+                    w.percent >= 90 ? 'bg-red-500' : w.percent >= 70 ? 'bg-amber-500' : 'bg-emerald-500',
+                  )}
+                  style={{ width: `${Math.min(100, w.percent)}%` }}
+                />
+              </div>
+            </div>
+          ))}
+          {limits.data.stale && (
+            <p className="text-[10px] text-muted-foreground">Limits are from the last good reading.</p>
+          )}
+        </div>
+      )}
+
+      {usage.isLoading ? (
+        <p className="flex items-center gap-2 text-xs text-muted-foreground">
+          <Loader2 className="size-3.5 animate-spin" /> Reading usage…
+        </p>
+      ) : usage.isError || !data ? (
+        <p className="text-xs text-muted-foreground">Could not read token usage from the server.</p>
+      ) : (
+        <>
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+            <UsageStat label="Calls" value={String(data.totals.calls)} />
+            <UsageStat label="Input" value={compact(data.totals.inputTokens)} sub="incl. cache" />
+            <UsageStat label="Output" value={compact(data.totals.outputTokens)} />
+            <UsageStat label="≈ Cost" value={usd(data.totals.costUsd)} sub="API-equivalent" />
+          </div>
+
+          {data.days > 1 && (
+            <div>
+              <div className="flex h-12 items-end gap-0.5">
+                {data.daily.map((d) => {
+                  const total = d.inputTokens + d.outputTokens
+                  return (
+                    <Tooltip key={d.key}>
+                      <TooltipTrigger asChild>
+                        <div className="flex h-full flex-1 items-end">
+                          <div
+                            className={cn(
+                              'w-full rounded-[2px]',
+                              total > 0 ? 'bg-foreground/60 hover:bg-foreground' : 'bg-muted',
+                            )}
+                            style={{
+                              height: `${peakDay > 0 ? (total / peakDay) * 100 : 0}%`,
+                              minHeight: total > 0 ? 3 : 1,
+                            }}
+                          />
+                        </div>
+                      </TooltipTrigger>
+                      <TooltipContent>
+                        {new Date(`${d.key}T00:00:00`).toLocaleDateString(undefined, {
+                          weekday: 'short',
+                          month: 'short',
+                          day: 'numeric',
+                        })}
+                        : {compact(total)} tokens · {d.calls} calls · {usd(d.costUsd)}
+                      </TooltipContent>
+                    </Tooltip>
+                  )
+                })}
+              </div>
+              <div className="mt-1 flex justify-between text-[10px] text-muted-foreground">
+                <span>{new Date(data.since).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</span>
+                <span>Today</span>
+              </div>
+            </div>
+          )}
+
+          {topSources.length > 0 ? (
+            <div className="space-y-2">
+              <p className="text-[10px] uppercase tracking-wide text-muted-foreground">By feature</p>
+              {topSources.map((b) => (
+                <BreakdownRow key={b.key} bucket={b} max={maxSource} label={sourceLabel(b.key)} />
+              ))}
+              {data.bySource.length > topSources.length && (
+                <p className="text-[10px] text-muted-foreground">
+                  +{data.bySource.length - topSources.length} more features
+                </p>
+              )}
+            </div>
+          ) : (
+            <p className="text-xs text-muted-foreground">No AI calls from the portal in this period.</p>
+          )}
+
+          {data.byModel.length > 0 && (
+            <div className="flex flex-wrap gap-1.5">
+              {data.byModel.map((m) => (
+                <span
+                  key={m.key}
+                  className="rounded-xl border border-border/60 bg-background/60 px-2 py-0.5 text-[11px] tabular-nums"
+                >
+                  <span className="font-medium">{m.key}</span>{' '}
+                  <span className="text-muted-foreground">
+                    {compact(m.inputTokens + m.outputTokens)} · {usd(m.costUsd)}
+                  </span>
+                </span>
+              ))}
+            </div>
+          )}
+
+          <p className="text-[10px] leading-relaxed text-muted-foreground">
+            Counts only calls this portal made
+            {data.lastCallAt ? ` (last call ${relative(data.lastCallAt)})` : ''}. Your terminal and
+            other machines on the same credential are not included
+            {limits.data?.available ? ' — the limit bars above are.' : '.'}
+          </p>
+        </>
+      )}
+    </div>
+  )
+}
+
+/**
  * Connect / disconnect Auto Agent from inside the portal.
  *
  * The sign-in is a server-side JOB that this panel polls, not a request it awaits: the
@@ -239,7 +592,7 @@ function AutoAgentPanel({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-lg">
+      <DialogContent className="max-h-[90vh] max-w-lg overflow-y-auto">
         <DialogHeader>
           <DialogTitle>Auto Agent AI</DialogTitle>
           <DialogDescription>
@@ -274,6 +627,13 @@ function AutoAgentPanel({
             </>
           )}
         </div>
+
+        {status?.state !== 'not-installed' && (
+          <>
+            <MachineTokenUsage open={open} />
+            <AutoAgentUsageSection open={open} />
+          </>
+        )}
 
         {/* The live sign-in. The CLI opens the browser itself; the URL is here for the
             case where it can't (no default browser, or the tab was closed by mistake) —

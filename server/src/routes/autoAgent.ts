@@ -1,5 +1,7 @@
 import { Router } from 'express'
 import { readAutoAgentStatus } from '../autoAgent.js'
+import { readClaudeTokenUsage } from '../claudeTokenUsage.js'
+import { listUsageSince, type UsageEventRow } from '../db.js'
 import {
   answerAutoAgentLogin,
   cancelAutoAgentLogin,
@@ -18,6 +20,89 @@ export const autoAgentRouter = Router()
  */
 autoAgentRouter.get('/status', (_req, res) => {
   res.json(readAutoAgentStatus())
+})
+
+/**
+ * GET /api/auto-agent/token-usage[?refresh=1] — today's tokens across EVERY `claude` on
+ * this machine, the same box `auto-agent-ai login` prints (see `claudeTokenUsage.ts`).
+ */
+autoAgentRouter.get('/token-usage', async (req, res) => {
+  try {
+    res.json(await readClaudeTokenUsage(req.query.refresh === '1'))
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) })
+  }
+})
+
+interface UsageBucket {
+  key: string
+  calls: number
+  inputTokens: number
+  outputTokens: number
+  costUsd: number
+}
+
+function addTo(map: Map<string, UsageBucket>, key: string, e: UsageEventRow): void {
+  const b = map.get(key) ?? { key, calls: 0, inputTokens: 0, outputTokens: 0, costUsd: 0 }
+  b.calls += 1
+  b.inputTokens += e.inputTokens
+  b.outputTokens += e.outputTokens
+  b.costUsd += e.costUsd
+  map.set(key, b)
+}
+
+function localDay(d: Date): string {
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
+}
+
+/**
+ * GET /api/auto-agent/usage?days=1|7|30 — what THIS portal has spent on the shared
+ * credential, from the `usage_events` every `claude` call already records. Only the
+ * portal's own calls: the credential's other consumers (the engineer's terminal, other
+ * machines) are invisible from here, and the dialog says so. Days are LOCAL calendar
+ * days — `days=1` is "today since midnight", not the last 24h.
+ */
+autoAgentRouter.get('/usage', (req, res) => {
+  const days = [1, 7, 30].includes(Number(req.query.days)) ? Number(req.query.days) : 7
+  const start = new Date()
+  start.setHours(0, 0, 0, 0)
+  start.setDate(start.getDate() - (days - 1))
+  const events = listUsageSince(start.toISOString())
+
+  const bySource = new Map<string, UsageBucket>()
+  const byModel = new Map<string, UsageBucket>()
+  const byDay = new Map<string, UsageBucket>()
+  // Pre-seed every day so a quiet day draws as an empty bar, not a missing one.
+  for (let i = 0; i < days; i++) {
+    const d = new Date(start)
+    d.setDate(start.getDate() + i)
+    const key = localDay(d)
+    byDay.set(key, { key, calls: 0, inputTokens: 0, outputTokens: 0, costUsd: 0 })
+  }
+  const totals = { calls: 0, inputTokens: 0, outputTokens: 0, costUsd: 0 }
+  for (const e of events) {
+    totals.calls += 1
+    totals.inputTokens += e.inputTokens
+    totals.outputTokens += e.outputTokens
+    totals.costUsd += e.costUsd
+    addTo(bySource, e.source, e)
+    addTo(byModel, e.model ?? 'default', e)
+    addTo(byDay, localDay(new Date(e.ts)), e)
+  }
+  const ranked = (m: Map<string, UsageBucket>) =>
+    [...m.values()].sort((a, b) => b.inputTokens + b.outputTokens - (a.inputTokens + a.outputTokens))
+
+  res.json({
+    days,
+    since: start.toISOString(),
+    totals,
+    bySource: ranked(bySource),
+    byModel: ranked(byModel),
+    daily: [...byDay.values()],
+    lastCallAt: events.length ? events[events.length - 1].ts : null,
+    generatedAt: new Date().toISOString(),
+  })
 })
 
 /**

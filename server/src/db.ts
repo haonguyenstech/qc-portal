@@ -1263,6 +1263,35 @@ export function oldestUsageSince(tsISO: string): string | null {
   return row?.oldest ?? null
 }
 
+export interface UsageEventRow {
+  ts: string
+  source: string
+  model: string | null
+  costUsd: number
+  inputTokens: number
+  outputTokens: number
+}
+
+const listUsageSinceStmt = db.prepare(`
+  SELECT ts, source, model, costUsd, inputTokens, outputTokens
+  FROM usage_events WHERE ts >= ? ORDER BY ts
+`)
+
+/**
+ * Every usage event at or after the given ISO timestamp. Raw rows rather than a GROUP
+ * BY because the caller buckets by LOCAL day, and `ts` is stored in UTC.
+ */
+export function listUsageSince(tsISO: string): UsageEventRow[] {
+  return (listUsageSinceStmt.all(tsISO) as Record<string, unknown>[]).map((r) => ({
+    ts: String(r.ts),
+    source: String(r.source),
+    model: r.model == null ? null : String(r.model),
+    costUsd: Number(r.costUsd) || 0,
+    inputTokens: Number(r.inputTokens) || 0,
+    outputTokens: Number(r.outputTokens) || 0,
+  }))
+}
+
 /**
  * Runs left in 'running'/'queued' when the server stopped are orphaned — their
  * claude child process was killed and can never resume. Mark them as errored so

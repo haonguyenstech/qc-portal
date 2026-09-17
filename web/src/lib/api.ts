@@ -3474,6 +3474,57 @@ export function getAutoAgentStatus(): Promise<AutoAgentStatus> {
   return request('/api/auto-agent/status')
 }
 
+export interface AutoAgentUsageBucket {
+  /** A feature (`chat`, `qc-run`, …), a model alias, or a local `YYYY-MM-DD` day. */
+  key: string
+  calls: number
+  inputTokens: number
+  outputTokens: number
+  costUsd: number
+}
+
+/** Tokens this portal spent on the shared credential over the last `days` local days. */
+export interface AutoAgentUsage {
+  days: number
+  since: string
+  totals: Omit<AutoAgentUsageBucket, 'key'>
+  bySource: AutoAgentUsageBucket[]
+  byModel: AutoAgentUsageBucket[]
+  daily: AutoAgentUsageBucket[]
+  lastCallAt: string | null
+  generatedAt: string
+}
+
+export interface ClaudeModelTokenUsage {
+  model: string
+  inputTokens: number
+  outputTokens: number
+  cacheCreationTokens: number
+  cacheReadTokens: number
+}
+
+/** Today's (UTC+7) tokens across every `claude` on this machine — Auto Agent's box. */
+export interface ClaudeTokenUsage {
+  date: string
+  inputTokens: number
+  outputTokens: number
+  cacheCreationTokens: number
+  cacheReadTokens: number
+  billableTokens: number
+  totalTokens: number
+  models: ClaudeModelTokenUsage[]
+  filesScanned: number
+  generatedAt: string
+}
+
+export function getClaudeTokenUsage(refresh = false): Promise<ClaudeTokenUsage> {
+  return request(`/api/auto-agent/token-usage${refresh ? '?refresh=1' : ''}`)
+}
+
+export function getAutoAgentUsage(days: 1 | 7 | 30): Promise<AutoAgentUsage> {
+  return request(`/api/auto-agent/usage?days=${days}`)
+}
+
 export type AutoAgentLoginState = 'running' | 'succeeded' | 'failed' | 'cancelled'
 
 /**

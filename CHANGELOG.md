@@ -3,6 +3,24 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.12.6 — 2026-09-17
+
+**See how many tokens you are using, right in the Auto Agent panel**
+
+### Added
+
+- **Today's token usage, the same box Auto Agent shows in the terminal.** Click *Auto Agent*
+  in the sidebar footer: the panel now shows today's billable tokens with Input, Output,
+  Cache create and Cache read, plus a chip per model. The figures match what
+  `auto-agent-ai login` prints, because they are counted the same way — from Claude Code's
+  own session logs on this machine, for the day in UTC+7. They cover every Claude session on
+  the machine (terminal, IDE and the portal), refresh every minute, and have a re-scan button.
+- **Portal usage, broken down.** Below it, a *Portal usage* section shows what the portal
+  itself spent over Today / 7 days / 30 days: calls, input and output tokens, an
+  API-equivalent cost (not a bill — the shared credential is a subscription), a bar per day,
+  the features that used the most (Chat, QC runs, test-case generation…) and the models.
+  When Claude's subscription limits can be read, their used-% and reset time appear too.
+
 ## 0.12.5 — 2026-09-11
 
 **Project cards you can actually read**

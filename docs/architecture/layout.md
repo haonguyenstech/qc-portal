@@ -26,6 +26,18 @@ server/src/
                     deliberate sign-out as "not set up on this machine".
                     Surfaced by GET /api/auto-agent/status (routes/autoAgent.ts) and the
                     sidebar's AutoAgentStatusIndicator, ABOVE Release notes.
+  claudeTokenUsage.ts  the Auto Agent dialog's "Token usage · today": a PORT of the box
+                    `auto-agent-ai login` prints. The CLI has no usage command and does not
+                    ask its server — it sums `message.usage` from Claude Code's transcripts
+                    (`<config dir>/projects/**/*.jsonl`), so this does the same, faithfully:
+                    the day is UTC+7 FIXED (the CLI's clock, not the machine's), files older
+                    than 26h before that day are skipped, a response written several times
+                    is de-duplicated by message id + request id (a sidechain copy never
+                    counts twice), and billable = input + output + cache create. Covers every
+                    `claude` on the machine — unlike `usage_events`, which is the portal's own
+                    calls only and feeds the dialog's "Portal usage" section
+                    (GET /api/auto-agent/usage). Async, cached 60s, single-flight. Counts and
+                    model names only; transcript content never leaves the module.
   autoAgentCli.ts   RUNS that CLI, so Connect / Disconnect are buttons in the sidebar panel
                     instead of a terminal window parked on `auto-agent-ai login` forever.
                     The split from autoAgent.ts is deliberate: the status endpoint is polled

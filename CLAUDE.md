@@ -185,6 +185,12 @@ server/src/
                     step is a loopback OAuth flow in the user's browser); the watcher the
                     CLI starts is detached, so no terminal has to stay open. Output is
                     ANSI-stripped, scrubbed and kept in memory only.
+  claudeTokenUsage.ts  today's (UTC+7) tokens for EVERY `claude` on the machine — a port of
+                    the "Token usage" box `auto-agent-ai login` prints, read from Claude
+                    Code's transcripts (`~/.claude/projects/**/*.jsonl`). Keep it FAITHFUL to
+                    the CLI (fixed UTC+7 day, message-id+request-id de-dup, billable = input
+                    + output + cache create) or the dialog and the terminal disagree. Returns
+                    counts only, never transcript content
   reportData.ts     /reports: ONE server-side pass joining tickets -> test cases -> runs ->
                     defects into the project's QC status. A ticket's result is its LATEST
                     reporting run, NEVER a sum across re-runs (22 runs x 331 cases summed to
