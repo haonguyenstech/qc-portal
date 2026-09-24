@@ -34,6 +34,7 @@ npm install                # install all workspaces
 npm run dev                # server (5174) + web (5175) together, via concurrently
 npm run build              # build web then compile server
 npm run typecheck          # typecheck both workspaces
+npm -w server test         # server unit tests (node:test + tsx; server/test/*.test.ts)
 
 npm -w web run lint        # eslint the web workspace
 npm -w web run dev         # web only
@@ -267,6 +268,29 @@ server/src/
                     -> cron. The browser has NO cron parser: `description`/`nextRunAt` and
                     the dialog's preview all come from here, so the sentence on a card and
                     the timer cannot disagree. Nothing is ever stored from a sentence alone
+  aiTeamStore.ts    /ai-team: the project's bot squad in testing/ai-team/team.json — roles,
+                    relations, coordinator, team rules. Saved WHOLE; `normalizeTeam` is the
+                    only gate (drops unknown kinds/links, coordinator must be an enabled bot;
+                    `@team-ai` / `@human` are RESERVED handles, renamed `-bot` if found).
+                    The team itself; `/chat` runs it (below)
+  teamChat.ts       `@team-ai` in /chat, the PURE half: who is IN the chat (`@ba` brings only the
+                    Analyst — `joinChatTeam`, `scopeTeam`), who a message is addressed to (named
+                    bots, else the bots that asked the human last exchange, else the
+                    coordinator), each reply's CONTROL LINE `<!--team {"call":[…],
+                    "askHuman":…}-->` (`parseDirective` / `DirectiveFilter` keeps it off the
+                    wire) — routing reads that field, never the prose — what each bot may
+                    touch (`botGuards`) and its prompt, which names the tools its run REALLY has
+  teamRunner.ts     the team LOOP, out of routes/chat.ts: everything it needs comes in through
+                    `TeamRunContext` (stream, queue, rescue hook, CLI runner), so
+                    server/test/teamRunner.test.ts drives it with a scripted fake CLI. One
+                    FRESH claude run per reply, the bots of a round in PARALLEL (`runPool`,
+                    `maxParallelBots`), bounded by `maxRounds` + MAX_TEAM_REPLIES, `seg`-tagged
+                    `speaker`/`delta`/`said` frames, one bot failing does not end the exchange
+  teamFiles.ts      what one team bot READ, handed to every later bot as current content
+                    (`Chat.teamFiles`) so nobody re-reads it; never .env*/.mcp.json/.git
+  teamMcp.ts        the HARD half of the team's approval rule: a bot the human did not address
+                    directly runs with a tracker-free MCP config (`--strict-mcp-config`, beside
+                    the DB, deleted after the reply) — fails CLOSED to no MCP at all
   chatLearn.ts      the same auto-capture for /chat: an answered turn arms a 90s QUIET timer on
                     that conversation, then ONE reflection over the last few exchanges, fired
                     after the turn's `done` frame and never awaited. Serialised process-wide
@@ -412,7 +436,8 @@ commit when the behaviour changes.
 | `/qc-run` — the E2E flow canvas, run output folders (`runs.outDirToken`), busy-ticket pruning, mobile device picking, filing issues to ClickUp | `runs.md` |
 | `/verify` (Design Check) or project templates (`testing/templates`, bundled template sync) | `design-check-and-templates.md` |
 | `/prototype` — builds, revisions, decisions ledger, design system, comment mode | `prototype.md` |
-| `/chat` — sessions, streaming, `@`/`/` mentions, temporary chats, composer, follow-ups | `chat.md` |
+| `/chat` — sessions, streaming, `@`/`/` mentions, temporary chats, composer, follow-ups, the AI team in chat (`@team-ai`) | `chat.md` |
+| `/ai-team` — the bot squad: roles, relations (coordinates / verifies / hands off / consults), team rules, health checks | `ai-team.md` |
 | `/scheduled` — recurring tasks, the cron layer, the sentence parser, `/scheduled` in chat | `scheduled.md` |
 | `/database` — read-only SQL console, SQL editor, Ask AI | `database.md` |
 | `/notes` | `notes.md` |

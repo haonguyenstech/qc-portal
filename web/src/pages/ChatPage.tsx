@@ -64,6 +64,7 @@ import {
   Ticket,
   Trash2,
   TriangleAlert,
+  UsersRound,
   Wand2,
   Wrench,
   X,
@@ -105,6 +106,8 @@ import {
   deleteChat,
   getChat,
   getDatabases,
+  getAiTeam,
+  setChatTeam,
   listChats,
   listCrawledTickets,
   listSkills,
@@ -135,7 +138,10 @@ import {
   type ChatFeedback,
   type ChatTools,
   type DatabaseConn,
+  type AiTeam,
+  type ChatBotRef,
 } from '@/lib/api'
+import { ROLES } from '@/lib/aiTeam'
 import type { SkillSummary } from '@/lib/types'
 import { formatWhen } from '@/lib/schedule'
 
@@ -530,7 +536,10 @@ const MAX_IMAGE_BYTES = 8 * 1024 * 1024
  */
 interface StagedMention {
   token: string
-  kind: 'ticket' | 'testcase' | 'database' | 'skill'
+  /** `team` = `@team-ai`, `bot` = one of its bots — they address the AI team, not a file. */
+  kind: 'ticket' | 'testcase' | 'database' | 'skill' | 'team' | 'bot'
+  /** Bots only — the bot's handle. */
+  bot?: string
   /** Tickets/test cases only — the folder under testing/tickets/. */
   folder?: string
   /** Databases only — the connected database's id (re-checked against the project). */
@@ -596,8 +605,65 @@ function mentionOptions(
   tickets: CrawledTicket[],
   databases: DatabaseConn[],
   query: string,
+  team?: AiTeam,
+  /** Who is in the open conversation already (`chat.team`), to say what a pick will do. */
+  inChat?: { members?: string[] },
 ): MentionOption[] {
   const q = query.trim().toLowerCase()
+  // The AI team comes first: `@team-ai` brings the whole team into the conversation, and
+  // each bot's own handle addresses that bot. A handful of rows, so they never crowd out
+  // the tickets the way a shared budget would.
+  const teamRows: MentionOption[] = []
+  const bots = team?.bots.filter((b) => b.enabled) ?? []
+  if (bots.length) {
+    // `@team-ai` matches only its OWN words. It used to match every bot's handle too, and it
+    // sits first — so typing `@ba` + Enter picked team-ai and brought all six bots in when
+    // the engineer asked for the Analyst.
+    const teamRow: MentionOption | null =
+      !q || 'team-ai'.includes(q) || 'ai team'.includes(q)
+        ? {
+            token: '@team-ai',
+            kind: 'team',
+            label: 'team-ai',
+            detail:
+              inChat && !inChat.members
+                ? `The whole team is in this chat — ${bots.length} bot${bots.length === 1 ? '' : 's'}`
+                : `Bring the whole AI team into this chat — ${bots.length} bot${bots.length === 1 ? '' : 's'}`,
+          }
+        : null
+    // Best match first: the exact handle, then a handle starting with what was typed, then a
+    // name starting with it, then anything containing it — so Enter takes the bot you meant.
+    const score = (b: (typeof bots)[number]) => {
+      const id = b.id.toLowerCase()
+      const name = b.name.toLowerCase()
+      if (!q) return 0
+      if (id === q) return 0
+      if (id.startsWith(q)) return 1
+      if (name.startsWith(q)) return 2
+      return 3
+    }
+    const botRows = bots
+      .filter((b) => !q || `${b.id} ${b.name} ${ROLES[b.role].label}`.toLowerCase().includes(q))
+      .map((b, i) => ({ b, i, s: score(b) }))
+      .sort((x, y) => x.s - y.s || x.i - y.i)
+      .map(({ b }): MentionOption => {
+        // "Lead · Lead" says nothing twice — the role only when the name doesn't already say it.
+        const role = ROLES[b.role].label
+        // Picking a bot brings ONLY that bot in — say whether it is already here.
+        const here = !!inChat && (!inChat.members || inChat.members.includes(b.id))
+        return {
+          token: `@${b.id}`,
+          kind: 'bot',
+          bot: b.id,
+          label: b.id,
+          detail: `${b.name}${role.toLowerCase() === b.name.toLowerCase() ? '' : ` · ${role}`}${team?.coordinatorId === b.id ? ' · coordinator' : ''}${here ? ' · in this chat' : ' · add to this chat'}`,
+        }
+      })
+    // With nothing typed, the whole team leads; with a query, the bots it names do.
+    if (teamRow && !q) teamRows.push(teamRow)
+    teamRows.push(...botRows)
+    if (teamRow && q) teamRows.push(teamRow)
+  }
   const out: MentionOption[] = []
   for (const d of databases) {
     const token = dbToken(d.tag)
@@ -635,7 +701,7 @@ function mentionOptions(
     }
     if (ticketRows.length >= MAX_MENTION_ROWS * 2) break
   }
-  return [...out, ...ticketRows].slice(0, MAX_MENTION_ROWS + out.length)
+  return [...teamRows, ...out, ...ticketRows].slice(0, MAX_MENTION_ROWS + out.length + teamRows.length)
 }
 
 /**
@@ -3382,17 +3448,81 @@ function useSmoothReveal(full: string, enabled: boolean): string {
  * `aria-hidden`, because `RowName` beside it says the same thing in text — labelling both
  * makes a screen reader announce every turn's speaker twice.
  */
-function RowAvatar() {
+function RowAvatar({ bot }: { bot?: ChatBotRef }) {
+  // A team bot wears its ROLE's mark, outlined — so a team exchange reads as several
+  // speakers at a glance, and none of them is mistaken for the plain assistant's solid chip.
+  const Icon = bot ? (ROLES[bot.role]?.icon ?? Sparkles) : Sparkles
   return (
     <div
       aria-hidden
-      className={
+      className={cn(
         // Only the ANSWER side has a mark now. The question side is right-aligned and
         // filled, which says who wrote it without spending 44px per turn saying it again.
-        'mt-0.5 flex size-8 shrink-0 select-none items-center justify-center rounded-xl bg-foreground text-background'
-      }
+        'mt-0.5 flex size-8 shrink-0 select-none items-center justify-center rounded-xl',
+        bot ? 'border border-border bg-card text-foreground' : 'bg-foreground text-background',
+      )}
     >
-      <Sparkles className="size-4" />
+      <Icon className="size-4" />
+    </div>
+  )
+}
+
+/**
+ * ONE TEAM BOT'S REPLY WHILE IT STREAMS. A round of the AI team runs in PARALLEL, so a
+ * team turn has a list of these — one row each, keyed by the server's `seg` so the reveal
+ * animation of one bot never carries into another's — instead of the single `answer`.
+ */
+interface TeamSlotView {
+  seg: number
+  bot: ChatBotRef
+  calledBy?: string[]
+  answer: string
+  tools: ChatToolCall[]
+  /** When this reply started — its own waiting clock. */
+  at: string
+}
+
+type WithTeam = { team?: TeamSlotView[]; continuation?: boolean; at: string }
+
+/** A bot starts a reply (`speaker` frame). */
+function teamSpeaker<P extends WithTeam>(p: P, bot: ChatBotRef, calledBy: string[] | undefined, seg: number): P {
+  const slot: TeamSlotView = { seg, bot, calledBy, answer: '', tools: [], at: new Date().toISOString() }
+  return { ...p, team: [...(p.team ?? []).filter((x) => x.seg !== seg), slot] }
+}
+
+/** Text or a tool call for ONE bot's row. */
+function teamUpdate<P extends WithTeam>(p: P, seg: number, change: (slot: TeamSlotView) => TeamSlotView): P {
+  return { ...p, team: (p.team ?? []).map((x) => (x.seg === seg ? change(x) : x)) }
+}
+
+/**
+ * A bot's reply was saved (`said`): the transcript draws it now, so its row goes. The
+ * question is in the transcript too from here (`continuation`). When nobody is left
+ * streaming, the waiting row's clock restarts — the next round has not begun yet.
+ */
+function teamSaid<P extends WithTeam>(p: P, seg: number): P {
+  const team = (p.team ?? []).filter((x) => x.seg !== seg)
+  return { ...p, continuation: true, team, at: team.length ? p.at : new Date().toISOString() }
+}
+
+/**
+ * Who is speaking, VISIBLY, above a team bot's message. The plain assistant needs no name
+ * (there is only one of it), but in a team exchange the speaker is the first thing a
+ * reader needs — and whom it was answering is what makes the exchange followable.
+ */
+function BotSpeakerLine({ bot, addressedBy }: { bot: ChatBotRef; addressedBy?: string[] }) {
+  return (
+    <div className="mb-1 flex flex-wrap items-center gap-1.5 text-xs">
+      <span className="font-semibold">{bot.name}</span>
+      <span className="font-mono text-[11px] text-muted-foreground">@{bot.id}</span>
+      <span className="rounded-full border border-border/60 bg-muted/60 px-1.5 py-px text-[10px] text-muted-foreground">
+        {ROLES[bot.role]?.label ?? bot.role}
+      </span>
+      {!!addressedBy?.length && (
+        <span className="text-[11px] text-muted-foreground">
+          replying to {addressedBy.map((a) => (a === 'human' ? 'you' : a)).join(', ')}
+        </span>
+      )}
     </div>
   )
 }
@@ -3406,8 +3536,8 @@ function RowAvatar() {
  * the DOM because the avatar is `aria-hidden`, so this is the only thing that names the
  * speaker to a reader that cannot see the alignment.
  */
-function RowName({ who }: { who: 'user' | 'assistant' }) {
-  return <div className="sr-only">{who === 'assistant' ? 'AI Assistant' : 'Me'}</div>
+function RowName({ who, bot }: { who: 'user' | 'assistant'; bot?: ChatBotRef }) {
+  return <div className="sr-only">{who === 'assistant' ? (bot ? `${bot.name} (AI team)` : 'AI Assistant') : 'Me'}</div>
 }
 
 /**
@@ -4335,6 +4465,8 @@ function AssistantRow({
   feedback,
   refs,
   audit,
+  bot,
+  addressedBy,
 }: {
   text: string
   /** A saved turn's tool names — the trail above the answer, for pre-`steps` transcripts. */
@@ -4365,6 +4497,10 @@ function AssistantRow({
   refs?: string[]
   /** The fact check already run on this answer, if any — see AuditPanel. */
   audit?: ChatAudit
+  /** The AI-team bot speaking, if this is a team message. */
+  bot?: ChatBotRef
+  /** Whom that bot was answering. */
+  addressedBy?: string[]
 }) {
   // While streaming, what's on screen trails the received text by a few frames on purpose
   // (see useSmoothReveal). A saved message renders whole — and was already stripped of the
@@ -4405,9 +4541,10 @@ function AssistantRow({
   const canAudit = !!projectId && !!slug && index !== undefined && !failed
   return (
     <div className="group flex justify-start gap-3">
-      <RowAvatar />
+      <RowAvatar bot={bot} />
       <div className="max-w-[85%] flex-1 sm:max-w-[75%]">
-        <RowName who="assistant" />
+        <RowName who="assistant" bot={bot} />
+        {bot && <BotSpeakerLine bot={bot} addressedBy={addressedBy} />}
         <div className="space-y-2">
           <div
             className={cn(
@@ -4803,6 +4940,8 @@ const Turn = memo(function Turn({
       feedback={m.feedback}
       refs={m.refs}
       audit={m.audit}
+      bot={m.bot}
+      addressedBy={m.addressedBy}
     />
   )
 })
@@ -4814,7 +4953,7 @@ const Turn = memo(function Turn({
 function downloadTranscript(name: string, messages: ChatMessage[]) {
   const body = messages
     .map((m) => {
-      const who = m.role === 'user' ? 'Me' : 'AI Assistant'
+      const who = m.role === 'user' ? 'Me' : m.bot ? `${m.bot.name} (@${m.bot.id})` : 'AI Assistant'
       const when = m.at ? ` — ${new Date(m.at).toLocaleString()}` : ''
       return `## ${who}${when}\n\n${m.text}`
     })
@@ -4833,6 +4972,100 @@ function downloadTranscript(name: string, messages: ChatMessage[]) {
   toast.success('Transcript downloaded', { description: file })
 }
 
+/** Client mirror of server/src/teamChat.ts `joinChatTeam` — for the header's optimistic update. */
+function joinTeamLocal(cur: Chat['team'], tags: ChatMention[]): Chat['team'] {
+  const now = new Date().toISOString()
+  if (tags.some((t) => t.kind === 'team')) return cur && !cur.members ? cur : { joinedAt: cur?.joinedAt ?? now }
+  const bots = tags.filter((t) => t.kind === 'bot' && t.bot).map((t) => t.bot!)
+  if (!bots.length) return cur
+  if (!cur) return { joinedAt: now, members: [...new Set(bots)] }
+  if (!cur.members) return cur
+  return { ...cur, members: [...new Set([...cur.members, ...bots])] }
+}
+
+/**
+ * WHO IS IN THIS CONVERSATION — the AI team's members, once `@team-ai` brought them in.
+ *
+ * One mark per active bot (the coordinator's solid, like on the AI Team page), so "who can
+ * I talk to here?" is answered without opening anything; the names are in the tooltip, the
+ * handles to type are in the `@` menu. The ✕ dismisses the team — refused while a reply is
+ * running, because that turn saves its own copy of the conversation when it ends.
+ */
+function TeamStrip({
+  team,
+  members,
+  streaming,
+  onLeave,
+}: {
+  team: AiTeam | null
+  /** The bots in THIS chat (`chat.team.members`); absent = the whole team. */
+  members?: string[]
+  streaming: boolean
+  onLeave?: () => void
+}) {
+  // Only who is actually in the conversation — picking `@ba` brought the Analyst, and a
+  // strip showing all six would be claiming five bots that will never answer here.
+  const bots = team?.bots.filter((b) => b.enabled && (!members || members.includes(b.id))) ?? []
+  const label = !members
+    ? 'AI team'
+    : bots.length === 0
+      ? 'AI team'
+      : bots.length <= 2
+        ? bots.map((b) => b.name).join(' & ')
+        : `${bots.length} bots`
+  return (
+    <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-blue-500/30 bg-blue-500/5 py-0.5 pl-1 pr-1.5 text-[11px]">
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <NavLink to="/ai-team" className="flex items-center gap-1.5" aria-label="AI team in this chat">
+            <span className="flex -space-x-1.5">
+              {bots.slice(0, 7).map((b) => {
+                const Icon = ROLES[b.role]?.icon ?? UsersRound
+                return (
+                  <span
+                    key={b.id}
+                    className={cn(
+                      'grid size-5 place-items-center rounded-full ring-2 ring-background',
+                      team?.coordinatorId === b.id
+                        ? 'bg-foreground text-background'
+                        : 'border border-border bg-card text-foreground',
+                    )}
+                  >
+                    <Icon className="size-2.5" />
+                  </span>
+                )
+              })}
+              {!team && <UsersRound className="size-3.5 text-blue-500" />}
+            </span>
+            <span className="font-medium text-blue-600 dark:text-blue-400">{label}</span>
+          </NavLink>
+        </TooltipTrigger>
+        <TooltipContent side="bottom" className="max-w-xs">
+          {bots.length
+            ? `${members ? 'In this chat: ' : 'The whole team: '}${bots
+                .map((b) => `${b.name} @${b.id}${team?.coordinatorId === b.id ? ' (coordinates)' : ''}`)
+                .join(' · ')}${members ? ' — pick another bot or @team-ai from the @ menu to add more' : ''}`
+            : team
+              ? 'No active bot in this chat — turn one on on the AI Team page'
+              : 'Loading the team…'}
+        </TooltipContent>
+      </Tooltip>
+      {onLeave && (
+        <button
+          type="button"
+          onClick={onLeave}
+          disabled={streaming}
+          title={streaming ? 'Wait for the reply to finish' : members ? 'Remove these bots from this chat' : 'Dismiss the team from this chat'}
+          aria-label="Dismiss the AI team from this chat"
+          className="grid size-4 place-items-center rounded-full text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-40"
+        >
+          <X className="size-3" />
+        </button>
+      )}
+    </span>
+  )
+}
+
 /**
  * The bar above the transcript.
  *
@@ -4849,6 +5082,9 @@ function downloadTranscript(name: string, messages: ChatMessage[]) {
 function ChatHeader({
   name,
   streaming,
+  team,
+  teamMembers,
+  onLeaveTeam,
   tools,
   temporary,
   onPin,
@@ -4861,6 +5097,14 @@ function ChatHeader({
 }: {
   name: string | null
   streaming: boolean
+  /**
+   * The AI team, when it has joined this conversation — `null` while it is still loading,
+   * `undefined` when it isn't in this chat at all.
+   */
+  team?: AiTeam | null
+  /** `chat.team.members` — who of the team is in this chat (absent = all of it). */
+  teamMembers?: string[]
+  onLeaveTeam?: () => void
   tools: ChatTools
   temporary: boolean
   pinned: boolean
@@ -4892,6 +5136,7 @@ function ChatHeader({
             Temporary
           </span>
         )}
+        {team !== undefined && <TeamStrip team={team} members={teamMembers} streaming={streaming} onLeave={onLeaveTeam} />}
         {streaming && (
           <span className="inline-flex shrink-0 items-center gap-1.5 text-[11px] text-muted-foreground">
             <span className="size-1.5 animate-pulse rounded-full bg-emerald-500" />
@@ -5075,6 +5320,13 @@ function ChatWorkspace({
      */
     model?: string
     stats?: TurnStats
+    /**
+     * A team turn past its first reply: the question is already in the saved transcript,
+     * so the streaming block draws only the next speaker's row.
+     */
+    continuation?: boolean
+    /** A team turn: the bots streaming right now, one row each (see TeamSlotView). */
+    team?: TeamSlotView[]
   } | null>(null)
   /**
    * MESSAGES WAITING THEIR TURN behind the one being answered.
@@ -5282,18 +5534,32 @@ function ChatWorkspace({
       projectId,
       slug,
       {
-        onResume: ({ prompt, at, images: files }) => {
+        onResume: ({ prompt, at, images: files, continuation }) => {
           // Pin the selection now that we're watching this one. Without it the page would
           // snap back to the new-chat screen the moment the turn finished, because the
           // slug was only being DERIVED from "which conversation is still running".
           setPicked(slug)
-          setPending({ prompt, answer: '', tools: [], images: [], imageFiles: files, at })
+          setPending({ prompt, answer: '', tools: [], images: [], imageFiles: files, at, continuation })
+        },
+        onSpeaker: (bot, calledBy, seg) => setPending((p) => (p ? teamSpeaker(p, bot, calledBy, seg) : p)),
+        onSaid: (savedChat, seg) => {
+          // `running: true` stays until `done`. The saved record carries no such flag, and
+          // this effect is keyed on it — dropping it here unsubscribed a re-attached page
+          // after the first bot, so every later speaker silently never appeared.
+          queryClient.setQueryData(['chat', projectId, savedChat.slug], { ...savedChat, running: true })
+          setPending((p) => (p ? teamSaid(p, seg) : p))
         },
         // The catch-up ends with the whole queue, so a page that reloaded mid-answer comes
         // back knowing what is still waiting — not just what is being answered.
         onQueue: (list) => setQueued(list),
-        onDelta: (t) => setPending((p) => (p ? { ...p, answer: p.answer + t } : p)),
-        onTool: (call) => setPending((p) => (p ? { ...p, tools: [...p.tools, call] } : p)),
+        onDelta: (t, seg) =>
+            setPending((p) =>
+              !p ? p : seg === undefined ? { ...p, answer: p.answer + t } : teamUpdate(p, seg, (x) => ({ ...x, answer: x.answer + t })),
+            ),
+        onTool: (call, seg) =>
+            setPending((p) =>
+              !p ? p : seg === undefined ? { ...p, tools: [...p.tools, call] } : teamUpdate(p, seg, (x) => ({ ...x, tools: [...x.tools, call] })),
+            ),
         onSettled: (model, stats) => setPending((p) => (p ? { ...p, model, stats } : p)),
         onStopped: (saved, dropped) => {
           setPending(null)
@@ -5354,14 +5620,22 @@ function ChatWorkspace({
     enabled: !!projectId && slashOpen,
     staleTime: 60_000,
   })
+  // The AI team: needed for the `@` menu, and for the header strip once it has joined.
+  const { data: teamData } = useQuery({
+    queryKey: ['ai-team', projectId],
+    queryFn: () => getAiTeam(projectId),
+    enabled: !!projectId && (atOpen || !!chat?.team),
+    staleTime: 60_000,
+  })
+  const team = teamData?.team
   const mentionRows = useMemo(() => {
     if (!mention) return []
     // Commands sit ABOVE the skills: `/scheduled` is not a skill, and a project with a
     // dozen skills would otherwise bury it.
     return mention.char === '/'
       ? [...commandOptions(mention.query), ...skillOptions(skills ?? [], mention.query)]
-      : mentionOptions(crawled ?? [], dbInfo?.databases ?? [], mention.query)
-  }, [crawled, dbInfo, skills, mention])
+      : mentionOptions(crawled ?? [], dbInfo?.databases ?? [], mention.query, team, openSlug ? chat?.team : undefined)
+  }, [crawled, dbInfo, skills, mention, team, openSlug, chat?.team])
 
   // Memoised: it is a dependency of the question navigator's list, and `chat?.messages ?? []`
   // is a fresh array on every render — which would rebuild that list (and re-run its scroll
@@ -5380,7 +5654,7 @@ function ChatWorkspace({
     const out = messages.flatMap((m, i) =>
       m.role === 'user' ? [{ id: questionAnchorId(i), text: m.text }] : [],
     )
-    if (pending) out.push({ id: questionAnchorId('pending'), text: pending.prompt })
+    if (pending && !pending.continuation) out.push({ id: questionAnchorId('pending'), text: pending.prompt })
     return out
   }, [messages, pending])
 
@@ -5401,7 +5675,7 @@ function ChatWorkspace({
   useEffect(() => {
     const el = logRef.current
     if (el && atBottom) el.scrollTop = el.scrollHeight
-  }, [messages.length, pending?.answer, pending?.tools.length, slug, atBottom])
+  }, [messages.length, pending?.answer, pending?.tools.length, pending?.team, slug, atBottom])
 
   // The text now reveals a few characters per FRAME, not once per delta, so pinning the
   // view on delta boundaries alone would let the newest line drift under the fold between
@@ -5488,6 +5762,7 @@ function ChatWorkspace({
                 folder: opt.folder,
                 databaseId: opt.databaseId,
                 skill: opt.skill,
+                bot: opt.bot,
               },
             ],
       )
@@ -5619,7 +5894,14 @@ function ChatWorkspace({
           folder: m.folder,
           databaseId: m.databaseId,
           skill: m.skill,
+          bot: m.bot,
         }))
+      // Who of the AI team this message brings in shows in the header NOW, not ten seconds
+      // later when the first reply is saved (the server applies the same rule —
+      // teamChat.ts `joinChatTeam`).
+      if (openSlug && tags.some((t) => t.kind === 'team' || t.kind === 'bot')) {
+        queryClient.setQueryData<Chat>(['chat', projectId, openSlug], (c) => (c ? { ...c, team: joinTeamLocal(c.team, tags) } : c))
+      }
       const sendingAction = action
       setInput('')
       setAttached([])
@@ -5689,12 +5971,26 @@ function ChatWorkspace({
           // The server hands this stream over to a queued message when the current turn
           // finishes, opening it with the same `resume` frame a re-attaching viewer gets.
           // So the row for the next question appears here, on the same connection.
-          onResume: ({ prompt: q, at: qAt, images: files }) => {
-            setPending({ prompt: q, answer: '', tools: [], images: [], imageFiles: files, at: qAt })
+          onResume: ({ prompt: q, at: qAt, images: files, continuation }) => {
+            setPending({ prompt: q, answer: '', tools: [], images: [], imageFiles: files, at: qAt, continuation })
+          },
+          // A team turn: each bot's reply streams into its own row. When one is saved the
+          // transcript takes it over and a fresh row opens for whoever speaks next.
+          onSpeaker: (bot, calledBy, seg) => setPending((p) => (p ? teamSpeaker(p, bot, calledBy, seg) : p)),
+          onSaid: (savedChat, seg) => {
+            // Still running until `done` — see the re-attach handler for why this matters.
+            queryClient.setQueryData(['chat', projectId, savedChat.slug], { ...savedChat, running: true })
+            setPending((p) => (p ? teamSaid(p, seg) : p))
           },
           onQueue: (list) => setQueued(list),
-          onDelta: (t) => setPending((p) => (p ? { ...p, answer: p.answer + t } : p)),
-          onTool: (call) => setPending((p) => (p ? { ...p, tools: [...p.tools, call] } : p)),
+          onDelta: (t, seg) =>
+            setPending((p) =>
+              !p ? p : seg === undefined ? { ...p, answer: p.answer + t } : teamUpdate(p, seg, (x) => ({ ...x, answer: x.answer + t })),
+            ),
+          onTool: (call, seg) =>
+            setPending((p) =>
+              !p ? p : seg === undefined ? { ...p, tools: [...p.tools, call] } : teamUpdate(p, seg, (x) => ({ ...x, tools: [...x.tools, call] })),
+            ),
           onSettled: (model, stats) => setPending((p) => (p ? { ...p, model, stats } : p)),
           onStopped: (saved?: Chat, dropped?: string[]) => {
             setPending(null)
@@ -5811,6 +6107,8 @@ function ChatWorkspace({
    * is saved as a (failed) turn, which is why the transcript is refetched afterwards.
    */
   const stop = useCallback(() => {
+    // The question being answered, unless an earlier team reply already saved it.
+    const asked = pending && !pending.continuation ? pending.prompt : null
     abortRef.current?.abort()
     setPending(null)
     // Stop halts the whole conversation, queue included. Aborting the local subscription
@@ -5822,7 +6120,29 @@ function ChatWorkspace({
       // Messages that were waiting behind the stopped turn never ran, and this response is
       // the copy of them this client actually receives: Stop aborts the local subscription
       // above, so the `stopped` FRAME (which carries the same list) is never read here.
-      .then((r) => restoreDropped(r.dropped))
+      .then(async (r) => {
+        // A Stop before a word of the reply existed saves NOTHING (by design — see the
+        // server's stop path), so the question would just vanish. `stopChat` answers only
+        // once the turn has settled, so the transcript is final here: if the question is
+        // not its last one, hand the text back (tags and images are not restored).
+        let back: string | null = null
+        if (asked?.trim()) {
+          try {
+            const saved = await getChat(projectId, openSlug)
+            const lastAsked = [...saved.messages].reverse().find((m) => m.role === 'user')
+            if (lastAsked?.text !== asked) back = asked
+          } catch {
+            /* can't tell — leave the composer alone rather than risk a duplicate */
+          }
+        }
+        if (back) {
+          const text = [back, ...(r.dropped ?? [])].join('\n\n')
+          setInput((cur) => (cur.trim() ? cur : text))
+          toast.info('Stopped before any reply — your message is back in the composer')
+        } else {
+          restoreDropped(r.dropped)
+        }
+      })
       .catch(() => {
         /* already finished — the transcript refresh below covers it */
       })
@@ -5830,7 +6150,7 @@ function ChatWorkspace({
         void queryClient.invalidateQueries({ queryKey: ['chat', projectId, openSlug] })
         void queryClient.invalidateQueries({ queryKey: ['chats', projectId] })
       })
-  }, [projectId, openSlug, restoreDropped, queryClient])
+  }, [projectId, openSlug, restoreDropped, queryClient, pending])
 
   /**
    * Stage image files (paste, drop, or the file picker). Images can't go through
@@ -6000,6 +6320,19 @@ function ChatWorkspace({
       void queryClient.invalidateQueries({ queryKey: ['chats', projectId] })
     },
     onError: (e: Error) => toast.error('Could not rename', { description: e.message }),
+  })
+
+  const teamToggle = useMutation({
+    mutationFn: (v: { slug: string; on: boolean }) => setChatTeam(projectId, v.slug, v.on),
+    onSuccess: (savedChat) => {
+      queryClient.setQueryData(['chat', projectId, savedChat.slug], savedChat)
+      toast.success(savedChat.team ? 'The AI team joined this chat' : 'The AI team left this chat', {
+        description: savedChat.team
+          ? 'Every message is now answered by the team.'
+          : 'New messages go to the plain assistant again. Type @team-ai to bring the team back.',
+      })
+    },
+    onError: (e: Error) => toast.error('Could not change the team', { description: e.message }),
   })
 
   const pin = useMutation({
@@ -6191,6 +6524,13 @@ function ChatWorkspace({
         <ChatHeader
           name={openSlug ? (chat?.name ?? null) : null}
           streaming={streaming}
+          team={openSlug && chat?.team ? (team ?? null) : undefined}
+          teamMembers={chat?.team?.members}
+          onLeaveTeam={
+            openSlug && chat?.team
+              ? () => teamToggle.mutate({ slug: openSlug, on: false })
+              : undefined
+          }
           tools={tools}
           temporary={isTemporary && !!openSlug}
           pinned={!!chat?.pinned}
@@ -6329,25 +6669,47 @@ function ChatWorkspace({
             ))}
             {pending && (
               <>
-                <UserRow
-                  text={pending.prompt}
-                  previews={pending.imageFiles ? undefined : pending.images}
-                  images={pending.imageFiles}
-                  projectId={projectId}
-                  at={pending.at}
-                  action={pending.action}
-                  anchorId={questionAnchorId('pending')}
-                />
-                <AssistantRow
-                  text={pending.answer}
-                  calls={pending.tools}
-                  streaming
-                  at={pending.at}
-                  model={pending.model}
-                  stats={pending.stats}
-                  question={pending.prompt}
-                  projectId={projectId}
-                />
+                {!pending.continuation && (
+                  <UserRow
+                    text={pending.prompt}
+                    previews={pending.imageFiles ? undefined : pending.images}
+                    images={pending.imageFiles}
+                    projectId={projectId}
+                    at={pending.at}
+                    action={pending.action}
+                    anchorId={questionAnchorId('pending')}
+                  />
+                )}
+                {pending.team?.length ? (
+                  // A team round: every bot streaming right now, side by side in the
+                  // transcript, each on its own clock. A finished one drops out here and
+                  // appears above, from the saved conversation.
+                  pending.team.map((slot) => (
+                    <AssistantRow
+                      key={`team-${slot.seg}`}
+                      text={slot.answer}
+                      calls={slot.tools}
+                      streaming
+                      at={slot.at}
+                      question={pending.prompt}
+                      projectId={projectId}
+                      bot={slot.bot}
+                      addressedBy={slot.calledBy}
+                    />
+                  ))
+                ) : (
+                  <AssistantRow
+                    key="pending"
+                    text={pending.answer}
+                    calls={pending.tools}
+                    streaming
+                    at={pending.at}
+                    model={pending.model}
+                    stats={pending.stats}
+                    question={pending.prompt}
+                    projectId={projectId}
+                  />
+                )}
               </>
             )}
             {/* Waiting their turn, under the answer they'll follow. Shown as the questions
@@ -6432,7 +6794,11 @@ function ChatWorkspace({
                             i === mentionIndex ? 'bg-accent' : 'hover:bg-accent/60',
                           )}
                         >
-                          {opt.kind === 'command' ? (
+                          {opt.kind === 'team' ? (
+                            <UsersRound className="size-4 shrink-0 text-blue-500" />
+                          ) : opt.kind === 'bot' ? (
+                            <UsersRound className="size-4 shrink-0 text-muted-foreground" />
+                          ) : opt.kind === 'command' ? (
                             <AlarmClock className="size-4 shrink-0 text-emerald-500" />
                           ) : opt.kind === 'skill' ? (
                             <Wand2 className="size-4 shrink-0 text-amber-500" />

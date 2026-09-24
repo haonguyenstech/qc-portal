@@ -65,6 +65,7 @@ import ResponsivePage from '@/pages/ResponsivePage'
 import PrototypePage from '@/pages/PrototypePage'
 import ChatPage from '@/pages/ChatPage'
 import SchedulesPage from '@/pages/SchedulesPage'
+import AiTeamPage from '@/pages/AiTeamPage'
 import AiLabsPage from '@/pages/AiLabsPage'
 import AiLabDetailPage from '@/pages/AiLabDetailPage'
 import McpPage from '@/pages/McpPage'
@@ -1733,6 +1734,7 @@ function AppShell() {
             <Route path="/responsive" element={<ResponsivePage />} />
             <Route path="/chat" element={<ChatPage />} />
             <Route path="/scheduled" element={<SchedulesPage />} />
+            <Route path="/ai-team" element={<AiTeamPage />} />
             <Route path="/prototype" element={<PrototypePage />} />
              <Route path="/terminal" element={<TerminalPage />} />
              <Route path="/notes" element={<NotesPage />} />

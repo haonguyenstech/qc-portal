@@ -37,6 +37,7 @@ import {
   Smartphone,
   TerminalSquare,
   Ticket,
+  UsersRound,
   Wrench,
   Zap,
 } from 'lucide-react'
@@ -104,6 +105,8 @@ export const navGroups: NavGroupDef[] = [
       // Next to Chat on purpose: a scheduled task IS a chat turn nobody had to be present
       // for, and the composer's `/scheduled` command is how most of them get created.
       { to: '/scheduled', label: 'Scheduled', icon: AlarmClock, end: false },
+      // Beside Chat and Scheduled: the team is who will take the work those two hand out.
+      { to: '/ai-team', label: 'AI Team', icon: UsersRound, end: false },
       { to: '/prototype', label: 'Prototype', icon: Layout, end: false },
       { to: '/terminal', label: 'Terminal', icon: TerminalSquare, end: false },
       { to: '/notes', label: 'Note', icon: NotebookPen, end: false },

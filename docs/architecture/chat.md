@@ -1153,3 +1153,160 @@ does this endpoint validate?").
   first. The reference dead-ends once a category is open (no way back to pick another), so Escape and
   an outside click also restore the chips — no extra control on screen.
 
+- **THE AI TEAM IN A CONVERSATION — `@team-ai`** (`teamChat.ts` for the pure rules, `teamRunner.ts` for the loop — `teamTurn` in `routes/chat.ts` only hands it the route's stream/queue/CLI; tests in `server/test/`, run `npm -w server test`,
+  `TeamStrip` / `BotSpeakerLine` / `TeamSlotView` + `teamSpeaker`/`teamSaid` in `ChatPage.tsx`; the team itself is
+  `testing/ai-team/team.json`, see `ai-team.md`). Picking `@team-ai` from the `@` menu (or
+  typing it — the same whole-handle rule as the bots' calls, so `@team-ai-x` and `` `@team-ai` ``
+  don't count), or picking one of its bots from the menu (`@lead`), brings the project's bot squad into the conversation: `chat.team` is
+  set and every later message is answered BY THE TEAM until the ✕ on the header strip dismisses
+  it (`POST /:slug/team`, refused 409 while a reply runs — that turn saves its own copy and would
+  undo the change).
+  - **Who is in the chat** (`chat.team.members`, `joinChatTeam` / `scopeTeam` in teamChat.ts).
+    Picking `@ba` brings ONLY the Analyst (`members: ['ba']`); picking another bot, or typing a
+    bot's handle in a partial chat, ADDS it (log: "@tester joined this chat"); `@team-ai` makes
+    it the whole team (no `members` — also what every chat from before members existed means).
+    The runner scopes the team to the members BEFORE anything else, so the roster a bot sees,
+    whom it may call (a call to a non-member is dropped), the coordinator (only if a member)
+    and who answers an unaddressed message all agree with the header — `TeamStrip` shows only
+    the members ("Analyst", "Analyst & Designer", "3 bots", or "AI team" for all), the `@`
+    menu says "in this chat" / "add to this chat", and the page updates the header the moment
+    the message is sent (`joinTeamLocal`, the client mirror of `joinChatTeam`). Found on screen:
+    the header showed all six after `@ba`, and the cause was twofold — any bot pick joined the
+    whole team, AND the `@team-ai` menu row matched every bot's handle, so typing `@ba` + Enter
+    picked team-ai (it sits first). It now matches only its own words, and bot rows are
+    ranked exact handle → handle prefix → name prefix → contains.
+  - **Who speaks.** A message goes to the bots it @names; else to the bots that asked the human
+    something with **`@human`** at the end of the last exchange (`pendingAskers` — "ok, file it"
+    is an answer to the Reporter, not a new question for the Lead; a log line says where it
+    went); else to the coordinator. Naming a bot that is turned off logs that it won't answer. `@team-ai`
+    typed by the HUMAN only brings the team in — it does not make six bots answer "hello" at
+    once (`addressees(…, teamMeansEveryone = false)`); typed by a bot it means everyone else.
+    Every bot reply ENDS WITH A CONTROL LINE — `<!--team {"call":["ba"],"askHuman":false}-->`
+    (`parseDirective`) — and the bots in `call` answer next as the next ROUND; a bot called by
+    several speakers in one round answers once, `addressedBy` naming all of them. `askHuman`
+    replaces `@human` for routing the human's next reply back. The HUMAN still addresses bots
+    by `@handle` in their message; a reply that FORGOT its line falls back to its @handles (log:
+    "no control line — routed by the @handles in its text"), so delegated work is never
+    stranded. Handles are matched whole, never inside a word, an email address, a code fence or
+    an inline code span.
+  - **Approval is ENFORCED, not just asked for** (`botGuards`, `teamMcp.ts`). A bot the human
+    addressed DIRECTLY in this message (named, or answering its `@human`) is approved — that
+    message is the approval. Any other bot, when the team rules reserve tracker actions for the
+    human, runs with a complete MCP config MINUS every tracker server (`--mcp-config <file>
+    --strict-mcp-config`; strict also drops user-scope servers and claude.ai connectors, one of
+    which may be a tracker we cannot name); when they reserve `edit-files`, `Edit`/`Write`/
+    `NotebookEdit` are denied. An `ask`-autonomy bot gets both locks until addressed. If the
+    config file cannot be written the bot runs with NO MCP — fail closed. Measured: Lead called
+    `@tester`, the log said the tracker (clickup, jira) was locked, and the Tester reported no
+    ClickUp/Jira tools; a Reporter named by the human drafted, asked `@human`, and the human's
+    next unaddressed reply went back to it. `MultiEdit` is deliberately NOT in the deny list —
+    the current CLI has no such tool and prints a stderr warning the chat shows as a red line.
+  - **The prompt names the tools the run REALLY has** (`ToolAccess`). A Tester in a `read`/`write`
+    chat has no browser, device or tracker (`--strict-mcp-config`), and a prompt promising
+    "you can drive a browser" produced "I tested it and it passed". It is told plainly what it
+    can reach, that its role's tools are unavailable in this tool mode, and never to claim it
+    ran, opened, tested, queried or filed anything it did not.
+  - **Bounded twice**: `policy.maxRounds` from the team rules and `MAX_TEAM_REPLIES` (16) per
+    human message. When a cap cuts off an exchange that was still going, the coordinator gets one
+    CLOSING turn (`closing: 'cap'` — told to conclude and call on nobody), and a log line says
+    the limit was hit.
+  - **The coordinator closes the loop it opened** (`closing: 'report'`). When its latest reply
+    delegated work and the exchange then ends on its own with nobody handing the answers back,
+    it gets one closing turn to bring them together (log: "@lead is bringing the answers
+    together"). Found by using it: Lead said "when you both answer I'll combine it for you",
+    Analyst and Designer answered, and the exchange simply ended — the promised summary only
+    ever happened when a bot HAPPENED to `@lead` it back. Calls on nobody, so it adds at most one
+    reply. Re-verified: Lead → Analyst + Designer → Lead's combined answer, unprompted.
+  - **Routing reads a STRUCTURED FIELD, never the prose** (the control line above). History,
+    because it explains the design: routing first scanned each reply's @handles, and bots
+    @-mentioned each other to agree or say "ready" — Lead and Analyst ping-ponged "no ticket
+    yet" until the round cap (11 replies to a greeting). A prompt rule ("an @handle is a CALL")
+    made it rarer, not gone: an Analyst writing "trước khi @tester chạy" still called the
+    Tester, and a Lead promising "I'll combine your answers" called nobody. With the line, the
+    prompt says the opposite — naming, with or without @, calls nobody; only `call` does.
+    Measured live: Lead's closing reply said "Để @tester bắt đầu chạy…" and the Tester was NOT
+    called; all four replies of that exchange carried a line (no fallback). The line never
+    reaches the wire — `DirectiveFilter` releases text only up to the first `<!--team` and
+    holds back a tail that could still become one (tested at every split point) — nor the
+    transcript; what it said is stored as `teamCalls` / `asksHuman` on the message.
+  - **Each reply is a FRESH `claude` run** with `--no-session-persistence` and the thread in its
+    prompt as JSON (`threadFrom`, last 20 messages, 2.5 KB each) — with the human's LATEST
+    question PINNED at the top when the window no longer reaches it: one exchange can run to 17
+    bot replies, and without the pin the closing coordinator answered a question it could not
+    see. Failed replies are marked `failed` in the thread (a notice, not words the bot said).
+    Material the human attached to EARLIER messages (tags, files, screenshots — the recorded
+    `context` blocks, not actions) is carried forward (`earlierMaterial`, capped 12 KB): a bot
+    has no session, so a ticket tagged in message one was gone by message two.
+    **What the team already READ is shared** (`teamFiles.ts`): every Read by a bot is noted (the
+    CLI tool log carries its full `path`), kept on the conversation (`Chat.teamFiles`, last 12),
+    and every later prompt carries those files' CURRENT content — read from disk when the prompt
+    is built, never stale — with "do NOT Read these again". Only text files inside the project,
+    never `.git/`, `node_modules/`, `.env*` or `.mcp.json`; 8 KB per file, 24 KB in all, a cut
+    file says so. Before, nearly every reply opened by re-reading the same ticket (a tool round
+    trip each); measured after: the three parallel bots made ZERO Read calls. The prompt also
+    says "say only what is NEW" — replies had each restated that the ticket was empty and the
+    tracker locked, five times per exchange. A resumed per-bot session would
+    only know what that bot said and read, while the thread it answers was written by others; and
+    sixteen stray sessions per message would clutter the engineer's own `claude --resume` list.
+    It never touches `chat.sessionId`, so the plain assistant's session survives a team exchange
+    — and would resume having seen NONE of it. So the plain turn after a team exchange is given
+    `teamCatchUpBlock` (recorded as "AI team exchange (replayed)"): the messages since its own
+    last reply, or a recap when the chat began as a team chat and has no session. Measured: after
+    dismissing the team, "quote the draft the Reporter wrote" was answered word for word.
+  - **Model and tools per bot**: `--model <bot.model>`; tools are the conversation's mode only
+    when the bot's capabilities need more than reading (`botTools`), otherwise `read` — which
+    starts in ~1s instead of booting every MCP server. Never more than the conversation allows.
+    The bot is given the attachment blocks of the human's message (`TurnSpec.attachments` — tags,
+    images, files) plus `FACTS_BLOCK` + `DEFECTS_BLOCK`; NOT `SUGGEST_BLOCK`, so team messages
+    carry no follow-up chips. The `+` ACTION (diagram / web / research) reaches only the bots the
+    human addressed in round one — with it in the shared attachments, "Diagram" made every bot
+    draw one. Auto-learn (`noteChatTurn`) runs after a team exchange too, over what the bots said.
+  - **One bot failing does not end the exchange.** Its failure is saved as its message (marked
+    failed), announced as a `said` frame + an error log line, and the others carry on; a failed
+    reply calls on nobody. Only an exchange in which NOBODY answered ends with `error` (a broken
+    CLI or a lost login — sixteen more attempts would be sixteen more timeouts). `rescueTurn`
+    tracks whether the streaming reply is already saved, so a throw between speakers doesn't
+    write the previous bot's message twice.
+  - **The bots of one ROUND run in PARALLEL** (`runPool`, at most `policy.maxParallelBots`,
+    default 4). They are independent by construction — each answers the thread as it stood when
+    the round began, and its prompt names the peers answering beside it ("do your own part; do not
+    wait for, guess at or repeat theirs") — so running them one after another only summed their
+    times. Rounds stay sequential: round N+1 is who round N called on. Results are processed in
+    CALL order, not finish order, so who is called next never depends on which model was faster.
+    `speak` never throws and never sends a terminal frame (a throw would abandon the bots beside
+    it; it becomes that bot's failure); the round owns the one `stopped`/`error`. The report turn
+    only counts answers from a LATER round than the coordinator's — a bot beside it in the same
+    round was not delegated to. Measured: Lead → Analyst + Designer + Critic started together at
+    13.0s and all saved by 24.5s (sequentially ~35s); the whole 5-reply exchange took 38.5s, where
+    a similar one took ~2 min before.
+  - **The wire**: every team frame carries `seg` (one per bot reply) because several stream at
+    once: `speaker {seg, bot, calledBy}` opens a reply, `delta`/`tool` carry their `seg`, `log`
+    lines are prefixed `@bot ·`, and `said {seg, chat}` carries the saved conversation when that
+    bot is done — the client draws the finished message from the transcript and drops that row.
+    The page keeps `pending.team: TeamSlotView[]`, one streaming row per active `seg`, each keyed
+    by it (the reveal animation never carries one bot's text into another's) and on its own clock.
+    `done` ends the exchange. The question is saved with the FIRST saved reply, like an ordinary
+    turn, so a Stop before anyone spoke leaves nothing; a Stop mid-round saves EVERY running bot's
+    partial reply as failed, with one `stopped` frame.
+  - **Re-attach**: `LiveTurn.continuation` (set when the question is pushed) tells a late viewer
+    the question is already in the transcript, and `LiveTurn.speakers` — every reply streaming
+    right now — is replayed slot by slot: `speaker`, its backlog as one `delta`, its tool steps.
+    Verified mid-round: a fresh connection received all three running bots with their text. **`onSaid` must write `running: true`
+    into the cached chat** — the saved record has no such flag and the re-attach effect is keyed on
+    it, so without it a reloaded page unsubscribed after the first bot and every later speaker
+    silently never appeared (found on screen, fixed, re-verified).
+  - **Stop before any reply hands the question back** (`stop` in `ChatPage.tsx`; plain chats
+    too). The server saves nothing for a turn stopped before a word existed — by design — and
+    Stop aborts the local subscription, so the `stopped` frame is never read here and the typed
+    text simply vanished. `stopChat` answers only once the turn has SETTLED, so the page then
+    reads the transcript and, if the question is not its last human message, puts the text back
+    in the composer (tags and images are not restored) with a toast. Verified both ways: Stop 2s
+    in → text back; Stop mid-reply → question + partial saved, composer left empty.
+  - Rating / fact-checking a bot's message reads the nearest HUMAN message above it as its
+    question (`questionBefore`) — in a team exchange the neighbour is usually another bot. A
+    lapsed plain-assistant session's recap names bot messages as the bot's, not as "You".
+  **Verified end to end**: "@team-ai Lead, greet the others" → Lead called `@ba @tester @designer
+  @critic @reporter`, each introduced itself (Opus/Sonnet/Haiku per bot), done in 7 messages; a
+  follow-up naming two bots got exactly those two; a reload mid-exchange re-attached and showed
+  every later speaker; Stop mid-reply kept Lead's message and saved Analyst's partial as failed
+  with the conversation no longer running.

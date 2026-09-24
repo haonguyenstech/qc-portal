@@ -221,6 +221,9 @@ export interface McpServer {
   url?: string
   type?: string
   env?: Record<string, string>
+  /** http/sse servers only; values always masked in the list. */
+  headers?: Record<string, string>
+  cwd?: string
   source: 'project' | 'local' | 'user' | 'cli'
   status?: 'connected' | 'needs-auth' | 'pending' | 'failed' | 'unknown'
 }

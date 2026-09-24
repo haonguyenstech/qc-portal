@@ -13,7 +13,7 @@ export interface StreamMessage { runId: string; event: LogEvent }
 export type SkillSyncState = 'in-sync' | 'update-available' | 'customized' | 'missing'
 export interface SkillSummary { name: string; description: string; files: string[]; sync?: SkillSyncState }
 export interface SkillFile { name: string; content: string }
-export interface McpServer { name: string; command?: string; args?: string[]; url?: string; type?: string; env?: Record<string, string>; source: string; status?: string }
+export interface McpServer { name: string; command?: string; args?: string[]; url?: string; type?: string; env?: Record<string, string>; headers?: Record<string, string>; cwd?: string; source: string; status?: string }
 
 export interface ClaudeModelInfo {
   id: string

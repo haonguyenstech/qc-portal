@@ -49,6 +49,7 @@ import { knowledgeRouter } from './routes/knowledge.js'
 import { overviewDocsRouter } from './routes/overviewDocs.js'
 import { memoryRouter } from './routes/memory.js'
 import { notesRouter } from './routes/notes.js'
+import { aiTeamRouter } from './routes/aiTeam.js'
 import { accountsRouter } from './routes/accounts.js'
 import { diagramsRouter } from './routes/diagrams.js'
 import { apiTestsRouter } from './routes/apiTests.js'
@@ -167,6 +168,7 @@ app.use('/api/knowledge', knowledgeRouter)
 app.use('/api/overview-docs', overviewDocsRouter)
 app.use('/api/memory', memoryRouter)
 app.use('/api/notes', notesRouter)
+app.use('/api/ai-team', aiTeamRouter)
 app.use('/api/accounts', accountsRouter)
 app.use('/api/diagrams', diagramsRouter)
 app.use('/api/api-tests', apiTestsRouter)

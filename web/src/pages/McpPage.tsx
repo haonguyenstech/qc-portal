@@ -5,7 +5,9 @@ import { Link } from 'react-router-dom'
 import {
   AlertCircle,
   AlertTriangle,
+  ArrowLeft,
   BookOpen,
+  Braces,
   Check,
   CheckCircle2,
   Clock,
@@ -18,22 +20,25 @@ import {
   FileJson,
   FolderGit2,
   FolderOpen,
-  FlaskConical,
-  Globe,
   Info,
   KeyRound,
+  LayoutGrid,
   ListChecks,
   Loader2,
   Maximize2,
   MonitorPlay,
   MousePointerClick,
+  PencilLine,
   Play,
   Plug,
   PlugZap,
+  Plus,
+  Search,
   Smartphone,
   Square,
   SquareKanban,
   Unplug,
+  X,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -49,8 +54,11 @@ import {
 import { Input } from '@/components/ui/input'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { Checkbox } from '@/components/ui/checkbox'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { Textarea } from '@/components/ui/textarea'
 import {
   addMcp,
+  importMcp,
   listMcp,
   mcpHealth,
   mcpOauthStatus,
@@ -64,17 +72,28 @@ import {
   connectMaestro,
   openMcpFolder,
   removeMcp,
+  updateMcp,
   revealMcpEnv,
-  revealMcpSecret,
-  runMcpTest,
   saveMcpToken,
   testMcp,
-  type McpCapabilityResult,
+  type McpEntryInput,
   type McpOauthProvider,
 } from '@/lib/api'
 import type { McpServer, Project } from '@/lib/types'
-import { deviceNameHint, devicesFromDetection, isUnnamed, type DetectedDevice } from '@/lib/devices'
 import { useProjects } from '@/lib/project-context'
+import {
+  BUILTIN_MCP_NAMES,
+  MCP_NAME_RE,
+  MCP_TEMPLATES,
+  MCP_TEMPLATE_CATEGORIES,
+  entrySummary,
+  fillTemplate,
+  iconForServer,
+  parsePastedMcp,
+  uniqueName,
+  type McpTemplate,
+  type McpTemplateField,
+} from '@/lib/mcpTemplates'
 
 const OAUTH_META: Record<
   McpOauthProvider,
@@ -123,18 +142,6 @@ const SERVER_PURPOSE: Record<string, string> = {
     'Drives an iOS/Android simulator or a Chromium browser through Maestro, and can save a run as a reusable YAML flow you re-run as a regression test.',
 }
 
-/**
- * Inline one-liner describing what a server is for, shown in the BODY of a
- * not-yet-connected card. It fills the empty space that "Connect" (pinned to the
- * bottom via mt-auto) would otherwise leave, and tells the QC why the integration
- * matters. Connected cards omit it (their body already holds the token + actions).
- */
-function PurposeBlurb({ name }: { name: string }) {
-  const text = SERVER_PURPOSE[name]
-  if (!text) return null
-  return <p className="text-xs leading-relaxed text-muted-foreground">{text}</p>
-}
-
 /** Small info glyph with a hover/focus tooltip explaining a server's purpose. */
 function PurposeTip({ name, label }: { name: string; label: string }) {
   const text = SERVER_PURPOSE[name]
@@ -157,44 +164,6 @@ function PurposeTip({ name, label }: { name: string; label: string }) {
   )
 }
 
-// Functional ("does it actually work?") test per known server: a real action run
-// through the MCP via Claude. Mirrors the server's CAPABILITY_TESTS.
-const CAPABILITY: Record<
-  string,
-  { needsInput: boolean; inputLabel: string; placeholder: string; action: string }
-> = {
-  clickup: {
-    needsInput: true,
-    inputLabel: 'Ticket ID',
-    placeholder: 'e.g. 86eqk2hfk',
-    action: 'Fetch ticket',
-  },
-  figma: {
-    needsInput: true,
-    inputLabel: 'Figma design link',
-    placeholder: 'https://www.figma.com/design/…',
-    action: 'Read design',
-  },
-  jira: {
-    needsInput: true,
-    inputLabel: 'Issue key',
-    placeholder: 'e.g. PROJ-123',
-    action: 'Fetch issue',
-  },
-  playwright: {
-    needsInput: false,
-    inputLabel: '',
-    placeholder: '',
-    action: 'Open Google & close',
-  },
-  maestro: {
-    needsInput: false,
-    inputLabel: '',
-    placeholder: '',
-    action: 'List devices',
-  },
-}
-
 // Badge shown on a connected card, driven by LIVE health — not just "is it in
 // .mcp.json". A server can be configured but Pending approval / Needs auth / Failed.
 const CARD_STATUS: Record<string, { label: string; cls: string; Icon: typeof Figma }> = {
@@ -204,15 +173,94 @@ const CARD_STATUS: Record<string, { label: string; cls: string; Icon: typeof Fig
   failed: { label: 'Failed', cls: 'bg-red-50 text-red-700', Icon: AlertCircle },
 }
 
-// Whole-card treatment. A connected server gets a subtle emerald tint + border so
-// the active integrations pop out of the grid at a glance; everything else keeps the
-// neutral hairline card. Opacity-based emerald reads correctly in light AND dark.
-function mcpCardClass(status?: string): string {
-  return cn(
-    'flex h-full flex-col gap-2.5 rounded-3xl border p-4 shadow-none transition-all duration-200 hover:-translate-y-0.5 hover:shadow-sm',
-    status === 'connected'
-      ? 'border-emerald-500/40 bg-emerald-500/[0.04] hover:border-emerald-500/60'
-      : 'border-border/60 hover:border-border',
+/**
+ * One server as a compact list row: icon + name, live badge, inline actions — no
+ * config (tokens, commands) and no purpose text; those live in Details and the
+ * name's info tooltip. Anything
+ * taller — the token form, a test result, an install hint — unfolds under the row.
+ * A connected server gets a faint emerald wash so live integrations stand out.
+ */
+function ServerRow({
+  icon: Icon,
+  title,
+  subtitle,
+  badge,
+  actions,
+  status,
+  children,
+}: {
+  icon: typeof Figma
+  title: ReactNode
+  subtitle: string
+  badge?: ReactNode
+  actions?: ReactNode
+  status?: string
+  children?: ReactNode
+}) {
+  const hasBody = Array.isArray(children) ? children.some(Boolean) : !!children
+  return (
+    <div
+      className={cn(
+        'px-4 py-3 transition-colors hover:bg-muted/30',
+        status === 'connected' && 'bg-emerald-500/[0.04]',
+      )}
+    >
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2 md:flex-nowrap">
+        <span
+          className={cn(
+            'flex h-8 w-8 shrink-0 items-center justify-center rounded-xl border bg-muted/60 text-muted-foreground',
+            status === 'connected' ? 'border-emerald-500/40' : 'border-border/60',
+          )}
+        >
+          <Icon className="h-4 w-4" />
+        </span>
+        <div className="min-w-0 flex-1 leading-tight md:w-48 md:flex-none">
+          <div className="flex items-center gap-1.5 text-sm font-semibold tracking-tight">{title}</div>
+          <div className="truncate text-xs text-muted-foreground">{subtitle}</div>
+        </div>
+        <div className="flex-1" />
+        <div className="flex shrink-0 items-center [&>span]:ml-0">{badge}</div>
+        <div className="flex shrink-0 items-center gap-1">{actions}</div>
+      </div>
+      {hasBody && <div className="mt-2.5 space-y-2 md:pl-11">{children}</div>}
+    </div>
+  )
+}
+
+/** A low-emphasis icon action with a tooltip, for the end of a server row. */
+function RowIconButton({
+  label,
+  onClick,
+  disabled,
+  destructive,
+  children,
+}: {
+  label: string
+  onClick: () => void
+  disabled?: boolean
+  destructive?: boolean
+  children: ReactNode
+}) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          type="button"
+          onClick={onClick}
+          disabled={disabled}
+          aria-label={label}
+          className={cn(
+            'flex h-8 w-8 items-center justify-center rounded-full text-muted-foreground transition-all duration-200 active:scale-[0.95] disabled:pointer-events-none disabled:opacity-50',
+            destructive
+              ? 'hover:bg-destructive/10 hover:text-destructive'
+              : 'hover:bg-muted hover:text-foreground',
+          )}
+        >
+          {children}
+        </button>
+      </TooltipTrigger>
+      <TooltipContent>{label}</TooltipContent>
+    </Tooltip>
   )
 }
 
@@ -339,231 +387,1039 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
   )
 }
 
-/** Colored result line shared by the functional-test surfaces (green / amber / red). */
-function ResultLine({ result }: { result: { ok: boolean; warn?: boolean; detail: string } }) {
-  const Icon = !result.ok ? AlertCircle : result.warn ? AlertTriangle : CheckCircle2
+/** A labeled group of MCP cards (e.g. "Tickets & tasks") with a header + responsive grid. */
+/** Mask a secret for the preview: keep the last 4 characters, like the server does. */
+function maskValue(v: string): string {
+  const t = v.trim()
+  if (!t) return ''
+  return t.length <= 4 ? '••••' : `••••${t.slice(-4)}`
+}
+
+/** A template field's input (secret fields get an eye toggle). */
+function TemplateFieldInput({
+  field,
+  value,
+  onChange,
+  autoFocus,
+}: {
+  field: McpTemplateField
+  value: string
+  onChange: (v: string) => void
+  autoFocus?: boolean
+}) {
+  const [show, setShow] = useState(false)
+  if (field.kind === 'checkbox') {
+    return (
+      <label className="flex items-center justify-between rounded-xl bg-muted/60 px-3 py-2 text-xs text-muted-foreground">
+        <span>{field.label}</span>
+        <Checkbox checked={value === 'true'} onChange={(e) => onChange(e.target.checked ? 'true' : '')} />
+      </label>
+    )
+  }
   return (
-    <p
-      className={cn(
-        'flex items-start gap-1.5 rounded-md px-2.5 py-2 text-xs leading-snug',
-        !result.ok
-          ? 'bg-red-50 text-red-700'
-          : result.warn
-            ? 'bg-amber-50 text-amber-700'
-            : 'bg-emerald-50 text-emerald-700',
-      )}
-    >
-      <Icon className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-      <span className="min-w-0 break-words">{result.detail}</span>
-    </p>
+    <Field label={field.label}>
+      <div className="relative">
+        <Input
+          autoFocus={autoFocus}
+          type={field.secret && !show ? 'password' : 'text'}
+          placeholder={field.placeholder}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          aria-label={field.label}
+          className={cn('h-9 text-xs', field.secret && 'pr-9 font-mono')}
+        />
+        {field.secret && (
+          <button
+            type="button"
+            onClick={() => setShow((v) => !v)}
+            aria-label={show ? 'Hide value' : 'Show value'}
+            className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground transition-colors hover:text-foreground"
+          >
+            {show ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+          </button>
+        )}
+      </div>
+      {field.hint && <p className="text-[11px] leading-snug text-muted-foreground">{field.hint}</p>}
+    </Field>
   )
 }
 
+/** Why a server name can't be used, or null when it can. */
+function nameProblem(name: string, taken: Set<string>): string | null {
+  if (!name) return 'Name is required.'
+  if (!MCP_NAME_RE.test(name)) return 'Letters, numbers, - and _ only (max 64).'
+  if (taken.has(name)) return `"${name}" is already in use.`
+  return null
+}
+
 /**
- * Mobile functional test — a two-step dialog. On open it auto-detects connected
- * devices/simulators (empty-input capability test); if any are found it shows a
- * device picker + an enabled "Run test" that actually drives the selected device.
- * No devices → amber notice, test stays disabled.
+ * "Add server": pick a ready-made template and fill its fields, or paste any MCP
+ * config (JSON in the usual shapes, or a `claude mcp add` line). Either way the
+ * result goes through ONE all-or-nothing import call, then every added server gets a
+ * live connection test — which is also what approves a new project server.
  */
-function MobileFunctionalTest({
-  name,
-  label,
+function AddServerDialog({
+  open,
+  onOpenChange,
   projectId,
-  onClose,
+  projectRoot,
+  existingNames,
+  onAdded,
 }: {
-  name: string
-  label: string
+  open: boolean
+  onOpenChange: (open: boolean) => void
   projectId: string
-  onClose: () => void
+  projectRoot?: string
+  existingNames: string[]
+  onAdded: (names: string[]) => void
 }) {
-  const [device, setDevice] = useState('')
-  const detect = useMutation({ mutationFn: () => runMcpTest(name, projectId, '') })
-  const runTest = useMutation({ mutationFn: (dev: string) => runMcpTest(name, projectId, dev) })
+  const [tab, setTab] = useState<'templates' | 'paste'>('templates')
+  const [query, setQuery] = useState('')
+  const [picked, setPicked] = useState<McpTemplate | null>(null)
+  const [templateName, setTemplateName] = useState('')
+  const [values, setValues] = useState<Record<string, string>>({})
+  const [pasted, setPasted] = useState('')
+  // Name edits for pasted servers, keyed by the name as pasted.
+  const [renames, setRenames] = useState<Record<string, string>>({})
 
-  // The component is freshly mounted each time the dialog opens (parent gates it),
-  // so a bare mount-time detect is enough — no state to reset.
-  useEffect(() => {
-    detect.mutate()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  const taken = useMemo(() => new Set(existingNames), [existingNames])
 
-  const detectResult = detect.data
-  const devices: DetectedDevice[] = devicesFromDetection(detectResult)
-  // Only worth saying when a row actually reads as an id — a named list needs no note.
-  const nameHint = devices.some(isUnnamed) ? deviceNameHint(detectResult) : null
-  // Selection keys on the device_id — that's what the drive step must be given.
-  const selected = devices.some((d) => d.deviceId === device) ? device : devices[0]?.deviceId ?? ''
-  const detecting = detect.isPending
-  const testing = runTest.isPending
-  const detectError = detect.isError
-    ? { ok: false, detail: detect.error instanceof Error ? detect.error.message : 'Detection failed' }
-    : null
+  function pick(t: McpTemplate) {
+    setPicked(t)
+    setTemplateName(uniqueName(t.name, taken))
+    setValues(
+      Object.fromEntries(
+        t.fields.map((f) => [f.key, f.prefill === 'project-root' ? (projectRoot ?? '') : '']),
+      ),
+    )
+  }
+
+  const parsed = useMemo(() => parsePastedMcp(pasted), [pasted])
+  const pastedRows = useMemo(() => {
+    if (!parsed.ok) return []
+    const rows = parsed.servers.map((s) => ({ ...s, finalName: (renames[s.name] ?? s.name).trim() }))
+    // A name is a problem if it is taken OR used twice within this paste.
+    return rows.map((r) => {
+      const others = new Set(rows.filter((o) => o !== r).map((o) => o.finalName))
+      const problem =
+        nameProblem(r.finalName, taken) ??
+        (others.has(r.finalName) ? `"${r.finalName}" appears twice in this paste.` : null)
+      return { ...r, problem }
+    })
+  }, [parsed, renames, taken])
+
+  // A built-in keeps its fixed name, so only a name clash matters (the tile is
+  // disabled once it is configured).
+  const templateProblem = picked && !picked.builtin ? nameProblem(templateName.trim(), taken) : null
+  const missingField = picked?.fields.find((f) => !f.optional && !values[f.key]?.trim())
+  const templateEntry = picked ? fillTemplate(picked, values) : null
+
+  const { data: oauth } = useQuery({
+    queryKey: ['mcp-oauth', projectId],
+    queryFn: () => mcpOauthStatus(projectId),
+  })
+  const tokenUrl = (provider?: string) =>
+    oauth?.providers.find((p) => p.provider === provider)?.tokenUrl ?? ''
+  // Maestro's CLI + JDK preflight boots a JVM — only while its template is open.
+  const { data: maestroPf, isFetching: maestroChecking } = useQuery({
+    queryKey: ['mcp-maestro'],
+    queryFn: mcpMaestroStatus,
+    enabled: picked?.builtin === 'maestro',
+    staleTime: 60_000,
+  })
+  const maestroBlocked = picked?.builtin === 'maestro' && (maestroChecking || !maestroPf?.available)
+
+  // A built-in connects through its own route, never the generic import: the token
+  // routes verify + shape the entry, and Playwright's profile / Maestro's JAVA_HOME
+  // are machine facts only the server knows.
+  const connectBuiltin = useMutation({
+    mutationFn: async (t: McpTemplate) => {
+      const v = (k: string) => values[k]?.trim() ?? ''
+      switch (t.builtin) {
+        case 'playwright':
+          await addMcp(
+            { name: 'playwright', command: 'npx', args: playwrightArgs(v('HEADLESS') === 'true'), type: 'stdio' },
+            projectId,
+          )
+          break
+        case 'maestro':
+          await connectMaestro(projectId)
+          break
+        case 'jira':
+          await saveMcpToken('jira', v('TOKEN'), projectId, { url: v('URL'), email: v('EMAIL') })
+          break
+        case 'azure':
+          await saveMcpToken('azure', v('TOKEN'), projectId, {
+            orgUrl: v('ORG_URL'),
+            project: v('PROJECT') || undefined,
+          })
+          break
+        default:
+          await saveMcpToken(t.builtin as McpOauthProvider, v('TOKEN'), projectId)
+      }
+      return t.name
+    },
+    onSuccess: (name) => {
+      toast.success(`${picked?.label ?? name} added`, {
+        description: "Saved to this project's .mcp.json — testing the connection…",
+      })
+      onOpenChange(false)
+      onAdded([name])
+    },
+    onError: (err) =>
+      toast.error('Could not connect', {
+        description: err instanceof Error ? err.message : 'Unknown error',
+      }),
+  })
+
+  const add = useMutation({
+    mutationFn: (servers: Record<string, McpEntryInput>) => importMcp(servers, projectId),
+    onSuccess: (res) => {
+      toast.success(
+        res.added.length === 1 ? `${res.added[0]} added` : `${res.added.length} servers added`,
+        { description: "Saved to this project's .mcp.json — testing the connection…" },
+      )
+      onOpenChange(false)
+      onAdded(res.added)
+    },
+    onError: (err) =>
+      toast.error('Could not add server', {
+        description: err instanceof Error ? err.message : 'Unknown error',
+      }),
+  })
+
+  function submitTemplate() {
+    if (!picked || !templateEntry || templateProblem || missingField) return
+    if (picked.builtin) {
+      if (!maestroBlocked) connectBuiltin.mutate(picked)
+      return
+    }
+    add.mutate({ [templateName.trim()]: templateEntry })
+  }
+  const pending = add.isPending || connectBuiltin.isPending
+
+  const pasteBlocked =
+    !parsed.ok || pastedRows.some((r) => r.problem || r.error) || pastedRows.length === 0
+  function submitPaste() {
+    if (pasteBlocked) return
+    add.mutate(Object.fromEntries(pastedRows.map((r) => [r.finalName, r.entry])))
+  }
+
+  // Preview JSON with secrets masked — the template's secret fields, every header.
+  const previewJson = useMemo(() => {
+    if (!picked || !templateEntry) return ''
+    const secretVals = picked.fields
+      .filter((f) => f.secret && values[f.key]?.trim())
+      .map((f) => values[f.key].trim())
+    const mask = (s: string) => secretVals.reduce((acc, v) => acc.split(v).join(maskValue(v)), s)
+    const shown = JSON.parse(JSON.stringify(templateEntry), (_k, v) =>
+      typeof v === 'string' ? mask(v) : v,
+    )
+    return JSON.stringify({ [templateName.trim() || picked.name]: shown }, null, 2)
+  }, [picked, templateEntry, values, templateName])
+
+  const q = query.trim().toLowerCase()
+  const visible = MCP_TEMPLATES.filter(
+    (t) => !q || `${t.label} ${t.blurb} ${t.category}`.toLowerCase().includes(q),
+  )
 
   return (
-    <Dialog
-      open
-      onOpenChange={(o) => {
-        if (!o && !detecting && !testing) onClose()
-      }}
-    >
-      <DialogContent className="sm:max-w-md">
-        <DialogHeader>
+    <Dialog open={open} onOpenChange={(o) => !add.isPending && !connectBuiltin.isPending && onOpenChange(o)}>
+      <DialogContent className="max-h-[88vh] overflow-y-auto overflow-x-hidden sm:max-w-2xl">
+        <DialogHeader className="min-w-0">
           <DialogTitle className="flex items-center gap-2">
-            <Smartphone className="h-4 w-4" />
-            Functional test — {label}
+            <Plus className="h-4 w-4" />
+            Add MCP server
           </DialogTitle>
           <DialogDescription>
-            Detects connected devices/simulators, then drives the one you pick to confirm the server
-            actually works — not just that it's configured.
+            Saved to this project's <code>.mcp.json</code>, then tested live.
           </DialogDescription>
         </DialogHeader>
 
-        {/* min-w-0: DialogContent is a grid, so a grid item's automatic minimum size is
-            its min-content width — a device label containing an unbreakable 36-char udid
-            blows the column past the dialog's max-width and paints the rows and footer
-            outside the card. Verified: without this the content box measures 591px inside
-            a 448px dialog. */}
-        <div className="min-w-0 space-y-3">
-          {detecting ? (
-            <p className="flex items-center gap-2 rounded-md bg-muted/60 px-2.5 py-2 text-xs text-muted-foreground">
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              Detecting devices…
-            </p>
-          ) : detectError ? (
-            <ResultLine result={detectError} />
-          ) : detectResult && devices.length === 0 ? (
-            // Detection succeeded but nothing to drive (amber), or a real failure (red).
-            <ResultLine result={detectResult} />
-          ) : detectResult ? (
-            <div className="space-y-2">
-              <label className="text-xs font-medium text-muted-foreground">
-                {devices.length} device{devices.length > 1 ? 's' : ''} detected · pick one to test
-              </label>
-              <div className="space-y-1.5">
-                {devices.map((info) => {
-                  const active = selected === info.deviceId
-                  const DeviceIcon = info.platform === 'Web' ? Globe : Smartphone
+        <Tabs value={tab} onValueChange={(v) => setTab(v as 'templates' | 'paste')} className="min-w-0">
+          <TabsList className="rounded-full">
+            <TabsTrigger value="templates" className="rounded-full">
+              <LayoutGrid className="h-3.5 w-3.5" />
+              Templates
+            </TabsTrigger>
+            <TabsTrigger value="paste" className="rounded-full">
+              <Braces className="h-3.5 w-3.5" />
+              Paste JSON
+            </TabsTrigger>
+          </TabsList>
+
+          <TabsContent value="templates" className="mt-3 min-w-0">
+            {!picked ? (
+              <div className="space-y-3">
+                <div className="relative">
+                  <Search className="absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+                  <Input
+                    autoFocus
+                    value={query}
+                    onChange={(e) => setQuery(e.target.value)}
+                    placeholder="Search templates…"
+                    aria-label="Search templates"
+                    className="h-9 rounded-full pl-8 text-sm"
+                  />
+                </div>
+                {MCP_TEMPLATE_CATEGORIES.map((cat) => {
+                  const items = visible.filter((t) => t.category === cat)
+                  if (!items.length) return null
                   return (
-                    <button
-                      key={info.deviceId}
-                      type="button"
-                      onClick={() => setDevice(info.deviceId)}
-                      disabled={testing}
-                      aria-pressed={active}
-                      // The caption carries the udid/serial, which the row truncates.
-                      title={`${info.name} · ${info.caption}`}
-                      className={cn(
-                        'flex w-full items-center gap-3 rounded-xl border px-3 py-2.5 text-left transition-all duration-200 active:scale-[0.99] disabled:opacity-60',
-                        active
-                          ? 'border-primary/40 bg-primary/5'
-                          : 'border-border/60 bg-muted/40 hover:border-border hover:bg-muted/70',
-                      )}
-                    >
-                      <span
-                        className={cn(
-                          'flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border bg-background',
-                          active ? 'border-primary/30 text-primary' : 'border-border/60 text-muted-foreground',
-                        )}
-                      >
-                        <DeviceIcon className="h-4 w-4" />
-                      </span>
-                      <span className="min-w-0 flex-1 leading-tight">
-                        <span className="block truncate text-sm font-medium">{info.name}</span>
-                        <span className="block truncate text-[11px] text-muted-foreground">
-                          {info.caption}
-                        </span>
-                      </span>
-                      {active && <CheckCircle2 className="h-4 w-4 shrink-0 text-primary" />}
-                    </button>
+                    <div key={cat} className="space-y-1.5">
+                      <div className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                        {cat}
+                      </div>
+                      <div className="grid gap-2 sm:grid-cols-2">
+                        {items.map((t) => {
+                          const added = taken.has(t.name)
+                          // A built-in exists once per project, under its fixed name.
+                          const locked = added && !!t.builtin
+                          return (
+                            <button
+                              key={t.id}
+                              type="button"
+                              onClick={() => pick(t)}
+                              disabled={locked}
+                              className="flex min-w-0 items-start gap-2.5 rounded-2xl border border-border/60 p-3 text-left transition-all duration-200 hover:-translate-y-0.5 hover:border-border hover:shadow-sm active:scale-[0.99] disabled:pointer-events-none disabled:opacity-55"
+                            >
+                              <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl border border-border/60 bg-muted/60 text-muted-foreground">
+                                <t.icon className="h-4 w-4" />
+                              </span>
+                              <span className="min-w-0 flex-1 leading-tight">
+                                <span className="flex items-center gap-1.5 text-sm font-semibold tracking-tight">
+                                  <span className="truncate">{t.label}</span>
+                                  {added && (
+                                    <span className="shrink-0 rounded-full bg-emerald-50 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700">
+                                      Added
+                                    </span>
+                                  )}
+                                </span>
+                                <span className="mt-0.5 line-clamp-2 block text-xs text-muted-foreground">
+                                  {t.blurb}
+                                </span>
+                              </span>
+                            </button>
+                          )
+                        })}
+                      </div>
+                    </div>
                   )
                 })}
+                {!visible.length && (
+                  <p className="py-6 text-center text-sm text-muted-foreground">
+                    No template matches — use <b>Paste JSON</b> for any other server.
+                  </p>
+                )}
               </div>
-              {nameHint && (
-                <p className="rounded-lg bg-amber-500/10 px-2.5 py-2 text-[11px] leading-relaxed text-amber-700 dark:text-amber-400">
-                  {nameHint}
-                </p>
-              )}
-            </div>
-          ) : null}
-
-          {runTest.data && <ResultLine result={runTest.data} />}
-          {runTest.isError && (
-            <ResultLine
-              result={{
-                ok: false,
-                detail: runTest.error instanceof Error ? runTest.error.message : 'Test failed',
-              }}
-            />
-          )}
-        </div>
-
-        <DialogFooter className="min-w-0 sm:flex-wrap">
-          <Button variant="ghost" onClick={onClose} disabled={detecting || testing}>
-            Close
-          </Button>
-          <Button
-            variant="secondary"
-            onClick={() => detect.mutate()}
-            disabled={detecting || testing}
-            className="rounded-full transition-all duration-200 active:scale-[0.98]"
-          >
-            {detecting ? <Loader2 className="h-4 w-4 animate-spin" /> : <PlugZap className="h-4 w-4" />}
-            Re-scan
-          </Button>
-          <Button
-            onClick={() => selected && runTest.mutate(selected)}
-            disabled={detecting || testing || !selected}
-            className="rounded-full transition-all duration-200 active:scale-[0.98]"
-          >
-            {testing ? (
-              <>
-                <Loader2 className="h-4 w-4 animate-spin" />
-                Testing…
-              </>
             ) : (
-              <>
-                <FlaskConical className="h-4 w-4" />
-                Run test
-              </>
+              <div className="min-w-0 space-y-3">
+                <div className="flex items-center gap-2.5">
+                  <button
+                    type="button"
+                    onClick={() => setPicked(null)}
+                    aria-label="Back to templates"
+                    className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-border/60 text-muted-foreground transition-colors hover:border-border hover:text-foreground"
+                  >
+                    <ArrowLeft className="h-4 w-4" />
+                  </button>
+                  <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl border border-border/60 bg-muted/60 text-muted-foreground">
+                    <picked.icon className="h-4 w-4" />
+                  </span>
+                  <div className="min-w-0 flex-1 leading-tight">
+                    <div className="text-sm font-semibold tracking-tight">{picked.label}</div>
+                    <div className="truncate text-xs text-muted-foreground">{picked.blurb}</div>
+                  </div>
+                  <a
+                    href={picked.docsUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex shrink-0 items-center gap-1 text-[11px] text-muted-foreground transition-colors hover:text-foreground"
+                  >
+                    <ExternalLink className="h-3 w-3" />
+                    Docs
+                  </a>
+                </div>
+
+                {picked.builtin ? (
+                  <p className="text-[11px] leading-snug text-muted-foreground">
+                    Saved as <code className="font-mono">{picked.name}</code> — the portal finds
+                    this built-in by that name, so keep it unless you know what relies on it.
+                  </p>
+                ) : (
+                  <Field label="Server name">
+                    <Input
+                      value={templateName}
+                      onChange={(e) => setTemplateName(e.target.value)}
+                      aria-label="Server name"
+                      className="h-9 font-mono text-xs"
+                    />
+                    {templateProblem && (
+                      <p className="text-[11px] text-red-600">{templateProblem}</p>
+                    )}
+                  </Field>
+                )}
+                {picked.fields.map((f, i) => (
+                  <TemplateFieldInput
+                    key={f.key}
+                    field={f}
+                    autoFocus={i === 0}
+                    value={values[f.key] ?? ''}
+                    onChange={(v) => setValues((m) => ({ ...m, [f.key]: v }))}
+                  />
+                ))}
+                {picked.builtin && tokenUrl(picked.builtin) && (
+                  <a
+                    href={tokenUrl(picked.builtin)}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center gap-1 text-[11px] text-muted-foreground transition-colors hover:text-foreground"
+                  >
+                    <ExternalLink className="h-3 w-3" />
+                    Get a token from {picked.label}
+                  </a>
+                )}
+                {picked.builtin === 'maestro' &&
+                  (maestroChecking ? (
+                    <p className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                      Checking the Maestro CLI and Java on this machine…
+                    </p>
+                  ) : maestroPf && !maestroPf.available ? (
+                    <div className="space-y-1.5 rounded-xl bg-amber-50 px-2.5 py-2 text-[11px] leading-snug text-amber-700">
+                      <p className="flex items-start gap-1.5">
+                        <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                        {maestroPf.javaHome === null && !maestroPf.defaultJavaOk
+                          ? `Maestro needs Java 17+${maestroPf.javaMajor ? ` (found Java ${maestroPf.javaMajor})` : ''}. Install a JDK, then reopen this.`
+                          : "The Maestro CLI isn't installed on this machine. Install it, then reopen this."}
+                      </p>
+                      <code className="block truncate rounded-md bg-amber-100/70 px-1.5 py-1 font-mono text-[10px] text-amber-900">
+                        {maestroPf.javaHome === null && !maestroPf.defaultJavaOk
+                          ? 'brew install openjdk@21'
+                          : 'curl -fsSL "https://get.maestro.mobile.dev" | bash'}
+                      </code>
+                    </div>
+                  ) : null)}
+                {picked.needsUv && (
+                  <p className="flex items-start gap-1.5 rounded-xl bg-amber-50 px-2.5 py-2 text-[11px] leading-snug text-amber-700">
+                    <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                    Runs through <code>uvx</code> — needs Astral's uv installed on this machine.
+                  </p>
+                )}
+                {!picked.builtin && (
+                <div className="min-w-0 space-y-1.5">
+                  <span className="text-xs font-medium text-muted-foreground">.mcp.json entry</span>
+                  <pre className="max-h-48 w-full min-w-0 overflow-auto rounded-xl bg-zinc-950 p-3 font-mono text-[11px] leading-relaxed text-zinc-100">
+                    {previewJson}
+                  </pre>
+                </div>
+                )}
+              </div>
             )}
+          </TabsContent>
+
+          <TabsContent value="paste" className="mt-3 min-w-0 space-y-3">
+            <Textarea
+              autoFocus
+              value={pasted}
+              onChange={(e) => {
+                setPasted(e.target.value)
+                setRenames({})
+              }}
+              spellCheck={false}
+              aria-label="MCP config to import"
+              placeholder={`{\n  "mcpServers": {\n    "my-server": {\n      "command": "npx",\n      "args": ["-y", "some-mcp-server"],\n      "env": { "API_KEY": "…" }\n    }\n  }\n}\n\n…or: claude mcp add --transport http my-server https://example.com/mcp`}
+              className="h-52 resize-y rounded-2xl font-mono text-[11px] leading-relaxed"
+            />
+            <p className="text-[11px] leading-snug text-muted-foreground">
+              Accepts <code>.mcp.json</code> / Claude Desktop (<code>mcpServers</code>), VS Code
+              (<code>servers</code>), a single server entry, or a <code>claude mcp add …</code> line.
+            </p>
+            {!parsed.ok && parsed.error && (
+              <p className="flex items-start gap-1.5 rounded-xl bg-red-50 px-2.5 py-2 text-xs text-red-700">
+                <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                <span className="min-w-0 break-words">{parsed.error}</span>
+              </p>
+            )}
+            {parsed.ok && (
+              <div className="space-y-2">
+                <div className="text-xs font-medium text-muted-foreground">
+                  Found {pastedRows.length} server{pastedRows.length === 1 ? '' : 's'} ·{' '}
+                  {parsed.format}
+                </div>
+                {pastedRows.map((r) => (
+                  <div
+                    key={r.name}
+                    className={cn(
+                      'min-w-0 space-y-1.5 rounded-2xl border p-2.5',
+                      r.problem || r.error ? 'border-red-300/70' : 'border-border/60',
+                    )}
+                  >
+                    <div className="flex min-w-0 items-center gap-2">
+                      <Input
+                        value={renames[r.name] ?? r.name}
+                        onChange={(e) => setRenames((m) => ({ ...m, [r.name]: e.target.value }))}
+                        aria-label={`Name for ${r.name}`}
+                        className="h-8 w-44 shrink-0 font-mono text-xs"
+                      />
+                      <span className="shrink-0 rounded-md bg-muted px-1.5 py-0.5 font-mono text-[10px]">
+                        {r.entry.type}
+                      </span>
+                      <span
+                        className="min-w-0 flex-1 truncate font-mono text-[11px] text-muted-foreground"
+                        title={entrySummary(r.entry)}
+                      >
+                        {entrySummary(r.entry)}
+                      </span>
+                    </div>
+                    {(r.error || r.problem) && (
+                      <p className="text-[11px] text-red-600">{r.error ?? r.problem}</p>
+                    )}
+                    {r.placeholders.length > 0 && (
+                      <p className="flex items-start gap-1 text-[11px] leading-snug text-amber-700">
+                        <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
+                        <span>
+                          Looks like a placeholder, not a real value:{' '}
+                          <code>{r.placeholders.join(', ')}</code> — edit it above first.
+                        </span>
+                      </p>
+                    )}
+                    {r.ignored.length > 0 && (
+                      <p className="text-[11px] text-muted-foreground">
+                        Ignored (not used by Claude Code): <code>{r.ignored.join(', ')}</code>
+                      </p>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </TabsContent>
+        </Tabs>
+
+        <DialogFooter>
+          <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={pending}>
+            Cancel
           </Button>
+          {tab === 'templates' ? (
+            <Button
+              onClick={submitTemplate}
+              disabled={!picked || !!templateProblem || !!missingField || maestroBlocked || pending}
+              className="rounded-full transition-all duration-200 active:scale-[0.98]"
+            >
+              {pending ? <Loader2 className="h-4 w-4 animate-spin" /> : <PlugZap className="h-4 w-4" />}
+              Add &amp; test
+            </Button>
+          ) : (
+            <Button
+              onClick={submitPaste}
+              disabled={pasteBlocked || add.isPending}
+              className="rounded-full transition-all duration-200 active:scale-[0.98]"
+            >
+              {add.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <PlugZap className="h-4 w-4" />}
+              {pastedRows.length > 1 ? `Add ${pastedRows.length} & test` : 'Add & test'}
+            </Button>
+          )}
         </DialogFooter>
       </DialogContent>
     </Dialog>
   )
 }
 
-/** A labeled group of MCP cards (e.g. "Tickets & tasks") with a header + responsive grid. */
-function McpGroup({
-  icon: Icon,
-  title,
-  blurb,
-  children,
+// What stops working when a built-in is renamed away — the portal finds each by name.
+const BUILTIN_RENAME_WARNING: Record<string, string> = {
+  clickup: 'Ticket crawling and ClickUp issue filing read the token from the server named "clickup".',
+  jira: 'Ticket crawling reads the Jira credentials from the server named "jira".',
+  azure: 'Ticket crawling reads the Azure DevOps credentials from the server named "azure".',
+  figma: 'Design Check and the qc-testing skill call Figma as "figma".',
+  playwright:
+    'Headless/headed run mode, the QC browser attach, and the qc-testing skill (mcp__playwright__*) all need the name "playwright".',
+  maestro: 'Mobile runs and the qc-testing skill call Maestro as "maestro".',
+}
+
+/** A server as the Edit dialog's Settings form holds it. */
+interface ServerDraft {
+  transport: 'stdio' | 'http' | 'sse'
+  command: string
+  /** One argument per line — an argument may itself contain spaces. */
+  args: string
+  url: string
+  cwd: string
+  env: { k: string; v: string }[]
+  headers: { k: string; v: string }[]
+}
+
+function draftFromEntry(e: McpEntryInput): ServerDraft {
+  const t = e.type === 'sse' ? 'sse' : e.url || e.type === 'http' ? 'http' : 'stdio'
+  const rows = (m?: Record<string, string>) => Object.entries(m ?? {}).map(([k, v]) => ({ k, v }))
+  return {
+    transport: t,
+    command: e.command ?? '',
+    args: (e.args ?? []).join('\n'),
+    url: e.url ?? '',
+    cwd: e.cwd ?? '',
+    env: rows(e.env),
+    headers: rows(e.headers),
+  }
+}
+
+function entryFromDraft(d: ServerDraft): McpEntryInput {
+  const map = (rows: { k: string; v: string }[]) => {
+    const out = Object.fromEntries(rows.filter((r) => r.k.trim()).map((r) => [r.k.trim(), r.v]))
+    return Object.keys(out).length ? out : undefined
+  }
+  const e: McpEntryInput = { type: d.transport }
+  if (d.transport === 'stdio') {
+    if (d.command.trim()) e.command = d.command.trim()
+    const args = d.args.split('\n').map((a) => a.trim()).filter(Boolean)
+    if (args.length) e.args = args
+    if (d.cwd.trim()) e.cwd = d.cwd.trim()
+  } else {
+    if (d.url.trim()) e.url = d.url.trim()
+    const headers = map(d.headers)
+    if (headers) e.headers = headers
+  }
+  const env = map(d.env)
+  if (env) e.env = env
+  return e
+}
+
+/** Editable key/value rows (env vars, headers). Values masked until "Show values". */
+function KvRows({
+  label,
+  rows,
+  onChange,
+  keyPlaceholder,
+  show,
 }: {
-  icon: typeof Figma
-  title: string
-  blurb: string
-  children: ReactNode
+  label: string
+  rows: { k: string; v: string }[]
+  onChange: (rows: { k: string; v: string }[]) => void
+  keyPlaceholder: string
+  show: boolean
 }) {
+  const set = (i: number, patch: Partial<{ k: string; v: string }>) =>
+    onChange(rows.map((r, j) => (j === i ? { ...r, ...patch } : r)))
+  // Per-field reveal (the header's "Show values" still reveals them all) + copy.
+  const [revealed, setRevealed] = useState<Set<number>>(() => new Set())
+  const [copied, setCopied] = useState<number | null>(null)
+  const toggleReveal = (i: number) =>
+    setRevealed((s) => {
+      const next = new Set(s)
+      if (next.has(i)) next.delete(i)
+      else next.add(i)
+      return next
+    })
+  async function copy(i: number, value: string) {
+    try {
+      await navigator.clipboard.writeText(value)
+      setCopied(i)
+      window.setTimeout(() => setCopied((c) => (c === i ? null : c)), 1200)
+    } catch {
+      toast.error('Could not copy', { description: 'The browser blocked clipboard access.' })
+    }
+  }
   return (
-    <section className="space-y-3">
-      <div className="flex items-center gap-2.5">
-        <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl border border-border/60 bg-muted/60 text-muted-foreground">
-          <Icon className="h-4 w-4" />
-        </span>
-        <div className="leading-tight">
-          <h3 className="text-sm font-semibold tracking-tight">{title}</h3>
-          <p className="text-xs text-muted-foreground">{blurb}</p>
-        </div>
+    <div className="space-y-1.5">
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-medium text-muted-foreground">{label}</span>
+        <button
+          type="button"
+          onClick={() => onChange([...rows, { k: '', v: '' }])}
+          className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
+        >
+          <Plus className="h-3 w-3" />
+          Add
+        </button>
       </div>
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">{children}</div>
-    </section>
+      {rows.length === 0 ? (
+        <p className="rounded-xl border border-dashed border-border/60 px-3 py-2 text-[11px] text-muted-foreground">
+          None
+        </p>
+      ) : (
+        <div className="space-y-1.5">
+          {rows.map((r, i) => (
+            <div key={i} className="flex items-center gap-1.5">
+              <Input
+                value={r.k}
+                onChange={(e) => set(i, { k: e.target.value })}
+                placeholder={keyPlaceholder}
+                aria-label={`${label} name ${i + 1}`}
+                className="h-8 w-2/5 font-mono text-[11px]"
+              />
+              <div className="relative min-w-0 flex-1">
+                <Input
+                  value={r.v}
+                  type={show || revealed.has(i) ? 'text' : 'password'}
+                  onChange={(e) => set(i, { v: e.target.value })}
+                  placeholder="value"
+                  aria-label={`${label} value ${i + 1}`}
+                  className="h-8 pr-16 font-mono text-[11px]"
+                />
+                <div className="absolute right-1.5 top-1/2 flex -translate-y-1/2 items-center">
+                  {!show && (
+                    <button
+                      type="button"
+                      onClick={() => toggleReveal(i)}
+                      aria-label={revealed.has(i) ? `Hide ${r.k || 'value'}` : `Show ${r.k || 'value'}`}
+                      title={revealed.has(i) ? 'Hide value' : 'Show value'}
+                      className="flex h-6 w-6 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                    >
+                      {revealed.has(i) ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => copy(i, r.v)}
+                    disabled={!r.v}
+                    aria-label={`Copy ${r.k || 'value'}`}
+                    title="Copy value"
+                    className="flex h-6 w-6 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
+                  >
+                    {copied === i ? <Check className="h-3.5 w-3.5 text-emerald-600" /> : <Copy className="h-3.5 w-3.5" />}
+                  </button>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  onChange(rows.filter((_, j) => j !== i))
+                  setRevealed(new Set())
+                  setCopied(null)
+                }}
+                aria-label={`Remove ${r.k || 'row'}`}
+                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/**
+ * Edit one server: its name, and its whole entry — as a form (Settings) or as the raw
+ * `.mcp.json` JSON. The dialog loads the REAL env/header values first (the list only
+ * ever holds masked ones), because saving a form seeded with "••••1234" would write
+ * the mask over the token.
+ */
+function EditServerDialog({
+  name,
+  server,
+  projectId,
+  existingNames,
+  onClose,
+  onSaved,
+}: {
+  name: string
+  server: McpServer
+  projectId: string
+  existingNames: string[]
+  onClose: () => void
+  onSaved: (from: string, to: string) => void
+}) {
+  const { data, isLoading, error } = useQuery({
+    queryKey: ['mcp-edit', projectId, name],
+    queryFn: () => revealMcpEnv(name, projectId),
+    // Real secrets: fetch fresh on every open and don't keep them in the cache.
+    gcTime: 0,
+    staleTime: 0,
+  })
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="max-h-[88vh] overflow-y-auto overflow-x-hidden sm:max-w-xl">
+        <DialogHeader className="min-w-0">
+          <DialogTitle className="flex items-center gap-2">
+            <PencilLine className="h-4 w-4" />
+            Edit <span className="font-mono text-sm">{name}</span>
+          </DialogTitle>
+          <DialogDescription>
+            Changes are saved to this project's <code>.mcp.json</code>, then the connection is
+            tested again.
+          </DialogDescription>
+        </DialogHeader>
+        {isLoading ? (
+          <div className="flex items-center gap-2 py-8 text-sm text-muted-foreground">
+            <Loader2 className="h-4 w-4 animate-spin" />
+            Loading the current settings…
+          </div>
+        ) : error ? (
+          <p className="rounded-xl bg-red-50 px-3 py-2 text-xs text-red-700">
+            {error instanceof Error ? error.message : 'Could not load this server.'}
+          </p>
+        ) : (
+          <EditServerForm
+            name={name}
+            initial={{
+              type: server.type,
+              command: server.command,
+              args: server.args,
+              url: server.url,
+              cwd: server.cwd,
+              env: data?.env && Object.keys(data.env).length ? data.env : undefined,
+              headers: data?.headers && Object.keys(data.headers).length ? data.headers : undefined,
+            }}
+            projectId={projectId}
+            existingNames={existingNames}
+            onClose={onClose}
+            onSaved={onSaved}
+          />
+        )}
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function EditServerForm({
+  name,
+  initial,
+  projectId,
+  existingNames,
+  onClose,
+  onSaved,
+}: {
+  name: string
+  initial: McpEntryInput
+  projectId: string
+  existingNames: string[]
+  onClose: () => void
+  onSaved: (from: string, to: string) => void
+}) {
+  const [newName, setNewName] = useState(name)
+  const [tab, setTab] = useState<'settings' | 'json'>('settings')
+  const [draft, setDraft] = useState<ServerDraft>(() => draftFromEntry(initial))
+  const [jsonText, setJsonText] = useState('')
+  const [jsonError, setJsonError] = useState<string | null>(null)
+  const [show, setShow] = useState(false)
+
+  const next = newName.trim()
+  const taken = useMemo(
+    () => new Set([...existingNames.filter((n) => n !== name), ...BUILTIN_MCP_NAMES]),
+    [existingNames, name],
+  )
+  const nameErr = next === name ? null : nameProblem(next, taken)
+  const renamingBuiltin = next !== name && !!BUILTIN_RENAME_WARNING[name]
+
+  /** The entry being edited, from whichever tab is showing. */
+  function currentEntry(): { entry?: McpEntryInput; error?: string } {
+    if (tab === 'settings') return { entry: entryFromDraft(draft) }
+    try {
+      const parsed = JSON.parse(jsonText) as unknown
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        return { error: 'The entry must be a JSON object, e.g. { "command": "npx", "args": [...] }.' }
+      }
+      return { entry: parsed as McpEntryInput }
+    } catch (e) {
+      return { error: `Not valid JSON — ${e instanceof Error ? e.message : 'parse error'}` }
+    }
+  }
+
+  function switchTab(to: 'settings' | 'json') {
+    if (to === tab) return
+    if (to === 'json') {
+      setJsonText(JSON.stringify(entryFromDraft(draft), null, 2))
+      setJsonError(null)
+      setTab('json')
+      return
+    }
+    const { entry, error } = currentEntry()
+    if (!entry) {
+      setJsonError(error ?? 'Invalid JSON')
+      return
+    }
+    setDraft(draftFromEntry(entry))
+    setTab('settings')
+  }
+
+  const save = useMutation({
+    mutationFn: (entry: McpEntryInput) => updateMcp(name, entry, next, projectId),
+    onSuccess: () => {
+      toast.success(next === name ? `${name} saved` : `Saved as ${next}`, {
+        description: 'Testing the connection…',
+      })
+      onSaved(name, next)
+      onClose()
+    },
+    onError: (err) =>
+      toast.error('Could not save', {
+        description: err instanceof Error ? err.message : 'Unknown error',
+      }),
+  })
+
+  function submit() {
+    const { entry, error } = currentEntry()
+    if (!entry) {
+      setJsonError(error ?? 'Invalid JSON')
+      return
+    }
+    save.mutate(entry)
+  }
+
+  const set = (patch: Partial<ServerDraft>) => setDraft((d) => ({ ...d, ...patch }))
+
+  return (
+    <div className="min-w-0 space-y-3">
+      <Field label="Server name">
+        <Input
+          value={newName}
+          onChange={(e) => setNewName(e.target.value)}
+          aria-label="Server name"
+          className="h-9 font-mono text-xs"
+        />
+        {nameErr && <p className="text-[11px] text-red-600">{nameErr}</p>}
+      </Field>
+      {renamingBuiltin && (
+        <p className="flex items-start gap-1.5 rounded-xl bg-amber-50 px-2.5 py-2 text-[11px] leading-snug text-amber-700">
+          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+          <span>
+            <b>{name}</b> is a built-in. {BUILTIN_RENAME_WARNING[name]} After renaming, those
+            features treat it as not connected — and it can't be renamed back, only re-added from
+            its template.
+          </span>
+        </p>
+      )}
+
+      <Tabs value={tab} onValueChange={(v) => switchTab(v as 'settings' | 'json')} className="min-w-0">
+        <div className="flex items-center gap-2">
+          <TabsList className="rounded-full">
+            <TabsTrigger value="settings" className="rounded-full">
+              <LayoutGrid className="h-3.5 w-3.5" />
+              Settings
+            </TabsTrigger>
+            <TabsTrigger value="json" className="rounded-full">
+              <Braces className="h-3.5 w-3.5" />
+              JSON
+            </TabsTrigger>
+          </TabsList>
+          {tab === 'settings' && (draft.env.length > 0 || draft.headers.length > 0) && (
+            <button
+              type="button"
+              onClick={() => setShow((v) => !v)}
+              className="ml-auto inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
+            >
+              {show ? <EyeOff className="h-3 w-3" /> : <Eye className="h-3 w-3" />}
+              {show ? 'Hide values' : 'Show values'}
+            </button>
+          )}
+        </div>
+
+        <TabsContent value="settings" className="mt-3 min-w-0 space-y-3">
+          <div className="flex items-center gap-1 rounded-full border border-border/60 bg-muted/40 p-1 text-xs">
+            {(['stdio', 'http', 'sse'] as const).map((t) => (
+              <button
+                key={t}
+                type="button"
+                onClick={() => set({ transport: t })}
+                className={cn(
+                  'flex-1 rounded-full px-2 py-1 font-medium transition-all duration-200',
+                  draft.transport === t
+                    ? 'bg-background text-foreground shadow-sm'
+                    : 'text-muted-foreground hover:text-foreground',
+                )}
+              >
+                {t === 'stdio' ? 'Local command (stdio)' : t === 'http' ? 'Remote (http)' : 'Remote (sse)'}
+              </button>
+            ))}
+          </div>
+          {draft.transport === 'stdio' ? (
+            <>
+              <Field label="Command">
+                <Input
+                  value={draft.command}
+                  onChange={(e) => set({ command: e.target.value })}
+                  placeholder="npx"
+                  aria-label="Command"
+                  className="h-9 font-mono text-xs"
+                />
+              </Field>
+              <Field label="Arguments (one per line)">
+                <Textarea
+                  value={draft.args}
+                  onChange={(e) => set({ args: e.target.value })}
+                  spellCheck={false}
+                  placeholder={'-y\nsome-mcp-server'}
+                  aria-label="Arguments"
+                  className="min-h-24 rounded-xl font-mono text-[11px] leading-relaxed"
+                />
+              </Field>
+            </>
+          ) : (
+            <Field label="URL">
+              <Input
+                value={draft.url}
+                onChange={(e) => set({ url: e.target.value })}
+                placeholder="https://example.com/mcp"
+                aria-label="URL"
+                className="h-9 font-mono text-xs"
+              />
+            </Field>
+          )}
+          <KvRows
+            label="Environment variables"
+            rows={draft.env}
+            onChange={(env) => set({ env })}
+            keyPlaceholder="API_KEY"
+            show={show}
+          />
+          {draft.transport !== 'stdio' && (
+            <KvRows
+              label="Headers"
+              rows={draft.headers}
+              onChange={(headers) => set({ headers })}
+              keyPlaceholder="Authorization"
+              show={show}
+            />
+          )}
+        </TabsContent>
+
+        <TabsContent value="json" className="mt-3 min-w-0 space-y-2">
+          <Textarea
+            value={jsonText}
+            onChange={(e) => {
+              setJsonText(e.target.value)
+              setJsonError(null)
+            }}
+            spellCheck={false}
+            aria-label=".mcp.json entry"
+            className="h-72 resize-y rounded-2xl font-mono text-[11px] leading-relaxed"
+          />
+          <p className="text-[11px] text-muted-foreground">
+            Just this server's entry — the value under <code>"{next || name}"</code> in{' '}
+            <code>mcpServers</code>. Values are shown in full here.
+          </p>
+        </TabsContent>
+      </Tabs>
+
+      {jsonError && (
+        <p className="flex items-start gap-1.5 rounded-xl bg-red-50 px-2.5 py-2 text-xs text-red-700">
+          <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+          <span className="min-w-0 break-words">{jsonError}</span>
+        </p>
+      )}
+
+      <DialogFooter>
+        <Button variant="ghost" onClick={onClose} disabled={save.isPending}>
+          Cancel
+        </Button>
+        <Button
+          onClick={submit}
+          disabled={!!nameErr || save.isPending}
+          className="rounded-full transition-all duration-200 active:scale-[0.98]"
+        >
+          {save.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
+          Save &amp; test
+        </Button>
+      </DialogFooter>
+    </div>
   )
 }
 
 /** Token-connect cards for ClickUp/Figma/Jira (paste a personal token) + no-auth Playwright/Mobile. */
 function ConnectServices({
   projectId,
+  projectRoot,
   existingNames,
   statusByName,
   envByName,
@@ -571,6 +1427,7 @@ function ConnectServices({
   checkingStatus,
 }: {
   projectId: string
+  projectRoot?: string
   existingNames: string[]
   statusByName: Record<string, string | undefined>
   envByName: Record<string, Record<string, string> | undefined>
@@ -578,21 +1435,6 @@ function ConnectServices({
   checkingStatus: boolean
 }) {
   const queryClient = useQueryClient()
-  const { data: status } = useQuery({
-    queryKey: ['mcp-oauth', projectId],
-    queryFn: () => mcpOauthStatus(projectId),
-  })
-  const [openProvider, setOpenProvider] = useState<McpOauthProvider | null>(null)
-  const [token, setToken] = useState('')
-  // Reveal toggle for the token paste field (eye icon).
-  const [showToken, setShowToken] = useState(false)
-  // Jira needs a site URL + account email alongside the API token (mcp-atlassian).
-  const [jiraUrl, setJiraUrl] = useState('')
-  const [jiraEmail, setJiraEmail] = useState('')
-  // Azure DevOps needs an organization URL (+ optional default project) with the PAT.
-  const [azureOrgUrl, setAzureOrgUrl] = useState('')
-  const [azureProject, setAzureProject] = useState('')
-  const [copiedEnv, setCopiedEnv] = useState<string | null>(null)
   // "View details" dialog: which server, a cache of its full (unmasked) env fetched
   // on demand — used BOTH for the Reveal display and for copying real values — and
   // whether the display is currently unmasked.
@@ -601,9 +1443,13 @@ function ConnectServices({
   const [showReveal, setShowReveal] = useState(false)
   const [revealingEnv, setRevealingEnv] = useState(false)
   const [copiedField, setCopiedField] = useState<string | null>(null)
-  // Default to headed (headless = false) so QC can watch the browser during runs;
-  // the checkbox below still lets them opt into headless before connecting.
-  const [playwrightHeadless, setPlaywrightHeadless] = useState(false)
+  // "Add server" (templates / paste JSON) and "Rename" dialogs.
+  const [addOpen, setAddOpen] = useState(false)
+  const [editName, setEditName] = useState<string | null>(null)
+  // Disconnect asks first: it deletes the entry — tokens included — from .mcp.json.
+  const [confirmDisconnect, setConfirmDisconnect] = useState<string | null>(null)
+  // Header values for the details dialog, fetched alongside the env on reveal.
+  const [fullHeaders, setFullHeaders] = useState<Record<string, string> | null>(null)
 
   // Returns a promise that resolves once the (slow, live-health) MCP list has
   // refetched. Mutations `return refresh()` from onSuccess so their `isPending`
@@ -617,65 +1463,6 @@ function ConnectServices({
     ])
   }
 
-  function tokenUrlFor(provider: McpOauthProvider): string {
-    return status?.providers.find((p) => p.provider === provider)?.tokenUrl ?? ''
-  }
-
-  // Connect = open the provider's token page in a new tab, then reveal a paste box.
-  function beginConnect(provider: McpOauthProvider) {
-    const url = tokenUrlFor(provider)
-    if (url) window.open(url, '_blank', 'noopener,noreferrer')
-    setToken('')
-    setShowToken(false)
-    setJiraUrl('')
-    setJiraEmail('')
-    setAzureOrgUrl('')
-    setAzureProject('')
-    setOpenProvider(provider)
-  }
-
-  // Whether the connect form has everything it needs to save (Jira also needs URL +
-  // email; Azure DevOps needs the organization URL).
-  function canSaveToken(provider: McpOauthProvider): boolean {
-    if (!token.trim()) return false
-    if (provider === 'jira') return !!jiraUrl.trim() && !!jiraEmail.trim()
-    if (provider === 'azure') return !!azureOrgUrl.trim()
-    return true
-  }
-
-  const saveToken = useMutation({
-    mutationFn: (provider: McpOauthProvider) =>
-      saveMcpToken(
-        provider,
-        token.trim(),
-        projectId,
-        provider === 'jira'
-          ? { url: jiraUrl.trim(), email: jiraEmail.trim() }
-          : provider === 'azure'
-            ? { orgUrl: azureOrgUrl.trim(), project: azureProject.trim() || undefined }
-            : undefined,
-      ),
-    onSuccess: (_, provider) => {
-      toast.success(`${OAUTH_META[provider].label} connected`, {
-        description: "Token saved to this project's .mcp.json.",
-      })
-      setOpenProvider(null)
-      setToken('')
-      setShowToken(false)
-      setJiraUrl('')
-      setJiraEmail('')
-      setAzureOrgUrl('')
-      setAzureProject('')
-      // Auto-run the live connection test so the user doesn't have to click it.
-      test.mutate(provider)
-      return refresh()
-    },
-    onError: (err) =>
-      toast.error('Failed to save token', {
-        description: err instanceof Error ? err.message : 'Unknown error',
-      }),
-  })
-
   // Disconnect = remove the server entry from this project's .mcp.json.
   // Per-name pending sets — a single useMutation only tracks its LATEST call, so
   // testing/disconnecting two servers at once would drop the first card's spinner.
@@ -688,6 +1475,7 @@ function ConnectServices({
       toast.success(`${name} disconnected`, {
         description: "Removed from this project's .mcp.json.",
       })
+      forgetStatus([name])
       return refresh()
     },
     onError: (err) =>
@@ -707,11 +1495,37 @@ function ConnectServices({
     Record<string, { ok: boolean; detail: string }>
   >({})
   const [testingNames, setTestingNames] = useState<Set<string>>(() => new Set())
+  // Drop everything remembered about a server NAME — its last test result and its
+  // badge in the (localStorage-backed) health map. Without this a server disconnected
+  // and then added again under the same name showed the OLD "Connected" at once, and
+  // kept it until the slow `claude mcp list` refetch came back.
+  function forgetStatus(names: string[]) {
+    setTestResults((m) => {
+      const next = { ...m }
+      for (const n of names) delete next[n]
+      return next
+    })
+    queryClient.setQueryData<Record<string, McpServer['status']>>(['mcp-health', projectId], (m) => {
+      if (!m) return m
+      const next = { ...m }
+      for (const n of names) delete next[n]
+      return next
+    })
+  }
+
   const test = useMutation({
     mutationFn: (name: string) => testMcp(name, projectId),
     onMutate: (name) => setTestingNames((s) => new Set(s).add(name)),
     onSuccess: (res, name) => {
       setTestResults((m) => ({ ...m, [name]: res }))
+      // The badge follows THIS test at once instead of waiting for the health refetch,
+      // so the result line and the badge can never disagree.
+      if (res.status) {
+        queryClient.setQueryData<Record<string, McpServer['status']>>(
+          ['mcp-health', projectId],
+          (m) => ({ ...(m ?? {}), [name]: res.status }),
+        )
+      }
       refresh()
       if (res.ok) toast.success(`${name} is connected`, { description: res.detail })
       else toast.error(`${name} is not connected`, { description: res.detail })
@@ -729,221 +1543,10 @@ function ConnectServices({
       }),
   })
 
-  // Functional MCP test (fetch ticket / read design / open browser).
-  const [capInputs, setCapInputs] = useState<Record<string, string>>({})
-  const [capResults, setCapResults] = useState<Record<string, McpCapabilityResult>>({})
-  // Which server's functional-test dialog is open (null = closed).
-  const [capDialogName, setCapDialogName] = useState<string | null>(null)
-  const capTest = useMutation({
-    mutationFn: (name: string) => runMcpTest(name, projectId, capInputs[name] ?? ''),
-    onSuccess: (res, name) => {
-      setCapResults((m) => ({ ...m, [name]: res }))
-      if (res.ok) toast.success(`${name} works`, { description: res.detail })
-      else toast.error(`${name} test failed`, { description: res.detail })
-    },
-    onError: (err, name) => {
-      const detail = err instanceof Error ? err.message : 'Test failed'
-      setCapResults((m) => ({ ...m, [name]: { ok: false, detail, data: null, raw: '' } }))
-      toast.error(`${name} test failed`, { description: detail })
-    },
-  })
-  const capTestingName = capTest.isPending ? (capTest.variables as string) : null
-
-  function serverLabel(name: string): string {
-    if (name === 'playwright') return 'Playwright'
-    if (name === 'maestro') return 'Maestro'
-    return OAUTH_META[name as McpOauthProvider]?.label ?? name
-  }
-
-  // The functional-test dialog — a real action run through the MCP via Claude.
-  function functionalTestDialog() {
-    const name = capDialogName
-    const spec = name ? CAPABILITY[name] : null
-    if (!name || !spec) return null
-    // Maestro has its own auto-detect → pick device → run dialog.
-    if (name === 'maestro') return null
-    const running = capTestingName === name
-    const result = capResults[name]
-    const input = capInputs[name] ?? ''
-    const disabled = running || (spec.needsInput && !input.trim())
-    return (
-      <Dialog
-        open
-        onOpenChange={(o) => {
-          if (!o && !running) setCapDialogName(null)
-        }}
-      >
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <FlaskConical className="h-4 w-4" />
-              Functional test — {serverLabel(name)}
-            </DialogTitle>
-            <DialogDescription>
-              Runs a real action through {serverLabel(name)} via Claude to confirm the server
-              actually works, not just that it's configured.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-3">
-            {spec.needsInput && (
-              <div className="space-y-1.5">
-                <label className="text-xs font-medium text-muted-foreground">
-                  {spec.inputLabel}
-                </label>
-                <Input
-                  autoFocus
-                  value={input}
-                  onChange={(e) => setCapInputs((m) => ({ ...m, [name]: e.target.value }))}
-                  placeholder={spec.placeholder}
-                  aria-label={spec.inputLabel}
-                  disabled={running}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && !disabled) capTest.mutate(name)
-                  }}
-                  className="h-9 text-sm"
-                />
-              </div>
-            )}
-            {result && (
-              <p
-                className={cn(
-                  'flex items-start gap-1.5 rounded-md px-2.5 py-2 text-xs leading-snug',
-                  !result.ok
-                    ? 'bg-red-50 text-red-700'
-                    : result.warn
-                      ? 'bg-amber-50 text-amber-700'
-                      : 'bg-emerald-50 text-emerald-700',
-                )}
-              >
-                {!result.ok ? (
-                  <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                ) : result.warn ? (
-                  <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                ) : (
-                  <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                )}
-                <span className="min-w-0 break-words">{result.detail}</span>
-              </p>
-            )}
-          </div>
-          <DialogFooter>
-            <Button variant="ghost" onClick={() => setCapDialogName(null)} disabled={running}>
-              Close
-            </Button>
-            <Button
-              onClick={() => capTest.mutate(name)}
-              disabled={disabled}
-              className="rounded-full transition-all duration-200 active:scale-[0.98]"
-            >
-              {running ? (
-                <>
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                  Testing…
-                </>
-              ) : (
-                <>
-                  <FlaskConical className="h-4 w-4" />
-                  {spec.action}
-                </>
-              )}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-    )
-  }
-
-  const playwrightAdded = existingNames.includes('playwright')
-  const addPlaywright = useMutation({
-    mutationFn: () =>
-      addMcp(
-        {
-          name: 'playwright',
-          command: 'npx',
-          args: playwrightArgs(playwrightHeadless),
-          type: 'stdio',
-        },
-        projectId,
-      ),
-    onSuccess: () => {
-      toast.success('Playwright added', { description: 'No authentication required.' })
-      test.mutate('playwright')
-      return refresh()
-    },
-    onError: (err) =>
-      toast.error('Failed to add Playwright', {
-        description: err instanceof Error ? err.message : 'Unknown error',
-      }),
-  })
-
-  const maestroAdded = existingNames.includes('maestro')
-  // Preflight the CLI + JDK only while the card would show a Connect button —
-  // the probe boots a JVM, so there's no reason to pay for it on every page view
-  // once the server is configured.
-  const { data: maestroPf, isFetching: maestroChecking } = useQuery({
-    queryKey: ['mcp-maestro'],
-    queryFn: mcpMaestroStatus,
-    enabled: !maestroAdded,
-    staleTime: 60_000,
-  })
-  const addMaestro = useMutation({
-    mutationFn: () => connectMaestro(projectId),
-    onSuccess: () => {
-      toast.success('Maestro added', {
-        description: 'Boot a simulator (or use the Chromium device), then test.',
-      })
-      test.mutate('maestro')
-      return refresh()
-    },
-    onError: (err) =>
-      toast.error('Failed to add Maestro', {
-        description: err instanceof Error ? err.message : 'Unknown error',
-      }),
-  })
-
-  function envPreview(name: string) {
-    const env = envByName[name]
-    const entries = env ? Object.entries(env) : []
-    if (!entries.length) return null
-    const [key, value] = entries[0]
-    const copyId = `${name}:${key}`
-    const copied = copiedEnv === copyId
-    async function copyValue() {
-      // The shown value is masked — fetch the real key on demand to copy it.
-      try {
-        const real = await revealMcpSecret(name, projectId)
-        await navigator.clipboard.writeText(real.value)
-        setCopiedEnv(copyId)
-        window.setTimeout(
-          () => setCopiedEnv((current) => (current === copyId ? null : current)),
-          1200,
-        )
-      } catch (err) {
-        toast.error('Failed to copy key', {
-          description: err instanceof Error ? err.message : 'Unknown error',
-        })
-      }
-    }
-    return (
-      <div className="flex min-w-0 items-center gap-1 rounded-xl bg-muted/60 px-2.5 py-1.5 text-muted-foreground">
-        <div className="min-w-0 flex-1 truncate font-mono text-[11px]" title={value}>
-          {value}
-        </div>
-        <button
-          type="button"
-          onClick={copyValue}
-          aria-label={`Copy ${key}`}
-          className="shrink-0 rounded p-0.5 transition-colors hover:bg-background hover:text-foreground"
-        >
-          {copied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
-        </button>
-      </div>
-    )
-  }
-
   // Open the "View details" dialog for a server (starts masked, no cached env).
   function openDetails(name: string) {
     setFullEnv(null)
+    setFullHeaders(null)
     setShowReveal(false)
     setCopiedField(null)
     setDetailsName(name)
@@ -952,11 +1555,19 @@ function ConnectServices({
   // Fetch the server's full (unmasked) env once and cache it. Used for both the
   // Reveal display and for copying real values to the clipboard.
   async function ensureFullEnv(): Promise<Record<string, string>> {
-    if (fullEnv) return fullEnv
-    if (!detailsName) return {}
-    const { env } = await revealMcpEnv(detailsName, projectId)
+    return (await ensureFullConfig()).env
+  }
+
+  async function ensureFullConfig(): Promise<{
+    env: Record<string, string>
+    headers: Record<string, string>
+  }> {
+    if (fullEnv) return { env: fullEnv, headers: fullHeaders ?? {} }
+    if (!detailsName) return { env: {}, headers: {} }
+    const { env, headers = {} } = await revealMcpEnv(detailsName, projectId)
     setFullEnv(env)
-    return env
+    setFullHeaders(headers)
+    return { env, headers }
   }
 
   // Reveal / hide the real values in the dialog display.
@@ -1008,14 +1619,24 @@ function ConnectServices({
     const server = serverByName[detailsName]
     const masked = envByName[detailsName] ?? {}
     const keys = Object.keys(masked)
+    const headerKeys = Object.keys(server?.headers ?? {})
     try {
-      const env = keys.length ? await ensureFullEnv() : {}
+      const full =
+        keys.length || headerKeys.length ? await ensureFullConfig() : { env: {}, headers: {} }
+      const env: Record<string, string> = full.env
       const entry: Record<string, unknown> = {}
       if (server?.type) entry.type = server.type
       if (server?.command) entry.command = server.command
       if (server?.args?.length) entry.args = server.args
       if (server?.url) entry.url = server.url
+      if (server?.cwd) entry.cwd = server.cwd
       if (keys.length) entry.env = Object.fromEntries(keys.map((k) => [k, env[k] ?? masked[k]]))
+      if (headerKeys.length) {
+        const headers: Record<string, string> = full.headers
+        entry.headers = Object.fromEntries(
+          headerKeys.map((k) => [k, headers[k] ?? server?.headers?.[k] ?? '']),
+        )
+      }
       await copyField('json', JSON.stringify({ [detailsName]: entry }, null, 2))
     } catch (err) {
       toast.error('Failed to copy config', {
@@ -1031,7 +1652,7 @@ function ConnectServices({
     const name = detailsName
     const server = name ? serverByName[name] : undefined
     const meta = name && name in OAUTH_META ? OAUTH_META[name as McpOauthProvider] : null
-    const Icon = meta?.icon ?? FileJson
+    const Icon = meta?.icon ?? (name && !BUILTIN_MCP_NAMES.has(name) ? iconForServer(name) : FileJson)
     const maskedEnv = (name && envByName[name]) || {}
     const envKeys = Object.keys(maskedEnv)
     // Fields shown in the readable list = user-entered env, minus fixed constants.
@@ -1046,8 +1667,18 @@ function ConnectServices({
     if (server?.command) entry.command = server.command
     if (server?.args?.length) entry.args = server.args
     if (server?.url) entry.url = server.url
+    if (server?.cwd) entry.cwd = server.cwd
     if (envKeys.length) {
       entry.env = Object.fromEntries(envKeys.map((k) => [k, valueFor(k)]))
+    }
+    const headerKeys = Object.keys(server?.headers ?? {})
+    if (headerKeys.length) {
+      entry.headers = Object.fromEntries(
+        headerKeys.map((k) => [
+          k,
+          revealed ? (fullHeaders?.[k] ?? '') : (server?.headers?.[k] ?? ''),
+        ]),
+      )
     }
     const entryJson = JSON.stringify({ [name ?? 'server']: entry }, null, 2)
 
@@ -1150,6 +1781,23 @@ function ConnectServices({
             <div className="min-w-0 space-y-1.5">
               <div className="flex items-center justify-between">
                 <span className="text-xs font-medium text-muted-foreground">.mcp.json entry</span>
+                {fieldKeys.length === 0 && headerKeys.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={toggleReveal}
+                    disabled={revealingEnv}
+                    className="ml-auto inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
+                  >
+                    {revealingEnv ? (
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                    ) : revealed ? (
+                      <EyeOff className="h-3 w-3" />
+                    ) : (
+                      <Eye className="h-3 w-3" />
+                    )}
+                    {revealed ? 'Hide' : 'Reveal'}
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={copyJsonEntry}
@@ -1175,436 +1823,184 @@ function ConnectServices({
     )
   }
 
-  // Actions shown once a service is connected. One prominent primary (Test
-  // connection) over a single compact row of equal, low-emphasis actions
-  // (Test feature · Details · Disconnect) — keeps connected cards short and calm
-  // instead of stacking four full-width buttons of four different weights.
+  function disconnectDialog() {
+    const name = confirmDisconnect
+    const busy = !!name && disconnectingNames.has(name)
+    const hasSecrets =
+      !!name &&
+      (Object.keys(envByName[name] ?? {}).length > 0 ||
+        Object.keys(serverByName[name]?.headers ?? {}).length > 0)
+    return (
+      <Dialog open={!!name} onOpenChange={(o) => !o && !busy && setConfirmDisconnect(null)}>
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Unplug className="h-4 w-4" />
+              Disconnect {name}?
+            </DialogTitle>
+            <DialogDescription>
+              Removes <code className="font-mono">{name}</code> from this project's{' '}
+              <code>.mcp.json</code>, so QC runs no longer get its tools.
+              {hasSecrets && ' Its saved token/settings are deleted too — you will need them again to reconnect.'}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setConfirmDisconnect(null)} disabled={busy}>
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() =>
+                name &&
+                disconnect.mutate(name, { onSuccess: () => setConfirmDisconnect(null) })
+              }
+              disabled={busy}
+              className="rounded-full transition-all duration-200 active:scale-[0.98]"
+            >
+              {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Unplug className="h-4 w-4" />}
+              Disconnect
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    )
+  }
+
+  // One-line test result under a row, after Test connection.
+  function resultLine(name: string) {
+    const result = testResults[name]
+    if (!result) return null
+    return (
+      <p
+        className={cn(
+          'flex items-start gap-1.5 rounded-lg px-2 py-1.5 text-[11px] leading-snug',
+          result.ok ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-700',
+        )}
+      >
+        {result.ok ? (
+          <CheckCircle2 className="mt-0.5 h-3 w-3 shrink-0" />
+        ) : (
+          <AlertCircle className="mt-0.5 h-3 w-3 shrink-0" />
+        )}
+        <span className="min-w-0 break-words">{result.detail}</span>
+      </p>
+    )
+  }
+
+  // Actions for a configured server, inline at the end of its row: one labelled
+  // primary (Test) and low-emphasis icon buttons for the rest.
   function connectedActions(name: string) {
     const testing = testingNames.has(name)
     const disconnecting = disconnectingNames.has(name)
-    const result = testResults[name]
-    const hasFn = !!CAPABILITY[name]
     return (
-      <div className="mt-auto space-y-1.5">
-        {result && (
-          <p
-            className={cn(
-              'flex items-start gap-1.5 rounded-lg px-2 py-1.5 text-[11px] leading-snug',
-              result.ok ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-700',
-            )}
-          >
-            {result.ok ? (
-              <CheckCircle2 className="mt-0.5 h-3 w-3 shrink-0" />
-            ) : (
-              <AlertCircle className="mt-0.5 h-3 w-3 shrink-0" />
-            )}
-            <span className="min-w-0 break-words">{result.detail}</span>
-          </p>
-        )}
+      <>
         <Button
           size="sm"
+          variant="outline"
           onClick={() => test.mutate(name)}
           disabled={testing || disconnecting}
-          className="h-9 w-full rounded-full font-medium transition-all duration-200 hover:shadow-sm active:scale-[0.98]"
+          className="h-8 rounded-full border-border/60 px-3 text-xs font-medium shadow-none transition-all duration-200 active:scale-[0.98]"
         >
           {testing ? (
-            <>
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              Testing…
-            </>
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
           ) : (
-            <>
-              <PlugZap className="h-3.5 w-3.5" />
-              Test connection
-            </>
+            <PlugZap className="h-3.5 w-3.5" />
           )}
+          {testing ? 'Testing…' : 'Test'}
         </Button>
-        {/* Segmented toolbar — three peer actions read as one cohesive control
-            instead of three loose ghost buttons; a hairline divider sets the
-            destructive Disconnect apart. */}
-        <div className="flex items-center gap-0.5 rounded-full border border-border/60 bg-muted/40 p-1">
-          {hasFn && (
-            <button
-              type="button"
-              onClick={() => setCapDialogName(name)}
-              disabled={disconnecting}
-              className="flex flex-1 items-center justify-center gap-1.5 rounded-full px-2 py-1.5 text-xs font-medium text-muted-foreground transition-all duration-200 hover:bg-background hover:text-foreground hover:shadow-sm active:scale-[0.97] disabled:pointer-events-none disabled:opacity-50"
-            >
-              <FlaskConical className="h-3.5 w-3.5" />
-              Test feature
-            </button>
+        <RowIconButton label="Details" onClick={() => openDetails(name)} disabled={disconnecting}>
+          <FileJson className="h-3.5 w-3.5" />
+        </RowIconButton>
+        <RowIconButton label="Edit" onClick={() => setEditName(name)} disabled={disconnecting || testing}>
+          <PencilLine className="h-3.5 w-3.5" />
+        </RowIconButton>
+        <RowIconButton
+          label="Disconnect"
+          destructive
+          onClick={() => setConfirmDisconnect(name)}
+          disabled={disconnecting || testing}
+        >
+          {disconnecting ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <Unplug className="h-3.5 w-3.5" />
           )}
-          <button
-            type="button"
-            onClick={() => openDetails(name)}
-            disabled={disconnecting}
-            className="flex flex-1 items-center justify-center gap-1.5 rounded-full px-2 py-1.5 text-xs font-medium text-muted-foreground transition-all duration-200 hover:bg-background hover:text-foreground hover:shadow-sm active:scale-[0.97] disabled:pointer-events-none disabled:opacity-50"
-          >
-            <FileJson className="h-3.5 w-3.5" />
-            Details
-          </button>
-          <span className="mx-0.5 h-4 w-px shrink-0 bg-border/60" />
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <button
-                type="button"
-                onClick={() => disconnect.mutate(name)}
-                disabled={disconnecting || testing}
-                aria-label="Disconnect"
-                className="flex shrink-0 items-center justify-center rounded-full px-2.5 py-1.5 text-muted-foreground transition-all duration-200 hover:bg-destructive/10 hover:text-destructive active:scale-[0.97] disabled:pointer-events-none disabled:opacity-50"
-              >
-                {disconnecting ? (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                ) : (
-                  <Unplug className="h-3.5 w-3.5" />
-                )}
-              </button>
-            </TooltipTrigger>
-            <TooltipContent>Disconnect</TooltipContent>
-          </Tooltip>
-        </div>
-      </div>
+        </RowIconButton>
+      </>
     )
   }
 
-  // ---- card renderers (closures over the mutations + state above) ----
+  // ---- row renderers (closures over the mutations + state above) ----
 
-  // A token-connect provider card (ClickUp / Figma / Jira). Jira's connect form
-  // adds a Site URL + Account email field on top of the API token.
-  function providerCard(provider: McpOauthProvider) {
-    const meta = OAUTH_META[provider]
-    const Icon = meta.icon
-    const info = status?.providers.find((p) => p.provider === provider)
-    const configured = !!info?.configured || existingNames.includes(provider)
-    const isOpen = openProvider === provider
-    const saving = saveToken.isPending && saveToken.variables === provider
-    const checking = checkingStatus && !isOpen
-    const canSave = canSaveToken(provider)
+  // A configured built-in. Only CONFIGURED servers are listed — connecting one is a
+  // template in the Add server dialog, like every other server.
+  const BUILTIN_ROW: Record<string, { label: string; blurb: string; icon: typeof Figma }> = {
+    ...Object.fromEntries(
+      Object.entries(OAUTH_META).map(([k, m]) => [k, { label: m.label, blurb: m.blurb, icon: m.icon }]),
+    ),
+    playwright: { label: 'Playwright', blurb: 'Browser driver', icon: MousePointerClick },
+    maestro: { label: 'Maestro', blurb: 'iOS / Android / web flows', icon: Smartphone },
+  }
 
+  function builtinRow(name: string) {
+    const meta = BUILTIN_ROW[name]
     return (
-      <Card
-        key={provider}
-        className={mcpCardClass(statusByName[provider])}
+      <ServerRow
+        key={name}
+        icon={meta.icon}
+        title={
+          <>
+            <span className="truncate">{meta.label}</span>
+            <PurposeTip name={name} label={meta.label} />
+          </>
+        }
+        subtitle={meta.blurb}
+        status={statusByName[name]}
+        badge={<CardStatusBadge configured status={statusByName[name]} checking={checkingStatus} />}
+        actions={checkingStatus ? null : connectedActions(name)}
       >
-        <div className="flex items-center gap-3">
-          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl border border-border/60 bg-muted/60 text-muted-foreground">
-            <Icon className="h-4 w-4" />
-          </span>
-          <div className="min-w-0 leading-tight">
-            <div className="flex items-center gap-1.5 text-sm font-semibold tracking-tight">
-              <span className="truncate">{meta.label}</span>
-              <PurposeTip name={provider} label={meta.label} />
-            </div>
-            <div className="truncate text-xs text-muted-foreground">{meta.blurb}</div>
-          </div>
-          <CardStatusBadge
-            configured={configured}
-            status={statusByName[provider]}
-            checking={checking}
-          />
-        </div>
-        {configured && envPreview(provider)}
-
-        {checking ? (
-          <Button size="sm" disabled className="mt-auto h-9 w-full rounded-full font-medium">
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            Checking status…
-          </Button>
-        ) : configured ? (
-          connectedActions(provider)
-        ) : isOpen ? (
-          // Token-connect: the provider's token page opened in a new tab — paste it here.
-          <div className="mt-auto space-y-2.5">
-            {provider === 'jira' && (
-              <>
-                <Field label="Site URL">
-                  <Input
-                    autoFocus
-                    type="url"
-                    placeholder="https://you.atlassian.net"
-                    value={jiraUrl}
-                    onChange={(e) => setJiraUrl(e.target.value)}
-                    aria-label="Jira site URL"
-                    className="h-9 text-xs"
-                  />
-                </Field>
-                <Field label="Account email">
-                  <Input
-                    type="email"
-                    placeholder="you@company.com"
-                    value={jiraEmail}
-                    onChange={(e) => setJiraEmail(e.target.value)}
-                    aria-label="Jira account email"
-                    className="h-9 text-xs"
-                  />
-                </Field>
-              </>
-            )}
-            {provider === 'azure' && (
-              <>
-                <Field label="Organization URL">
-                  <Input
-                    autoFocus
-                    type="url"
-                    placeholder="https://dev.azure.com/your-org"
-                    value={azureOrgUrl}
-                    onChange={(e) => setAzureOrgUrl(e.target.value)}
-                    aria-label="Azure DevOps organization URL"
-                    className="h-9 text-xs"
-                  />
-                </Field>
-                <Field label="Default project (optional)">
-                  <Input
-                    type="text"
-                    placeholder="e.g. Mobile App"
-                    value={azureProject}
-                    onChange={(e) => setAzureProject(e.target.value)}
-                    aria-label="Azure DevOps default project"
-                    className="h-9 text-xs"
-                  />
-                </Field>
-              </>
-            )}
-            <Field label={provider === 'azure' ? 'Personal Access Token' : 'API token'}>
-              <div className="relative">
-                <Input
-                  autoFocus={provider !== 'jira' && provider !== 'azure'}
-                  type={showToken ? 'text' : 'password'}
-                  placeholder={provider === 'azure' ? 'Paste your PAT' : 'Paste your API token'}
-                  value={token}
-                  onChange={(e) => setToken(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && canSave) saveToken.mutate(provider)
-                  }}
-                  aria-label={`${meta.label} API token`}
-                  className="h-9 pr-9 font-mono text-xs"
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowToken((v) => !v)}
-                  aria-label={showToken ? 'Hide token' : 'Show token'}
-                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground transition-colors hover:text-foreground"
-                >
-                  {showToken ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
-                </button>
-              </div>
-            </Field>
-            <div className="flex gap-2 pt-0.5">
-              <Button
-                size="sm"
-                onClick={() => saveToken.mutate(provider)}
-                disabled={!canSave || saving}
-                className="h-9 flex-1 rounded-full font-medium transition-all duration-200 hover:shadow-sm active:scale-[0.98]"
-              >
-                {saving ? (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                ) : (
-                  <Check className="h-3.5 w-3.5" />
-                )}
-                Save &amp; connect
-              </Button>
-              <Button
-                size="sm"
-                variant="ghost"
-                onClick={() => {
-                  setOpenProvider(null)
-                  setToken('')
-                  setShowToken(false)
-                  setJiraUrl('')
-                  setJiraEmail('')
-                  setAzureOrgUrl('')
-                  setAzureProject('')
-                }}
-                disabled={saving}
-                className="h-9 rounded-full"
-              >
-                Cancel
-              </Button>
-            </div>
-            <div className="flex flex-wrap items-center justify-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
-              <a
-                href={info?.tokenUrl}
-                target="_blank"
-                rel="noreferrer"
-                className="inline-flex items-center gap-1 transition-colors hover:text-foreground"
-              >
-                <ExternalLink className="h-3 w-3" />
-                {meta.tokenHint}
-              </a>
-              <span className="text-border">·</span>
-              <Link
-                to="/document/mcp-tokens"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-flex items-center gap-1 transition-colors hover:text-foreground"
-              >
-                <BookOpen className="h-3 w-3" />
-                Step-by-step guide
-              </Link>
-            </div>
-          </div>
-        ) : (
-          <>
-            <PurposeBlurb name={provider} />
-            <Button
-              size="sm"
-              onClick={() => beginConnect(provider)}
-              className="mt-auto h-9 w-full rounded-full font-medium transition-all duration-200 hover:shadow-sm active:scale-[0.98]"
-            >
-              <Plug className="h-3.5 w-3.5" />
-              Connect
-            </Button>
-          </>
-        )}
-      </Card>
+        {!checkingStatus && resultLine(name)}
+      </ServerRow>
     )
   }
 
-  // Playwright needs no token — one-click project setup.
-  function playwrightCard() {
+  // Everything in .mcp.json that isn't one of the built-in cards above — added from
+  // a template, pasted, or hand-written. Without this section such a server was
+  // spawned on every run yet invisible (and unremovable) on this page.
+  const BUILTIN_ORDER = ['clickup', 'jira', 'azure', 'figma', 'playwright', 'maestro']
+  const customServers = Object.values(serverByName).filter(
+    (s): s is McpServer => !!s && !BUILTIN_MCP_NAMES.has(s.name),
+  )
+
+  // Test each new server in turn: a first test also APPROVES a pending project
+  // server, and parallel approvals would race on the same ~/.claude.json write.
+  async function afterAdd(names: string[]) {
+    forgetStatus(names)
+    await refresh()
+    for (const n of names) await test.mutateAsync(n).catch(() => undefined)
+  }
+
+  // After an edit the old result says nothing about the new config — forget it and
+  // test again under the (possibly new) name.
+  async function afterEdit(from: string, to: string) {
+    forgetStatus([from, to])
+    await refresh()
+    await test.mutateAsync(to).catch(() => undefined)
+  }
+
+  function customCard(server: McpServer) {
     return (
-      <Card
-        key="playwright"
-        className={mcpCardClass(statusByName['playwright'])}
+      <ServerRow
+        key={server.name}
+        icon={iconForServer(server.name)}
+        title={<span className="truncate font-mono">{server.name}</span>}
+        subtitle={`${server.type ?? 'stdio'}${server.source === 'local' ? ' · local scope' : ''}`}
+        status={statusByName[server.name]}
+        badge={<CardStatusBadge configured status={statusByName[server.name]} checking={checkingStatus} />}
+        actions={checkingStatus ? null : connectedActions(server.name)}
       >
-        <div className="flex items-center gap-3">
-          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl border border-border/60 bg-muted/60 text-muted-foreground">
-            <MousePointerClick className="h-4 w-4" />
-          </span>
-          <div className="min-w-0 leading-tight">
-            <div className="flex items-center gap-1.5 text-sm font-semibold tracking-tight">
-              <span className="truncate">Playwright</span>
-              <PurposeTip name="playwright" label="Playwright" />
-            </div>
-            <div className="truncate text-xs text-muted-foreground">Browser driver</div>
-          </div>
-          <CardStatusBadge
-            configured={playwrightAdded}
-            status={statusByName['playwright']}
-            checking={checkingStatus}
-          />
-        </div>
-        {checkingStatus ? (
-          <Button size="sm" disabled className="mt-auto h-9 w-full rounded-full font-medium">
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            Checking status…
-          </Button>
-        ) : playwrightAdded ? (
-          connectedActions('playwright')
-        ) : (
-          <>
-            <PurposeBlurb name="playwright" />
-            <div className="mt-auto space-y-2">
-            <label className="flex items-center justify-between rounded-xl bg-muted/60 px-3 py-2 text-xs text-muted-foreground">
-              <span>Headless</span>
-              <Checkbox
-                checked={playwrightHeadless}
-                onChange={(e) => setPlaywrightHeadless(e.target.checked)}
-              />
-            </label>
-            <Button
-              size="sm"
-              onClick={() => addPlaywright.mutate()}
-              disabled={addPlaywright.isPending}
-              className="h-9 w-full rounded-full font-medium transition-all duration-200 hover:shadow-sm active:scale-[0.98]"
-            >
-              {addPlaywright.isPending ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : (
-                <Plug className="h-3.5 w-3.5" />
-              )}
-              Connect
-            </Button>
-            </div>
-          </>
-        )}
-      </Card>
-    )
-  }
-
-  // Maestro (mobile.dev) needs no token, but it IS the one card whose prerequisites
-  // the portal can't satisfy on demand: a separately-installed `maestro` binary and
-  // a JDK 17+. So the Connect button is gated on a live preflight, and an unmet
-  // prerequisite becomes an actionable install hint instead of a dead "failed" badge.
-  function maestroCard() {
-    const pf = maestroPf
-    const blocked = !!pf && !pf.available
-    const javaMissing = blocked && pf.javaHome === null && !pf.defaultJavaOk
-    return (
-      <Card key="maestro" className={mcpCardClass(statusByName.maestro)}>
-        <div className="flex items-center gap-3">
-          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl border border-border/60 bg-muted/60 text-muted-foreground">
-            <Smartphone className="h-4 w-4" />
-          </span>
-          <div className="min-w-0 leading-tight">
-            <div className="flex items-center gap-1.5 text-sm font-semibold tracking-tight">
-              <span className="truncate">Maestro</span>
-              <PurposeTip name="maestro" label="Maestro" />
-            </div>
-            <div className="truncate text-xs text-muted-foreground">
-              iOS / Android / web flows
-            </div>
-          </div>
-          <CardStatusBadge
-            configured={maestroAdded}
-            status={statusByName.maestro}
-            checking={checkingStatus}
-          />
-        </div>
-        {checkingStatus ? (
-          <Button size="sm" disabled className="mt-auto h-9 w-full rounded-full font-medium">
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            Checking status…
-          </Button>
-        ) : maestroAdded ? (
-          connectedActions('maestro')
-        ) : (
-          <>
-            <PurposeBlurb name="maestro" />
-            <div className="mt-auto space-y-2">
-              {blocked && (
-                <div className="space-y-1.5 rounded-xl bg-amber-50 px-2.5 py-2 text-[11px] leading-snug text-amber-700">
-                  <p className="flex items-start gap-1.5">
-                    <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                    <span>
-                      {javaMissing ? (
-                        <>
-                          Maestro needs <span className="font-medium">Java 17+</span>
-                          {pf.javaMajor ? ` (found Java ${pf.javaMajor})` : ''}. Install a JDK,
-                          then re-check.
-                        </>
-                      ) : (
-                        <>
-                          The <span className="font-medium">Maestro CLI</span> isn't installed on
-                          this machine. Install it, then re-check.
-                        </>
-                      )}
-                    </span>
-                  </p>
-                  <code className="block truncate rounded-md bg-amber-100/70 px-1.5 py-1 font-mono text-[10px] text-amber-900">
-                    {javaMissing
-                      ? 'brew install openjdk@21'
-                      : 'curl -fsSL "https://get.maestro.mobile.dev" | bash'}
-                  </code>
-                </div>
-              )}
-              <Button
-                size="sm"
-                onClick={() => addMaestro.mutate()}
-                disabled={addMaestro.isPending || maestroChecking || blocked}
-                className="h-9 w-full rounded-full font-medium transition-all duration-200 hover:shadow-sm active:scale-[0.98]"
-              >
-                {addMaestro.isPending || maestroChecking ? (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                ) : (
-                  <Plug className="h-3.5 w-3.5" />
-                )}
-                {maestroChecking ? 'Checking Maestro…' : 'Connect'}
-              </Button>
-            </div>
-          </>
-        )}
-      </Card>
+        {!checkingStatus && resultLine(server.name)}
+      </ServerRow>
     )
   }
 
@@ -1620,45 +2016,61 @@ function ConnectServices({
           <BookOpen className="h-3.5 w-3.5" />
           How to get a token
         </Link>
+        <Button
+          size="sm"
+          onClick={() => setAddOpen(true)}
+          className="h-8 shrink-0 rounded-full font-medium transition-all duration-200 hover:shadow-sm active:scale-[0.98]"
+        >
+          <Plus className="h-3.5 w-3.5" />
+          Add server
+        </Button>
       </div>
 
-      <McpGroup
-        icon={ListChecks}
-        title="Tickets & tasks"
-        blurb="Read QC requirements straight from your tracker."
-      >
-        {providerCard('clickup')}
-        {providerCard('jira')}
-        {providerCard('azure')}
-      </McpGroup>
+      {/* One list of the servers this project HAS — built-ins first, then anything
+          added from a template or pasted. Connecting a new one (built-in or not) is
+          the Add server dialog. */}
+      <div className="divide-y divide-border/60 overflow-hidden rounded-3xl border border-border/60 bg-card">
+        {BUILTIN_ORDER.filter((n) => existingNames.includes(n)).map(builtinRow)}
+        {customServers.map(customCard)}
+        <button
+          type="button"
+          onClick={() => setAddOpen(true)}
+          className="flex w-full items-center gap-3 px-4 py-3 text-left text-muted-foreground transition-colors hover:bg-muted/40 hover:text-foreground"
+        >
+          <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl border border-dashed border-border">
+            <Plus className="h-4 w-4" />
+          </span>
+          <span className="text-sm font-medium">Add server</span>
+          <span className="text-xs">{MCP_TEMPLATES.length} templates · or paste JSON</span>
+        </button>
+      </div>
 
-      <McpGroup
-        icon={Figma}
-        title="Design"
-        blurb="Compare the built UI against the intended design."
-      >
-        {providerCard('figma')}
-      </McpGroup>
-
-      <McpGroup
-        icon={MousePointerClick}
-        title="Browser & device"
-        blurb="Drive the real app to exercise and verify it."
-      >
-        {playwrightCard()}
-        {maestroCard()}
-      </McpGroup>
-
-      {functionalTestDialog()}
-      {detailsDialog()}
-      {capDialogName === 'maestro' && (
-        <MobileFunctionalTest
-          name={capDialogName}
-          label={serverLabel(capDialogName)}
+      {/* Mounted only while open: every open starts clean, so a half-typed token
+          from last time never lingers in the form. */}
+      {addOpen && (
+      <AddServerDialog
+        open={addOpen}
+        onOpenChange={setAddOpen}
+        projectId={projectId}
+        projectRoot={projectRoot}
+        existingNames={existingNames}
+        onAdded={afterAdd}
+      />
+      )}
+      {editName && serverByName[editName] && (
+        <EditServerDialog
+          key={editName}
+          name={editName}
+          server={serverByName[editName] as McpServer}
           projectId={projectId}
-          onClose={() => setCapDialogName(null)}
+          existingNames={existingNames}
+          onClose={() => setEditName(null)}
+          onSaved={afterEdit}
         />
       )}
+
+      {detailsDialog()}
+      {disconnectDialog()}
     </div>
   )
 }
@@ -1965,7 +2377,9 @@ function readHealthCache(projectId: string): { map: HealthMap; at: number } | nu
     const raw = localStorage.getItem(healthCacheKey(projectId))
     if (!raw) return null
     const parsed = JSON.parse(raw) as { map?: HealthMap; at?: number }
-    if (parsed && typeof parsed === 'object' && parsed.map) {
+    // An EMPTY map is never a real reading — it is what a timed-out probe used to
+    // return, and seeding it hid every badge for the next five minutes.
+    if (parsed && typeof parsed === 'object' && parsed.map && Object.keys(parsed.map).length) {
       return { map: parsed.map, at: typeof parsed.at === 'number' ? parsed.at : 0 }
     }
   } catch {
@@ -1974,6 +2388,7 @@ function readHealthCache(projectId: string): { map: HealthMap; at: number } | nu
   return null
 }
 function writeHealthCache(projectId: string, map: HealthMap) {
+  if (!Object.keys(map).length) return
   try {
     localStorage.setItem(healthCacheKey(projectId), JSON.stringify({ map, at: Date.now() }))
   } catch {
@@ -2002,10 +2417,20 @@ export default function McpPage() {
     () => (activeProjectId ? readHealthCache(activeProjectId) : null),
     [activeProjectId],
   )
-  const { data: health, isFetching: healthChecking } = useQuery({
+  const {
+    data: health,
+    isFetching: healthChecking,
+    error: healthError,
+    refetch: refetchHealth,
+  } = useQuery({
     queryKey: ['mcp-health', activeProjectId],
     queryFn: () => mcpHealth(activeProjectId as string),
     enabled: !!activeProjectId,
+    // A cold `claude mcp list` can overrun the server's cap once; the second try
+    // finds the servers warm. On a final failure React Query KEEPS the last map, so
+    // the badges stay instead of vanishing.
+    retry: 1,
+    retryDelay: 1500,
     initialData: cached?.map,
     initialDataUpdatedAt: cached?.at,
     staleTime: 5 * 60_000,
@@ -2102,6 +2527,23 @@ export default function McpPage() {
           )}
         </div>
 
+        {healthError && !healthChecking && (
+          <div className="flex flex-wrap items-center gap-2 rounded-2xl bg-amber-50 px-4 py-2.5 text-xs text-amber-700">
+            <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+            <span className="min-w-0 flex-1">
+              {healthError instanceof Error ? healthError.message : 'The live status check failed.'}
+              {health ? ' Showing the last known status.' : ''}
+            </span>
+            <button
+              type="button"
+              onClick={() => refetchHealth()}
+              className="rounded-full border border-amber-300/70 px-3 py-1 font-medium transition-colors hover:bg-amber-100"
+            >
+              Retry
+            </button>
+          </div>
+        )}
+
         {/* Per-project context: makes it unmistakable which .mcp.json is being edited. */}
         {activeProject && (
           <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-2xl border border-border/60 bg-card px-4 py-3 shadow-none">
@@ -2155,6 +2597,7 @@ export default function McpPage() {
 
       <ConnectServices
         projectId={activeProjectId}
+        projectRoot={activeProject?.rootPath}
         existingNames={servers.map((s) => s.name)}
         statusByName={Object.fromEntries(servers.map((s) => [s.name, s.status]))}
         envByName={Object.fromEntries(servers.map((s) => [s.name, s.env]))}

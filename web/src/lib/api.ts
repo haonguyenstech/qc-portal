@@ -1778,6 +1778,80 @@ export function openMemoryFolder(projectId: string): Promise<{ ok: true; path: s
   })
 }
 
+// ---- AI Team (testing/ai-team/team.json) ----------------------------------------
+// The shape mirrors server/src/aiTeamStore.ts; the server normalises whatever is PUT.
+
+export type BotRole = 'lead' | 'analyst' | 'tester' | 'critic' | 'designer' | 'reporter' | 'custom'
+export type BotModel = 'haiku' | 'sonnet' | 'opus'
+export type BotAutonomy = 'ask' | 'suggest' | 'act'
+export type BotCapability =
+  | 'read-project'
+  | 'plan-work'
+  | 'run-tests'
+  | 'drive-browser'
+  | 'drive-mobile'
+  | 'query-database'
+  | 'design-check'
+  | 'draft-bugs'
+  | 'file-bugs'
+  | 'write-reports'
+export type TeamLinkKind = 'coordinates' | 'reviews' | 'hands-off' | 'consults'
+export type ApprovalAction = 'file-bugs' | 'comment-tickets' | 'change-ticket-status' | 'edit-files'
+
+export interface TeamBot {
+  id: string
+  name: string
+  role: BotRole
+  mission: string
+  instructions: string
+  model: BotModel
+  autonomy: BotAutonomy
+  capabilities: BotCapability[]
+  maxParallel: number
+  enabled: boolean
+  position: { x: number; y: number }
+}
+
+export interface TeamLink {
+  id: string
+  from: string
+  to: string
+  kind: TeamLinkKind
+  note: string
+}
+
+export interface TeamPolicy {
+  maxRounds: number
+  maxParallelBots: number
+  missionTokenBudget: number
+  requireApprovalFor: ApprovalAction[]
+  crossVerifyBugs: boolean
+}
+
+export interface AiTeam {
+  version: 1
+  coordinatorId: string | null
+  bots: TeamBot[]
+  links: TeamLink[]
+  policy: TeamPolicy
+  updatedAt: string
+}
+
+export function getAiTeam(projectId: string): Promise<{ team: AiTeam; file: string }> {
+  return request(`/api/ai-team?projectId=${encodeURIComponent(projectId)}`)
+}
+
+export function saveAiTeam(projectId: string, team: AiTeam): Promise<{ team: AiTeam }> {
+  return request(`/api/ai-team?projectId=${encodeURIComponent(projectId)}`, {
+    method: 'PUT',
+    body: JSON.stringify({ team }),
+  })
+}
+
+export function resetAiTeam(projectId: string): Promise<{ team: AiTeam }> {
+  return request(`/api/ai-team/reset?projectId=${encodeURIComponent(projectId)}`, { method: 'POST' })
+}
+
 // ---- Workspace notes (testing/notes/notes.json) ----
 
 export interface WorkspaceNote {
@@ -2142,11 +2216,64 @@ export function addMcp(body: Partial<McpServer>, projectId: string): Promise<voi
   })
 }
 
+/** One .mcp.json entry as the import endpoint takes it. */
+export interface McpEntryInput {
+  type?: string
+  command?: string
+  args?: string[]
+  url?: string
+  env?: Record<string, string>
+  headers?: Record<string, string>
+  cwd?: string
+}
+
+/**
+ * Add several servers in one write (Paste JSON / templates). All-or-nothing: the
+ * server refuses the whole batch on a bad entry or a name already in use.
+ */
+export function importMcp(
+  servers: Record<string, McpEntryInput>,
+  projectId: string,
+): Promise<{ ok: true; added: string[] }> {
+  return request(`/api/mcp/import?projectId=${encodeURIComponent(projectId)}`, {
+    method: 'POST',
+    body: JSON.stringify({ servers, projectId }),
+  })
+}
+
+/**
+ * Replace a server's entry (and rename it when `newName` differs). The server
+ * validates the entry like an import, before renaming anything.
+ */
+export function updateMcp(
+  name: string,
+  entry: McpEntryInput,
+  newName: string,
+  projectId: string,
+): Promise<{ ok: true; name: string }> {
+  return request(
+    `/api/mcp/${encodeURIComponent(name)}?projectId=${encodeURIComponent(projectId)}`,
+    { method: 'PUT', body: JSON.stringify({ entry, newName, projectId }) },
+  )
+}
+
+/** Rename a server; its approval moves with it. */
+export function renameMcp(
+  name: string,
+  newName: string,
+  projectId: string,
+): Promise<{ ok: true; name: string }> {
+  return request(
+    `/api/mcp/${encodeURIComponent(name)}/rename?projectId=${encodeURIComponent(projectId)}`,
+    { method: 'POST', body: JSON.stringify({ newName, projectId }) },
+  )
+}
+
 /** Run a real connection test against a configured server (spawns it via the Claude CLI). */
 export function testMcp(
   name: string,
   projectId: string,
-): Promise<{ ok: boolean; detail: string }> {
+): Promise<{ ok: boolean; detail: string; status?: McpServer['status'] }> {
   return request(
     `/api/mcp/test/${encodeURIComponent(name)}?projectId=${encodeURIComponent(projectId)}`,
   )
@@ -2173,7 +2300,7 @@ export function revealMcpSecret(
 export function revealMcpEnv(
   name: string,
   projectId: string,
-): Promise<{ env: Record<string, string> }> {
+): Promise<{ env: Record<string, string>; headers?: Record<string, string> }> {
   return request(
     `/api/mcp/${encodeURIComponent(name)}/env?projectId=${encodeURIComponent(projectId)}`,
   )
@@ -3695,6 +3822,21 @@ export interface ChatMessage {
   refs?: string[]
   /** The fact check, if one was run on this answer — see ChatAudit. */
   audit?: ChatAudit
+  /** The AI-team bot that wrote this message; absent on the plain assistant's answers. */
+  bot?: ChatBotRef
+  /** Who that bot was answering: `human`, or the handles of the bots that called on it. */
+  addressedBy?: string[]
+  /** The bots this reply called next (from its control line). */
+  teamCalls?: string[]
+  /** This bot asked the human something. */
+  asksHuman?: boolean
+}
+
+/** A bot of the project's AI team, as a chat message records its speaker. */
+export interface ChatBotRef {
+  id: string
+  name: string
+  role: BotRole
 }
 
 /**
@@ -3848,7 +3990,10 @@ export interface ChatDocUpload {
  * and a skill to its SKILL.md to follow (see routes/chat.ts `resolveMentions`).
  */
 export interface ChatMention {
-  kind: 'ticket' | 'testcase' | 'database' | 'skill'
+  /** `team` (`@team-ai`) and `bot` (`@lead`) address the AI team instead of tagging a file. */
+  kind: 'ticket' | 'testcase' | 'database' | 'skill' | 'team' | 'bot'
+  /** Bot handle, for a `bot` mention. */
+  bot?: string
   /** Crawled-ticket folder under testing/tickets/ (nested PARENT/CHILD for a subtask). */
   folder?: string
   /** Test-case version, or omitted for the newest. */
@@ -3868,6 +4013,11 @@ export interface Chat {
   tools: ChatTools
   /** Effort the last turn ran at — the default for the next one. */
   effort?: ChatEffort
+  /**
+   * AI-team bots in this conversation — every message is answered by them. `members`
+   * absent = the whole team (`@team-ai`); present = only those bots (`@ba` brings the Analyst).
+   */
+  team?: { joinedAt: string; members?: string[] }
   /** The Claude CLI session backing the conversation (what makes follow-ups work). */
   sessionId: string | null
   /** Starred — the rail pins it above the date groups. */
@@ -4050,9 +4200,21 @@ export interface ChatStreamHandlers {
    * Re-attach only: the question this in-flight turn is answering. A reloaded page no
    * longer has the prompt it sent, so the server echoes it back with its images.
    */
-  onResume?: (info: { prompt: string; at: string; images: string[] }) => void
-  onDelta: (text: string) => void
-  onTool?: (call: ChatToolCall) => void
+  onResume?: (info: { prompt: string; at: string; images: string[]; continuation?: boolean }) => void
+  /**
+   * A team turn: a bot starts a reply, identified by `seg` — several stream AT ONCE when a
+   * round runs in parallel, so every `delta`/`tool` of a team turn carries its `seg` too.
+   * `calledBy` is `human` or the handles that called on it.
+   */
+  onSpeaker?: (bot: ChatBotRef, calledBy: string[] | undefined, seg: number) => void
+  /**
+   * A team turn: reply `seg` finished and is saved — `chat` is the transcript with it.
+   * Others may still be streaming; `onDone` ends the exchange.
+   */
+  onSaid?: (chat: Chat, seg: number) => void
+  /** `seg` is set on a team bot's text (see `onSpeaker`), absent on a plain answer's. */
+  onDelta: (text: string, seg?: number) => void
+  onTool?: (call: ChatToolCall, seg?: number) => void
   /**
    * The ANSWER is over; the follow-up chips are still being written. Carries the model
    * that answered and the timings, both of which the server already knows at this point —
@@ -4125,17 +4287,21 @@ async function consumeChatStream(res: Response, handlers: ChatStreamHandlers): P
         error?: string
         queued?: QueuedChatMessage[]
         dropped?: string[]
+        continuation?: boolean
+        bot?: ChatBotRef
+        calledBy?: string[]
+        seg?: number
       }
       try {
         msg = JSON.parse(dataLine.slice(5).trim())
       } catch {
         continue
       }
-      if (msg.type === 'delta') handlers.onDelta(msg.text ?? '')
+      if (msg.type === 'delta') handlers.onDelta(msg.text ?? '', msg.seg)
       else if (msg.type === 'settled') {
         if (msg.model && msg.stats) handlers.onSettled?.(msg.model, msg.stats)
       } else if (msg.type === 'tool')
-        handlers.onTool?.({ name: msg.name ?? '', detail: msg.detail, kind: msg.kind, pos: msg.pos })
+        handlers.onTool?.({ name: msg.name ?? '', detail: msg.detail, kind: msg.kind, pos: msg.pos }, msg.seg)
       else if (msg.type === 'start' && msg.slug) {
         // One stream can carry SEVERAL turns: when a queued message follows, the server
         // hands over on the same connection and opens the next turn with `start` again.
@@ -4144,7 +4310,15 @@ async function consumeChatStream(res: Response, handlers: ChatStreamHandlers): P
         settled = false
         handlers.onStart?.(msg.slug, msg.name ?? '')
       } else if (msg.type === 'resume')
-        handlers.onResume?.({ prompt: msg.prompt ?? '', at: msg.at ?? '', images: msg.images ?? [] })
+        handlers.onResume?.({
+          prompt: msg.prompt ?? '',
+          at: msg.at ?? '',
+          images: msg.images ?? [],
+          continuation: msg.continuation,
+        })
+      else if (msg.type === 'speaker' && msg.bot && typeof msg.seg === 'number')
+        handlers.onSpeaker?.(msg.bot, msg.calledBy, msg.seg)
+      else if (msg.type === 'said' && msg.chat && typeof msg.seg === 'number') handlers.onSaid?.(msg.chat, msg.seg)
       else if (msg.type === 'log') handlers.onLog?.(msg.level ?? 'info', msg.text ?? '')
       else if (msg.type === 'queue') handlers.onQueue?.(msg.queued ?? [])
       else if (msg.type === 'done' && msg.chat) {
@@ -4268,6 +4442,17 @@ export async function streamChat(
   }
   await consumeChatStream(res, handlers)
   return { kind: 'streamed' }
+}
+
+/**
+ * Bring the project's AI team into a conversation, or dismiss it. Refused (409) while a
+ * reply is running.
+ */
+export function setChatTeam(projectId: string, slug: string, on: boolean): Promise<Chat> {
+  return request(`/api/chat/${encodeURIComponent(slug)}/team`, {
+    method: 'POST',
+    body: JSON.stringify({ projectId, on }),
+  })
 }
 
 /** What `streamChat` did with the message. */

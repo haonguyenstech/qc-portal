@@ -3,6 +3,62 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.12.7 — 2026-09-24
+
+**Connect any MCP server, and a team of QC bots in Chat**
+
+### Added
+
+- **Add any MCP server, not just the built-in six.** *MCP › Add server* opens a picker of
+  17 templates — the portal's own **QC essentials** (ClickUp, Jira, Azure DevOps, Figma,
+  Playwright, Maestro) plus GitHub, GitLab, Context7, Chrome DevTools, Fetch, Brave Search,
+  PostgreSQL, Filesystem, Sentry, Notion and Sequential Thinking. Fill in the token or
+  folder it asks for and press *Add & test*: it is saved to the project's `.mcp.json` and
+  the connection is tested live straight away.
+- **Paste any MCP config.** The *Paste JSON* tab takes whatever a README gives you — a
+  `.mcp.json` / Claude Desktop block, a VS Code `servers` block, a single server entry, or
+  a `claude mcp add …` command line — shows every server it found, and lets you rename one
+  whose name is already taken before anything is saved. A value that still looks like a
+  placeholder (`YOUR_API_KEY`) is flagged.
+- **Edit a connected server.** The pencil on each row opens its settings: name, transport,
+  command and arguments or URL, environment variables and headers — or the raw JSON entry.
+  Each secret has its own show/hide eye and a copy button. Saving re-tests the connection.
+  Built-ins can be renamed too, with a warning of exactly what stops working if you do.
+- **AI Team** (new page, next to Chat). Organise the project's squad of QC bots — Lead,
+  Analyst, Tester, Designer, Critic, Reporter — each with its own role, model and autonomy,
+  and draw who coordinates, verifies, hands off to and consults whom. A health check flags
+  a team that could not actually run (no coordinator, a bot nobody gives work to, a
+  coordination loop…). The team is saved with the project in `testing/ai-team/team.json`.
+- **`@team-ai` in Chat.** Mention `@team-ai` (or one bot, like `@ba`) and the team answers
+  in the conversation: the coordinator takes the message, calls on the right bots, and
+  brings their answers together. A bot asks you with `@human`, and your next reply goes back
+  to it. Tracker actions (filing to ClickUp/Jira) stay locked for any bot you did not
+  address yourself — enforced, not just asked for.
+
+### Changed
+
+- **The MCP page is one compact list** of the servers this project actually has — no more
+  sections and connect cards for services you don't use. Tokens, commands and URLs are only
+  shown under *Details*; each row keeps its status, *Test*, *Details*, *Edit* and
+  *Disconnect*.
+- **Disconnect asks first**, and says when the server's saved token goes with it.
+- **The per-server "Test feature" button is gone** — *Test* checks the live connection.
+
+### Fixed
+
+- **ClickUp would not start at all.** The ClickUp server installs its newest dependencies
+  on every fresh setup, and a new major version of one of them removed something it needs,
+  so it quit on launch and the page could only say "Failed — Connection closed". The portal
+  now pins a compatible version, and repairs existing projects automatically when it starts.
+- **A connected server sometimes showed no status after a reload.** On a cold start the live
+  check could run past its time limit and came back empty — which hid every badge and was
+  then remembered for five minutes. It now waits longer, runs one check at a time, keeps the
+  last known status if a check fails, and says so with a *Retry* button.
+- **A server Claude had been told to reject never showed a status**, and *Test* could not fix
+  it. It now shows *Pending approval*, and *Test* approves it.
+- **Disconnecting a server and adding it again showed the old "Connected"** before the new
+  test had run.
+
 ## 0.12.6 — 2026-09-17
 
 **See how many tokens you are using, right in the Auto Agent panel**

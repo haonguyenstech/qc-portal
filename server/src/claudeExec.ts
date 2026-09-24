@@ -166,7 +166,7 @@ export interface StreamLog {
    * `text` is deliberately left as the bare `⚙ <name>` every other log consumer already
    * renders — this rides alongside it.
    */
-  tool?: { name: string; detail?: string }
+  tool?: { name: string; detail?: string; path?: string }
 }
 
 /** Max length of the target shown beside a tool name (a whole bash line is unreadable). */
@@ -506,7 +506,15 @@ export function runClaudeStream(
               onLog({
                 level: 'info',
                 text: `⚙ ${block.name}`,
-                tool: { name: block.name, detail: toolDetail(block.name, block.input) },
+                tool: {
+                  name: block.name,
+                  detail: toolDetail(block.name, block.input),
+                  // The FULL path of a Read — `detail` is only the basename. The AI team
+                  // shares what one bot read with the next (see teamFiles.ts).
+                  ...(block.name === 'Read' && typeof (block.input as { file_path?: unknown } | undefined)?.file_path === 'string'
+                    ? { path: (block.input as { file_path: string }).file_path }
+                    : {}),
+                },
               })
             }
           }

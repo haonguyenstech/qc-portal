@@ -24,7 +24,7 @@ import { maestroEnvFor, probeMaestro, type MaestroPreflight } from '../maestro.j
 import { agentProfileDir, isForeignProfileDir } from '../browserProfile.js'
 import { cdpEndpoint, writePlaywrightMcpConfig } from '../qcBrowser.js'
 import type { McpServer } from '../types.js'
-import { spawnEnv } from '../toolPath.js'
+import { killSpawnedTree, spawnEnv } from '../toolPath.js'
 
 export const mcpRouter = Router()
 
@@ -143,53 +143,86 @@ interface McpTestResult {
 }
 
 /**
- * Ask the Claude CLI for live MCP health in a project dir and map each server
- * name to a status. Best-effort: resolves to {} on any error/timeout so the
- * page still loads (servers then show "unknown").
+ * How long `claude mcp list` may take. It spawns EVERY server in scope (project,
+ * local, user, claude.ai connectors, plugins) and waits on each, so a cold start —
+ * the first `npx`/`uvx` spawn after a reboot or an update — measured 15s+ on a
+ * 10-server machine. The old 15s cap turned exactly that into an empty map, i.e.
+ * "no status" for every server on the page.
+ */
+const MCP_LIST_TIMEOUT_MS = 45_000
+
+/** A health probe that did not finish — NOT the same thing as "no servers". */
+export class McpProbeTimeout extends Error {}
+
+function parseStatuses(out: string): Record<string, McpServer['status']> {
+  const map: Record<string, McpServer['status']> = {}
+  for (const raw of out.split('\n')) {
+    // Lines look like: "name: <command/url> - <status text>"
+    const line = raw.trim()
+    const colon = line.indexOf(': ')
+    const dash = line.lastIndexOf(' - ')
+    if (colon === -1 || dash === -1 || dash < colon) continue
+    const name = line.slice(0, colon).trim()
+    const status = line.slice(dash + 3).toLowerCase()
+    if (status.includes('connected')) map[name] = 'connected'
+    else if (status.includes('pending') || status.includes('approve')) map[name] = 'pending'
+    else if (status.includes('auth')) map[name] = 'needs-auth'
+    else if (status.includes('fail') || status.includes('error')) map[name] = 'failed'
+    else map[name] = 'unknown'
+  }
+  return map
+}
+
+// One probe per project at a time, plus a short memory of the last GOOD one. A page
+// reload fires /health while a Test click (or a second tab) may already be probing;
+// two `claude mcp list` runs spawn every server twice, fight for the CPU and push
+// each other past the timeout — the very failure the probe is meant to report.
+const inflight = new Map<string, Promise<Record<string, McpServer['status']>>>()
+const lastGood = new Map<string, { at: number; map: Record<string, McpServer['status']> }>()
+const REUSE_MS = 5_000
+
+/** Forget a project's remembered health (after a write changed its servers). */
+export function invalidateMcpHealth(cwd: string): void {
+  lastGood.delete(cwd)
+}
+
+/**
+ * Ask the Claude CLI for live MCP health in a project dir and map each server name
+ * to a status. REJECTS with McpProbeTimeout when the CLI doesn't finish in time, so
+ * callers can tell "couldn't check" from "checked, nothing connected" — resolving
+ * `{}` there made the page drop every badge (and cache the empty map).
  */
 function getStatuses(cwd: string): Promise<Record<string, McpServer['status']>> {
-  return new Promise((resolve) => {
+  const recent = lastGood.get(cwd)
+  if (recent && Date.now() - recent.at < REUSE_MS) return Promise.resolve({ ...recent.map })
+  const running = inflight.get(cwd)
+  if (running) return running.then((m) => ({ ...m }))
+
+  const probe = new Promise<Record<string, McpServer['status']>>((resolve, reject) => {
     let out = ''
     const child = spawn(CLAUDE_BIN, ['mcp', 'list'], {
       cwd,
       env: spawnEnv(),
       windowsHide: true, // no cmd window flash on Windows
     })
-    // Health-checking remote servers can take ~10s; cap the wait so one hung
-    // server can't stall the whole status probe (best-effort → {} on timeout).
     const timer = setTimeout(() => {
-      try {
-        child.kill()
-      } catch {
-        /* already gone */
-      }
-      resolve({})
-    }, 15000)
+      killSpawnedTree(child)
+      reject(new McpProbeTimeout(`claude mcp list did not finish within ${MCP_LIST_TIMEOUT_MS / 1000}s`))
+    }, MCP_LIST_TIMEOUT_MS)
     child.stdout?.on('data', (d) => (out += String(d)))
-    child.on('error', () => {
+    child.on('error', (e) => {
       clearTimeout(timer)
-      resolve({})
+      reject(e)
     })
     child.on('close', () => {
       clearTimeout(timer)
-      const map: Record<string, McpServer['status']> = {}
-      for (const raw of out.split('\n')) {
-        // Lines look like: "name: <command/url> - <status text>"
-        const line = raw.trim()
-        const colon = line.indexOf(': ')
-        const dash = line.lastIndexOf(' - ')
-        if (colon === -1 || dash === -1 || dash < colon) continue
-        const name = line.slice(0, colon).trim()
-        const status = line.slice(dash + 3).toLowerCase()
-        if (status.includes('connected')) map[name] = 'connected'
-        else if (status.includes('pending') || status.includes('approve')) map[name] = 'pending'
-        else if (status.includes('auth')) map[name] = 'needs-auth'
-        else if (status.includes('fail') || status.includes('error')) map[name] = 'failed'
-        else map[name] = 'unknown'
-      }
+      const map = parseStatuses(out)
+      lastGood.set(cwd, { at: Date.now(), map })
       resolve(map)
     })
-  })
+  }).finally(() => inflight.delete(cwd))
+  inflight.set(cwd, probe)
+  return probe.then((m) => ({ ...m }))
 }
 
 /**
@@ -206,17 +239,13 @@ function testServer(cwd: string, name: string): Promise<McpTestResult> {
       windowsHide: true, // no cmd window flash on Windows
     })
     const timer = setTimeout(() => {
-      try {
-        child.kill()
-      } catch {
-        /* already gone */
-      }
+      killSpawnedTree(child)
       resolve({
         ok: false,
-        detail: 'Timed out after 25s while checking server health.',
+        detail: `Timed out after ${MCP_LIST_TIMEOUT_MS / 1000}s while checking server health.`,
         status: 'failed',
       })
-    }, 25000)
+    }, MCP_LIST_TIMEOUT_MS)
     child.stdout?.on('data', (d) => (out += String(d)))
     child.stderr?.on('data', (d) => (out += String(d)))
     child.on('error', (e) => {
@@ -261,6 +290,17 @@ function testServer(cwd: string, name: string): Promise<McpTestResult> {
         }
         return resolve({ ok: false, detail: clean || 'Not connected.', status: 'failed' })
       }
+      // A project server Claude has REJECTED (listed in disabledMcpjsonServers) is
+      // left out of `mcp list` entirely. It isn't broken — it's unapproved, so report
+      // it as pending and let the test route approve it (which also takes it off the
+      // disabled list) instead of failing forever with no way out from the page.
+      if (isRejectedProjectServer(cwd, name)) {
+        return resolve({
+          ok: false,
+          detail: 'Rejected in this project\'s Claude settings — approving it and testing again.',
+          status: 'pending',
+        })
+      }
       resolve({
         ok: false,
         detail: 'Server did not appear in the MCP list — check the command/token.',
@@ -276,6 +316,8 @@ interface McpEntry {
   url?: string
   type?: string
   env?: Record<string, string>
+  headers?: Record<string, string>
+  cwd?: string
   [key: string]: unknown
 }
 
@@ -306,6 +348,8 @@ function readMcp(file: string): McpFile {
 
 function writeMcp(file: string, data: McpFile): void {
   fs.writeFileSync(file, JSON.stringify(data, null, 2) + '\n', 'utf8')
+  // The servers changed — a remembered health map now describes a different config.
+  invalidateMcpHealth(path.dirname(file))
 }
 
 /**
@@ -445,10 +489,22 @@ function normalizePlaywrightProfile(entry: McpEntry): boolean {
   return true
 }
 
+/** Add the `mcp<2` pin (see CLICKUP_MCP_ARGS) to a clickup-mcp entry lacking it. */
+function pinClickupMcpSdk(entry: McpEntry): boolean {
+  if (entry.command !== 'uvx' || !Array.isArray(entry.args)) return false
+  const args = entry.args
+  if (!args.some((a) => typeof a === 'string' && a.includes('DiversioTeam/clickup-mcp'))) return false
+  const pinned = args.some((a, i) => a === '--with' && /^mcp\s*[<=~]/.test(args[i + 1] ?? ''))
+  if (pinned) return false
+  entry.args = [...CLICKUP_MCP_PIN, ...args]
+  return true
+}
+
 /**
  * Bring one project's .mcp.json in line with what this portal (and this machine)
- * actually supports: drop retired servers, and repair a Playwright profile path that
- * belongs to a different user. Idempotent — writes only when something changed.
+ * actually supports: drop retired servers, pin clickup-mcp's `mcp` SDK below 2, and
+ * repair a Playwright profile path that belongs to a different user. Idempotent —
+ * writes only when something changed.
  */
 export function repairProjectMcpConfig(rootPath: string, attachBrowser = false): void {
   const file = mcpJsonFor(rootPath)
@@ -461,6 +517,9 @@ export function repairProjectMcpConfig(rootPath: string, attachBrowser = false):
         delete servers[name]
         changed = true
       }
+    }
+    for (const entry of Object.values(servers)) {
+      if (entry && typeof entry === 'object' && pinClickupMcpSdk(entry)) changed = true
     }
     const playwright = servers.playwright
     if (playwright) {
@@ -562,6 +621,14 @@ function publicEnv(env?: Record<string, string>): Record<string, string> | undef
   return Object.keys(masked).length ? masked : undefined
 }
 
+// Header VALUES are masked whatever their name: remote servers put the credential in
+// `Authorization` / `X-Api-Key` / a vendor header, and no name rule catches them all.
+function maskedHeaders(headers: unknown): Record<string, string> | undefined {
+  const map = stringMap(headers)
+  if (!map) return undefined
+  return Object.fromEntries(Object.entries(map).map(([k, v]) => [k, maskSecret(v)]))
+}
+
 interface ClaudeProjectSettings {
   enabledMcpjsonServers?: unknown
   disabledMcpjsonServers?: unknown
@@ -580,6 +647,20 @@ function readClaudeProjectSettings(file: string): ClaudeProjectSettings {
 
 function asStringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : []
+}
+
+/**
+ * Is `name` a project (.mcp.json) server that Claude has been told to reject — in
+ * `disabledMcpjsonServers` of ~/.claude.json's project entry or of
+ * .claude/settings.local.json? Such a server is silently absent from `mcp list`.
+ */
+function isRejectedProjectServer(rootPath: string, name: string): boolean {
+  if (!(name in (readMcp(mcpJsonFor(rootPath)).mcpServers ?? {}))) return false
+  const projects = readClaudeConfig().projects ?? {}
+  const entry = projects[claudeProjectKey(rootPath)] ?? projects[rootPath]
+  if (asStringArray(entry?.disabledMcpjsonServers).includes(name)) return true
+  const settings = readClaudeProjectSettings(path.join(rootPath, '.claude', 'settings.local.json'))
+  return asStringArray(settings.disabledMcpjsonServers).includes(name)
 }
 
 /**
@@ -653,6 +734,11 @@ async function computeStatuses(
   configuredNames: Set<string>,
 ): Promise<Record<string, McpServer['status']>> {
   const statuses = await getStatuses(rootPath)
+  // A rejected project server never appears in `mcp list`; without this its row could
+  // never show a badge. "Pending approval" is what it is — and Test approves it.
+  for (const n of configuredNames) {
+    if (!(n in statuses) && isRejectedProjectServer(rootPath, n)) statuses[n] = 'pending'
+  }
   // Only downgrade a server the handshake reported "connected" — a "failed"/
   // "pending" status is already more informative than "needs-auth".
   const toCheck = TRACKER_SERVERS.filter(
@@ -684,7 +770,9 @@ mcpRouter.get('/', async (req, res) => {
   // The page loads this with health=false for an instant render, then fetches
   // /health separately so the (slow) probe fills statuses in progressively.
   const statuses =
-    req.query.health === 'false' ? {} : await computeStatuses(project.rootPath, configuredNames)
+    req.query.health === 'false'
+      ? {}
+      : await computeStatuses(project.rootPath, configuredNames).catch(() => ({}))
 
   const list: McpServer[] = Object.entries(projectServers).map(([name, entry]) => ({
     name,
@@ -693,6 +781,8 @@ mcpRouter.get('/', async (req, res) => {
     url: entry.url,
     type: entry.type,
     env: publicEnv(entry.env),
+    headers: maskedHeaders(entry.headers),
+    cwd: typeof entry.cwd === 'string' ? entry.cwd : undefined,
     source: 'project',
     status: statuses[name] ?? 'unknown',
   }))
@@ -705,6 +795,8 @@ mcpRouter.get('/', async (req, res) => {
       url: entry.url,
       type: entry.type,
       env: publicEnv(entry.env),
+      headers: maskedHeaders(entry.headers),
+      cwd: typeof entry.cwd === 'string' ? entry.cwd : undefined,
       source: 'local',
       status: statuses[name] ?? 'unknown',
     })
@@ -727,8 +819,18 @@ mcpRouter.get('/health', async (req, res) => {
     ...Object.keys(projectServers),
     ...Object.keys(localServers),
   ])
-  const statuses = await computeStatuses(project.rootPath, configuredNames)
-  res.json(statuses)
+  try {
+    res.json(await computeStatuses(project.rootPath, configuredNames))
+  } catch (err) {
+    // "Couldn't check" must not look like "nothing is connected": an error keeps the
+    // page's last known badges (and never lands in its cache), where {} wiped them.
+    const timedOut = err instanceof McpProbeTimeout
+    res.status(timedOut ? 504 : 500).json({
+      error: timedOut
+        ? 'The live status check timed out — the MCP servers took too long to start.'
+        : `Could not run claude mcp list: ${(err as Error).message}`,
+    })
+  }
 })
 
 /**
@@ -765,7 +867,7 @@ mcpRouter.get('/:name/env', (req, res) => {
   if (env && typeof env === 'object') {
     for (const [k, v] of Object.entries(env)) if (typeof v === 'string') out[k] = v
   }
-  return res.json({ env: out })
+  return res.json({ env: out, headers: stringMap(entry?.headers) ?? {} })
 })
 
 /**
@@ -785,7 +887,7 @@ mcpRouter.post('/', (req, res) => {
   const file = mcpPath(req)
   if (!file) return res.status(400).json({ error: 'project not found' })
 
-  const { name, command, args, url, env, type } = req.body ?? {}
+  const { name } = req.body ?? {}
   if (typeof name !== 'string' || !name.trim()) {
     return res.status(400).json({ error: 'name is required' })
   }
@@ -796,18 +898,7 @@ mcpRouter.post('/', (req, res) => {
     return res.status(400).json({ error: 'server already exists' })
   }
 
-  const entry: McpEntry = {}
-  if (typeof type === 'string') entry.type = type
-  if (typeof command === 'string' && command.trim()) entry.command = command.trim()
-  if (Array.isArray(args)) entry.args = args.filter((a) => typeof a === 'string')
-  if (typeof url === 'string' && url.trim()) entry.url = url.trim()
-  if (env && typeof env === 'object' && !Array.isArray(env)) {
-    const clean: Record<string, string> = {}
-    for (const [k, v] of Object.entries(env)) {
-      if (typeof v === 'string') clean[k] = v
-    }
-    if (Object.keys(clean).length) entry.env = clean
-  }
+  const entry = sanitizeEntry(req.body)
   // The browser can't know this machine's home directory, so it never sends a
   // profile path — fill in (or correct) it here. See normalizePlaywrightProfile.
   if (name === 'playwright') normalizePlaywrightProfile(entry)
@@ -817,11 +908,249 @@ mcpRouter.post('/', (req, res) => {
   return res.status(201).json({ ok: true })
 })
 
+/**
+ * Servers the portal has its own code paths for. Their NAME is load-bearing: the
+ * tracker token resolvers (clickup.ts / jira.ts / azure.ts), Playwright's run mode and
+ * QC-browser attach, and the qc-testing skill's `mcp__playwright__*` tools all look an
+ * entry up by it. Renaming one AWAY is allowed — the engineer asked for it, and the
+ * rename dialog spells out what stops working — but nothing may be renamed ONTO one:
+ * the portal would start rewriting that server's args as if it were Playwright.
+ */
+const BUILTIN_SERVERS = new Set(['clickup', 'figma', 'jira', 'azure', 'playwright', 'maestro'])
+
+/** Same rule `claude mcp add` enforces — anything else the CLI can't address. */
+const SERVER_NAME_RE = /^[A-Za-z0-9_-]{1,64}$/
+
+function stringMap(value: unknown): Record<string, string> | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const clean: Record<string, string> = {}
+  for (const [k, v] of Object.entries(value)) if (typeof v === 'string') clean[k] = v
+  return Object.keys(clean).length ? clean : undefined
+}
+
+/** Keep only the .mcp.json fields Claude Code reads, with the right types. */
+function sanitizeEntry(raw: Record<string, unknown>): McpEntry {
+  const { command, args, url, env, type, headers, cwd } = raw
+  const entry: McpEntry = {}
+  if (typeof type === 'string' && type.trim()) entry.type = type.trim()
+  if (typeof command === 'string' && command.trim()) entry.command = command.trim()
+  if (Array.isArray(args)) entry.args = args.filter((a): a is string => typeof a === 'string')
+  if (typeof url === 'string' && url.trim()) entry.url = url.trim()
+  if (typeof cwd === 'string' && cwd.trim()) entry.cwd = cwd.trim()
+  const cleanEnv = stringMap(env)
+  if (cleanEnv) entry.env = cleanEnv
+  const cleanHeaders = stringMap(headers)
+  if (cleanHeaders) entry.headers = cleanHeaders
+  return entry
+}
+
+/**
+ * Add one or more servers in one write — the "Paste JSON" and template dialogs.
+ * Body: `{ servers: { name: entry } }`. The browser already unwrapped whatever shape
+ * was pasted (`{mcpServers:{…}}`, a bare map, a single entry); this re-validates
+ * every name and entry and refuses the WHOLE batch on any problem, so a paste never
+ * lands half-applied. A name already in use is a conflict, never an overwrite —
+ * replacing a working server by pasting over it is too easy to do by accident.
+ */
+mcpRouter.post('/import', (req, res) => {
+  const file = mcpPath(req)
+  if (!file) return res.status(400).json({ error: 'project not found' })
+  const project = resolveProject(req)!
+
+  const servers = req.body?.servers
+  if (!servers || typeof servers !== 'object' || Array.isArray(servers)) {
+    return res.status(400).json({ error: 'servers must be an object of { name: config }' })
+  }
+  const names = Object.keys(servers)
+  if (!names.length) return res.status(400).json({ error: 'no servers to add' })
+
+  const data = readMcp(file)
+  if (!data.mcpServers) data.mcpServers = {}
+  const local = localProjectMcpServers(project.rootPath)
+  const entries: Record<string, McpEntry> = {}
+  for (const name of names) {
+    if (!SERVER_NAME_RE.test(name)) {
+      return res.status(400).json({
+        error: `"${name}" is not a valid server name — use letters, numbers, - and _ only (max 64).`,
+      })
+    }
+    if (name in data.mcpServers || name in local) {
+      return res.status(409).json({ error: `A server named "${name}" already exists — rename it first.` })
+    }
+    const raw = (servers as Record<string, unknown>)[name]
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+      return res.status(400).json({ error: `"${name}" must be an object.` })
+    }
+    const entry = sanitizeEntry(raw as Record<string, unknown>)
+    if (!entry.command && !entry.url) {
+      return res.status(400).json({ error: `"${name}" needs a "command" (stdio) or a "url" (http/sse).` })
+    }
+    if (entry.url && !/^https?:\/\//i.test(entry.url)) {
+      return res.status(400).json({ error: `"${name}" url must start with http:// or https://.` })
+    }
+    if (entry.url && !entry.type) entry.type = 'http'
+    if (name === 'playwright') normalizePlaywrightProfile(entry)
+    entries[name] = entry
+  }
+  Object.assign(data.mcpServers, entries)
+  writeMcp(file, data)
+  return res.status(201).json({ ok: true, added: names })
+})
+
+/** Swap `from` for `to` in an approval list, keeping its position. */
+function renameInList(value: unknown, from: string, to: string): string[] | undefined {
+  const list = asStringArray(value)
+  if (!list.includes(from)) return undefined
+  return [...new Set(list.map((v) => (v === from ? to : v)))]
+}
+
+/** Rebuild an object with one key renamed, so the entry keeps its place in the file. */
+function renameKey<T>(obj: Record<string, T>, from: string, to: string): Record<string, T> {
+  return Object.fromEntries(Object.entries(obj).map(([k, v]) => [k === from ? to : k, v]))
+}
+
+/**
+ * Rename a server. Moves the entry in .mcp.json (or the local ~/.claude.json scope,
+ * whichever holds it) and carries its approval over, so a renamed server doesn't
+ * drop back to "Pending approval". Renaming onto a built-in name is refused — see
+ * BUILTIN_SERVERS.
+ */
+/**
+ * Move server `from` to `to` in whichever scope holds it, carrying its approval with
+ * it. Checks everything BEFORE touching a file, so a refusal leaves no half-rename.
+ */
+function renameServer(
+  rootPath: string,
+  from: string,
+  to: string,
+): { status: number; error?: string } {
+  if (!SERVER_NAME_RE.test(to)) {
+    return { status: 400, error: 'Use letters, numbers, - and _ only (max 64).' }
+  }
+  if (to === from) return { status: 200 }
+  if (BUILTIN_SERVERS.has(to)) {
+    return { status: 400, error: `"${to}" is reserved for the portal's built-in ${to} server.` }
+  }
+
+  const file = mcpJsonFor(rootPath)
+  const data = readMcp(file)
+  const projectServers = data.mcpServers ?? {}
+  const local = localProjectMcpServers(rootPath)
+  if (to in projectServers || to in local) {
+    return { status: 409, error: `A server named "${to}" already exists.` }
+  }
+
+  if (from in projectServers) {
+    data.mcpServers = renameKey(projectServers, from, to)
+    writeMcp(file, data)
+  } else if (!(from in local)) {
+    return { status: 404, error: `No server named "${from}".` }
+  }
+
+  // ~/.claude.json: the local-scope entry (if that's where it lives) and the approval.
+  const config = readClaudeConfig()
+  let configChanged = false
+  for (const key of new Set([claudeProjectKey(rootPath), rootPath])) {
+    const entry = config.projects?.[key]
+    if (!entry) continue
+    if (entry.mcpServers && from in entry.mcpServers) {
+      entry.mcpServers = renameKey(entry.mcpServers, from, to)
+      configChanged = true
+    }
+    for (const field of ['enabledMcpjsonServers', 'disabledMcpjsonServers'] as const) {
+      const next = renameInList(entry[field], from, to)
+      if (next) {
+        entry[field] = next
+        configChanged = true
+      }
+    }
+  }
+  if (configChanged) writeClaudeConfig(config)
+
+  // Older CLIs read the approval from .claude/settings.local.json.
+  const settingsFile = path.join(rootPath, '.claude', 'settings.local.json')
+  if (fs.existsSync(settingsFile)) {
+    const settings = readClaudeProjectSettings(settingsFile)
+    let changed = false
+    for (const field of ['enabledMcpjsonServers', 'disabledMcpjsonServers'] as const) {
+      const next = renameInList(settings[field], from, to)
+      if (next) {
+        settings[field] = next
+        changed = true
+      }
+    }
+    if (changed) fs.writeFileSync(settingsFile, JSON.stringify(settings, null, 2) + '\n', 'utf8')
+  }
+  return { status: 200 }
+}
+
+mcpRouter.post('/:name/rename', (req, res) => {
+  const project = resolveProject(req)
+  if (!project) return res.status(400).json({ error: 'project not found' })
+  const to = typeof req.body?.newName === 'string' ? req.body.newName.trim() : ''
+  const r = renameServer(project.rootPath, req.params.name, to)
+  if (r.error) return res.status(r.status).json({ error: r.error })
+  return res.json({ ok: true, name: to })
+})
+
+/**
+ * Edit a server: replace its entry (the Edit dialog's Settings form or raw JSON) and
+ * optionally rename it, in whichever scope holds it. Body: `{ entry, newName? }`.
+ * The entry is validated like an import — and BEFORE the rename, so a bad entry
+ * never leaves a server renamed with its old config.
+ */
+mcpRouter.put('/:name', (req, res) => {
+  const project = resolveProject(req)
+  if (!project) return res.status(400).json({ error: 'project not found' })
+  const from = req.params.name
+  const to = typeof req.body?.newName === 'string' && req.body.newName.trim() ? req.body.newName.trim() : from
+
+  const raw = req.body?.entry
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return res.status(400).json({ error: 'entry must be an object' })
+  }
+  const entry = sanitizeEntry(raw as Record<string, unknown>)
+  if (!entry.command && !entry.url) {
+    return res.status(400).json({ error: 'Needs a "command" (stdio) or a "url" (http/sse).' })
+  }
+  if (entry.url && !/^https?:\/\//i.test(entry.url)) {
+    return res.status(400).json({ error: 'The url must start with http:// or https://.' })
+  }
+  if (entry.url && !entry.type) entry.type = 'http'
+  // Same as POST /: the browser never knows this machine's Playwright profile path.
+  if (to === 'playwright') normalizePlaywrightProfile(entry)
+
+  const r = renameServer(project.rootPath, from, to)
+  if (r.error) return res.status(r.status).json({ error: r.error })
+
+  const file = mcpJsonFor(project.rootPath)
+  const data = readMcp(file)
+  if (data.mcpServers && to in data.mcpServers) {
+    data.mcpServers[to] = entry
+    writeMcp(file, data)
+  } else {
+    // A local-scope entry lives in ~/.claude.json, under this project's key.
+    const config = readClaudeConfig()
+    let written = false
+    for (const key of new Set([claudeProjectKey(project.rootPath), project.rootPath])) {
+      const servers = config.projects?.[key]?.mcpServers
+      if (servers && to in servers) {
+        servers[to] = entry
+        written = true
+      }
+    }
+    if (!written) return res.status(404).json({ error: `No server named "${to}".` })
+    writeClaudeConfig(config)
+  }
+  return res.json({ ok: true, name: to })
+})
+
 /** Live connection test for a single configured server. */
 mcpRouter.get('/test/:name', async (req, res) => {
   const project = resolveProject(req)
   if (!project) return res.status(400).json({ error: 'project not found' })
   let result = await testServer(project.rootPath, req.params.name)
+  invalidateMcpHealth(project.rootPath)
   if (result.status === 'pending' && approveMcpJsonServer(project.rootPath, req.params.name)) {
     const retry = await testServer(project.rootPath, req.params.name)
     result = {
@@ -843,6 +1172,8 @@ mcpRouter.get('/test/:name', async (req, res) => {
     }
   }
 
+  // An approval may have just changed what `mcp list` reports — drop the memory.
+  invalidateMcpHealth(project.rootPath)
   res.json(result)
 })
 
@@ -884,8 +1215,19 @@ mcpRouter.delete('/:name', (req, res) => {
 
 type ProviderId = 'clickup' | 'figma' | 'jira' | 'azure'
 
-/** `uvx` args for clickup-mcp — one definition, used by both entry builders. */
+/**
+ * `uvx` args for clickup-mcp — one definition, used by both entry builders.
+ *
+ * `--with mcp<2` is load-bearing: clickup-mcp is installed from git HEAD with no lock,
+ * so uvx resolves the NEWEST `mcp` SDK, and mcp 2.x removed `Server.list_tools` — the
+ * server then exits on start ("'Server' object has no attribute 'list_tools'"), which
+ * the MCP page can only report as CONNECTION_CLOSED. Measured 2026-09-24 against
+ * mcp 2.2.0; `mcp<2` starts cleanly. Existing entries get the same pin from
+ * `pinClickupMcpSdk` (run by repairProjectMcpConfig).
+ */
+const CLICKUP_MCP_PIN = ['--with', 'mcp<2']
 const CLICKUP_MCP_ARGS = [
+  ...CLICKUP_MCP_PIN,
   '--from',
   'git+https://github.com/DiversioTeam/clickup-mcp.git',
   'clickup-mcp',

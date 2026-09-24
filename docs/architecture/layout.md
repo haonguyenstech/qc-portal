@@ -310,6 +310,29 @@ server/src/
   routes/           projects, qc, files, skills, mcp, clickup, source, ai, templates,
                     knowledge, memory, notes, database, diagrams, prototype, chat,
                     performance, version
+                    routes/mcp.ts also backs the MCP page's "More servers": POST /import
+                    (template or pasted JSON — the BROWSER unwraps the pasted shape in
+                    web/src/lib/mcpTemplates.ts, the server re-validates every name +
+                    entry and refuses the whole batch, never overwrites an existing name)
+                    and PUT /:name (the Edit dialog: replace the entry — form or raw JSON —
+                    and optionally rename; the entry is validated BEFORE the rename, and a
+                    rename moves the entry AND its approval in ~/.claude.json /
+                    settings.local.json). The dialog loads the REAL env/header values
+                    first — seeding the form with the list's masked "••••1234" would save
+                    the mask over the token. BUILTIN_SERVERS (clickup, figma,
+                    jira, azure, playwright, maestro) MAY be renamed away (the dialog warns
+                    what stops working — their NAME is how the token resolvers, Playwright
+                    run mode / QC-browser attach and the skill's mcp__playwright__* tools
+                    find them) but nothing may be renamed ONTO one. The page lists only
+                    CONFIGURED servers; connecting a built-in is a "QC essentials" template
+                    that calls its own route (token save / addMcp / maestro/connect), never
+                    the generic import. Live health (`getStatuses`) is `claude mcp list`,
+                    which spawns EVERY server in scope: capped at 45s (a cold start measured
+                    15s+ and the old 15s cap returned `{}` = every badge gone, then cached
+                    for 5 min by the page), a timeout is a 504 ERROR never an empty map,
+                    one probe per project at a time (+5s reuse, cleared by writeMcp and by
+                    Test). A project server in `disabledMcpjsonServers` is absent from the
+                    list, so it is reported `pending` and Test approves it
 
 web/src/
   App.tsx           two branches: `/ai-labs` renders BARE (no shell — see "QC AI Labs"),
