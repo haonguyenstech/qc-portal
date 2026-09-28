@@ -1,6 +1,6 @@
 import { missingRefs } from './answerCheck.js'
 import type { TeamBot, TeamFile } from './aiTeamStore.js'
-import type { runClaudeStream, StreamResult } from './claudeExec.js'
+import { WRITE_TOOLS, type runClaudeStream, type StreamResult } from './claudeExec.js'
 import type {
   Chat,
   ChatAction,
@@ -387,7 +387,12 @@ export async function runTeamTurn(ctx: TeamRunContext): Promise<TeamOutcome> {
             if (log.tool.name === 'Read' && log.tool.path) noteRead(bot, log.tool.path)
             if (slot.calls.length < limits.maxToolsPerTurn) {
               usedTools.push(log.tool.name)
-              const step: ChatStep = { name: log.tool.name, detail: log.tool.detail, pos: slot.answer.length }
+              const step: ChatStep = {
+                name: log.tool.name,
+                detail: log.tool.detail,
+                pos: slot.answer.length,
+                ...(log.tool.path && WRITE_TOOLS.has(log.tool.name) ? { path: log.tool.path } : {}),
+              }
               slot.calls.push(step)
               send({ type: 'tool', seg, ...step })
             }

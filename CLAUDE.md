@@ -178,6 +178,10 @@ server/src/
                     and NOTHING else, not even the JS bundle. Its middleware must stay ahead
                     of every router AND of express.static in index.ts
   qcBrowser.ts      the portal-owned browser Playwright MCP attaches to over CDP
+  mcpSignin.ts      MCP page "Sign in" for a remote (http/sse) server: drives `claude mcp
+                    login --no-browser` in a PTY (it exits without a TTY) as a polled job.
+                    Claude Code stores + refreshes the token, so .mcp.json holds none. One
+                    sign-in at a time (the CLI's callback port is fixed per server)
   playwrightRunMode.ts  per-RUN headless/headed browser choice (a per-run MCP config; never
                     rewrites the project's .mcp.json)
   autoAgent.ts      Auto Agent (shared Claude credential) status — read-only probe

@@ -7,7 +7,7 @@ import { dbMapDocName } from '../dbMap.js'
 import { resolveProject } from '../projectScope.js'
 import { ensureQcBrowser } from '../qcBrowser.js'
 import { revealFolderNative } from '../folderPicker.js'
-import { runClaudeStream, CRAWL_SUMMARY_MODELS, type StreamResult } from '../claudeExec.js'
+import { runClaudeStream, CRAWL_SUMMARY_MODELS, WRITE_TOOLS, type StreamResult } from '../claudeExec.js'
 import { listTestcaseVersions } from '../testcaseGen.js'
 import { runFeedbackCapture } from '../learn.js'
 import { forgetChatLearning, noteChatTurn } from '../chatLearn.js'
@@ -139,6 +139,12 @@ export interface ChatStep {
    * connection is a trap; a different name costs nothing.
    */
   pos: number
+  /**
+   * The FULL path a Write / Edit / MultiEdit / NotebookEdit touched (`detail` is only the
+   * basename). What "Files in this chat" lists as made by the AI, and the only paths
+   * `GET /:slug/asset` will serve. Absent on steps recorded before it existed.
+   */
+  path?: string
 }
 
 export interface ChatMessage {
@@ -2329,7 +2335,12 @@ chatRouter.post('/stream', async (req, res) => {
               // transcript put this step back where it happened instead of piling every
               // call above the reply. Kept on the turn too, so a viewer that attaches late
               // still sees the whole trail.
-              addStep({ name: log.tool.name, detail: log.tool.detail, pos: t.answer.length })
+              addStep({
+                name: log.tool.name,
+                detail: log.tool.detail,
+                pos: t.answer.length,
+                ...(log.tool.path && WRITE_TOOLS.has(log.tool.name) ? { path: log.tool.path } : {}),
+              })
             }
             return
           }
@@ -2923,6 +2934,175 @@ chatRouter.post('/:slug/team', (req, res) => {
 })
 
 /** GET /api/chat/:slug — one conversation in full. */
+/** One file the AI created or changed in a conversation, as "Files in this chat" lists it. */
+export interface ChatWrittenFile {
+  /** Project-relative (forward slashes) when inside the project, else the absolute path. */
+  path: string
+  name: string
+  /** Every write tool that touched it — `Write` alone means it was created from scratch. */
+  tools: string[]
+  /** Index of the LAST assistant message that touched it. */
+  index: number
+  /** The user question that answer replied to — the transcript anchors questions, not answers. */
+  question: number
+  at: string
+  /** Inside the project root: the only ones `GET /:slug/asset` serves. */
+  inProject: boolean
+  exists: boolean
+  size?: number
+}
+
+export interface ChatAssets {
+  /**
+   * `legacy`: attached before documents had their own field, when the browser pasted the
+   * converted text INTO the message (`--- ATTACHED FILE: <name> ---`). Listed so the dialog
+   * matches the chips the transcript draws, but there is no file behind it (`file` empty) —
+   * its text rides along as `text`, cut out of the message, for the preview.
+   */
+  uploads: {
+    file: string
+    name: string
+    index: number
+    at: string
+    exists: boolean
+    size?: number
+    legacy?: boolean
+    text?: string
+  }[]
+  images: { file: string; index: number; at: string; size?: number }[]
+  written: ChatWrittenFile[]
+  /**
+   * Question index → the first ~160 characters of what was asked (pasted attachment text
+   * cut off), for the viewer's "From" line. Only the questions some file points at.
+   */
+  questions: Record<number, string>
+}
+
+/** `abs` resolved inside `root` → its relative path; outside (or the root itself) → null. */
+function relInside(root: string, abs: string): string | null {
+  const rel = path.relative(path.resolve(root), path.resolve(root, abs))
+  if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) return null
+  return rel.split(path.sep).join('/')
+}
+
+/**
+ * Everything a conversation brought in or produced, read off the transcript itself: the
+ * documents and screenshots attached to the questions, and every file a Write/Edit step
+ * of an answer touched (`ChatStep.path`). Derived on read rather than stored separately,
+ * so there is one record of what happened — and a deleted file shows as gone rather than
+ * silently vanishing from the list.
+ */
+export function chatAssets(root: string, chat: Chat): ChatAssets {
+  const out: ChatAssets = { uploads: [], images: [], written: [], questions: {} }
+  const byPath = new Map<string, ChatWrittenFile>()
+  let question = 0
+  const stat = (abs: string) => {
+    try {
+      const s = fs.statSync(abs)
+      return s.isFile() ? { exists: true, size: s.size } : { exists: false }
+    } catch {
+      return { exists: false }
+    }
+  }
+  chat.messages.forEach((m, index) => {
+    if (m.role === 'user') question = index
+    for (const f of m.files ?? []) {
+      out.uploads.push({ ...f, index, at: m.at, ...stat(path.join(docDir(root), f.file)) })
+    }
+    if (m.role === 'user' && !m.files?.length) {
+      const hits = [...m.text.matchAll(/^--- ATTACHED FILE: (.+?) ---$/gm)]
+      hits.forEach((hit, i) => {
+        const from = (hit.index ?? 0) + hit[0].length
+        const to = i + 1 < hits.length ? (hits[i + 1].index ?? m.text.length) : m.text.length
+        const text = m.text.slice(from, to).trim()
+        out.uploads.push({ file: '', name: hit[1], index, at: m.at, exists: false, legacy: true, text, size: Buffer.byteLength(text) })
+      })
+    }
+    for (const file of m.images ?? []) {
+      out.images.push({ file, index, at: m.at, size: stat(path.join(imageDir(root), file)).size })
+    }
+    for (const s of m.steps ?? []) {
+      if (!s.path || !WRITE_TOOLS.has(s.name)) continue
+      const abs = path.resolve(root, s.path)
+      const rel = relInside(root, abs)
+      const key = rel ?? abs
+      const prev = byPath.get(key)
+      if (prev) {
+        if (!prev.tools.includes(s.name)) prev.tools.push(s.name)
+        prev.index = index
+        prev.question = question
+        prev.at = m.at
+      } else {
+        byPath.set(key, {
+          path: key,
+          name: path.basename(abs),
+          tools: [s.name],
+          index,
+          question,
+          at: m.at,
+          inProject: rel !== null,
+          ...stat(abs),
+        })
+      }
+    }
+  })
+  // Newest activity first — the file the last answer wrote is the one being asked about.
+  out.written = [...byPath.values()].sort((a, b) => b.index - a.index)
+  const wanted = new Set([
+    ...out.uploads.map((u) => u.index),
+    ...out.images.map((i) => i.index),
+    ...out.written.map((w) => w.question),
+  ])
+  for (const i of wanted) {
+    const m = chat.messages[i]
+    if (m?.role !== 'user') continue
+    const cut = m.text.search(/^--- ATTACHED FILE: /m)
+    const ask = (cut >= 0 ? m.text.slice(0, cut) : m.text).replace(/\s+/g, ' ').trim()
+    out.questions[i] = ask.length > 160 ? `${ask.slice(0, 159)}…` : ask
+  }
+  return out
+}
+
+/** GET /api/chat/:slug/assets — see `chatAssets`. */
+chatRouter.get('/:slug/assets', (req, res) => {
+  const project = resolveProject(req)
+  if (!project) return res.status(400).json({ error: 'project not found' })
+  const chat = loadChat(project.rootPath, req.params.slug)
+  if (!chat) return res.status(404).json({ error: 'chat not found' })
+  res.json(chatAssets(project.rootPath, chat))
+})
+
+const ASSET_IMAGE_TYPES: Record<string, string> = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+}
+
+/**
+ * GET /api/chat/:slug/asset?path=<rel> — open one file the AI wrote in this conversation.
+ *
+ * Deliberately NOT a general "read any project file" route: the path must be one this
+ * chat's own steps recorded AND resolve inside the project root. Everything but a raster
+ * image goes out as text/plain + nosniff — an HTML or SVG file the AI wrote must never
+ * RUN on the portal's origin, it is shown as source.
+ */
+chatRouter.get('/:slug/asset', (req, res) => {
+  const project = resolveProject(req)
+  if (!project) return res.status(400).json({ error: 'project not found' })
+  const chat = loadChat(project.rootPath, req.params.slug)
+  if (!chat) return res.status(404).json({ error: 'chat not found' })
+  const want = typeof req.query.path === 'string' ? req.query.path : ''
+  const hit = chatAssets(project.rootPath, chat).written.find((f) => f.path === want)
+  if (!hit || !hit.inProject) return res.status(404).json({ error: 'not a file this chat wrote' })
+  if (!hit.exists) return res.status(404).json({ error: 'that file is no longer on disk' })
+  const abs = path.join(project.rootPath, hit.path)
+  const type = ASSET_IMAGE_TYPES[path.extname(abs).toLowerCase()] ?? 'text/plain; charset=utf-8'
+  res.setHeader('X-Content-Type-Options', 'nosniff')
+  res.type(type).sendFile(abs)
+})
+
 chatRouter.get('/:slug', (req, res) => {
   const project = resolveProject(req)
   if (!project) return res.status(400).json({ error: 'project not found' })

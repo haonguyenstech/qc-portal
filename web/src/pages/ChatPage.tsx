@@ -14,27 +14,40 @@ import remarkGfm from 'remark-gfm'
 import { toast } from 'sonner'
 import {
   ArrowUp,
+  ArrowUpDown,
   Blocks,
   Brain,
   Bug,
   AlarmClock,
   Check,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  ChevronUp,
   CircleCheck,
   CircleHelp,
   Clock,
   ClipboardList,
   Compass,
   Copy,
+  CornerDownRight,
   Database,
   Download,
+  Eye,
+  FileCode,
   FileSearch,
+  FileSpreadsheet,
   FileText,
+  FolderOpen,
   Gauge,
   Globe,
+  HardDrive,
   History,
   ImageIcon,
+  Inbox,
+  LayoutGrid,
   Library,
+  List,
   ListChecks,
   ListTodo,
   Loader2,
@@ -97,6 +110,7 @@ import { convertFileToMarkdown, KNOWLEDGE_ACCEPT, MAX_FILE_BYTES } from '@/lib/d
 import { useProjects } from '@/lib/project-context'
 import {
   auditChatAnswer,
+  chatFileUrl,
   chatImageUrl,
   projectImageUrl,
   resolveProjectImages,
@@ -140,7 +154,13 @@ import {
   type DatabaseConn,
   type AiTeam,
   type ChatBotRef,
+  type ChatAssets,
+  getChatAssets,
+  chatAssetUrl,
+  fetchTextPreview,
+  fetchFileBlob,
 } from '@/lib/api'
+import { formatBytes } from '@/lib/sync'
 import { ROLES } from '@/lib/aiTeam'
 import type { SkillSummary } from '@/lib/types'
 import { formatWhen } from '@/lib/schedule'
@@ -500,6 +520,13 @@ const COMPOSER_H_MIN = 56
 const COMPOSER_H_MAX = 640
 const clampComposerH = (px: number) =>
   Math.round(Math.min(COMPOSER_H_MAX, Math.max(COMPOSER_H_MIN, px)))
+/**
+ * The composer folded away to a one-line bar, so a long answer gets the whole column.
+ * Remembered per browser like the height above. Only ever honoured while the composer is
+ * EMPTY (`composerFolded` in ChatWorkspace): a draft, a staged file or text put back after
+ * a failed send must never sit somewhere the engineer can't see it.
+ */
+const COMPOSER_HIDDEN_KEY = 'qc.chatComposerHidden.v1'
 /** Mirrors the server's cap (routes/chat.ts). Over it the server 413s rather than truncating. */
 const MAX_PROMPT = 48_000
 /**
@@ -519,6 +546,24 @@ const MAX_QUEUED = 3
 const IMAGE_MIMES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif']
 const MAX_IMAGES = 4
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024
+/** Attached documents — kept in step with routes/chat.ts (`MAX_DOCS`, `MAX_DOC_BYTES`). */
+const MAX_DOCS = 4
+const MAX_DOC_BYTES = 4 * 1024 * 1024
+
+/**
+ * Messages saved before attachments went through `attachments` carry the whole converted
+ * file in their text, as `--- ATTACHED FILE: <name> ---` blocks after the question. Split
+ * those back out so the bubble shows the question and a chip per file, not a wall of
+ * extracted PDF text. New messages never contain the marker (the server gets the files
+ * separately), so for them this is a no-op.
+ */
+const LEGACY_ATTACHED = '\n\n--- ATTACHED FILE: '
+function splitLegacyAttachments(text: string): { text: string; names: string[] } {
+  const at = text.startsWith(LEGACY_ATTACHED.trimStart()) ? 0 : text.indexOf(LEGACY_ATTACHED)
+  if (at < 0) return { text, names: [] }
+  const names = [...text.slice(at).matchAll(/^--- ATTACHED FILE: (.+?) ---$/gm)].map((m) => m[1])
+  return { text: text.slice(0, at).trim(), names }
+}
 
 // --------------------------------------------------------------- @ and / pickers
 
@@ -1448,6 +1493,7 @@ function RowMenu({
   onDelete,
   onExport,
   onSelect,
+  onFiles,
   always,
 }: {
   pinned: boolean
@@ -1468,6 +1514,8 @@ function RowMenu({
    * pointing at, is the step this removes.
    */
   onSelect?: () => void
+  /** Open "Files in this chat" — what was attached and what the AI wrote. */
+  onFiles?: () => void
   /** The rail reveals the trigger on row hover; the header's is always there. */
   always?: boolean
 }) {
@@ -1519,6 +1567,19 @@ function RowMenu({
             <PenLine className="size-3.5" />
             Rename
           </button>
+          {onFiles && (
+            <button
+              type="button"
+              onClick={() => {
+                setOpen(false)
+                onFiles()
+              }}
+              className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm transition-colors hover:bg-accent"
+            >
+              <FolderOpen className="size-3.5" />
+              Files
+            </button>
+          )}
           {onSelect && (
             <button
               type="button"
@@ -1812,6 +1873,7 @@ function ChatRail({
   onArchive,
   onRename,
   onDelete,
+  onFiles,
   selection,
   onSelectionChange,
   onBulk,
@@ -1827,6 +1889,7 @@ function ChatRail({
   onArchive: (slug: string, archived: boolean) => void
   onRename: (slug: string, current: string) => void
   onDelete: (slug: string) => void
+  onFiles: (slug: string) => void
   /**
    * The multi-select. `null` is "not selecting" — distinct from `[]`, which is selection
    * mode with nothing ticked yet, and the two have to look different on screen (one shows
@@ -2300,6 +2363,7 @@ function ChatRail({
                                 onRename={() => onRename(c.slug, c.name)}
                                 onDelete={() => onDelete(c.slug)}
                                 onSelect={() => enterSelect(c.slug)}
+                                onFiles={() => onFiles(c.slug)}
                               />
                             </div>
                           )}
@@ -3707,9 +3771,10 @@ function QueuedRows({
 }
 
 function UserRow({
-  text,
+  text: raw,
   images,
   previews,
+  files,
   projectId,
   at,
   action,
@@ -3719,6 +3784,12 @@ function UserRow({
   text: string
   images?: string[]
   previews?: string[]
+  /**
+   * Documents attached with this message. `file` (the server's stored name) is set once the
+   * message is saved and makes the chip a link to the converted markdown; a turn still in
+   * flight only knows the names.
+   */
+  files?: { file?: string; name: string }[]
   projectId?: string
   at?: string
   /** The `+` menu action this message ran with — shown, because it changes the answer. */
@@ -3734,6 +3805,10 @@ function UserRow({
 }) {
   const meta = action ? actionMeta(action) : null
   const srcs = previews ?? (images && projectId ? images.map((n) => chatImageUrl(projectId, n)) : [])
+  // The chip IS the attachment on screen — the file's text belongs on disk, never in the bubble.
+  const legacy = splitLegacyAttachments(raw)
+  const text = legacy.text
+  const docs = files?.length ? files : legacy.names.map((name) => ({ name }) as { file?: string; name: string })
   return (
     /*
      * No avatar on this side. Right-alignment plus the filled bubble already say "you
@@ -3764,9 +3839,41 @@ function UserRow({
             ))}
           </div>
         )}
-        <div className="inline-flex whitespace-pre-wrap break-words rounded-2xl rounded-br-md bg-primary px-4 py-2.5 text-start text-sm leading-relaxed text-primary-foreground">
-          {text}
-        </div>
+        {docs.length > 0 && (
+          <div className="mb-2 flex flex-wrap justify-end gap-1.5">
+            {docs.map((d, i) => {
+              const chip = (
+                <>
+                  <FileText className="size-3.5 shrink-0 text-muted-foreground" />
+                  <span className="max-w-[16rem] truncate">{d.name}</span>
+                </>
+              )
+              const cls =
+                'inline-flex items-center gap-1.5 rounded-xl border border-border/60 bg-muted/60 px-2.5 py-1.5 text-xs text-foreground'
+              return d.file && projectId ? (
+                <a
+                  key={`${d.file}-${i}`}
+                  href={chatFileUrl(projectId, d.file)}
+                  target="_blank"
+                  rel="noreferrer"
+                  title={`Open ${d.name} (as the AI read it)`}
+                  className={cn(cls, 'transition-all duration-200 hover:-translate-y-0.5 hover:border-border hover:shadow-sm')}
+                >
+                  {chip}
+                </a>
+              ) : (
+                <span key={`${d.name}-${i}`} className={cls}>
+                  {chip}
+                </span>
+              )
+            })}
+          </div>
+        )}
+        {text && (
+          <div className="inline-flex whitespace-pre-wrap break-words rounded-2xl rounded-br-md bg-primary px-4 py-2.5 text-start text-sm leading-relaxed text-primary-foreground">
+            {text}
+          </div>
+        )}
         {context && context.length > 0 && <ContextRows blocks={context} />}
         {/* On hover, not always. In a scrolled transcript a timestamp under every question
             is a column of numbers nobody reads; the one time it IS wanted ("when did I ask
@@ -4917,6 +5024,7 @@ const Turn = memo(function Turn({
     <UserRow
       text={m.text}
       images={m.images}
+      files={m.files}
       projectId={projectId}
       at={m.at}
       action={m.action}
@@ -5066,6 +5174,839 @@ function TeamStrip({
   )
 }
 
+// ------------------------------------------------------------------ files in this chat
+
+/** One row of the files dialog, whichever list it came from. */
+type ChatAssetItem = {
+  key: string
+  group: 'upload' | 'image' | 'written'
+  name: string
+  /** What the row says under the name: the project path, or where it came from. */
+  sub: string
+  /** Opened in the preview pane / a new window. Absent = nothing to open (gone, outside). */
+  url?: string
+  isImage: boolean
+  /** The user message to scroll to. */
+  question: number
+  at: string
+  size?: number
+  /** Why `url` is absent, said on the row instead of a dead click. */
+  unavailable?: string
+  /** An older chat's attachment: the text that was pasted into the message, shown as is. */
+  inlineText?: string
+  /** Write tools in the order they first touched it — a leading `Write` means this chat CREATED it. */
+  tools?: string[]
+  /** An excerpt of the question this file belongs to. */
+  asked?: string
+}
+
+const IMAGE_EXT = /\.(png|jpe?g|gif|webp)$/i
+
+function assetItems(projectId: string, slug: string, a: ChatAssets): ChatAssetItem[] {
+  const items: ChatAssetItem[] = [
+    ...a.uploads.map<ChatAssetItem>((u, i) => ({
+      key: `u-${i}-${u.file}`,
+      group: 'upload',
+      name: u.name,
+      sub: u.legacy ? 'Attached · older chat, text kept in the message' : 'Attached · converted to text for the AI',
+      url: u.exists ? chatFileUrl(projectId, u.file) : undefined,
+      unavailable: u.exists || u.legacy ? undefined : 'No longer on disk',
+      inlineText: u.legacy ? u.text : undefined,
+      isImage: false,
+      question: u.index,
+      at: u.at,
+      size: u.size,
+    })),
+    ...a.images.map<ChatAssetItem>((img, i) => ({
+      key: `i-${i}-${img.file}`,
+      group: 'image',
+      name: img.file,
+      sub: 'Pasted screenshot',
+      url: chatImageUrl(projectId, img.file),
+      isImage: true,
+      question: img.index,
+      at: img.at,
+      size: img.size,
+    })),
+    ...a.written.map<ChatAssetItem>((w) => ({
+      key: `w-${w.path}`,
+      group: 'written',
+      name: w.name,
+      sub: w.path,
+      url: w.inProject && w.exists ? chatAssetUrl(projectId, slug, w.path) : undefined,
+      unavailable: !w.inProject ? 'Outside this project' : !w.exists ? 'Deleted since' : undefined,
+      isImage: IMAGE_EXT.test(w.name),
+      question: w.question,
+      at: w.at,
+      size: w.size,
+      tools: w.tools,
+    })),
+  ]
+  return items.map((it) => ({ ...it, asked: a.questions?.[it.question] }))
+}
+
+/**
+ * The preview pane. Text is fetched and shown as SOURCE in a <pre> — never rendered, and
+ * never in an iframe: an HTML file the AI wrote must not run on the portal's origin (the
+ * server sends it as text/plain + nosniff for the same reason).
+ */
+function AssetPreview({ item }: { item: ChatAssetItem }) {
+  const preview = useQuery({
+    queryKey: ['chat-asset-preview', item.url],
+    queryFn: () => fetchTextPreview(item.url!),
+    enabled: !!item.url && !item.isImage,
+    staleTime: 0,
+  })
+  if (item.inlineText !== undefined) {
+    return (
+      <pre className="h-full overflow-auto whitespace-pre-wrap break-words p-3 font-mono text-[12px] leading-relaxed text-foreground">
+        {item.inlineText || '(empty file)'}
+      </pre>
+    )
+  }
+  if (!item.url) {
+    return (
+      <div className="grid h-full place-items-center p-6 text-center text-sm text-muted-foreground">
+        {item.unavailable ?? 'Nothing to show.'}
+      </div>
+    )
+  }
+  if (item.isImage) {
+    return (
+      <div className="grid h-full place-items-center overflow-auto p-3">
+        <img src={item.url} alt={item.name} className="max-h-full max-w-full rounded-lg border object-contain" />
+      </div>
+    )
+  }
+  if (preview.isPending) {
+    return (
+      <div className="grid h-full place-items-center text-sm text-muted-foreground">
+        <Loader2 className="size-4 animate-spin" />
+      </div>
+    )
+  }
+  if (preview.isError) {
+    return <div className="p-4 text-sm text-destructive">{(preview.error as Error).message}</div>
+  }
+  return (
+    <div className="h-full overflow-auto">
+      {preview.data.truncated && (
+        <div className="sticky top-0 border-b border-border/60 bg-amber-500/10 px-3 py-1.5 text-[11px] text-amber-700 dark:text-amber-400">
+          Showing the first 200,000 characters — open it for the rest.
+        </div>
+      )}
+      <pre className="whitespace-pre-wrap break-words p-3 font-mono text-[12px] leading-relaxed text-foreground">
+        {preview.data.text || '(empty file)'}
+      </pre>
+    </div>
+  )
+}
+
+/** Save bytes under a name of our choosing — and SAY so (app mode has no download bubble). */
+function saveBlob(blob: Blob, file: string) {
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = file
+  a.click()
+  // Revoked a tick later: revoking synchronously can cancel the save before it starts.
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
+  toast.success('Downloaded', { description: `${file} — in your Downloads folder` })
+}
+
+/**
+ * What a Download saves the item as. An attachment is kept as the MARKDOWN the browser
+ * converted it to (the original PDF/DOCX never reaches the server), so it is saved as
+ * `<name>.md` — calling it `spec.pdf` would hand over a text file with a PDF's name.
+ */
+function downloadName(it: ChatAssetItem): string {
+  if (it.group !== 'upload' || /\.(md|markdown)$/i.test(it.name)) return it.name
+  return `${it.name.replace(/\.[^.]+$/, '') || 'document'}.md`
+}
+
+async function downloadAsset(it: ChatAssetItem) {
+  try {
+    if (it.inlineText !== undefined) {
+      saveBlob(new Blob([it.inlineText], { type: 'text/markdown' }), downloadName(it))
+      return
+    }
+    if (!it.url) return
+    saveBlob(await fetchFileBlob(it.url), downloadName(it))
+  } catch (err) {
+    toast.error(`Could not download ${it.name}`, { description: (err as Error).message })
+  }
+}
+
+/** Short type label for the card's corner badge — `PDF`, `MD`, `PNG`… */
+function extLabel(it: ChatAssetItem): string {
+  const m = /\.([a-z0-9]{1,5})$/i.exec(it.name)
+  return (m?.[1] ?? (it.isImage ? 'img' : 'file')).toUpperCase()
+}
+
+/**
+ * A card's thumbnail: the image itself, or the first lines of a text file set small, so a
+ * grid of twelve `.md` files is told apart by what is IN them, not by twelve identical icons.
+ */
+function AssetThumb({ item }: { item: ChatAssetItem }) {
+  const snippet = useQuery({
+    queryKey: ['chat-asset-thumb', item.url],
+    queryFn: () => fetchTextPreview(item.url!, 1200),
+    enabled: !!item.url && !item.isImage && item.inlineText === undefined,
+    staleTime: 60_000,
+  })
+  if (item.unavailable) {
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-1.5 p-3 text-center text-[11px] text-muted-foreground">
+        <FileText className="size-6 opacity-40" />
+        {item.unavailable}
+      </div>
+    )
+  }
+  if (item.isImage && item.url) {
+    return <img src={item.url} alt={item.name} loading="lazy" className="size-full object-cover object-top" />
+  }
+  // The converter's `<!-- page N -->` markers are for the model, not for a glance.
+  const raw = item.inlineText?.slice(0, 1200) ?? snippet.data?.text
+  const text = raw?.replace(/<!--\s*page \d+\s*-->\s*/g, '').trimStart()
+  if (text === undefined) {
+    return (
+      <div className="grid h-full place-items-center">
+        {snippet.isError ? (
+          <FileText className="size-6 text-muted-foreground/40" />
+        ) : (
+          <Loader2 className="size-4 animate-spin text-muted-foreground" />
+        )}
+      </div>
+    )
+  }
+  return (
+    <pre className="h-full overflow-hidden whitespace-pre-wrap break-words p-3 pt-9 font-mono text-[9.5px] leading-snug text-muted-foreground [mask-image:linear-gradient(to_bottom,black_60%,transparent)]">
+      {text || '(empty file)'}
+    </pre>
+  )
+}
+
+/** The icon for a file, by what it IS — a spreadsheet and a spec should not look alike. */
+function AssetIcon({ item, className }: { item: ChatAssetItem; className?: string }) {
+  if (item.isImage || item.group === 'image') return <ImageIcon className={className} />
+  if (/\.(csv|xlsx?|tsv)$/i.test(item.name)) return <FileSpreadsheet className={className} />
+  if (/\.(tsx?|jsx?|json|ya?ml|py|sh|sql|html?|css|xml)$/i.test(item.name)) return <FileCode className={className} />
+  return <FileText className={className} />
+}
+
+/** Where a file came from, in words — the same label on a card, a list row and the viewer. */
+function assetOrigin(it: ChatAssetItem): { label: string; tone: string } {
+  if (it.group === 'upload') return { label: 'Uploaded', tone: 'text-muted-foreground' }
+  if (it.group === 'image') return { label: 'Screenshot', tone: 'text-muted-foreground' }
+  return it.tools?.[0] === 'Write'
+    ? { label: 'Created by AI', tone: 'text-emerald-700 dark:text-emerald-400' }
+    : { label: 'Edited by AI', tone: 'text-amber-700 dark:text-amber-400' }
+}
+
+/** A small round icon action, used on cards and list rows alike. */
+function IconAction({
+  label,
+  onClick,
+  disabled,
+  children,
+}: {
+  label: string
+  onClick: () => void
+  disabled?: boolean
+  children: ReactNode
+}) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          type="button"
+          aria-label={label}
+          disabled={disabled}
+          onClick={(e) => {
+            e.stopPropagation()
+            onClick()
+          }}
+          className="grid size-8 place-items-center rounded-full border border-border/60 bg-background/90 text-foreground backdrop-blur transition-all duration-200 hover:border-border hover:bg-background active:scale-[0.95] disabled:pointer-events-none disabled:opacity-40"
+        >
+          {children}
+        </button>
+      </TooltipTrigger>
+      <TooltipContent>{label}</TooltipContent>
+    </Tooltip>
+  )
+}
+
+/** One gallery card: a big thumbnail of what is IN the file, its origin, View + Download. */
+function AssetCard({ item, onView }: { item: ChatAssetItem; onView: () => void }) {
+  const viewable = !item.unavailable
+  const origin = assetOrigin(item)
+  return (
+    <div
+      role="button"
+      tabIndex={viewable ? 0 : -1}
+      onClick={() => viewable && onView()}
+      onKeyDown={(e) => {
+        if (viewable && (e.key === 'Enter' || e.key === ' ')) {
+          e.preventDefault()
+          onView()
+        }
+      }}
+      aria-label={`View ${item.name}`}
+      className={cn(
+        'group/card flex flex-col overflow-hidden rounded-3xl border border-border/60 bg-card text-start outline-none transition-all duration-200 focus-visible:ring-2 focus-visible:ring-ring',
+        viewable ? 'cursor-pointer hover:-translate-y-0.5 hover:border-border hover:shadow-sm' : 'opacity-70',
+      )}
+    >
+      <div className="relative m-2 mb-0 aspect-[4/3] overflow-hidden rounded-2xl bg-muted/60">
+        <AssetThumb item={item} />
+        <span className="absolute start-2.5 top-2.5 rounded-lg bg-background/90 px-1.5 py-0.5 font-mono text-[10px] font-medium text-foreground shadow-sm backdrop-blur">
+          {extLabel(item)}
+        </span>
+        {/* Quick actions on hover; the same two stay in the footer for touch, which has no hover. */}
+        <div className="absolute end-2.5 top-2.5 flex gap-1.5 opacity-0 transition-opacity duration-200 group-hover/card:opacity-100 group-focus-visible/card:opacity-100">
+          <IconAction label="View" onClick={onView} disabled={!viewable}>
+            <Eye className="size-3.5" />
+          </IconAction>
+          <IconAction label="Download" onClick={() => void downloadAsset(item)} disabled={!viewable}>
+            <Download className="size-3.5" />
+          </IconAction>
+        </div>
+      </div>
+      <div className="flex items-start gap-3 p-3.5">
+        <span className="grid size-9 shrink-0 place-items-center rounded-xl bg-foreground text-background">
+          <AssetIcon item={item} className="size-4" />
+        </span>
+        <div className="min-w-0 flex-1">
+          <div
+            className={cn('truncate text-sm font-medium', item.unavailable && 'text-muted-foreground line-through')}
+            title={item.name}
+          >
+            {item.name}
+          </div>
+          <div className="mt-0.5 flex items-center gap-1.5 text-[11px]">
+            <span className={cn('font-medium', origin.tone)}>{origin.label}</span>
+            <span className="text-muted-foreground/60">·</span>
+            <span className="truncate text-muted-foreground">
+              {item.unavailable ?? (item.size !== undefined ? formatBytes(item.size) : formatWhen(item.at))}
+            </span>
+          </div>
+        </div>
+      </div>
+      <div className="mt-auto flex gap-1.5 px-3.5 pb-3.5 md:hidden">
+        <Button size="sm" variant="outline" disabled={!viewable} onClick={onView} className="h-8 flex-1 gap-1.5 rounded-full text-xs">
+          <Eye className="size-3.5" />
+          View
+        </Button>
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={!viewable}
+          onClick={(e) => {
+            e.stopPropagation()
+            void downloadAsset(item)
+          }}
+          className="h-8 flex-1 gap-1.5 rounded-full text-xs"
+        >
+          <Download className="size-3.5" />
+          Download
+        </Button>
+      </div>
+    </div>
+  )
+}
+
+/** The list layout's row — for a chat with forty files, where a grid means scrolling. */
+function AssetRow({ item, onView }: { item: ChatAssetItem; onView: () => void }) {
+  const viewable = !item.unavailable
+  const origin = assetOrigin(item)
+  return (
+    <div
+      role="button"
+      tabIndex={viewable ? 0 : -1}
+      onClick={() => viewable && onView()}
+      onKeyDown={(e) => {
+        if (viewable && (e.key === 'Enter' || e.key === ' ')) {
+          e.preventDefault()
+          onView()
+        }
+      }}
+      className={cn(
+        'group/row grid grid-cols-[auto_1fr_auto] items-center gap-3 rounded-2xl px-3 py-2.5 outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring md:grid-cols-[auto_1fr_8rem_6rem_10rem_auto]',
+        viewable ? 'cursor-pointer hover:bg-muted/60' : 'opacity-70',
+      )}
+    >
+      <span className="grid size-9 place-items-center overflow-hidden rounded-xl bg-muted">
+        {item.isImage && item.url ? (
+          <img src={item.url} alt="" loading="lazy" className="size-full object-cover" />
+        ) : (
+          <AssetIcon item={item} className="size-4 text-foreground" />
+        )}
+      </span>
+      <div className="min-w-0">
+        <div className={cn('truncate text-sm font-medium', item.unavailable && 'text-muted-foreground line-through')}>
+          {item.name}
+        </div>
+        <div className="truncate font-mono text-[11px] text-muted-foreground" title={item.sub}>
+          {item.unavailable ?? (item.group === 'written' ? item.sub : item.asked || item.sub)}
+        </div>
+      </div>
+      <span className={cn('hidden text-xs font-medium md:block', origin.tone)}>{origin.label}</span>
+      <span className="hidden text-xs tabular-nums text-muted-foreground md:block">
+        {item.size !== undefined ? formatBytes(item.size) : '—'}
+      </span>
+      <span className="hidden truncate text-xs text-muted-foreground md:block">{formatWhen(item.at)}</span>
+      <div className="flex gap-1.5">
+        <IconAction label="View" onClick={onView} disabled={!viewable}>
+          <Eye className="size-3.5" />
+        </IconAction>
+        <IconAction label="Download" onClick={() => void downloadAsset(item)} disabled={!viewable}>
+          <Download className="size-3.5" />
+        </IconAction>
+      </div>
+    </div>
+  )
+}
+
+type AssetFilter = 'all' | ChatAssetItem['group']
+type AssetSort = 'newest' | 'oldest' | 'name' | 'size'
+
+const ASSET_FILTERS: { id: AssetFilter; label: string; icon: LucideIcon }[] = [
+  { id: 'all', label: 'All files', icon: LayoutGrid },
+  { id: 'upload', label: 'Uploaded', icon: FileText },
+  { id: 'image', label: 'Screenshots', icon: ImageIcon },
+  { id: 'written', label: 'AI files', icon: Sparkles },
+]
+
+/** Grid or list — a per-machine view preference, like the rail fold. */
+const ASSET_LAYOUT_KEY = 'qc.chat.filesLayout'
+function readAssetLayout(): 'grid' | 'list' {
+  try {
+    return localStorage.getItem(ASSET_LAYOUT_KEY) === 'list' ? 'list' : 'grid'
+  } catch {
+    return 'grid'
+  }
+}
+
+/** The viewer's right-hand panel: what this file is, where it came from, and what to do with it. */
+function AssetDetails({
+  item,
+  onJump,
+}: {
+  item: ChatAssetItem
+  onJump: () => void
+}) {
+  const origin = assetOrigin(item)
+  const rows: [string, ReactNode][] = [
+    ['Type', extLabel(item)],
+    ['Size', item.size !== undefined ? formatBytes(item.size) : '—'],
+    ['Added', formatWhen(item.at)],
+    ['Source', <span className={cn('font-medium', origin.tone)}>{origin.label}</span>],
+  ]
+  if (item.group === 'written') rows.push(['Path', <span className="break-all font-mono text-[11px]">{item.sub}</span>])
+  if (item.group === 'upload') rows.push(['Stored as', 'Text the AI read (markdown)'])
+  return (
+    <aside className="hidden w-80 shrink-0 flex-col gap-5 overflow-y-auto border-s border-border/60 p-5 lg:flex">
+      <div className="flex items-center gap-3">
+        <span className="grid size-11 shrink-0 place-items-center rounded-2xl bg-foreground text-background">
+          <AssetIcon item={item} className="size-5" />
+        </span>
+        <div className="min-w-0">
+          <div className="break-words text-sm font-semibold tracking-tight">{item.name}</div>
+          <div className={cn('text-xs', origin.tone)}>{origin.label}</div>
+        </div>
+      </div>
+      <dl className="grid grid-cols-[5.5rem_1fr] gap-x-3 gap-y-2.5 text-xs">
+        {rows.map(([k, v]) => (
+          <div key={k} className="contents">
+            <dt className="text-muted-foreground">{k}</dt>
+            <dd className="min-w-0 text-foreground">{v}</dd>
+          </div>
+        ))}
+      </dl>
+      {item.asked && (
+        <div className="space-y-2">
+          <div className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">From this message</div>
+          <button
+            type="button"
+            onClick={onJump}
+            className="block w-full rounded-2xl border border-border/60 bg-muted/60 p-3 text-start text-xs leading-relaxed text-foreground transition-all duration-200 hover:-translate-y-0.5 hover:border-border hover:shadow-sm"
+          >
+            <span className="line-clamp-4">“{item.asked}”</span>
+            <span className="mt-2 inline-flex items-center gap-1 text-[11px] font-medium text-muted-foreground">
+              <CornerDownRight className="size-3" />
+              Go to message
+            </span>
+          </button>
+        </div>
+      )}
+      <div className="mt-auto flex flex-col gap-2">
+        <Button className="h-9 gap-1.5 rounded-full" onClick={() => void downloadAsset(item)}>
+          <Download className="size-4" />
+          Download
+        </Button>
+        {item.group === 'written' && (
+          <Button
+            variant="outline"
+            className="h-9 gap-1.5 rounded-full"
+            onClick={() => {
+              void copyText(item.sub)
+              toast.success('Path copied', { description: item.sub })
+            }}
+          >
+            <Copy className="size-4" />
+            Copy path
+          </Button>
+        )}
+      </div>
+    </aside>
+  )
+}
+
+/**
+ * "Files in this chat" — everything a conversation brought in or produced, as a file
+ * browser: filters with counts and total size on the left, search / sort / grid-or-list on
+ * top, and a viewer with a details panel.
+ *
+ * A long conversation buries its attachments forty messages up, and the files an answer
+ * WROTE only ever appeared as a basename in a collapsed step trail — so "where is the test
+ * case file it made?" meant scrolling and guessing. This reads the transcript server-side
+ * (`chatAssets`): uploads, screenshots, and every Write/Edit target. Cards show WHAT is in
+ * each file (image, or the first lines of text); View opens it inside the dialog — app mode
+ * has no browser tabs — with prev/next, and Download saves it and names the file in a toast.
+ * Answers recorded before steps carried a full path cannot be listed — said in the empty state.
+ */
+function ChatFilesDialog({
+  projectId,
+  slug,
+  name,
+  onClose,
+  onJump,
+  onClosed,
+}: {
+  projectId: string
+  /** `null` = closed. */
+  slug: string | null
+  name?: string
+  onClose: () => void
+  /** Open that conversation (if it isn't) and scroll to the message. */
+  onJump: (slug: string, question: number) => void
+  /**
+   * Runs once the dialog has fully closed; returns true when it took over (a jump), so the
+   * dialog skips handing focus back to its trigger. A scroll started while the modal is still
+   * up does not land — which is why "Go to message" scrolls from HERE, not from the click.
+   */
+  onClosed?: () => boolean
+}) {
+  const assets = useQuery({
+    queryKey: ['chat-assets', projectId, slug],
+    queryFn: () => getChatAssets(projectId, slug!),
+    enabled: !!slug,
+    staleTime: 0,
+  })
+  const items = useMemo(
+    () => (slug && assets.data ? assetItems(projectId, slug, assets.data) : []),
+    [assets.data, projectId, slug],
+  )
+  const [filter, setFilter] = useState<AssetFilter>('all')
+  const [query, setQuery] = useState('')
+  const [sort, setSort] = useState<AssetSort>('newest')
+  const [layout, setLayoutState] = useState<'grid' | 'list'>(readAssetLayout)
+  const setLayout = (l: 'grid' | 'list') => {
+    setLayoutState(l)
+    try {
+      localStorage.setItem(ASSET_LAYOUT_KEY, l)
+    } catch {
+      /* private window — the choice just doesn't stick */
+    }
+  }
+  /** The item open in the viewer; `null` = the gallery. */
+  const [viewing, setViewing] = useState<string | null>(null)
+
+  const count = (f: AssetFilter) => (f === 'all' ? items.length : items.filter((i) => i.group === f).length)
+  const totalBytes = items.reduce((n, i) => n + (i.size ?? 0), 0)
+  const shown = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    const list = items.filter(
+      (i) =>
+        (filter === 'all' || i.group === filter) &&
+        (!q || i.name.toLowerCase().includes(q) || i.sub.toLowerCase().includes(q) || (i.asked ?? '').toLowerCase().includes(q)),
+    )
+    const by: Record<AssetSort, (a: ChatAssetItem, b: ChatAssetItem) => number> = {
+      newest: (a, b) => b.at.localeCompare(a.at),
+      oldest: (a, b) => a.at.localeCompare(b.at),
+      name: (a, b) => a.name.localeCompare(b.name),
+      size: (a, b) => (b.size ?? 0) - (a.size ?? 0),
+    }
+    return [...list].sort(by[sort])
+  }, [items, filter, query, sort])
+  // One flat, sorted set — NOT a section per type. The side nav already filters by type and
+  // every card names its origin; sections of one or two files each left the big dialog a
+  // column of half-empty rows you had to scroll past (measured on a 4-file chat).
+
+  // Prev/next walk what is ON SCREEN (the filtered, sorted set), skipping what can't open.
+  const nav = shown.filter((i) => !i.unavailable)
+  const current = nav.find((i) => i.key === viewing) ?? null
+  const at = current ? nav.indexOf(current) : -1
+  const reset = () => {
+    setViewing(null)
+    setFilter('all')
+    setQuery('')
+  }
+  const jump = (it: ChatAssetItem) => {
+    if (!slug) return
+    onJump(slug, it.question)
+    reset()
+    onClose()
+  }
+  const noResults = items.length > 0 && !shown.length
+
+  return (
+    <Dialog
+      open={!!slug}
+      onOpenChange={(o) => {
+        if (!o) {
+          reset()
+          onClose()
+        }
+      }}
+    >
+      <DialogContent
+        onCloseAutoFocus={(e) => {
+          if (onClosed?.()) e.preventDefault()
+        }}
+        onKeyDown={(e) => {
+          if (!current) return
+          if (e.key === 'ArrowRight' && at < nav.length - 1) setViewing(nav[at + 1].key)
+          if (e.key === 'ArrowLeft' && at > 0) setViewing(nav[at - 1].key)
+        }}
+        className="flex h-[92vh] w-[96vw] max-w-[96vw] flex-col gap-0 overflow-hidden rounded-3xl p-0 sm:max-w-[min(96vw,112rem)]"
+      >
+        <DialogHeader className="flex-row items-center gap-3 space-y-0 border-b border-border/60 px-5 py-3.5 pe-14 text-start">
+          <span className="grid size-9 shrink-0 place-items-center rounded-xl bg-foreground text-background">
+            <FolderOpen className="size-4" />
+          </span>
+          <div className="min-w-0">
+            <DialogTitle className="text-base font-semibold tracking-tight">Files in this chat</DialogTitle>
+            <DialogDescription className="truncate text-xs">
+              {name ? railTitle(name) : 'This conversation'} — what you attached, and what the AI wrote.
+            </DialogDescription>
+          </div>
+        </DialogHeader>
+
+        {assets.isPending ? (
+          <div className="grid flex-1 place-items-center text-sm text-muted-foreground">
+            <Loader2 className="size-5 animate-spin" />
+          </div>
+        ) : assets.isError ? (
+          <div className="p-5 text-sm text-destructive">{(assets.error as Error).message}</div>
+        ) : !items.length ? (
+          <div className="grid flex-1 place-items-center p-8 text-center">
+            <div className="max-w-sm space-y-3">
+              <span className="mx-auto grid size-14 place-items-center rounded-3xl bg-muted">
+                <Inbox className="size-6 text-muted-foreground" />
+              </span>
+              <p className="text-sm font-medium">No files in this chat yet</p>
+              <p className="text-xs leading-relaxed text-muted-foreground">
+                Attach a document or paste a screenshot, or ask the AI to write a file (in Edit or
+                Full access mode) and it shows up here. Files written by answers from before this
+                list existed cannot be traced back.
+              </p>
+            </div>
+          </div>
+        ) : current ? (
+          /* ---------------------------------------------------------------- viewer */
+          <div className="flex min-h-0 flex-1 flex-col">
+            <div className="flex items-center gap-2 border-b border-border/60 px-3 py-2">
+              <Button size="sm" variant="ghost" className="h-8 gap-1 rounded-full text-xs" onClick={() => setViewing(null)}>
+                <ChevronLeft className="size-4" />
+                All files
+              </Button>
+              <div className="min-w-0 flex-1 px-1">
+                <div className="truncate text-sm font-medium">{current.name}</div>
+                <div className="truncate font-mono text-[11px] text-muted-foreground lg:hidden">
+                  {assetOrigin(current).label}
+                  {current.size !== undefined && ` · ${formatBytes(current.size)}`}
+                </div>
+              </div>
+              <span className="text-[11px] tabular-nums text-muted-foreground">
+                {at + 1} / {nav.length}
+              </span>
+              <Button
+                size="icon"
+                variant="ghost"
+                className="size-8 rounded-full"
+                disabled={at <= 0}
+                onClick={() => setViewing(nav[at - 1].key)}
+                aria-label="Previous file"
+              >
+                <ChevronLeft className="size-4" />
+              </Button>
+              <Button
+                size="icon"
+                variant="ghost"
+                className="size-8 rounded-full"
+                disabled={at >= nav.length - 1}
+                onClick={() => setViewing(nav[at + 1].key)}
+                aria-label="Next file"
+              >
+                <ChevronRight className="size-4" />
+              </Button>
+              {/* The details panel carries these on a wide screen; below lg it is hidden. */}
+              <Button size="sm" variant="ghost" className="h-8 gap-1.5 rounded-full text-xs lg:hidden" onClick={() => jump(current)}>
+                <CornerDownRight className="size-3.5" />
+              </Button>
+              <Button size="sm" className="h-8 gap-1.5 rounded-full text-xs lg:hidden" onClick={() => void downloadAsset(current)}>
+                <Download className="size-3.5" />
+                Download
+              </Button>
+            </div>
+            <div className="flex min-h-0 flex-1">
+              <div className="min-h-0 min-w-0 flex-1 bg-muted/30">
+                <AssetPreview key={current.key} item={current} />
+              </div>
+              <AssetDetails item={current} onJump={() => jump(current)} />
+            </div>
+          </div>
+        ) : (
+          /* ---------------------------------------------------------------- browser */
+          <div className="flex min-h-0 flex-1">
+            <nav aria-label="File types" className="hidden w-60 shrink-0 flex-col gap-1 border-e border-border/60 p-3 md:flex">
+              {ASSET_FILTERS.map((f) => {
+                const n = count(f.id)
+                if (f.id !== 'all' && !n) return null
+                return (
+                  <button
+                    key={f.id}
+                    type="button"
+                    onClick={() => setFilter(f.id)}
+                    className={cn(
+                      'flex items-center gap-2.5 rounded-xl px-3 py-2 text-sm transition-colors',
+                      filter === f.id ? 'bg-muted font-medium text-foreground' : 'text-muted-foreground hover:bg-muted/60 hover:text-foreground',
+                    )}
+                  >
+                    <f.icon className="size-4" />
+                    <span className="flex-1 text-start">{f.label}</span>
+                    <span className="text-xs tabular-nums">{n}</span>
+                  </button>
+                )
+              })}
+              <div className="mt-auto rounded-2xl border border-border/60 bg-muted/60 p-3">
+                <div className="flex items-center gap-2 text-xs font-medium">
+                  <HardDrive className="size-3.5" />
+                  {items.length} file{items.length === 1 ? '' : 's'} · {formatBytes(totalBytes)}
+                </div>
+                <p className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground">
+                  Attachments are kept as the text the AI read. AI files live in the project.
+                </p>
+              </div>
+            </nav>
+
+            <div className="flex min-w-0 flex-1 flex-col">
+              <div className="flex flex-wrap items-center gap-2 border-b border-border/60 px-4 py-2.5">
+                <div className="relative min-w-[12rem] flex-1">
+                  <Search className="pointer-events-none absolute start-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+                  <Input
+                    value={query}
+                    onChange={(e) => setQuery(e.target.value)}
+                    placeholder="Search files, paths, or the message they came from…"
+                    className="h-9 rounded-full ps-9"
+                  />
+                </div>
+                <Select value={sort} onValueChange={(v) => setSort(v as AssetSort)}>
+                  <SelectTrigger className="h-9 w-36 gap-1.5 rounded-full text-xs">
+                    <ArrowUpDown className="size-3.5 text-muted-foreground" />
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="newest">Newest first</SelectItem>
+                    <SelectItem value="oldest">Oldest first</SelectItem>
+                    <SelectItem value="name">Name</SelectItem>
+                    <SelectItem value="size">Largest first</SelectItem>
+                  </SelectContent>
+                </Select>
+                <div className="flex rounded-full border border-border/60 p-0.5">
+                  {(
+                    [
+                      ['grid', LayoutGrid, 'Grid view'],
+                      ['list', List, 'List view'],
+                    ] as const
+                  ).map(([id, LIcon, label]) => (
+                    <button
+                      key={id}
+                      type="button"
+                      aria-label={label}
+                      aria-pressed={layout === id}
+                      onClick={() => setLayout(id)}
+                      className={cn(
+                        'grid size-8 place-items-center rounded-full transition-colors',
+                        layout === id ? 'bg-foreground text-background' : 'text-muted-foreground hover:text-foreground',
+                      )}
+                    >
+                      <LIcon className="size-4" />
+                    </button>
+                  ))}
+                </div>
+                {/* Below md the side nav is hidden — the filters come up here as pills. */}
+                <div className="flex w-full gap-1.5 overflow-x-auto md:hidden">
+                  {ASSET_FILTERS.map((f) => {
+                    const n = count(f.id)
+                    if (f.id !== 'all' && !n) return null
+                    return (
+                      <button
+                        key={f.id}
+                        type="button"
+                        onClick={() => setFilter(f.id)}
+                        className={cn(
+                          'inline-flex shrink-0 items-center gap-1.5 rounded-full border px-3 py-1 text-xs',
+                          filter === f.id ? 'border-foreground bg-foreground text-background' : 'border-border/60 text-muted-foreground',
+                        )}
+                      >
+                        {f.label}
+                        <span className="tabular-nums opacity-70">{n}</span>
+                      </button>
+                    )
+                  })}
+                </div>
+              </div>
+
+              <div className="min-h-0 flex-1 overflow-y-auto p-5">
+                {noResults ? (
+                  <div className="grid h-full place-items-center text-center text-sm text-muted-foreground">
+                    <div className="space-y-2">
+                      <Search className="mx-auto size-6 opacity-40" />
+                      <p>Nothing matches “{query}”.</p>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    <div className="text-xs text-muted-foreground">
+                      {shown.length} of {items.length} file{items.length === 1 ? '' : 's'}
+                      {query.trim() && <> matching “{query.trim()}”</>}
+                    </div>
+                    {layout === 'grid' ? (
+                      <div className="grid grid-cols-[repeat(auto-fill,minmax(15rem,1fr))] gap-4">
+                        {shown.map((it) => (
+                          <AssetCard key={it.key} item={it} onView={() => setViewing(it.key)} />
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="flex flex-col gap-0.5">
+                        {shown.map((it) => (
+                          <AssetRow key={it.key} item={it} onView={() => setViewing(it.key)} />
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 /**
  * The bar above the transcript.
  *
@@ -5093,6 +6034,7 @@ function ChatHeader({
   onRename,
   onDelete,
   onExport,
+  onFiles,
   pinned,
 }: {
   name: string | null
@@ -5114,6 +6056,7 @@ function ChatHeader({
   onRename?: () => void
   onDelete?: () => void
   onExport?: () => void
+  onFiles?: () => void
 }) {
   const live = !!onRename // a conversation exists (the new-chat screen has nothing to act on)
   // pe-[6.5rem] keeps this row clear of the FIXED chrome cluster that floats over it on
@@ -5176,6 +6119,21 @@ function ChatHeader({
               <Star className={cn('size-4', pinned && 'fill-amber-400 text-amber-500')} />
             </button>
           )}
+          {onFiles && (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  type="button"
+                  onClick={onFiles}
+                  aria-label="Files in this chat"
+                  className="flex size-9 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+                >
+                  <FolderOpen className="size-4" />
+                </button>
+              </TooltipTrigger>
+              <TooltipContent>Files in this chat — attached and AI-written</TooltipContent>
+            </Tooltip>
+          )}
           <RowMenu
             always
             pinned={pinned}
@@ -5185,6 +6143,7 @@ function ChatHeader({
             onRename={() => onRename?.()}
             onDelete={() => onDelete?.()}
             onExport={onExport}
+            onFiles={onFiles}
           />
         </>
       )}
@@ -5261,6 +6220,14 @@ function ChatWorkspace({
   })
   /** True while the grip is being dragged — kills the tint/transition flicker mid-drag. */
   const [resizingComposer, setResizingComposer] = useState(false)
+  /** The engineer folded the composer away — see COMPOSER_HIDDEN_KEY. */
+  const [composerHidden, setComposerHidden] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(COMPOSER_HIDDEN_KEY) === '1'
+    } catch {
+      return false
+    }
+  })
   /** Files attached to the NEXT message — converted to markdown here in the browser. */
   const [attached, setAttached] = useState<{ name: string; markdown: string }[]>([])
   /** Images pasted/dropped/picked for the NEXT message (see StagedImage). */
@@ -5306,6 +6273,8 @@ function ChatWorkspace({
     action?: ChatAction | null
     /** File names instead — a RE-ATTACHED turn's images are already written to disk. */
     imageFiles?: string[]
+    /** Names of the documents attached with this turn — chips on the row still streaming. */
+    fileNames?: string[]
     /** When it was sent — the saved message gets its `at` from the server, this is the
      *  same stamp for the row that's still streaming, so the time doesn't pop in late. */
     at: string
@@ -5364,6 +6333,26 @@ function ChatWorkspace({
 
   /** The conversation the rename / delete dialog is about, or null when closed. */
   const [renaming, setRenaming] = useState<{ slug: string; name: string } | null>(null)
+  /** Conversation whose "Files in this chat" dialog is open. */
+  const [filesFor, setFilesFor] = useState<string | null>(null)
+  /**
+   * A question to scroll to once its conversation has rendered — set by "Go to message",
+   * which may have to OPEN the chat first. A ref, not state: it is consumed by an effect,
+   * and this page bans setState-in-effect.
+   */
+  const jumpRef = useRef<string | null>(null)
+  const scrollToPendingJump = useCallback(() => {
+    const id = jumpRef.current
+    if (!id) return
+    const node = document.getElementById(id)
+    if (!node) return
+    jumpRef.current = null
+    setAtBottom(false)
+    // INSTANT, not smooth: a smooth scroll's first frames are still within 80px of the
+    // bottom, so `onScroll` flips `atBottom` back on and the follow-the-answer effect
+    // yanks the view straight back down.
+    node.scrollIntoView({ block: 'start' })
+  }, [])
   const [deleting, setDeleting] = useState<{ slug: string; name: string } | null>(null)
   /** Which quick-prompt category is expanded into its four suggestions, if any. */
   const [openCategory, setOpenCategory] = useState<(typeof QUICK)[number] | null>(null)
@@ -5413,6 +6402,13 @@ function ChatWorkspace({
   useEffect(() => {
     localStorage.setItem(COMPOSER_H_KEY, String(composerH))
   }, [composerH])
+  useEffect(() => {
+    try {
+      localStorage.setItem(COMPOSER_HIDDEN_KEY, composerHidden ? '1' : '0')
+    } catch {
+      /* private window — the fold just isn't remembered */
+    }
+  }, [composerHidden])
 
   /**
    * Drag the composer taller/shorter.
@@ -5641,8 +6637,23 @@ function ChatWorkspace({
   // is a fresh array on every render — which would rebuild that list (and re-run its scroll
   // measurement) on every keystroke in the composer.
   const messages = useMemo(() => chat?.messages ?? [], [chat])
+  // A pending "Go to message" lands once the conversation it named has rendered — a frame
+  // late, so it runs after the open-a-chat scroll-to-bottom rather than being undone by it.
+  useEffect(() => {
+    // Never while the files dialog is still up — a scroll under the modal does not land.
+    if (!jumpRef.current || filesFor) return
+    const frame = requestAnimationFrame(scrollToPendingJump)
+    return () => cancelAnimationFrame(frame)
+  }, [messages, filesFor, scrollToPendingJump])
   const streaming = pending !== null
   const empty = !openSlug && !pending
+  /**
+   * Derived, not stored: the fold gives way by itself whenever anything is in the composer —
+   * a quick prompt typed into it, text put back after a failed send, a staged file — so
+   * nothing the engineer wrote is ever hidden.
+   */
+  const composerFolded =
+    composerHidden && !input && !images.length && !attached.length && !mention
 
   /*
    * The questions in this conversation, for the navigator down the right edge. The one in
@@ -5652,7 +6663,7 @@ function ChatWorkspace({
    */
   const questions = useMemo<QuestionAnchor[]>(() => {
     const out = messages.flatMap((m, i) =>
-      m.role === 'user' ? [{ id: questionAnchorId(i), text: m.text }] : [],
+      m.role === 'user' ? [{ id: questionAnchorId(i), text: splitLegacyAttachments(m.text).text || m.files?.[0]?.name || m.text }] : [],
     )
     if (pending && !pending.continuation) out.push({ id: questionAnchorId('pending'), text: pending.prompt })
     return out
@@ -5860,7 +6871,7 @@ function ChatWorkspace({
       const base = text.trim()
       // An image on its own is a real message ("what's wrong here?"), so images alone are
       // enough to send; the server supplies the wording when nothing was typed.
-      if (!base && !images.length) return
+      if (!base && !images.length && !attached.length) return
       // Sending DURING a turn is allowed — the message waits its turn (see `queued`). The
       // one case that isn't: the split second before the server has named a brand-new
       // conversation, when there is no slug to queue into and sending would create a
@@ -5873,15 +6884,12 @@ function ChatWorkspace({
         })
         return
       }
-      // An attached document rides along in the prompt itself — it's already markdown,
-      // and the server never sees the file.
-      const prompt = (
-        attached.length
-          ? `${base}\n\n${attached
-              .map((a) => `--- ATTACHED FILE: ${a.name} ---\n${a.markdown}`)
-              .join('\n\n')}`
-          : base
-      ).slice(0, MAX_PROMPT)
+      // Attached documents go in their OWN field, never pasted into the prompt: the prompt
+      // is capped at MAX_PROMPT and a long spec pasted in lost its tail silently. The server
+      // writes each one to testing/chats/files and has Claude Read it (routes/chat.ts
+      // `saveDocs`), and the bubble shows a chip per file instead of the extracted text.
+      const prompt = base
+      const docs = attached
 
       const sending = images
       // Only tags whose token is still in the message count. Deleting `@ABC-123` from the
@@ -5910,7 +6918,8 @@ function ChatWorkspace({
       setMention(null)
       setAction(null)
       setAtBottom(true)
-      const shown = base || 'Take a look at the attached screenshot.'
+      // Same wording the server stores for a message with nothing typed.
+      const shown = base || (images.length ? 'Take a look at the attached screenshot.' : 'Take a look at the attached file.')
       const sentAt = new Date().toISOString()
       /** A local stand-in until the server answers with the real id; any `queue` frame wins. */
       const localId = `local-${sentAt}-${Math.random().toString(36).slice(2, 8)}`
@@ -5929,6 +6938,7 @@ function ChatWorkspace({
           // Previews come from the data URLs already in memory — the files aren't on disk
           // (and so aren't servable) until the turn finishes.
           images: sending.map((i) => i.dataUrl),
+          fileNames: docs.length ? docs.map((d) => d.name) : undefined,
           action: sendingAction,
           at: sentAt,
         })
@@ -5953,6 +6963,7 @@ function ChatWorkspace({
           temporary: !openSlug && temporary ? true : undefined,
           action: sendingAction ?? undefined,
           images: sending.length ? sending.map((i) => ({ mime: i.mime, data: i.data })) : undefined,
+          attachments: docs.length ? docs : undefined,
           mentions: tags.length ? tags : undefined,
         },
         {
@@ -6021,6 +7032,8 @@ function ChatWorkspace({
             // the longer the message, the more likely it was refused. Put it back, unless
             // the user has already started typing something else.
             setInput((cur) => (cur.trim() ? cur : base))
+            // …and the same for the files: a refused message must not cost the attachments.
+            if (docs.length) setAttached((cur) => (cur.length ? cur : docs))
             void queryClient.invalidateQueries({ queryKey: ['chat', projectId, targetSlug] })
             void queryClient.invalidateQueries({ queryKey: ['chats', projectId] })
           },
@@ -6204,6 +7217,18 @@ function ChatWorkspace({
   /** Convert dropped/selected DOCUMENTS to markdown in the browser (same pipeline as Knowledge). */
   const attachDocs = useCallback(async (files: File[]) => {
     if (!files.length) return
+    // Refused HERE rather than by the server's 413 after a turn was already started.
+    const room = MAX_DOCS - attached.length
+    if (room <= 0) {
+      toast.error(`Up to ${MAX_DOCS} files per message`)
+      return
+    }
+    if (files.length > room) {
+      toast.error(`Up to ${MAX_DOCS} files per message`, {
+        description: `Attached the first ${room}; send, then attach the rest to the next message.`,
+      })
+      files = files.slice(0, room)
+    }
     setConverting(true)
     const ok: { name: string; markdown: string }[] = []
     const failed: string[] = []
@@ -6218,6 +7243,10 @@ function ChatWorkspace({
           failed.push(`${file.name} (no text found)`)
           continue
         }
+        if (new Blob([doc.markdown]).size > MAX_DOC_BYTES) {
+          failed.push(`${file.name} (over ${MAX_DOC_BYTES / 1024 / 1024} MB of text — split it)`)
+          continue
+        }
         ok.push({ name: file.name, markdown: doc.markdown })
       } catch (err) {
         failed.push(`${file.name} (${(err as Error).message})`)
@@ -6230,7 +7259,7 @@ function ChatWorkspace({
         description: failed.join(', '),
       })
     }
-  }, [])
+  }, [attached.length])
 
   /**
    * One entry point for every way a file arrives (picker, drop): an image is staged as an
@@ -6459,23 +7488,32 @@ function ChatWorkspace({
     }),
   })
 
+  const openChat = (s: string) => {
+    if (s === openSlug) return
+    // A reply in flight is left RUNNING, not cancelled — see `detach`.
+    detach()
+    // Opening a saved conversation ends the temporary one (it can't be reached again)
+    // and leaves temporary MODE — otherwise the next New Chat would quietly be
+    // temporary too.
+    if (isTemporary) forgetTemporary(openSlug)
+    setPicked(s)
+    setTemporary(false)
+    setAtBottom(true)
+  }
+
+  /** "Go to message" from the files dialog: open that chat if needed, then scroll to the question. */
+  const jumpToQuestion = (s: string, question: number) => {
+    // Scrolled from the dialog's `onClosed` (or, for another chat, once it has rendered).
+    jumpRef.current = questionAnchorId(question)
+    if (s !== openSlug) openChat(s)
+  }
+
   return (
     <div className="relative flex h-svh min-h-[34rem]">
       <ChatRail
         chats={chats}
         activeSlug={openSlug}
-        onSelect={(s) => {
-          if (s === openSlug) return
-          // A reply in flight is left RUNNING, not cancelled — see `detach`.
-          detach()
-          // Opening a saved conversation ends the temporary one (it can't be reached again)
-          // and leaves temporary MODE — otherwise the next New Chat would quietly be
-          // temporary too.
-          if (isTemporary) forgetTemporary(openSlug)
-          setPicked(s)
-          setTemporary(false)
-          setAtBottom(true)
-        }}
+        onSelect={openChat}
         onNew={() => {
           detach()
           startNew(false)
@@ -6487,6 +7525,7 @@ function ChatWorkspace({
         onPin={(s, pinned) => pin.mutate({ slug: s, pinned })}
         onArchive={(s, archived) => archive.mutate({ slug: s, archived })}
         onRename={(s, current) => setRenaming({ slug: s, name: current })}
+        onFiles={setFilesFor}
         onDelete={(s) =>
           setDeleting({ slug: s, name: chats.find((c) => c.slug === s)?.name ?? 'this conversation' })
         }
@@ -6496,6 +7535,21 @@ function ChatWorkspace({
         onBulkDelete={setBulkDeleting}
         bulkBusy={bulk.isPending}
       />
+
+      {projectId && (
+        <ChatFilesDialog
+          projectId={projectId}
+          slug={filesFor}
+          name={chats.find((c) => c.slug === filesFor)?.name}
+          onClose={() => setFilesFor(null)}
+          onJump={jumpToQuestion}
+          onClosed={() => {
+            if (!jumpRef.current) return false
+            scrollToPendingJump()
+            return true
+          }}
+        />
+      )}
 
       {/* Keyed on the target so the rename field seeds from the current name on open. */}
       <RenameChatDialog
@@ -6558,6 +7612,7 @@ function ChatWorkspace({
               ? () => downloadTranscript(chat?.name ?? 'chat', messages)
               : undefined
           }
+          onFiles={openSlug && messages.length ? () => setFilesFor(openSlug) : undefined}
         />
 
         {/* The reference caps this column at max-w-4xl, which on a 1440px+ screen leaves the
@@ -6674,6 +7729,7 @@ function ChatWorkspace({
                     text={pending.prompt}
                     previews={pending.imageFiles ? undefined : pending.images}
                     images={pending.imageFiles}
+                    files={pending.fileNames?.map((name) => ({ name }))}
                     projectId={projectId}
                     at={pending.at}
                     action={pending.action}
@@ -6742,7 +7798,12 @@ function ChatWorkspace({
           <QuestionNav items={questions} scrollerRef={logRef} />
 
           {/* Jump back to the newest message — only once you've scrolled away from it. */}
-          <div className="absolute bottom-28 right-6 z-10">
+          <div
+            className={cn(
+              'absolute right-6 z-10 transition-[bottom] duration-200',
+              composerFolded ? 'bottom-16' : 'bottom-28',
+            )}
+          >
             <Button
               variant="outline"
               size="sm"
@@ -6763,6 +7824,44 @@ function ChatWorkspace({
             </Button>
           </div>
 
+          {/* The composer folded away: one slim bar that says where the box went and
+              brings it back. Stop stays reachable — hiding the box must not strand a
+              ten-minute answer with no way to end it. */}
+          {composerFolded && (
+            <div className="flex w-full items-center gap-2 rounded-2xl bg-primary/10 p-1">
+              <button
+                type="button"
+                onClick={() => {
+                  setComposerHidden(false)
+                  requestAnimationFrame(() => taRef.current?.focus())
+                }}
+                aria-label="Show the message box"
+                className="flex h-10 min-w-0 flex-1 items-center gap-2 rounded-xl bg-background px-4 text-left text-sm text-muted-foreground transition-colors hover:text-foreground"
+              >
+                <PenLine className="size-4 shrink-0" />
+                <span className="min-w-0 flex-1 truncate">
+                  {streaming
+                    ? 'Answering… click to write your next message'
+                    : empty
+                      ? 'Ask me anything…'
+                      : 'Ask a follow-up…'}
+                </span>
+                <ChevronUp className="size-4 shrink-0" />
+              </button>
+              {streaming && (
+                <Button
+                  size="icon"
+                  variant="destructive"
+                  onClick={() => stop()}
+                  aria-label="Stop generating"
+                  className="mr-1 size-8 shrink-0 rounded-full"
+                >
+                  <Square className="size-4" />
+                </Button>
+              )}
+            </div>
+          )}
+
           {/* Composer well — a tinted tray whose hint strip sits above the input card.
               Drop anywhere on the well, not just the textarea: a dropped screenshot that
               lands 4px off and navigates the browser to the file is a lost attachment. */}
@@ -6770,7 +7869,12 @@ function ChatWorkspace({
             ref={setWellEl}
             onDrop={onDrop}
             onDragOver={(e) => e.preventDefault()}
-            className="relative w-full rounded-2xl bg-primary/10 p-1 pt-0"
+            className={cn(
+              'relative w-full rounded-2xl bg-primary/10 p-1 pt-0',
+              // Kept MOUNTED while folded: the `+` menu portals into this well and the
+              // textarea keeps its ref, so unfolding is instant and focus lands in it.
+              composerFolded && 'hidden',
+            )}
           >
             {/* The `@` / `/` menu. Anchored to the WELL (which doesn't clip) and opening
                 upward, so it never covers the message being typed. */}
@@ -6837,7 +7941,12 @@ function ChatWorkspace({
               </div>
             )}
 
-            <div className="flex flex-wrap items-center gap-2 px-4 py-2 text-xs text-muted-foreground">
+            <div
+              className={cn(
+                'flex flex-wrap items-center gap-2 px-4 py-2 text-xs text-muted-foreground',
+                'pr-24',
+              )}
+            >
               <span>
                 Answers come from{' '}
                 <span className="font-medium text-foreground">
@@ -6880,6 +7989,25 @@ function ChatWorkspace({
                   <span className="hidden lg:inline">•</span>
                   <code className="hidden min-w-0 truncate font-mono lg:inline">{projectPath}</code>
                 </>
+              )}
+              {/* Fold the composer away to read a long answer. Pinned to the well's corner
+                  (the strip wraps, and a wrapped chevron reads as part of the path), and
+                  labelled — a bare muted chevron up there was not found. */}
+              {(
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <button
+                      type="button"
+                      onClick={() => setComposerHidden(true)}
+                      aria-label="Hide the message box"
+                      className="absolute right-2 top-1.5 inline-flex h-7 items-center gap-1 rounded-full border border-border/60 bg-background/70 px-2.5 text-xs font-medium text-foreground transition-all duration-200 hover:border-border hover:bg-background active:scale-[0.98]"
+                    >
+                      Hide
+                      <ChevronDown className="size-3.5" />
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent>Hide the message box — more room for the answer</TooltipContent>
+                </Tooltip>
               )}
             </div>
 
@@ -7247,7 +8375,7 @@ function ChatWorkspace({
                       something in the composer it sends (queuing behind the current turn),
                       empty during a turn it stops. Keying it on `streaming` alone is what
                       made the composer dead for the whole of a ten-minute answer. */}
-                  {streaming && !input.trim() && !images.length ? (
+                  {streaming && !input.trim() && !images.length && !attached.length ? (
                     <Tooltip>
                       <TooltipTrigger asChild>
                         <Button
@@ -7274,7 +8402,7 @@ function ChatWorkspace({
                           ? // Scheduling is not a chat turn: it neither queues behind a
                             // running answer nor needs a conversation to exist.
                             !input.trim() || !projectId || scheduleParsing
-                          : (!input.trim() && !images.length) ||
+                          : (!input.trim() && !images.length && !attached.length) ||
                             !projectId ||
                             // The split second before a brand-new conversation has a slug:
                             // there is nothing to queue into yet, and sending would start a

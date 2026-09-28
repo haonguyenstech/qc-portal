@@ -169,6 +169,18 @@ export interface StreamLog {
   tool?: { name: string; detail?: string; path?: string }
 }
 
+/** Tools that create or change a file — what Chat lists as "made by the AI". */
+export const WRITE_TOOLS: ReadonlySet<string> = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit'])
+/** Tools whose target file is worth a FULL path on the log event (see `StreamLog.tool.path`). */
+const PATH_TOOLS = new Set(['Read', ...WRITE_TOOLS])
+
+function toolPathOf(name: string, input: unknown): { path?: string } {
+  if (!PATH_TOOLS.has(name)) return {}
+  const i = (input ?? {}) as Record<string, unknown>
+  const p = i.file_path ?? i.notebook_path
+  return typeof p === 'string' && p.trim() ? { path: p.trim() } : {}
+}
+
 /** Max length of the target shown beside a tool name (a whole bash line is unreadable). */
 const TOOL_DETAIL_CHARS = 64
 
@@ -510,10 +522,9 @@ export function runClaudeStream(
                   name: block.name,
                   detail: toolDetail(block.name, block.input),
                   // The FULL path of a Read — `detail` is only the basename. The AI team
-                  // shares what one bot read with the next (see teamFiles.ts).
-                  ...(block.name === 'Read' && typeof (block.input as { file_path?: unknown } | undefined)?.file_path === 'string'
-                    ? { path: (block.input as { file_path: string }).file_path }
-                    : {}),
+                  // shares what one bot read with the next (see teamFiles.ts). Also kept
+                  // for a write, so Chat's "Files in this chat" can open what the AI made.
+                  ...(toolPathOf(block.name, block.input)),
                 },
               })
             }

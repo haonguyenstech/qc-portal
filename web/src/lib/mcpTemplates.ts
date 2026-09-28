@@ -68,7 +68,86 @@ export interface McpTemplate {
   builtin?: BuiltinMcp
 }
 
-export const MCP_TEMPLATE_CATEGORIES = ['QC essentials', 'Code & docs', 'Browser & web', 'Data', 'Monitoring', 'Productivity']
+export const MCP_TEMPLATE_CATEGORIES = ['QC essentials', 'Sign in (OAuth)', 'Code & docs', 'Browser & web', 'Data', 'Monitoring', 'Productivity']
+
+/**
+ * Hosted servers that use OAuth: added as a bare `{type:'http', url}` and signed in to
+ * from the page (`claude mcp login`), so no token is ever typed or stored in .mcp.json.
+ * Every URL here was probed with `claude mcp login` and returned a real authorize page.
+ * The ClickUp/Figma names are deliberately NOT `clickup`/`figma`: those are the token
+ * built-ins that ticket crawling and the tracker checks read their token from.
+ */
+function oauthTemplate(
+  id: string,
+  label: string,
+  blurb: string,
+  icon: LucideIcon,
+  url: string,
+  docsUrl: string,
+): McpTemplate {
+  return {
+    id,
+    name: id,
+    label,
+    blurb,
+    category: 'Sign in (OAuth)',
+    icon,
+    entry: { type: 'http', url },
+    fields: [],
+    docsUrl,
+  }
+}
+
+const OAUTH_TEMPLATES: McpTemplate[] = [
+  oauthTemplate(
+    'clickup-oauth',
+    'ClickUp (sign in)',
+    'ClickUp’s hosted server — sign in with your account, no token. It asks again daily.',
+    ListChecks,
+    'https://mcp.clickup.com/mcp',
+    'https://developer.clickup.com/docs/connect-an-ai-assistant-to-clickups-mcp-server',
+  ),
+  oauthTemplate(
+    'figma-oauth',
+    'Figma (sign in)',
+    'Figma’s hosted server — read designs to compare against the build, no token.',
+    Figma,
+    'https://mcp.figma.com/mcp',
+    'https://developers.figma.com/docs/figma-mcp-server/',
+  ),
+  oauthTemplate(
+    'linear',
+    'Linear',
+    'Issues, projects and cycles in Linear — sign in with your account.',
+    SquareKanban,
+    'https://mcp.linear.app/mcp',
+    'https://linear.app/docs/mcp',
+  ),
+  oauthTemplate(
+    'atlassian',
+    'Atlassian (Jira, Confluence)',
+    'Jira issues and Confluence pages through Atlassian’s hosted server.',
+    SquareKanban,
+    'https://mcp.atlassian.com/v1/mcp',
+    'https://support.atlassian.com/atlassian-rovo-mcp-server/docs/getting-started-with-the-atlassian-remote-mcp-server/',
+  ),
+  oauthTemplate(
+    'notion-oauth',
+    'Notion (sign in)',
+    'Specs and test plans in Notion — sign in instead of sharing pages with a token.',
+    NotebookText,
+    'https://mcp.notion.com/mcp',
+    'https://developers.notion.com/docs/mcp',
+  ),
+  oauthTemplate(
+    'sentry-oauth',
+    'Sentry (sign in)',
+    'Errors and stack traces behind a bug, through Sentry’s hosted server.',
+    Bug,
+    'https://mcp.sentry.dev/mcp',
+    'https://docs.sentry.io/product/sentry-mcp/',
+  ),
+]
 
 export const MCP_TEMPLATES: McpTemplate[] = [
   {
@@ -387,6 +466,7 @@ export const MCP_TEMPLATES: McpTemplate[] = [
     fields: [],
     docsUrl: 'https://github.com/modelcontextprotocol/servers/tree/main/src/sequentialthinking',
   },
+  ...OAUTH_TEMPLATES,
 ]
 
 /** Icon for a configured server: its template's when the name still matches one. */
@@ -455,7 +535,7 @@ export type ParseResult =
   | { ok: true; servers: ParsedServer[]; format: string }
   | { ok: false; error: string }
 
-const ENTRY_KEYS = new Set(['type', 'command', 'args', 'url', 'env', 'headers', 'cwd'])
+const ENTRY_KEYS = new Set(['type', 'command', 'args', 'url', 'env', 'headers', 'cwd', 'oauth'])
 
 function isObj(v: unknown): v is Record<string, unknown> {
   return !!v && typeof v === 'object' && !Array.isArray(v)
@@ -488,6 +568,9 @@ function normalizeEntry(name: string, raw: Record<string, unknown>): ParsedServe
   if (env) entry.env = env
   const headers = strMap(raw.headers)
   if (headers) entry.headers = headers
+  // A pre-registered OAuth client (`claude mcp add --client-id … --callback-port …`).
+  // Passed through as-is; the server keeps only plain, non-secret values.
+  if (entry.url && isObj(raw.oauth)) entry.oauth = raw.oauth as McpEntryInput['oauth']
   // VS Code writes `"type": "sse"`/"http"; Claude Desktop omits it. Default the obvious.
   if (!entry.type) entry.type = entry.url ? 'http' : 'stdio'
 

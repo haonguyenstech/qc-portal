@@ -2224,6 +2224,8 @@ export interface McpEntryInput {
   url?: string
   env?: Record<string, string>
   headers?: Record<string, string>
+  /** http/sse only: a pre-registered OAuth client (`clientId`, `callbackPort`). */
+  oauth?: Record<string, string | number | boolean>
   cwd?: string
 }
 
@@ -2350,6 +2352,65 @@ export interface McpOauthStatus {
     configured: boolean
     tokenUrl: string
   }[]
+}
+
+/**
+ * OAuth sign-in to a remote (http/sse) MCP server. The server drives
+ * `claude mcp login`; the token lands in Claude Code's own credential store, never in
+ * .mcp.json. A polled job: start → poll until `signInUrl` → the page opens it → the
+ * engineer signs in (or pastes the redirect address) → `succeeded`.
+ */
+export interface McpSigninJob {
+  id: string
+  projectId: string
+  server: string
+  state: 'running' | 'succeeded' | 'failed' | 'cancelled'
+  startedAt: string
+  finishedAt: string | null
+  signInUrl: string | null
+  awaitingPaste: boolean
+  pasteError: string | null
+  lines: string[]
+  error: string | null
+  exitCode: number | null
+}
+
+function signinUrl(name: string, action: string, projectId: string): string {
+  const q = `?projectId=${encodeURIComponent(projectId)}`
+  return `/api/mcp/signin/${encodeURIComponent(name)}${action ? `/${action}` : ''}${q}`
+}
+
+export function startMcpSignin(name: string, projectId: string): Promise<{ job: McpSigninJob }> {
+  return request(signinUrl(name, 'start', projectId), {
+    method: 'POST',
+    body: JSON.stringify({ projectId }),
+  })
+}
+
+export function getMcpSignin(name: string, projectId: string): Promise<{ job: McpSigninJob | null }> {
+  return request(signinUrl(name, '', projectId))
+}
+
+export function pasteMcpSignin(name: string, url: string, projectId: string): Promise<{ ok: true }> {
+  return request(signinUrl(name, 'paste', projectId), {
+    method: 'POST',
+    body: JSON.stringify({ url, projectId }),
+  })
+}
+
+export function cancelMcpSignin(name: string, projectId: string): Promise<{ ok: true }> {
+  return request(signinUrl(name, 'cancel', projectId), {
+    method: 'POST',
+    body: JSON.stringify({ projectId }),
+  })
+}
+
+/** Drop the stored OAuth token (`claude mcp logout`). */
+export function logoutMcpSignin(name: string, projectId: string): Promise<{ ok: true; detail: string }> {
+  return request(signinUrl(name, 'logout', projectId), {
+    method: 'POST',
+    body: JSON.stringify({ projectId }),
+  })
 }
 
 export function mcpOauthStatus(projectId: string): Promise<McpOauthStatus> {
@@ -4181,6 +4242,80 @@ export function deleteChat(projectId: string, slug: string): Promise<{ ok: true 
 /** Src for an image pasted into a message (served from testing/chats/images). */
 export function chatImageUrl(projectId: string, name: string): string {
   return `/api/chat/images/${encodeURIComponent(name)}?projectId=${encodeURIComponent(projectId)}`
+}
+
+/**
+ * Everything one conversation brought in or produced (routes/chat.ts `chatAssets`): the
+ * documents and screenshots attached to its questions, and the files its answers wrote.
+ * `index` is the message's position; `question` the user message to scroll to for it.
+ */
+export interface ChatAssets {
+  /** `legacy` = pasted into the message by an older build; no file, its `text` instead. */
+  uploads: {
+    file: string
+    name: string
+    index: number
+    at: string
+    exists: boolean
+    size?: number
+    legacy?: boolean
+    text?: string
+  }[]
+  images: { file: string; index: number; at: string; size?: number }[]
+  /** Question index → a short excerpt of what was asked. */
+  questions: Record<number, string>
+  written: {
+    /** Project-relative when `inProject`, else absolute. */
+    path: string
+    name: string
+    /** Write alone = created; any Edit = changed an existing file. */
+    tools: string[]
+    index: number
+    question: number
+    at: string
+    inProject: boolean
+    exists: boolean
+    size?: number
+  }[]
+}
+
+export function getChatAssets(projectId: string, slug: string): Promise<ChatAssets> {
+  return request(
+    `/api/chat/${encodeURIComponent(slug)}/assets?projectId=${encodeURIComponent(projectId)}`,
+  )
+}
+
+/** Src for a file the AI wrote in this conversation — only ones its own steps recorded. */
+export function chatAssetUrl(projectId: string, slug: string, relPath: string): string {
+  return `/api/chat/${encodeURIComponent(slug)}/asset?projectId=${encodeURIComponent(projectId)}&path=${encodeURIComponent(relPath)}`
+}
+
+/**
+ * A text file's contents for an in-page preview, cut at `max` characters (the preview is a
+ * look, not an editor — a 5 MB log would freeze the dialog). `truncated` says it was cut.
+ */
+export async function fetchTextPreview(url: string, max = 200_000): Promise<{ text: string; truncated: boolean }> {
+  const res = await fetch(url)
+  if (!res.ok) {
+    const body = await res.text().catch(() => '')
+    let message = body || `HTTP ${res.status}`
+    try {
+      const j = JSON.parse(body) as { error?: unknown }
+      if (typeof j.error === 'string') message = j.error
+    } catch {
+      /* not the error envelope — keep the raw text */
+    }
+    throw new Error(message)
+  }
+  const text = await res.text()
+  return text.length > max ? { text: text.slice(0, max), truncated: true } : { text, truncated: false }
+}
+
+/** A file's bytes, for a Download button that must name the saved file itself. */
+export async function fetchFileBlob(url: string): Promise<Blob> {
+  const res = await fetch(url)
+  if (!res.ok) throw new Error((await res.text().catch(() => '')) || `HTTP ${res.status}`)
+  return res.blob()
 }
 
 /** Src for a document attached to a message (served from testing/chats/files). */

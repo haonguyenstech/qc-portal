@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { Link } from 'react-router-dom'
@@ -23,6 +23,7 @@ import {
   Info,
   KeyRound,
   LayoutGrid,
+  LogOut,
   ListChecks,
   Loader2,
   Maximize2,
@@ -58,7 +59,12 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Textarea } from '@/components/ui/textarea'
 import {
   addMcp,
+  cancelMcpSignin,
+  getMcpSignin,
   importMcp,
+  logoutMcpSignin,
+  pasteMcpSignin,
+  startMcpSignin,
   listMcp,
   mcpHealth,
   mcpOauthStatus,
@@ -1416,6 +1422,237 @@ function EditServerForm({
   )
 }
 
+/** A remote server: the only kind `claude mcp login` can sign in to. */
+function isRemoteServer(s: McpServer | undefined): boolean {
+  return !!s && (s.type === 'http' || s.type === 'sse' || (!s.command && !!s.url))
+}
+
+/**
+ * OAuth sign-in to a remote MCP server. The server runs `claude mcp login`, so the
+ * token is stored — and refreshed — by Claude Code itself, never in .mcp.json.
+ *
+ * The page opens the provider's page in THIS browser (the CLI runs with
+ * `--no-browser`). On the portal's own machine the provider's redirect reaches the
+ * CLI's localhost callback and the dialog finishes by itself; from anywhere else
+ * (Remote access) that redirect fails, and pasting the address it left behind
+ * finishes it instead. Closing the dialog while it is waiting cancels the sign-in.
+ */
+function SignInDialog({
+  name,
+  projectId,
+  onClose,
+  onSignedIn,
+}: {
+  name: string
+  projectId: string
+  onClose: () => void
+  onSignedIn: (name: string) => void
+}) {
+  const [jobId, setJobId] = useState<string | null>(null)
+  const [pasted, setPasted] = useState('')
+  const [copied, setCopied] = useState(false)
+
+  const start = useMutation({
+    mutationFn: () => startMcpSignin(name, projectId),
+    onSuccess: (res) => setJobId(res.job.id),
+  })
+  // Start once on open; "Try again" calls it again.
+  useEffect(() => {
+    start.mutate()
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- once per open
+  }, [])
+
+  const { data } = useQuery({
+    queryKey: ['mcp-signin', projectId, name, jobId],
+    queryFn: () => getMcpSignin(name, projectId),
+    enabled: !!jobId,
+    refetchInterval: (q) => (q.state.data?.job?.state === 'running' ? 1000 : false),
+    gcTime: 0,
+  })
+  // A job from an earlier attempt must not be read as this one's result.
+  const job = data?.job && data.job.id === jobId ? data.job : null
+  const state = start.isPending ? 'starting' : start.isError ? 'failed' : (job?.state ?? 'starting')
+
+  // Announce a success once per job, however many polls report it.
+  const announced = useRef<string | null>(null)
+  useEffect(() => {
+    if (job?.state === 'succeeded' && announced.current !== job.id) {
+      announced.current = job.id
+      toast.success(`Signed in to ${name}`, { description: 'Testing the connection…' })
+      onSignedIn(name)
+    }
+  }, [job, name, onSignedIn])
+
+  const paste = useMutation({
+    mutationFn: () => pasteMcpSignin(name, pasted.trim(), projectId),
+    onSuccess: () => setPasted(''),
+    onError: (err) =>
+      toast.error('Could not send that address', {
+        description: err instanceof Error ? err.message : 'Unknown error',
+      }),
+  })
+
+  function close() {
+    // Leaving mid-sign-in cancels it, so the CLI's callback port isn't held for 10 min.
+    if (job?.state === 'running') cancelMcpSignin(name, projectId).catch(() => undefined)
+    onClose()
+  }
+
+  async function copyLink() {
+    if (!job?.signInUrl) return
+    try {
+      await navigator.clipboard.writeText(job.signInUrl)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    } catch {
+      toast.error('Could not copy — select the link and copy it by hand.')
+    }
+  }
+
+  const error = start.isError
+    ? start.error instanceof Error
+      ? start.error.message
+      : 'Could not start the sign-in.'
+    : job?.state === 'failed' || job?.state === 'cancelled'
+      ? job.error
+      : null
+
+  return (
+    <Dialog open onOpenChange={(o) => !o && close()}>
+      <DialogContent className="max-h-[88vh] overflow-y-auto overflow-x-hidden sm:max-w-lg">
+        <DialogHeader className="min-w-0">
+          <DialogTitle className="flex items-center gap-2">
+            <KeyRound className="h-4 w-4" />
+            Sign in to <span className="font-mono text-sm">{name}</span>
+          </DialogTitle>
+          <DialogDescription>
+            Signs in with the provider's own page. Claude Code keeps the sign-in and refreshes
+            it — nothing is written to <code>.mcp.json</code>.
+          </DialogDescription>
+        </DialogHeader>
+
+        {state === 'starting' && (
+          <div className="flex items-center gap-2 py-6 text-sm text-muted-foreground">
+            <Loader2 className="h-4 w-4 animate-spin" />
+            Preparing the sign-in…
+          </div>
+        )}
+
+        {state === 'running' && !job?.signInUrl && (
+          <div className="flex items-center gap-2 py-6 text-sm text-muted-foreground">
+            <Loader2 className="h-4 w-4 animate-spin" />
+            Asking {name} where to sign in…
+          </div>
+        )}
+
+        {state === 'running' && job?.signInUrl && (
+          <div className="min-w-0 space-y-4">
+            <div className="space-y-2 rounded-2xl border border-border/60 bg-muted/40 p-3">
+              <p className="text-xs font-medium">1. Open the sign-in page and allow access</p>
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  asChild
+                  size="sm"
+                  className="rounded-full transition-all duration-200 active:scale-[0.98]"
+                >
+                  <a href={job.signInUrl} target="_blank" rel="noopener noreferrer">
+                    <ExternalLink className="h-3.5 w-3.5" />
+                    Open sign-in page
+                  </a>
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={copyLink}
+                  className="rounded-full border-border/60 shadow-none"
+                >
+                  {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+                  {copied ? 'Copied' : 'Copy link'}
+                </Button>
+              </div>
+              <p className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                <Loader2 className="h-3 w-3 animate-spin" />
+                Waiting — on this computer, this finishes by itself once you allow access.
+              </p>
+            </div>
+
+            <div className="space-y-2 rounded-2xl border border-border/60 p-3">
+              <p className="text-xs font-medium">
+                2. Browser says it can't reach <code>localhost</code>?
+              </p>
+              <p className="text-[11px] leading-snug text-muted-foreground">
+                That happens when you use the portal from another computer. Copy the whole address
+                from that browser tab and paste it here.
+              </p>
+              <div className="flex items-center gap-2">
+                <Input
+                  value={pasted}
+                  onChange={(e) => setPasted(e.target.value)}
+                  placeholder="http://localhost:…/callback?code=…"
+                  aria-label="Redirect address"
+                  className="h-9 min-w-0 flex-1 font-mono text-xs"
+                  onKeyDown={(e) => e.key === 'Enter' && pasted.trim() && paste.mutate()}
+                />
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => paste.mutate()}
+                  disabled={!pasted.trim() || paste.isPending || !job.awaitingPaste}
+                  className="rounded-full border-border/60 shadow-none"
+                >
+                  {paste.isPending && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                  Finish
+                </Button>
+              </div>
+              {job.pasteError && (
+                <p className="rounded-xl bg-red-50 px-2.5 py-1.5 text-[11px] text-red-700">
+                  {job.pasteError}
+                </p>
+              )}
+            </div>
+          </div>
+        )}
+
+        {state === 'succeeded' && (
+          <p className="flex items-start gap-2 rounded-2xl bg-emerald-50 px-3 py-3 text-sm text-emerald-700">
+            <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" />
+            <span>
+              Signed in. QC runs in this project now get {name}'s tools. Some providers (ClickUp)
+              end a sign-in after a day — this card will ask again when that happens.
+            </span>
+          </p>
+        )}
+
+        {(state === 'failed' || state === 'cancelled') && (
+          <p className="flex items-start gap-2 rounded-2xl bg-red-50 px-3 py-3 text-xs text-red-700">
+            <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+            <span className="min-w-0 break-words">{error ?? 'The sign-in did not finish.'}</span>
+          </p>
+        )}
+
+        <DialogFooter>
+          {(state === 'failed' || state === 'cancelled') && (
+            <Button
+              variant="outline"
+              onClick={() => start.mutate()}
+              className="rounded-full border-border/60 shadow-none"
+            >
+              Try again
+            </Button>
+          )}
+          <Button
+            variant={state === 'succeeded' ? 'default' : 'ghost'}
+            onClick={close}
+            className="rounded-full"
+          >
+            {state === 'running' ? 'Cancel' : state === 'succeeded' ? 'Done' : 'Close'}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 /** Token-connect cards for ClickUp/Figma/Jira (paste a personal token) + no-auth Playwright/Mobile. */
 function ConnectServices({
   projectId,
@@ -1448,6 +1685,8 @@ function ConnectServices({
   const [editName, setEditName] = useState<string | null>(null)
   // Disconnect asks first: it deletes the entry — tokens included — from .mcp.json.
   const [confirmDisconnect, setConfirmDisconnect] = useState<string | null>(null)
+  // OAuth sign-in dialog for a remote (http/sse) server.
+  const [signinName, setSigninName] = useState<string | null>(null)
   // Header values for the details dialog, fetched alongside the env on reveal.
   const [fullHeaders, setFullHeaders] = useState<Record<string, string> | null>(null)
 
@@ -1892,8 +2131,23 @@ function ConnectServices({
   function connectedActions(name: string) {
     const testing = testingNames.has(name)
     const disconnecting = disconnectingNames.has(name)
+    const remote = isRemoteServer(serverByName[name])
+    const status = statusByName[name]
+    // A remote server with a static token header signs in through that header, not OAuth.
+    const usesHeaderToken = Object.keys(serverByName[name]?.headers ?? {}).length > 0
     return (
       <>
+        {remote && status === 'needs-auth' && (
+          <Button
+            size="sm"
+            onClick={() => setSigninName(name)}
+            disabled={testing || disconnecting}
+            className="h-8 rounded-full px-3 text-xs font-medium transition-all duration-200 active:scale-[0.98]"
+          >
+            <KeyRound className="h-3.5 w-3.5" />
+            Sign in
+          </Button>
+        )}
         <Button
           size="sm"
           variant="outline"
@@ -1914,6 +2168,19 @@ function ConnectServices({
         <RowIconButton label="Edit" onClick={() => setEditName(name)} disabled={disconnecting || testing}>
           <PencilLine className="h-3.5 w-3.5" />
         </RowIconButton>
+        {remote && status === 'connected' && !usesHeaderToken && (
+          <RowIconButton
+            label="Sign out"
+            onClick={() => signOut.mutate(name)}
+            disabled={disconnecting || testing || (signOut.isPending && signOut.variables === name)}
+          >
+            {signOut.isPending && signOut.variables === name ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <LogOut className="h-3.5 w-3.5" />
+            )}
+          </RowIconButton>
+        )}
         <RowIconButton
           label="Disconnect"
           destructive
@@ -1977,8 +2244,36 @@ function ConnectServices({
   async function afterAdd(names: string[]) {
     forgetStatus(names)
     await refresh()
-    for (const n of names) await test.mutateAsync(n).catch(() => undefined)
+    // Read the refreshed list, not the props: this closure predates the refetch.
+    const fresh = queryClient.getQueryData<McpServer[]>(['mcp', projectId]) ?? []
+    let needsSignin: string | null = null
+    for (const n of names) {
+      const res = await test.mutateAsync(n).catch(() => undefined)
+      const server = fresh.find((s) => s.name === n)
+      if (!needsSignin && res?.status === 'needs-auth' && isRemoteServer(server)) needsSignin = n
+    }
+    // A just-added OAuth server's next step is signing in — offer it straight away.
+    if (needsSignin) setSigninName(needsSignin)
   }
+
+  async function afterSignin(name: string) {
+    forgetStatus([name])
+    await refresh()
+    await test.mutateAsync(name).catch(() => undefined)
+  }
+
+  const signOut = useMutation({
+    mutationFn: (name: string) => logoutMcpSignin(name, projectId),
+    onSuccess: (res, name) => {
+      toast.success(`Signed out of ${name}`, { description: res.detail })
+      forgetStatus([name])
+      return refresh()
+    },
+    onError: (err, name) =>
+      toast.error(`Could not sign out of ${name}`, {
+        description: err instanceof Error ? err.message : 'Unknown error',
+      }),
+  })
 
   // After an edit the old result says nothing about the new config — forget it and
   // test again under the (possibly new) name.
@@ -2066,6 +2361,16 @@ function ConnectServices({
           existingNames={existingNames}
           onClose={() => setEditName(null)}
           onSaved={afterEdit}
+        />
+      )}
+
+      {signinName && (
+        <SignInDialog
+          key={signinName}
+          name={signinName}
+          projectId={projectId}
+          onClose={() => setSigninName(null)}
+          onSignedIn={afterSignin}
         />
       )}
 

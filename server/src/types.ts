@@ -223,6 +223,8 @@ export interface McpServer {
   env?: Record<string, string>
   /** http/sse servers only; values always masked in the list. */
   headers?: Record<string, string>
+  /** A pre-registered OAuth client (`clientId`, `callbackPort`) — never a secret. */
+  oauth?: Record<string, string | number | boolean>
   cwd?: string
   source: 'project' | 'local' | 'user' | 'cli'
   status?: 'connected' | 'needs-auth' | 'pending' | 'failed' | 'unknown'

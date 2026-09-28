@@ -277,11 +277,54 @@ does this endpoint validate?").
   images route). It did **not** always work this way: the markdown used to be appended to the
   prompt in the browser and the whole thing cut with `.slice(0, MAX_PROMPT)` — so a spec over 48 KB
   reached the model as its **first half**, with nothing on screen saying so, and the answer was
-  judged wrong for a reason nobody could see. That is also why the `MAX_PROMPT` 413 says "attach it
+  judged wrong for a reason nobody could see. (The server half of the fix shipped in 0.11.20 but
+  `ChatPage` kept pasting until later — so the bubble also showed the whole extracted PDF. Messages
+  saved in that era still carry `--- ATTACHED FILE: <name> ---` blocks in their text;
+  `splitLegacyAttachments` renders those as chips too, so no old transcript shows the dump.) PDF text
+  is joined by glyph POSITION in `docConvert.ts` `pdfItemsToText`, not with a blind space: a PDF that
+  places accented glyphs one by one came out as "gi ả m giá", and ignoring `hasEOL` flattened every
+  page into one line. That is also why the `MAX_PROMPT` 413 says "attach it
   as a file with the paperclip": the escape hatch has to actually be one. Caps are mirrored on both
   sides (`MAX_DOCS` = 4, `MAX_DOC_BYTES` = 4 MB of markdown each) and both sides **refuse rather
   than drop** — the client says it at the paperclip, the server 413s naming the file. **An
   attachment with no text is a valid message**, like an image; the server supplies the wording.
+- **Files in this chat** (header folder icon, or "Files" in any row's "…" menu) —
+  `ChatFilesDialog`, fed by `GET /:slug/assets` (`chatAssets`). It lists what the conversation
+  brought in (attached documents, pasted screenshots) and what its answers WROTE: every
+  Write / Edit / MultiEdit / NotebookEdit step now records the tool's FULL `file_path` as
+  `ChatStep.path` (`detail` is only the basename; `claudeExec.ts` `WRITE_TOOLS` is the shared
+  list, used by `teamRunner.ts` too). Derived from the transcript on read, never stored twice,
+  so a file deleted since shows as gone. A leading `Write` = created in this chat ("new"),
+  otherwise "edited". Answers from before `path` existed cannot be traced — the empty state
+  says so. Pre-attachments messages list their pasted files as `legacy` uploads, with the
+  pasted text as the preview.
+  - **`GET /:slug/asset` is not a file server.** It serves only a path THIS chat's own steps
+    recorded, resolved inside the project root, and everything but a raster image goes out as
+    `text/plain` + `nosniff` — an HTML/SVG file the AI wrote must never run on the portal's
+    origin. The preview likewise shows text as source in a `<pre>`, never an iframe.
+  - **A file browser, near full screen** (`92vh` × `96vw`, capped at 112rem): a side nav of
+    types with counts and the total size, a toolbar (search — also over the QUESTION each file
+    came from, via `chatAssets().questions` — sort, grid/list toggle kept in localStorage
+    `qc.chat.filesLayout`), and one flat sorted set. Not a section per type: sections of one
+    or two files left the big dialog a column of half-empty rows (measured on a 4-file chat),
+    and the nav already filters by type. Cards show WHAT is in each file — the image, or the
+    first lines of text (`AssetThumb`, 1,200 chars, page markers stripped) — and carry
+    **View** and **Download** (hover actions on the thumbnail; always-visible buttons below md,
+    since touch has no hover).
+  - **The viewer has a details panel** (`AssetDetails`, lg+): type, size, when, origin
+    (Uploaded / Screenshot / Created by AI / Edited by AI), path, and the question it came from
+    as a "Go to message" card.
+  - **View opens inside the dialog, not a new tab**: app mode (`--app`) has no tabs. Prev/next
+    (buttons and ←/→) walk the FILTERED set, skipping what cannot be opened.
+  - **Download fetches the bytes and names the file itself** (`saveBlob`), then toasts the
+    name — app mode has no download bubble, so a silent save reads as a dead button. An
+    attachment downloads as `<name>.md`: the server only ever has the markdown the browser
+    converted, and saving that as `spec.pdf` would be a text file wearing a PDF's name.
+  - **"Go to message" scrolls from the dialog's `onCloseAutoFocus`, and INSTANTLY.** A scroll
+    started while the modal is up does not land; a SMOOTH scroll's first frames are still
+    within 80px of the bottom, so `onScroll` flips `atBottom` back on and the
+    follow-the-answer effect yanks the view down again (both measured). For another chat,
+    `jumpRef` holds the target until that conversation has rendered.
 - **Archive / unarchive, because a chat list only grows.** `POST /api/chat/:slug/archive`
   (`archived` on the record and the summary), the row "…" menu and the chat header's menu. It is
   **not a soft delete**: the transcript is untouched, still openable, still resumable, still
@@ -580,6 +623,16 @@ does this endpoint validate?").
     control. The ceiling moved with it: `min(26rem, 45vh)` is what stops a GROWN box from
     swallowing the conversation on a short screen, and the `max(...)` around it is what keeps a
     deliberately tall dragged box from being clipped by that same cap.
+  - **The whole composer FOLDS away** — the labelled "Hide ⌄" pill pinned to the well's
+    top-right corner (a bare muted chevron there went unfound) collapses it to one "Ask a
+    follow-up…" bar (`COMPOSER_HIDDEN_KEY`, remembered per browser), so a long answer gets the
+    column. Three rules: the fold is **derived** (`composerFolded`), honoured only while the
+    composer is EMPTY — a quick prompt typed into it, text put back after a failed send or a
+    staged file unfolds it by itself, so nothing sits somewhere invisible, and deriving it
+    avoids a setState-in-effect. The well stays **mounted** (`hidden`), because the `+` menu portals into
+    it and the textarea keeps its ref, so unfolding focuses it at once. And the folded bar
+    carries **Stop** while a reply streams — hiding the box must not strand a long answer with
+    no way to end it.
   - **A picked tag renders as a CHIP, painted behind the textarea** (`ComposerPaint` +
     `paintSegments`) — a `<textarea>` can't hold an element, so a tag used to read as plain
     text with a spellcheck squiggle through it, indistinguishable from typing. Same overlay

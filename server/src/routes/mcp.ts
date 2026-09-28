@@ -7,6 +7,13 @@ import path from 'node:path'
 import spawn from 'cross-spawn'
 import { CLAUDE_BIN, OAUTH_APPS, OAUTH_REDIRECT_BASE, mcpJsonFor } from '../config.js'
 import { resolveProject } from '../projectScope.js'
+import {
+  cancelMcpSignin,
+  getMcpSignin,
+  pasteMcpSignin,
+  runMcpLogout,
+  startMcpSignin,
+} from '../mcpSignin.js'
 import { revealFolderNative } from '../folderPicker.js'
 import {
   resolveProjectClickupToken,
@@ -782,6 +789,7 @@ mcpRouter.get('/', async (req, res) => {
     type: entry.type,
     env: publicEnv(entry.env),
     headers: maskedHeaders(entry.headers),
+    oauth: sanitizeOauth(entry.oauth),
     cwd: typeof entry.cwd === 'string' ? entry.cwd : undefined,
     source: 'project',
     status: statuses[name] ?? 'unknown',
@@ -796,6 +804,7 @@ mcpRouter.get('/', async (req, res) => {
       type: entry.type,
       env: publicEnv(entry.env),
       headers: maskedHeaders(entry.headers),
+      oauth: sanitizeOauth(entry.oauth),
       cwd: typeof entry.cwd === 'string' ? entry.cwd : undefined,
       source: 'local',
       status: statuses[name] ?? 'unknown',
@@ -831,6 +840,80 @@ mcpRouter.get('/health', async (req, res) => {
         : `Could not run claude mcp list: ${(err as Error).message}`,
     })
   }
+})
+
+// ------------------------------------------------ OAuth sign-in (remote servers)
+//
+// "Sign in" for an http/sse server: drives `claude mcp login` (see mcpSignin.ts for
+// why the portal never runs the OAuth flow itself). Declared ahead of the
+// `/:name/...` routes so a server literally named "secret" or "env" can't shadow them.
+
+/** The configured http/sse entry for `name`, or why it can't be signed in to. */
+function signinTarget(
+  rootPath: string,
+  name: string,
+): { ok: true; inMcpJson: boolean } | { ok: false; status: number; error: string } {
+  const projectServers = readMcp(mcpJsonFor(rootPath)).mcpServers ?? {}
+  const entry = projectServers[name] ?? localProjectMcpServers(rootPath)[name]
+  if (!entry) return { ok: false, status: 404, error: `No server named "${name}".` }
+  const remote = entry.type === 'http' || entry.type === 'sse' || (!entry.command && !!entry.url)
+  if (!remote) {
+    return {
+      ok: false,
+      status: 400,
+      error: `"${name}" runs locally (stdio) — it takes its credential in its settings, not a sign-in.`,
+    }
+  }
+  return { ok: true, inMcpJson: name in projectServers }
+}
+
+mcpRouter.get('/signin/:name', (req, res) => {
+  const project = resolveProject(req)
+  if (!project) return res.status(400).json({ error: 'project not found' })
+  res.json({ job: getMcpSignin(project.id, req.params.name) })
+})
+
+mcpRouter.post('/signin/:name/start', (req, res) => {
+  const project = resolveProject(req)
+  if (!project) return res.status(400).json({ error: 'project not found' })
+  const name = req.params.name
+  const target = signinTarget(project.rootPath, name)
+  if (!target.ok) return res.status(target.status).json({ error: target.error })
+  // The CLI refuses an unapproved .mcp.json server outright, so approve it first —
+  // the same approval Test connection already grants.
+  if (target.inMcpJson) approveMcpJsonServer(project.rootPath, name)
+  const rootPath = project.rootPath
+  const r = startMcpSignin(rootPath, project.id, name, () => invalidateMcpHealth(rootPath))
+  if (!r.ok) return res.status(r.status).json({ error: r.error })
+  res.json({ job: r.job })
+})
+
+mcpRouter.post('/signin/:name/paste', (req, res) => {
+  const project = resolveProject(req)
+  if (!project) return res.status(400).json({ error: 'project not found' })
+  const url = typeof req.body?.url === 'string' ? req.body.url : ''
+  const r = pasteMcpSignin(project.id, req.params.name, url)
+  if (!r.ok) return res.status(400).json({ error: r.error })
+  res.json({ ok: true })
+})
+
+mcpRouter.post('/signin/:name/cancel', (req, res) => {
+  const project = resolveProject(req)
+  if (!project) return res.status(400).json({ error: 'project not found' })
+  const r = cancelMcpSignin(project.id, req.params.name)
+  if (!r.ok) return res.status(400).json({ error: r.error })
+  res.json({ ok: true })
+})
+
+mcpRouter.post('/signin/:name/logout', async (req, res) => {
+  const project = resolveProject(req)
+  if (!project) return res.status(400).json({ error: 'project not found' })
+  const target = signinTarget(project.rootPath, req.params.name)
+  if (!target.ok) return res.status(target.status).json({ error: target.error })
+  const r = await runMcpLogout(project.rootPath, req.params.name)
+  invalidateMcpHealth(project.rootPath)
+  if (!r.ok) return res.status(500).json({ error: r.detail })
+  res.json({ ok: true, detail: r.detail })
 })
 
 /**
@@ -928,9 +1011,32 @@ function stringMap(value: unknown): Record<string, string> | undefined {
   return Object.keys(clean).length ? clean : undefined
 }
 
+/**
+ * An http/sse server's `oauth` block — what `claude mcp add --client-id … --callback-port …`
+ * writes for a provider that needs a pre-registered OAuth client. Only plain values
+ * survive, and never anything secret-named: the CLI keeps a client secret in its own
+ * credential store, so one found here would be a leak into the repo, not config.
+ */
+function sanitizeOauth(value: unknown): Record<string, string | number | boolean> | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const clean: Record<string, string | number | boolean> = {}
+  for (const [k, v] of Object.entries(value)) {
+    if (/secret/i.test(k)) continue
+    if (k === 'callbackPort') {
+      const port = Number(v)
+      if (Number.isInteger(port) && port > 0 && port < 65536) clean[k] = port
+      continue
+    }
+    if (typeof v === 'string' ? v.trim() : typeof v === 'number' || typeof v === 'boolean') {
+      clean[k] = typeof v === 'string' ? v.trim() : v
+    }
+  }
+  return Object.keys(clean).length ? clean : undefined
+}
+
 /** Keep only the .mcp.json fields Claude Code reads, with the right types. */
 function sanitizeEntry(raw: Record<string, unknown>): McpEntry {
-  const { command, args, url, env, type, headers, cwd } = raw
+  const { command, args, url, env, type, headers, cwd, oauth } = raw
   const entry: McpEntry = {}
   if (typeof type === 'string' && type.trim()) entry.type = type.trim()
   if (typeof command === 'string' && command.trim()) entry.command = command.trim()
@@ -941,6 +1047,8 @@ function sanitizeEntry(raw: Record<string, unknown>): McpEntry {
   if (cleanEnv) entry.env = cleanEnv
   const cleanHeaders = stringMap(headers)
   if (cleanHeaders) entry.headers = cleanHeaders
+  const cleanOauth = entry.url ? sanitizeOauth(oauth) : undefined
+  if (cleanOauth) entry.oauth = cleanOauth
   return entry
 }
 
@@ -1119,6 +1227,16 @@ mcpRouter.put('/:name', (req, res) => {
   if (entry.url && !entry.type) entry.type = 'http'
   // Same as POST /: the browser never knows this machine's Playwright profile path.
   if (to === 'playwright') normalizePlaywrightProfile(entry)
+  // The Settings form has no field for a pre-registered OAuth client, so an edit
+  // arrives without it. Carry it over while the url is unchanged — otherwise saving
+  // an unrelated header silently breaks sign-in for that server.
+  const prev =
+    readMcp(mcpJsonFor(project.rootPath)).mcpServers?.[from] ??
+    localProjectMcpServers(project.rootPath)[from]
+  if (!entry.oauth && prev?.oauth && prev.url === entry.url) {
+    const kept = sanitizeOauth(prev.oauth)
+    if (kept) entry.oauth = kept
+  }
 
   const r = renameServer(project.rootPath, from, to)
   if (r.error) return res.status(r.status).json({ error: r.error })

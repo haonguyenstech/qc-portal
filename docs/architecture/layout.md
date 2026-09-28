@@ -332,7 +332,33 @@ server/src/
                     for 5 min by the page), a timeout is a 504 ERROR never an empty map,
                     one probe per project at a time (+5s reuse, cleared by writeMcp and by
                     Test). A project server in `disabledMcpjsonServers` is absent from the
-                    list, so it is reported `pending` and Test approves it
+                    list, so it is reported `pending` and Test approves it.
+                    OAuth SIGN-IN for a remote (http/sse) server — /signin/:name/{start,
+                    paste,cancel,logout} + GET /signin/:name, declared AHEAD of the
+                    `/:name/...` routes — drives `claude mcp login` through mcpSignin.ts
+                    (below); the "Sign in (OAuth)" templates add a bare `{type:'http',url}`
+                    and the page offers Sign in as soon as the first Test says needs-auth.
+                    `sanitizeEntry` keeps an entry's `oauth` block (a pre-registered
+                    client: `clientId`, `callbackPort` — what `claude mcp add --client-id`
+                    writes) minus anything secret-named, and PUT carries it over when the
+                    url is unchanged, because the Settings form has no field for it and
+                    used to drop it silently on every save
+  mcpSignin.ts      the job behind that Sign in. The portal never runs OAuth itself:
+                    `claude mcp login` does discovery / client registration / PKCE and
+                    keeps + REFRESHES the token in Claude Code's credential store, which
+                    every headless run then uses — so .mcp.json holds no secret. Measured
+                    on CLI 2.1.281: it needs a TTY (piped stdin exits 1 in both modes), so
+                    it runs in a node-pty; always `--no-browser`, because the CLI's own
+                    browser opens on the SERVER's machine, wrong under /remote — the page
+                    opens the URL in the engineer's browser instead. In a pty the CLI both
+                    listens on localhost:<port>/callback (a local browser finishes by
+                    itself) and prompts for the redirect URL (a remote one pastes the
+                    address its failed redirect left); a wrong paste is re-prompted, not
+                    fatal. It refuses an unapproved .mcp.json server, so start approves
+                    first. The callback port is fixed per server: ONE sign-in at a time,
+                    portal-wide. The URL is an OSC 8 hyperlink, so the ANSI strip's OSC
+                    body must not be greedy (it would eat the visible URL); the `code=` of
+                    a pasted URL (the pty echoes it) is masked; memory only, never logged
 
 web/src/
   App.tsx           two branches: `/ai-labs` renders BARE (no shell — see "QC AI Labs"),

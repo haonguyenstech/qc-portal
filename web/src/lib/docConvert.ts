@@ -121,6 +121,50 @@ async function fromDocx(file: File): Promise<string> {
   return td.turndown(html).trim()
 }
 
+interface PdfTextItem {
+  str: string
+  transform: number[]
+  width: number
+  height: number
+  hasEOL?: boolean
+}
+
+/**
+ * Join a page's text items by WHERE they sit, not with a blind space.
+ *
+ * pdf.js hands back runs of glyphs, and a run boundary is not a word boundary: a PDF
+ * that positions accented glyphs one by one (common for Vietnamese) splits "giảm" into
+ * "gi" + "ả" + "m", and joining every run with ' ' produced "gi ả m". Ignoring `hasEOL`
+ * also flattened the whole page into one line. So: a space only where there is a visible
+ * gap between the end of one run and the start of the next, and a newline where the
+ * run ends a line or the baseline moves.
+ */
+export function pdfItemsToText(items: readonly unknown[]): string {
+  let out = ''
+  let prev: PdfTextItem | null = null
+  for (const raw of items) {
+    if (!raw || typeof raw !== 'object' || !('str' in raw)) continue
+    const it = raw as PdfTextItem
+    if (prev && !prev.hasEOL && it.str) {
+      const size = Math.abs(it.transform[3]) || it.height || 10
+      const sameLine = Math.abs(it.transform[5] - prev.transform[5]) < size * 0.5
+      if (!sameLine) out += '\n'
+      else {
+        const gap = it.transform[4] - (prev.transform[4] + prev.width)
+        if (gap > size * 0.15 && !/\s$/.test(out) && !/^\s/.test(it.str)) out += ' '
+      }
+    }
+    out += it.str
+    if (it.hasEOL) out += '\n'
+    if (it.str || it.hasEOL) prev = it
+  }
+  return out
+    .replace(/[ \t]+/g, ' ')
+    .replace(/ *\n */g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
+
 async function fromPdf(file: File): Promise<string> {
   const pdfjs = await import('pdfjs-dist')
   // Vite resolves the ?url query to the bundled worker asset path.
@@ -132,12 +176,7 @@ async function fromPdf(file: File): Promise<string> {
   for (let i = 1; i <= pdf.numPages; i++) {
     const page = await pdf.getPage(i)
     const tc = await page.getTextContent()
-    const text = tc.items
-      .map((it) => ('str' in it ? it.str : ''))
-      .join(' ')
-      .replace(/[ \t]+/g, ' ')
-      .replace(/\s+\n/g, '\n')
-      .trim()
+    const text = pdfItemsToText(tc.items)
     if (text) out.push(`<!-- page ${i} -->\n\n${text}`)
   }
   return out.join('\n\n').trim()

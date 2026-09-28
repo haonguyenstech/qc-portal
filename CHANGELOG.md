@@ -3,6 +3,39 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.12.8 — 2026-09-28
+
+**Sign in to hosted MCP servers, and every file a chat touched in one place**
+
+### Added
+
+- **Sign in to a hosted MCP server from the MCP page.** A new *Sign in (OAuth)* group of
+  templates — ClickUp, Figma, Linear, Atlassian (Jira, Confluence), Notion and Sentry — adds
+  the server with just its address; as soon as the first test says it needs sign-in, a
+  **Sign in** button appears. It opens the provider's login in *your* browser (also when you
+  reach the portal remotely — paste back the address the browser lands on). No token is
+  pasted or stored in `.mcp.json`: Claude Code keeps and refreshes it, and every QC run uses
+  it. Sign out is on the same row.
+- **Files in this chat.** The folder icon in a chat's header (or *Files* in any chat's "…"
+  menu) opens a near-full-screen file browser of everything the conversation brought in —
+  attached documents, pasted screenshots — and everything its answers **created or edited**.
+  Search (also by the question a file came from), sort, grid or list, a preview of what is
+  in each file, **View** without leaving the dialog (←/→ to step through), **Download**, and
+  *Go to message* to jump to the question that produced it.
+- **Hide the message box.** The *Hide* pill at the top-right of the composer folds it into a
+  single "Ask a follow-up…" bar, so a long answer gets the whole column. It unfolds by itself
+  when there is something in it, and *Stop* stays on the bar while an answer is streaming.
+
+### Fixed
+
+- **PDF attachments read correctly.** Text extracted from a PDF no longer breaks words apart
+  (Vietnamese came out as "gi ả m giá") or squashes a whole page into one line — words and
+  line breaks now follow where the text actually sits on the page.
+- **An attached file no longer dumps its whole text into your message bubble.** It shows as a
+  file chip, including in older conversations saved before the fix.
+- **Editing an MCP server keeps its sign-in settings.** Saving the edit form used to drop a
+  server's pre-registered OAuth client (client id / callback port) silently.
+
 ## 0.12.7 — 2026-09-24
 
 **Connect any MCP server, and a team of QC bots in Chat**
