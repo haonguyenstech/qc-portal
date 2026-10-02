@@ -22,8 +22,10 @@ import {
   ChevronRight,
   Compass,
   Crosshair,
+  Eye,
   File as FileIcon,
   FileCode2,
+  FileCog,
   FileText,
   Files,
   Folder,
@@ -62,6 +64,7 @@ import {
   getRun,
   listCrawledTickets,
   listRunFiles,
+  listTemplates,
   openRunFolder,
   runFileUrl,
   screenshotUrl,
@@ -69,6 +72,14 @@ import {
 } from '@/lib/api'
 import { ClickupFilingBar } from '@/components/ClickupFilingBar'
 import { severityMeta, type FilingItem } from '@/lib/clickup-filing'
+import {
+  ISSUE_TEMPLATE_KEY,
+  buildIssueVars,
+  parseIssueSection,
+  parseIssuesPreamble,
+  renderIssueTemplate,
+  type IssueSectionFields,
+} from '@/lib/issueTemplate'
 import { StatusBadge } from '@/lib/status'
 import type { LogEvent } from '@/lib/types'
 import { cn } from '@/lib/utils'
@@ -559,6 +570,11 @@ type ParsedIssue = {
    */
   severity: string | null
   screenshots: string[]
+  /** The `## ISSUE-n — …` heading as written (tags and all) — for the ClickUp issue template. */
+  heading: string
+  /** The issue split into template fields. null for the table / whole-file fallbacks,
+   *  which have no per-field structure to split. */
+  fields: IssueSectionFields | null
 }
 
 // Screenshot paths the qc-testing skill writes into an issue body, e.g.
@@ -606,8 +622,8 @@ function extractSeverity(text: string): string | null {
 function parseIssues(md: string | null): ParsedIssue[] {
   if (!md?.trim()) return []
   const lines = md.split('\n')
-  const sections: { title: string; body: string[] }[] = []
-  let current: { title: string; body: string[] } | null = null
+  const sections: { title: string; heading: string; body: string[] }[] = []
+  let current: { title: string; heading: string; body: string[] } | null = null
 
   for (const line of lines) {
     const heading = line.match(/^(#{2,4})\s+(.+)$/)
@@ -619,7 +635,7 @@ function parseIssues(md: string | null): ParsedIssue[] {
         (/^issue[-\s#]*\d+/i.test(title) || /^defect[-\s#]*\d+/i.test(title))
       if (isIssueHeading) {
         if (current) sections.push(current)
-        current = { title, body: [] }
+        current = { title, heading: heading[2].trim(), body: [] }
         continue
       }
       if (level === 2 && current) {
@@ -641,8 +657,13 @@ function parseIssues(md: string | null): ParsedIssue[] {
         id: `issue-${index}`,
         title: section.title.slice(0, 140),
         description,
-        severity: extractSeverity(section.body.join('\n')),
+        // The skill writes severity in the HEADING ("[Severity: High]"), not the body —
+        // reading the body alone left it null, so the bug was filed with the parent's
+        // priority (usually none) instead of its own.
+        severity: extractSeverity(`${section.heading}\n${section.body.join('\n')}`),
         screenshots,
+        heading: section.heading,
+        fields: parseIssueSection(section.heading, section.body),
       }
     })
     .filter((issue) => issue.title.length > 0)
@@ -675,6 +696,8 @@ function parseIssues(md: string | null): ParsedIssue[] {
           description,
           severity: extractSeverity(description),
           screenshots: extractScreenshots(description),
+          heading: title,
+          fields: null,
         }
       })
       .slice(0, 20)
@@ -688,6 +711,8 @@ function parseIssues(md: string | null): ParsedIssue[] {
       description: md.trim().slice(0, 6000),
       severity: extractSeverity(md),
       screenshots: extractScreenshots(md),
+      heading: stripMd(firstContent ?? 'QC issue'),
+      fields: null,
     },
   ]
 }
@@ -1173,8 +1198,17 @@ function IssueCard({
               anchor && 'group-hover:text-primary',
             )}
           >
-            {issue.title}
+            {/* The clean summary — the heading's [Severity]/[Layer] tags are already
+                the badge beside it. The anchor still keys off `issue.title`. */}
+            {issue.fields?.title
+              ? `${issue.fields.id ? `${issue.fields.id} — ` : ''}${issue.fields.title}`
+              : issue.title}
           </span>
+          {issue.fields?.layer && (
+            <span className="hidden shrink-0 rounded-full border border-border/60 px-1.5 py-0.5 text-[10px] text-muted-foreground sm:inline">
+              {issue.fields.layer}
+            </span>
+          )}
           {issue.screenshots.length > 0 && (
             <span className="inline-flex shrink-0 items-center gap-1 text-[10px] text-muted-foreground">
               <ImageIcon className="size-3" />
@@ -1341,18 +1375,162 @@ function ScreenshotLightbox({
   )
 }
 
+/**
+ * One line above the commit bar saying how the cards will be WORDED — the project's
+ * ClickUp issue template, or the issue text as the run wrote it — with the way to see
+ * the actual cards and the way to change the wording.
+ */
+function CardFormatStrip({
+  template,
+  loading,
+  count,
+  onPreview,
+}: {
+  template: string | null
+  loading: boolean
+  count: number
+  onPreview: () => void
+}) {
+  return (
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-2 rounded-2xl border border-border/60 bg-muted/30 px-3.5 py-2.5">
+      <span className="flex size-7 shrink-0 items-center justify-center rounded-xl border border-border/60 bg-background text-muted-foreground">
+        <FileCog className="size-3.5" />
+      </span>
+      <div className="min-w-0 flex-1 text-xs leading-relaxed">
+        <p className="font-semibold text-foreground">
+          {loading
+            ? 'Card format…'
+            : template
+              ? 'Card format: project ClickUp issue template'
+              : 'Card format: the issue text as the run wrote it'}
+        </p>
+        <p className="text-muted-foreground">
+          {template ? (
+            <>
+              Name and description come from{' '}
+              <span className="font-mono">testing/templates/{ISSUE_TEMPLATE_KEY}.md</span>.
+            </>
+          ) : (
+            'No ClickUp issue template is set for this project — add one to control the card name and layout.'
+          )}
+        </p>
+      </div>
+      <div className="flex shrink-0 items-center gap-1.5">
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={onPreview}
+          disabled={count === 0}
+          className="h-8 rounded-full text-xs transition-all duration-200 active:scale-[0.98]"
+        >
+          <Eye className="size-3.5" />
+          Preview {count > 0 ? count : ''} card{count === 1 ? '' : 's'}
+        </Button>
+        <Button
+          asChild
+          variant="ghost"
+          size="sm"
+          className="h-8 rounded-full text-xs text-muted-foreground hover:text-foreground"
+        >
+          <Link to="/templates">{template ? 'Edit template' : 'Set up template'}</Link>
+        </Button>
+      </div>
+    </div>
+  )
+}
+
+/** The selected issues exactly as ClickUp will receive them — name + rendered body. */
+function FiledCardsPreview({
+  open,
+  onOpenChange,
+  items,
+  templated,
+}: {
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  items: FilingItem[]
+  templated: boolean
+}) {
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="flex max-h-[90vh] w-[95vw] flex-col gap-0 overflow-hidden p-0 sm:max-w-3xl">
+        <DialogHeader className="shrink-0 space-y-1 border-b border-border/60 bg-muted/30 px-5 py-3">
+          <DialogTitle className="flex items-center gap-2 text-base">
+            <Eye className="size-4 text-muted-foreground" />
+            {items.length} ClickUp card{items.length === 1 ? '' : 's'} as they will be filed
+          </DialogTitle>
+          <DialogDescription className="text-xs">
+            {templated
+              ? `Worded by testing/templates/${ISSUE_TEMPLATE_KEY}.md. Screenshots are attached and posted as a comment separately.`
+              : 'No project template — each card carries the issue text as written. Screenshots are attached and posted as a comment separately.'}
+          </DialogDescription>
+        </DialogHeader>
+        <div className="min-h-0 flex-1 space-y-3 overflow-auto px-5 py-4">
+          {items.map((item) => (
+            <div key={item.id} className="rounded-2xl border border-border/60 bg-card">
+              <div className="flex items-start gap-2 border-b border-border/60 bg-muted/40 px-3.5 py-2">
+                <span className="mt-0.5 shrink-0 text-[10px] font-semibold tracking-wide text-muted-foreground uppercase">
+                  Name
+                </span>
+                <p className="min-w-0 flex-1 text-sm font-semibold break-words">{item.title}</p>
+              </div>
+              <div className="px-3.5 py-2.5 text-sm">
+                <Markdown remarkPlugins={[remarkGfm]} components={issuePreviewComponents}>
+                  {item.description}
+                </Markdown>
+              </div>
+            </div>
+          ))}
+        </div>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+/** Compact markdown for the card preview (the page's own renderers are tuned for the
+ *  full report, with anchors and screenshot resolution this preview doesn't want). */
+const issuePreviewComponents: Components = {
+  p: ({ children }) => <p className="my-1.5 leading-relaxed text-foreground/90">{children}</p>,
+  ol: ({ children }) => <ol className="my-1.5 list-decimal space-y-0.5 pl-5">{children}</ol>,
+  ul: ({ children }) => <ul className="my-1.5 list-disc space-y-0.5 pl-5">{children}</ul>,
+  hr: () => <hr className="my-3 border-border/60" />,
+  h1: ({ children }) => <p className="my-1.5 font-semibold">{children}</p>,
+  h2: ({ children }) => <p className="my-1.5 font-semibold">{children}</p>,
+  h3: ({ children }) => <p className="my-1.5 font-semibold">{children}</p>,
+  code: ({ children }) => (
+    <code className="rounded bg-muted px-1 py-0.5 font-mono text-[12px]">{children}</code>
+  ),
+  a: ({ children, href }) => (
+    <a href={href} target="_blank" rel="noreferrer" className="text-primary underline-offset-2 hover:underline">
+      {children}
+    </a>
+  ),
+}
+
 function IssueClickupPanel({
   issuesMd,
   projectId,
   ticketId,
+  appUrl,
   slug,
 }: {
   issuesMd: string | null
   projectId: string
   ticketId: string
+  appUrl: string
   slug: string | null
 }) {
   const issues = parseIssues(issuesMd)
+  // The project's ClickUp issue template (/templates). Same query key as that page,
+  // so saving it there refreshes the wording here.
+  const templates = useQuery({
+    queryKey: ['templates', projectId],
+    queryFn: () => listTemplates(projectId),
+  })
+  const template =
+    templates.data?.find((t) => t.key === ISSUE_TEMPLATE_KEY && t.content.trim())?.content ?? null
+  const [showCards, setShowCards] = useState(false)
   const [selected, setSelected] = useState<Set<string>>(() => new Set(issues.map((issue) => issue.id)))
   // Screenshot path currently open in the lightbox (null = closed).
   const [viewer, setViewer] = useState<string | null>(null)
@@ -1362,15 +1540,41 @@ function IssueClickupPanel({
 
   // The selected issues, worded for ClickUp. The parent field, the inherit preview
   // and the create call all live in <ClickupFilingBar/>, shared with Design Check.
+  // With a project template the wording comes from it; without one the issue is filed
+  // exactly as it always was. Either way this list IS what gets sent — the card
+  // preview below renders these same items, never a second rendering of its own.
+  const preamble = parseIssuesPreamble(issuesMd ?? '')
   const filingItems: FilingItem[] = issues
     .filter((issue) => selected.has(issue.id))
-    .map((issue) => ({
-      id: issue.id,
-      title: issue.title,
-      description: [issue.description, '', `Source: QC run ${ticketId}`].join('\n'),
-      severity: issue.severity,
-      screenshots: issue.screenshots,
-    }))
+    .map((issue) => {
+      const legacy = [issue.description, '', `Source: QC run ${ticketId}`].join('\n')
+      const card = template
+        ? renderIssueTemplate(
+            template,
+            buildIssueVars({
+              heading: issue.heading,
+              legacyTitle: issue.title,
+              fields: issue.fields ?? parseIssueSection(issue.heading, []),
+              severity: issue.severity,
+              body: issue.description,
+              screenshots: issue.screenshots,
+              ticket: ticketId,
+              appUrl,
+              environment: preamble.environment,
+              runDate: preamble.runDate,
+            }),
+            issue.title,
+          )
+        : null
+      return {
+        id: issue.id,
+        title: card?.title || issue.title,
+        // A template that renders to nothing must not file an empty card.
+        description: card?.description || legacy,
+        severity: issue.severity,
+        screenshots: issue.screenshots,
+      }
+    })
 
   if (issues.length === 0) return null
 
@@ -1450,9 +1654,23 @@ function IssueClickupPanel({
           ))}
         </div>
 
+        <CardFormatStrip
+          template={template}
+          loading={templates.isLoading}
+          count={filingItems.length}
+          onPreview={() => setShowCards(true)}
+        />
+
         {/* Commit bar: parent ticket + inherit preview + create (shared with Design Check) */}
         <ClickupFilingBar projectId={projectId} items={filingItems} slug={slug} noun="issue" />
       </div>
+
+      <FiledCardsPreview
+        open={showCards}
+        onOpenChange={setShowCards}
+        items={filingItems}
+        templated={!!template}
+      />
 
       {/* Screenshot lightbox */}
       <ScreenshotLightbox
@@ -2529,6 +2747,7 @@ export default function RunDetailPage() {
                 issuesMd={run.issuesMd}
                 projectId={run.projectId}
                 ticketId={run.ticketId}
+                appUrl={run.appUrl}
                 slug={run.slug ?? null}
               />
               {!run.issuesMd && diagnosis ? (

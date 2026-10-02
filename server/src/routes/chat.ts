@@ -3,6 +3,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { PORT, skillsDirFor, testingDirFor, ticketsDirFor } from '../config.js'
 import { getDatabaseRow } from '../db.js'
+import { issueTemplateBlock } from '../chatIssueTemplate.js'
 import { dbMapDocName } from '../dbMap.js'
 import { resolveProject } from '../projectScope.js'
 import { ensureQcBrowser } from '../qcBrowser.js'
@@ -1997,6 +1998,10 @@ chatRouter.post('/stream', async (req, res) => {
   add('Tagged items and picked skills', mentions.block)
   add('Attached images', imagePromptBlock(images))
   add('Attached files', docPromptBlock(docs))
+  // "Create a ClickUp bug for …" → the project's ClickUp issue template, so a card filed
+  // from chat is worded like one filed from Run → Issues (see chatIssueTemplate.ts).
+  // Before `attachments` is cut, so a team bot that does the filing gets it too.
+  add('ClickUp issue template', issueTemplateBlock(root, prompt))
   // Everything above is what the engineer ATTACHED; the action and everything below it are
   // the plain assistant's reply contract. The team's bots get the attachments, and the
   // action only reaches the bots the human addressed (see `runTeamTurn`) — otherwise

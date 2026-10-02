@@ -1363,3 +1363,16 @@ does this endpoint validate?").
   follow-up naming two bots got exactly those two; a reload mid-exchange re-attached and showed
   every later speaker; Stop mid-reply kept Lead's message and saved Analyst's partial as failed
   with the conversation no longer running.
+
+### Filing a ClickUp bug from chat uses the project's issue template
+
+"Create a ClickUp bug for ISSUE-2" / "tạo ticket trên clickup cho lỗi này" in /chat is done by the
+MODEL through the ClickUp MCP, so the portal can't render the card itself the way Run → Issues does.
+Instead `server/src/chatIssueTemplate.ts` appends the project's `testing/templates/clickup-issue.md`
+as a recorded context block ("ClickUp issue template") with the placeholder meanings and section
+rules: name from the `title:` front matter, Markdown description, no `{{…}}` left over, a field with
+no source stays EMPTY (never invented to fill the template), priority from severity. Only on a turn
+that looks like a create request (`wantsTrackerCreate`, English + Vietnamese, liberal on purpose);
+a follow-up "ok, go" still has it through the resumed CLI session. Added before the attachments are
+cut, so a team bot doing the filing gets it too. No template saved → no block. The placeholder list
+MIRRORS `ISSUE_TEMPLATE_VARS` in `web/src/lib/issueTemplate.ts` — keep them in step.

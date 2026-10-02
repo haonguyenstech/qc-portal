@@ -14,9 +14,12 @@ import {
   FolderTree,
   ListChecks,
   Loader2,
+  PencilLine,
   RotateCcw,
   Save,
+  Send,
   Settings,
+  TriangleAlert,
   Trash2,
   X,
 } from 'lucide-react'
@@ -32,8 +35,17 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
+import { Textarea } from '@/components/ui/textarea'
+import {
+  ISSUE_TEMPLATE_KEY,
+  ISSUE_TEMPLATE_VARS,
+  SAMPLE_ISSUE_VARS,
+  issueTemplateProblems,
+  renderIssueTemplate,
+} from '@/lib/issueTemplate'
 import {
   deleteTemplate,
+  getTemplateDefault,
   listTemplateDefaults,
   listTemplates,
   openTemplatesFolder,
@@ -100,6 +112,10 @@ interface TemplateKind {
   label: string
   icon: typeof FileText
   description: string
+  /** What happens once it is removed — said in the confirm dialog. */
+  removeNote: string
+  /** Written by hand in the page's editor (placeholders), not only uploaded. */
+  editable?: boolean
 }
 
 const TEMPLATE_KINDS: TemplateKind[] = [
@@ -109,6 +125,8 @@ const TEMPLATE_KINDS: TemplateKind[] = [
     icon: ClipboardList,
     description:
       'The structure Claude matches when drafting test cases on the TestCase page. Upload there still overrides this per run.',
+    removeNote:
+      'Test-case generation then falls back to no template — cases are drafted in the model’s own structure until you upload one again.',
   },
   {
     key: 'design-check',
@@ -116,6 +134,18 @@ const TEMPLATE_KINDS: TemplateKind[] = [
     icon: ListChecks,
     description:
       'A standard checklist of things to verify on the Design Check page (spacing, component states, copy, responsiveness, accessibility…). Auto-applied to every Design Check run as criteria — the model reports a finding for each item.',
+    removeNote:
+      'Design Check then runs without the project checklist until you upload one again.',
+  },
+  {
+    key: ISSUE_TEMPLATE_KEY,
+    label: 'ClickUp issue template',
+    icon: Send,
+    description:
+      'How a QC run’s issue is worded when it is filed to ClickUp from Run → Issues: the card name and its description, built from placeholders like {{title}}, {{steps}}, {{expected}}, {{actual}}. Assignee, tags, priority and screenshots are still filled in automatically.',
+    removeNote:
+      'Issues are then filed with the issue text exactly as the run wrote it, as before templates existed.',
+    editable: true,
   },
 ]
 
@@ -146,6 +176,195 @@ async function readTemplateFile(file: File): Promise<string> {
   return (await file.text()).trim()
 }
 
+/**
+ * Write / edit the ClickUp issue template by hand: the text on the left, what a real
+ * issue becomes on the right. The preview renders through the SAME function the
+ * Issues tab files with (`renderIssueTemplate`), against a sample issue, so what you
+ * see here is what lands in ClickUp. Placeholders are clicked in, not remembered.
+ */
+function IssueTemplateEditor({
+  initial,
+  savedContent,
+  hasDefault,
+  saving,
+  onSave,
+  onClose,
+}: {
+  initial: string
+  /** What is on disk now — saving identical text is a no-op, so the button says so. */
+  savedContent: string | null
+  hasDefault: boolean
+  saving: boolean
+  onSave: (content: string) => void
+  onClose: () => void
+}) {
+  const [text, setText] = useState(initial)
+  const area = useRef<HTMLTextAreaElement>(null)
+  const loadDefault = useMutation({
+    mutationFn: () => getTemplateDefault(ISSUE_TEMPLATE_KEY),
+    onSuccess: (res) => setText(res.content),
+    onError: (err) =>
+      toast.error('Could not load the default template', {
+        description: err instanceof Error ? err.message : undefined,
+      }),
+  })
+
+  const problems = issueTemplateProblems(text)
+  const card = renderIssueTemplate(text, SAMPLE_ISSUE_VARS, SAMPLE_ISSUE_VARS.heading)
+  const unchanged = savedContent !== null && text === savedContent
+  const tooBig = new Blob([text]).size > MAX_BYTES
+  const blocked = problems.some((p) => p.blocking)
+
+  function insert(snippet: string) {
+    const el = area.current
+    if (!el) return setText((t) => t + snippet)
+    const start = el.selectionStart ?? text.length
+    const end = el.selectionEnd ?? start
+    const next = text.slice(0, start) + snippet + text.slice(end)
+    setText(next)
+    requestAnimationFrame(() => {
+      el.focus()
+      el.setSelectionRange(start + snippet.length, start + snippet.length)
+    })
+  }
+
+  return (
+    <Dialog open onOpenChange={(o) => !o && !saving && onClose()}>
+      <DialogContent className="flex max-h-[94vh] w-[97vw] flex-col gap-0 overflow-hidden p-0 sm:max-w-[84rem]">
+        <DialogHeader className="shrink-0 space-y-1 border-b border-border/60 bg-muted/30 px-5 py-3">
+          <DialogTitle className="flex items-center gap-2 text-base">
+            <Send className="size-4 text-muted-foreground" />
+            ClickUp issue template
+          </DialogTitle>
+          <DialogDescription className="text-xs">
+            testing/templates/{ISSUE_TEMPLATE_KEY}.md · Markdown with{' '}
+            <code className="font-mono">{'{{placeholders}}'}</code>. The optional{' '}
+            <code className="font-mono">title:</code> line between <code className="font-mono">---</code>{' '}
+            sets the card name.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="grid min-h-0 flex-1 gap-0 overflow-hidden lg:grid-cols-2">
+          {/* Left: the template + its placeholders */}
+          <div className="flex min-h-0 flex-col gap-3 overflow-auto border-b border-border/60 p-4 lg:border-r lg:border-b-0">
+            <Textarea
+              ref={area}
+              value={text}
+              onChange={(e) => setText(e.target.value)}
+              spellCheck={false}
+              placeholder={'---\ntitle: [{{severity}}] {{title}}\n---\n**Steps to reproduce:**\n{{steps}}\n\n**Expected:** {{expected}}\n\n**Actual:** {{actual}}'}
+              className="min-h-[20rem] flex-1 resize-none font-mono text-[12px] leading-relaxed shadow-none [field-sizing:fixed]"
+            />
+            {problems.length > 0 && (
+              <div className="space-y-1 rounded-xl border border-amber-200 bg-amber-50/60 px-3 py-2 text-[11px] text-amber-800 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-300">
+                {problems.map((p) => (
+                  <p key={p.text} className="flex items-start gap-1.5">
+                    <TriangleAlert className="mt-px size-3 shrink-0" />
+                    {p.text}
+                    {p.blocking ? ' Fix it to save.' : ''}
+                  </p>
+                ))}
+              </div>
+            )}
+            <div className="space-y-1.5">
+              <p className="text-[11px] font-semibold text-foreground">
+                Placeholders{' '}
+                <span className="font-normal text-muted-foreground">
+                  — click to insert. Wrap text in{' '}
+                  <code className="font-mono">{'{{#name}}…{{/name}}'}</code> to show it only when
+                  the field has a value, <code className="font-mono">{'{{^name}}…{{/name}}'}</code>{' '}
+                  only when it is empty.
+                </span>
+              </p>
+              <div className="flex flex-wrap gap-1.5">
+                {ISSUE_TEMPLATE_VARS.map((v) => (
+                  <button
+                    key={v.name}
+                    type="button"
+                    title={v.description}
+                    onClick={() => insert(`{{${v.name}}}`)}
+                    className="rounded-xl border border-border/60 bg-muted/50 px-2 py-0.5 font-mono text-[11px] text-foreground/80 transition-colors hover:border-border hover:bg-muted"
+                  >
+                    {`{{${v.name}}}`}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* Right: what a real issue becomes */}
+          <div className="flex min-h-0 flex-col overflow-auto bg-muted/20 p-4">
+            <p className="mb-2 text-[11px] font-semibold tracking-wide text-muted-foreground uppercase">
+              Preview · a sample issue as the ClickUp card
+            </p>
+            <div className="rounded-2xl border border-border/60 bg-card">
+              <div className="border-b border-border/60 bg-muted/40 px-3.5 py-2">
+                <p className="text-[10px] font-semibold tracking-wide text-muted-foreground uppercase">
+                  Name
+                </p>
+                <p className="text-sm font-semibold break-words">{card.title}</p>
+              </div>
+              <div className={cn(MD_CLASS, 'px-3.5 py-2.5 [&_li]:text-foreground/90 [&_p]:text-foreground/90')}>
+                {card.description ? (
+                  <ReactMarkdown remarkPlugins={[remarkGfm]} components={MD_COMPONENTS}>
+                    {card.description}
+                  </ReactMarkdown>
+                ) : (
+                  <p className="text-muted-foreground italic">
+                    Empty — the issue would be filed with its text as written instead.
+                  </p>
+                )}
+              </div>
+            </div>
+            <p className="mt-2 text-[11px] text-muted-foreground">
+              Assignee and tags come from the parent ticket, priority from the issue&apos;s
+              severity, and screenshots are attached and posted as a comment — the template
+              only decides the wording.
+            </p>
+          </div>
+        </div>
+
+        <DialogFooter className="shrink-0 items-center gap-2 border-t border-border/60 bg-muted/30 px-5 py-3 sm:justify-between">
+          <div>
+            {hasDefault && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={() => loadDefault.mutate()}
+                disabled={saving || loadDefault.isPending}
+                className="rounded-full text-muted-foreground hover:text-foreground"
+              >
+                {loadDefault.isPending ? (
+                  <Loader2 className="size-3.5 animate-spin" />
+                ) : (
+                  <RotateCcw className="size-3.5" />
+                )}
+                Start from the default
+              </Button>
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            {tooBig && <span className="text-[11px] text-destructive">Over 200 KB</span>}
+            <Button type="button" variant="outline" onClick={onClose} disabled={saving} className="rounded-full">
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              onClick={() => onSave(text)}
+              disabled={saving || !text.trim() || tooBig || blocked || unchanged}
+              className="rounded-full transition-all duration-200 active:scale-[0.98]"
+            >
+              {saving ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}
+              Save template
+            </Button>
+          </div>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 /** One template: upload a file (csv / md / txt / json / excel) → preview → save.
  *  No manual typing — the content always comes from an uploaded file. */
 function TemplateCard({
@@ -169,12 +388,14 @@ function TemplateCard({
   const [showPreview, setShowPreview] = useState(false)
   const [confirmReset, setConfirmReset] = useState(false)
   const [confirmRemove, setConfirmRemove] = useState(false)
+  const [editing, setEditing] = useState(false)
 
   const save = useMutation({
     mutationFn: (content: string) => saveTemplate(kind.key, content, projectId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['templates', projectId] })
       setPending(null)
+      setEditing(false)
       toast.success('Template saved', {
         description: `${kind.label} · testing/templates/${kind.key}.md`,
       })
@@ -291,11 +512,19 @@ function TemplateCard({
               type="button"
               variant="ghost"
               size="sm"
-              onClick={() => setShowPreview(true)}
+              onClick={() => (kind.editable ? setEditing(true) : setShowPreview(true))}
               disabled={!previewContent}
               className="h-7 shrink-0 gap-1.5 rounded-full px-2.5 text-xs"
             >
-              <Eye className="size-3.5" /> Preview
+              {kind.editable ? (
+                <>
+                  <PencilLine className="size-3.5" /> Preview &amp; edit
+                </>
+              ) : (
+                <>
+                  <Eye className="size-3.5" /> Preview
+                </>
+              )}
             </Button>
             {pending && (
               <button
@@ -363,6 +592,18 @@ function TemplateCard({
               {pending ? 'Pick another' : 'Replace'}
             </Button>
           )}
+          {kind.editable && !pending && !saved && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setEditing(true)}
+              disabled={busy}
+              className="rounded-full transition-all duration-200 active:scale-[0.98]"
+            >
+              <PencilLine className="size-3.5" />
+              Write one
+            </Button>
+          )}
           {hasDefault && !pending && (
             <Button
               variant="outline"
@@ -398,6 +639,17 @@ function TemplateCard({
         </div>
       </CardContent>
 
+      {kind.editable && editing && (
+        <IssueTemplateEditor
+          initial={pending?.content ?? saved?.content ?? ''}
+          savedContent={saved?.content ?? null}
+          hasDefault={hasDefault}
+          saving={save.isPending}
+          onSave={(content) => save.mutate(content)}
+          onClose={() => setEditing(false)}
+        />
+      )}
+
       <Dialog open={confirmRemove} onOpenChange={(o) => !remove.isPending && setConfirmRemove(o)}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
@@ -411,9 +663,7 @@ function TemplateCard({
                 is deleted from disk.
               </span>
               <span className="block">
-                {kind.key === 'testcase'
-                  ? 'Test-case generation then falls back to no template — cases are drafted in the model’s own structure until you upload one again.'
-                  : 'Design Check then runs without the project checklist until you upload one again.'}
+                {kind.removeNote}
                 {hasDefault
                   ? ' You can put the portal’s default back at any time with “Use default”.'
                   : ''}
@@ -609,7 +859,7 @@ export default function ProjectSettingsPage() {
             <h1 className="text-3xl font-semibold tracking-tight">Templates</h1>
             <p className="text-sm text-muted-foreground">
               Per-project file templates{activeProject ? ` for ${activeProject.name}` : ''}. Upload
-              a file (no manual typing); it's stored under{' '}
+              a file (the ClickUp issue template can also be written here); it's stored under{' '}
               <span className="font-mono text-foreground">testing/templates/</span> so the QC skill
               and the Portal can reuse it.
             </p>

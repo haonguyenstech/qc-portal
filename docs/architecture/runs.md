@@ -173,6 +173,13 @@ rule that panel enforces for BOTH — don't fork it to change one of them.
 - **`applied` reports what ClickUp actually stored** (it echoes the created task's own
   `assignees`/`priority`), because a user who isn't a member of the list is silently dropped on
   create. The panel must not claim a bug was assigned when it wasn't.
+- **The wording is the project's `clickup-issue` template** (`lib/issueTemplate.ts`, see
+  `design-check-and-templates.md`); `parseIssues` keeps each section's raw heading and splits it
+  into fields (`parseIssueSection`) for it. The strip above the commit bar says which wording is in
+  use and opens a preview of the exact cards `filingItems` will send.
+- **Severity is read from the heading AND the body.** The skill writes it as a heading tag
+  (`## ISSUE-1 — … [Severity: Low]`); reading the body alone left it `null`, so every such bug was
+  filed with the parent's priority (usually none) instead of its own.
 - `request()` in `lib/api.ts` throws the **raw response body**, so a ClickUp failure arrives as
   `{"error":"ClickUp API 404: {…}"}`. `errorSentence()` unwraps both layers for this panel — don't
   print the envelope at the engineer.

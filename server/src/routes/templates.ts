@@ -75,6 +75,20 @@ templatesRouter.get('/defaults', (_req, res) => {
 })
 
 /**
+ * GET /api/templates/defaults/:key — the CONTENT of the default the portal ships for
+ * one kind, without writing it anywhere. The /templates editor starts a new template
+ * from it, so the web bundle never carries a second copy that could drift.
+ */
+templatesRouter.get('/defaults/:key', (req, res) => {
+  if (!KEY_RE.test(req.params.key)) return res.status(400).json({ error: 'invalid template key' })
+  try {
+    res.json({ key: req.params.key, content: fs.readFileSync(bundledTemplateFile(req.params.key), 'utf8') })
+  } catch {
+    res.status(404).json({ error: `the portal ships no default "${req.params.key}" template` })
+  }
+})
+
+/**
  * POST /api/templates/open — reveal the project's testing/templates folder in the
  * OS file explorer on the machine running the server. Creates it first if missing.
  */

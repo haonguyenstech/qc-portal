@@ -1512,6 +1512,11 @@ export interface ProjectTemplate {
 }
 
 /** Every reusable template saved under the project's testing/templates/. */
+/** The content of the default the portal ships for one template kind (read-only). */
+export function getTemplateDefault(key: string): Promise<{ key: string; content: string }> {
+  return request(`/api/templates/defaults/${encodeURIComponent(key)}`)
+}
+
 export function listTemplates(projectId: string): Promise<ProjectTemplate[]> {
   return request(`/api/templates?projectId=${encodeURIComponent(projectId)}`)
 }

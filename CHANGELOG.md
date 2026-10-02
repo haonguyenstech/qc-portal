@@ -3,6 +3,33 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.12.9 — 2026-10-02
+
+**Word your ClickUp bugs your way, with one issue template**
+
+### Added
+
+- **A ClickUp issue template per project.** *Templates* now has a *ClickUp issue* template
+  you write by hand: click a placeholder (title, severity, steps, expected, actual,
+  environment…) to insert it, and see a live preview on a sample issue as you type. A
+  ready-made default ships with every project — *Start from the default* to begin from it. A
+  placeholder the portal doesn't know is flagged, and a template with a broken section won't
+  save, so a stray tag never lands on a real card.
+- **Preview the exact cards before filing.** On a run's *Issues* tab, a strip above the
+  *File* bar says which wording is in use, and *Preview N cards* shows the name and
+  description of every card exactly as ClickUp will get it.
+- **Chat follows the same template.** Ask Chat to "create a ClickUp bug for ISSUE-2" (or
+  "tạo ticket trên clickup cho lỗi này") and the AI words the card with your project's
+  template — leaving a field empty rather than inventing one to fill it.
+
+### Fixed
+
+- **Bugs are filed with their own severity.** A severity written in the issue's heading
+  (`[Severity: Low]`) was ignored, so those bugs took the parent task's priority — usually
+  none. It is now read from the heading as well as the body.
+
+No template saved? Issues are filed exactly as before.
+
 ## 0.12.8 — 2026-09-28
 
 **Sign in to hosted MCP servers, and every file a chat touched in one place**

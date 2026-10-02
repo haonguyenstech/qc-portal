@@ -121,4 +121,25 @@ to expose a new upload slot. Current kinds:
   saved `testing/templates/design-check.md` (key `CHECKLIST_TEMPLATE_KEY` via `readChecklist`). The page's
   Checklist upload (md/csv/xlsx, Excel→CSV in-browser, preview dialog) shows "Using project checklist"
   with Preview/Override when one is saved, exactly like the TestCase template upload.
+- `clickup-issue` — the project's **ClickUp issue template**: how a QC run's issue is WORDED when
+  Run → Issues files it (card name + Markdown description). Mustache subset — `{{name}}`,
+  `{{#name}}…{{/name}}` (only when non-empty), `{{^name}}…{{/name}}` (only when empty) — plus an
+  optional front matter whose `title:` line is the card name. The placeholder catalog
+  (`ISSUE_TEMPLATE_VARS`), the issue → fields parser and the renderer all live in
+  **`web/src/lib/issueTemplate.ts`**, and it is rendered **in the browser**, not the server: the
+  Issues tab previews the exact cards before filing ("Preview N cards"), and the /templates editor
+  previews a sample issue — both through the same `renderIssueTemplate`, so neither preview is a
+  second implementation. The server still just receives `{title, description}`; assignee / tags /
+  priority / screenshots are untouched by the template.
+  This is the one kind **written by hand** on /templates (`editable` in `TEMPLATE_KINDS` →
+  `IssueTemplateEditor`: textarea, click-to-insert placeholders, live preview). An unknown
+  placeholder is a warning; an unclosed section or an empty body **blocks saving**, because the
+  stray tag would land on a real card as literal text. A bundled default ships
+  (`templates/project-templates/clickup-issue.md`, served read-only by
+  `GET /api/templates/defaults/:key` for the editor's "Start from the default"), so `templateSync`
+  seeds it into every project. **No template (removed) → issues are filed exactly as before
+  templates existed** (issue text as written + `Source: QC run …`); a template that renders to an
+  empty body falls back the same way rather than filing an empty card.
+  **/chat uses it too**: a "create a ClickUp bug…" turn gets the template injected as
+  instructions (`chatIssueTemplate.ts`, see `chat.md`), because there the model files the card.
 
