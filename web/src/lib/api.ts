@@ -912,6 +912,71 @@ export function jiraStatus(projectId?: string): Promise<{ configured: boolean }>
   return request(`/api/jira/status${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ''}`)
 }
 
+/**
+ * The portal's own browser sign-in to a tracker — Jira (Atlassian's hosted MCP server),
+ * ClickUp (likewise) or Azure DevOps (Microsoft Entra; server/src/azureSignin.ts). One
+ * sign-in serves Tickets, issue filing, QC runs and Chat; no API token.
+ */
+export type SigninTracker = 'jira' | 'clickup' | 'azure'
+
+export interface TrackerSigninStatus {
+  signedIn: boolean
+  site: { url: string; name: string } | null
+  /** An API token is configured too, and wins over the sign-in. */
+  usingToken: boolean
+  /** When the last sign-in fully landed (ms); 0 = never. */
+  linkedAt: number
+  /** Azure DevOps only: every organization the account belongs to (`site` is the one used). */
+  orgs?: string[]
+  /** Azure DevOps only: signed in to Microsoft, but the organization lookup failed — the
+   *  engineer types it (`setAzureSigninOrg`) to finish, with no second sign-in. */
+  needsOrg?: boolean
+}
+/** @deprecated name — kept for existing imports. */
+export type JiraSigninStatus = TrackerSigninStatus
+
+export function trackerSigninStatus(tracker: SigninTracker, projectId: string): Promise<TrackerSigninStatus> {
+  return request(`/api/${tracker}/oauth/status?projectId=${encodeURIComponent(projectId)}`)
+}
+
+/** Start the sign-in; the URL is the provider's page, opened by the caller. `since` is
+ *  the current `linkedAt` — the sign-in has landed once status reports a later one. */
+export function startTrackerSignin(
+  tracker: SigninTracker,
+  projectId: string,
+  /** Azure DevOps: the organization to use, when the account has several (optional). */
+  org?: string,
+): Promise<{ url: string; since: number }> {
+  return request(`/api/${tracker}/oauth/start?projectId=${encodeURIComponent(projectId)}`, {
+    method: 'POST',
+    body: JSON.stringify({
+      origin: window.location.origin,
+      returnTo: window.location.pathname + window.location.search,
+      ...(org ? { org } : {}),
+    }),
+  })
+}
+
+/** Azure DevOps: choose / switch the organization the browser sign-in reads tickets from
+ *  (a listed one, or a typed name the server checks). `linked`: this finished the sign-in.
+ *  `resignin`: the organization is in another Microsoft tenant that needs its own sign-in
+ *  — start one with this organization. */
+export function setAzureSigninOrg(
+  org: string,
+  projectId: string,
+): Promise<{ ok: true; linked: boolean } | { ok: false; resignin: true; error: string }> {
+  return request(`/api/azure/oauth/site?projectId=${encodeURIComponent(projectId)}`, {
+    method: 'POST',
+    body: JSON.stringify({ org }),
+  })
+}
+
+export function signOutTracker(tracker: SigninTracker, projectId: string): Promise<{ ok: true }> {
+  return request(`/api/${tracker}/oauth/signout?projectId=${encodeURIComponent(projectId)}`, {
+    method: 'POST',
+  })
+}
+
 export function jiraWorkspaces(projectId?: string): Promise<ClickupWorkspace[]> {
   const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : ''
   return request(`/api/jira/workspaces${qs}`)
@@ -2286,7 +2351,11 @@ export function testMcp(
   )
 }
 
-export function removeMcp(name: string, projectId: string): Promise<void> {
+/** `signedOut`: the tracker whose portal browser sign-in ended with this server. */
+export function removeMcp(
+  name: string,
+  projectId: string,
+): Promise<{ ok: true; signedOut: SigninTracker | null }> {
   return request(
     `/api/mcp/${encodeURIComponent(name)}?projectId=${encodeURIComponent(projectId)}`,
     { method: 'DELETE' },

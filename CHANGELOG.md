@@ -3,6 +3,62 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.12.10 — 2026-10-02
+
+**One sign-in per tracker — now with Azure DevOps — and a tidier MCP page**
+
+### Added
+
+- **Sign in to Jira or ClickUp once, and everything uses it.** *Sign in with browser* on
+  the MCP page is now the portal's own login: the Tickets page browses and crawls with it,
+  Run → Issues files to ClickUp with it, and QC runs and Chat get the same login — no API
+  token, and no second sign-in. ClickUp's hosted login is not accepted by ClickUp's REST API,
+  so the portal reads and files through ClickUp's MCP tools instead.
+- **Azure DevOps by browser sign-in.** Pick Azure DevOps → *Sign in with browser* and log in
+  with your Microsoft account — no Personal Access Token. Tickets, QC runs and Chat all use
+  it (runs and chat through Microsoft's official Azure DevOps MCP server, started with a
+  fresh token each time). Type your organization in the form so the portal signs in to the
+  right Microsoft tenant; if it can't find one, a *Finish the Azure DevOps sign-in* banner
+  asks for it — usually with no second login. An account in several organizations can
+  switch on the Tickets page. Sign-in has to happen on the computer running the portal
+  (Microsoft only returns to `localhost`), and a single run or chat turn longer than about
+  an hour loses Azure access partway.
+- **One ticket tracker per project.** A project reads its tickets from ClickUp, Jira *or*
+  Azure DevOps. While one is connected the other two are locked in *Add server*, and the
+  portal says which server to disconnect first. Projects that already had two keep working.
+- **Templates page, rebuilt.** A list of templates on the left and the selected one on the
+  right, with an inline rendered / source preview and drag-and-drop upload. Run → Issues and
+  Design Check now open the template they use directly.
+
+### Changed
+
+- **A cleaner *Add MCP server* dialog.** Category pills instead of a long list, a compact
+  three-column grid, a tooltip on every tile saying what it is (or why it is locked), and
+  one tile per service — ClickUp, Jira, Azure DevOps and Figma each offer *Sign in* or *API
+  token* inside. The list is trimmed to what QC uses; Linear, GitLab, Context7, Brave
+  Search, Filesystem, Sequential Thinking and the token versions of Sentry and Notion are
+  gone (anything else is still a *Paste JSON* away, and servers you already added keep
+  working).
+- **A server is added once.** The same server (same address or command) under a second name,
+  or the same tracker a second way, is refused with the name of the one already there.
+- **The Tickets page no longer signs in.** With no tracker connected it shows one *Configure
+  MCP* button; every sign-in happens on the MCP page.
+- **The QC browser card is gone from the MCP page.** No project used it; nothing changes for
+  runs.
+
+### Fixed
+
+- **The sign-in page opens by itself** for Figma, Notion, Sentry and any other OAuth server,
+  as it already did for Jira and ClickUp — the browser used to block it as a popup.
+- **A signed-in row shows its status straight away** — *Checking…*, then *Connected* —
+  instead of no badge until a reload. Same after signing out, or closing the sign-in early.
+- **A new sign-in shows up without a reload.** Signing in again over a still-valid login made
+  the page refresh before the server row had been written.
+- **Disconnecting a signed-in tracker on the MCP page signs it out** — the Tickets page used
+  to keep showing its tickets.
+- **ClickUp sign-in no longer fails with "Invalid redirect_uri"** — its long sign-in address
+  was being read before it had fully arrived.
+
 ## 0.12.9 — 2026-10-02
 
 **Word your ClickUp bugs your way, with one issue template**

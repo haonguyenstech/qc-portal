@@ -16,6 +16,9 @@
 // the ticket UI stays empty. This keeps /tickets in lockstep with /mcp — configure
 // ClickUp in MCP to see ClickUp tickets, remove it to hide them.
 
+import { projectIdForRoot } from './projectScope.js'
+import { clickupSigninToken } from './clickupMcp.js'
+import { callHostedTool, hostedSite } from './hostedMcp.js'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import fs from 'node:fs'
 import { mcpJsonFor } from './config.js'
@@ -45,18 +48,24 @@ export function resolveProjectClickupToken(projectRoot: string): string | undefi
   try {
     const raw = fs.readFileSync(mcpJsonFor(projectRoot), 'utf8')
     const env = JSON.parse(raw)?.mcpServers?.clickup?.env
-    if (!env || typeof env !== 'object') return undefined
-    for (const key of ['CLICKUP_API_KEY', 'CLICKUP_MCP_API_KEY']) {
-      let v = env[key]
-      if (typeof v !== 'string' || !v) continue
-      const ref = v.match(/^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$/)
-      if (ref) v = process.env[ref[1]] ?? ''
-      if (v) return v
+    // No `clickup` entry is NOT "not configured" yet — the browser sign-in below may be.
+    if (env && typeof env === 'object') {
+      for (const key of ['CLICKUP_API_KEY', 'CLICKUP_MCP_API_KEY']) {
+        let v = env[key]
+        if (typeof v !== 'string' || !v) continue
+        const ref = v.match(/^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$/)
+        if (ref) v = process.env[ref[1]] ?? ''
+        if (v) return v
+      }
     }
   } catch {
     /* no file / bad json */
   }
-  return undefined
+  // No API token — the portal's browser sign-in to ClickUp's hosted server, if any
+  // (clickupMcp.ts). Sync on purpose: ~15 callers read this; the routes refresh the
+  // token first (`refreshClickupSignin`) so what is read here is current.
+  const projectId = projectIdForRoot(projectRoot)
+  return projectId ? clickupSigninToken(projectId) : undefined
 }
 
 export function clickupConfigured(): boolean {
@@ -69,7 +78,117 @@ function token(): string {
   return t
 }
 
+// ---- Browser sign-in: the same reads/writes through ClickUp's hosted MCP tools ----
+//
+// The token from ClickUp's hosted MCP sign-in is NOT accepted by the REST API
+// (measured: `401 {"err":"Oauth token not found","ECODE":"OAUTH_019"}`), so a project
+// signed in through the browser (clickupMcp.ts) gets the marker `mcp:<projectId>` as
+// its "token", and every function below that the Tickets page and Run → Issues filing
+// use branches to the MCP tools — returning the SAME normalized shapes, so nothing
+// downstream knows the difference. Anything else that only REST can do (Docs) says so
+// plainly instead of surfacing ClickUp's confusing 401 (`restNeedsToken`).
+
+export const MCP_TOKEN_PREFIX = 'mcp:'
+/** An attachment to fetch through the MCP download tool: `mcp-attachment:<task>|<id>`. */
+const MCP_ATTACHMENT = 'mcp-attachment:'
+
+/** The project whose browser sign-in this request uses, or null for a REST token. */
+function mcpProject(): string | null {
+  const t = currentToken()
+  return t?.startsWith(MCP_TOKEN_PREFIX) ? t.slice(MCP_TOKEN_PREFIX.length) : null
+}
+
+function restNeedsToken(): Error {
+  return Object.assign(
+    new Error(
+      'This ClickUp feature needs an API token — the browser sign-in covers tickets and issue filing, not this.',
+    ),
+    { status: 400 },
+  )
+}
+
+/** One ClickUp MCP tool call for the signed-in project, in its workspace. */
+async function mcpCall(name: string, args: Record<string, unknown>): Promise<any> {
+  const projectId = mcpProject()!
+  const k = { provider: 'clickup' as const, projectId }
+  const workspace = (() => {
+    try {
+      return hostedSite(k).cloudId
+    } catch {
+      return ''
+    }
+  })()
+  return callHostedTool(k, name, workspace ? { workspace_id: workspace, ...args } : args)
+}
+
+/** A created task, whether the tool answers with it or wraps it (`{task}`). */
+function unwrapTask(data: any): any {
+  return data?.task?.id ? data.task : data
+}
+
+/** MCP task rows carry `status` as a bare string (REST: `{status, color}`). */
+function toHitMcp(t: any): TaskHit {
+  const customId = t.custom_id ? String(t.custom_id) : null
+  const status = typeof t.status === 'string' ? t.status : String(t.status?.status ?? '')
+  return {
+    id: String(t.id),
+    customId,
+    displayId: customId ?? String(t.id),
+    name: String(t.name ?? ''),
+    status,
+    statusColor: String(t.status_color ?? t.status?.color ?? ''),
+    listName: String(t.list?.name ?? t.hierarchy?.subcategory?.name ?? ''),
+    url: String(t.url ?? ''),
+    parent: t.parent ? String(t.parent) : null,
+  }
+}
+
+/** Every task of a filter, newest first, paged like the REST list (100 / page). */
+async function mcpFilterTasks(
+  filter: Record<string, unknown>,
+  query: string,
+  maxPages: number,
+): Promise<TaskHit[]> {
+  const q = query.trim().toLowerCase()
+  const hits: TaskHit[] = []
+  for (let page = 0; page < maxPages; page++) {
+    const data = await mcpCall('clickup_filter_tasks', {
+      ...filter,
+      page,
+      order_by: 'updated',
+      subtasks: !!q,
+      include_closed: false,
+    })
+    const tasks: any[] = data?.tasks ?? []
+    for (const t of tasks) {
+      const hit = toHitMcp(t)
+      if (!q || `${hit.displayId} ${hit.name}`.toLowerCase().includes(q)) hits.push(hit)
+      if (hits.length >= 100) break
+    }
+    if (hits.length >= 100 || tasks.length < 100) break
+  }
+  return hits.slice(0, 100)
+}
+
+/** The workspace tree (spaces → folders → lists), every page of spaces. */
+async function mcpHierarchy(depth: '0' | '2'): Promise<any[]> {
+  const spaces: any[] = []
+  let cursor: string | undefined
+  for (let page = 0; page < 20; page++) {
+    const data = await mcpCall('clickup_get_workspace_hierarchy', {
+      max_depth: depth,
+      limit: 50,
+      ...(cursor ? { cursor } : {}),
+    })
+    spaces.push(...((data?.hierarchy?.root?.children ?? []) as any[]))
+    if (!data?.has_more || !data?.next_cursor) break
+    cursor = String(data.next_cursor)
+  }
+  return spaces.filter((n) => n?.type === 'space')
+}
+
 async function cuFetchAt(base: string, pathAndQuery: string, init?: RequestInit): Promise<any> {
+  if (mcpProject()) throw restNeedsToken()
   const res = await fetch(`${base}${pathAndQuery}`, {
     ...init,
     headers: {
@@ -108,6 +227,7 @@ async function cuFetchV3(pathAndQuery: string): Promise<any> {
  */
 export async function verifyToken(): Promise<{ ok: boolean; status: number | null; detail: string }> {
   const t = currentToken()
+  if (t?.startsWith(MCP_TOKEN_PREFIX)) return { ok: true, status: null, detail: 'Signed in with the browser.' }
   if (!t) return { ok: false, status: null, detail: 'No ClickUp token is configured.' }
   try {
     const ctrl = new AbortController()
@@ -135,6 +255,11 @@ export interface Workspace {
 }
 
 export async function getWorkspaces(): Promise<Workspace[]> {
+  if (mcpProject()) {
+    const data = await mcpCall('clickup_get_workspace_hierarchy', { max_depth: '0', limit: 1 })
+    const root = data?.hierarchy?.root
+    return root?.id ? [{ id: String(root.id), name: String(root.name ?? root.id) }] : []
+  }
   const data = await cuFetch('/team')
   return (data.teams ?? []).map((t: any) => ({ id: String(t.id), name: String(t.name ?? t.id) }))
 }
@@ -177,6 +302,7 @@ function toHit(t: any): TaskHit {
  * (otherwise subtasks — never in the flat list — would be unsearchable).
  */
 export async function searchTasks(teamId: string, query: string): Promise<TaskHit[]> {
+  if (mcpProject()) return mcpFilterTasks({}, query, 6)
   const q = query.trim().toLowerCase()
   const includeSubtasks = q ? 'true' : 'false'
   const hits: TaskHit[] = []
@@ -208,6 +334,9 @@ export interface Space {
 }
 
 export async function getSpaces(teamId: string): Promise<Space[]> {
+  if (mcpProject()) {
+    return (await mcpHierarchy('0')).map((sp) => ({ id: String(sp.id), name: String(sp.name ?? sp.id) }))
+  }
   const data = await cuFetch(`/team/${encodeURIComponent(teamId)}/space?archived=false`)
   return (data.spaces ?? []).map((s: any) => ({ id: String(s.id), name: String(s.name ?? s.id) }))
 }
@@ -220,6 +349,18 @@ export interface ListRef {
 
 export async function getLists(spaceId: string): Promise<ListRef[]> {
   const out: ListRef[] = []
+  if (mcpProject()) {
+    const space = (await mcpHierarchy('2')).find((sp) => String(sp.id) === String(spaceId))
+    for (const node of space?.children ?? []) {
+      if (node.type === 'list') out.push({ id: String(node.id), name: String(node.name ?? node.id), folderName: null })
+      if (node.type === 'folder') {
+        for (const l of node.children ?? []) {
+          if (l.type === 'list') out.push({ id: String(l.id), name: String(l.name ?? l.id), folderName: String(node.name ?? '') })
+        }
+      }
+    }
+    return out
+  }
 
   // Lists nested inside folders — the folder response already embeds its lists.
   const folders = await cuFetch(`/space/${encodeURIComponent(spaceId)}/folder?archived=false`)
@@ -247,6 +388,16 @@ export async function getLists(spaceId: string): Promise<ListRef[]> {
  * query, subtasks=true so the search can also match a SUBTASK by its id/name.
  */
 export async function getListTasks(listId: string, query: string): Promise<TaskHit[]> {
+  if (mcpProject()) {
+    const hits = await mcpFilterTasks({ list_ids: [listId] }, query, 10)
+    // MCP task rows carry no status colour; the list's status definitions do, so the
+    // status groups get their real ClickUp colours instead of all-grey pills.
+    const list = await mcpCall('clickup_get_list', { list_id: listId }).catch(() => null)
+    const colour = new Map<string, string>(
+      ((list?.statuses ?? []) as any[]).map((st) => [String(st.status).toLowerCase(), String(st.color ?? '')]),
+    )
+    return hits.map((h) => (h.statusColor ? h : { ...h, statusColor: colour.get(h.status.toLowerCase()) ?? '' }))
+  }
   const q = query.trim().toLowerCase()
   const includeSubtasks = q ? 'true' : 'false'
   const hits: TaskHit[] = []
@@ -276,6 +427,10 @@ export async function getListTasks(listId: string, query: string): Promise<TaskH
  * call; each row keeps its own `parent` so the UI can nest them to any depth.
  */
 export async function getSubtasks(parentId: string): Promise<TaskHit[]> {
+  if (mcpProject()) {
+    const data = await mcpCall('clickup_get_task', { task_id: parentId, include: ['subtasks'] })
+    return ((data?.subtasks ?? []) as any[]).filter((t) => String(t.id) !== String(parentId)).map(toHitMcp)
+  }
   const data = await cuFetch(
     `/task/${encodeURIComponent(parentId)}?include_subtasks=true`,
   )
@@ -374,14 +529,22 @@ export async function getIssueFilingContext(parentTask: string): Promise<IssueFi
   if (!parentId) {
     throw Object.assign(new Error('A ClickUp parent ticket URL or id is required'), { status: 400 })
   }
-  const parent = await cuFetch(`/task/${encodeURIComponent(parentId)}`)
+  const parent = mcpProject()
+    ? await mcpCall('clickup_get_task', { task_id: parentId })
+    : await cuFetch(`/task/${encodeURIComponent(parentId)}`)
   const listId = String(parent?.list?.id ?? '')
   if (!listId) {
     throw Object.assign(new Error('Could not resolve the parent task list in ClickUp'), {
       status: 502,
     })
   }
-  const priorityId = parent?.priority?.id != null ? Number(parent.priority.id) : NaN
+  // REST: `{id, priority}`; the MCP tool may give the bare label ("high").
+  const priorityId =
+    parent?.priority?.id != null
+      ? Number(parent.priority.id)
+      : typeof parent?.priority === 'string'
+        ? (severityPriority(parent.priority)?.id ?? NaN)
+        : NaN
   const customId = parent?.custom_id ? String(parent.custom_id) : null
   return {
     id: parentId,
@@ -400,7 +563,13 @@ export async function getIssueFilingContext(parentTask: string): Promise<IssueFi
       : [],
     priority:
       Number.isFinite(priorityId) && priorityId >= 1 && priorityId <= 4
-        ? { id: priorityId, label: String(parent?.priority?.priority ?? PRIORITY_LABEL[priorityId]) }
+        ? {
+            id: priorityId,
+            label: String(
+              (typeof parent?.priority === 'object' && parent?.priority?.priority) ||
+                PRIORITY_LABEL[priorityId],
+            ),
+          }
         : null,
   }
 }
@@ -465,14 +634,28 @@ export async function createIssueSubtask(
   // Send markdown_content (NOT description): ClickUp renders markdown_content as rich
   // text (bold labels, numbered/bulleted lists) but shows description as literal plain
   // text — which is why the raw `**...**` and run-on layout appeared before.
-  const created = await cuPost(`/list/${encodeURIComponent(context.listId)}/task`, {
-    name,
-    markdown_content: normalizeIssueMarkdown(input.description).slice(0, 6000),
-    parent: context.id,
-    ...(assignees.length ? { assignees } : {}),
-    ...(context.tags.length ? { tags: context.tags } : {}),
-    ...(priority ? { priority: priority.id } : {}),
-  })
+  const markdown = normalizeIssueMarkdown(input.description).slice(0, 6000)
+  const created = mcpProject()
+    ? unwrapTask(
+        await mcpCall('clickup_create_task', {
+          name,
+          list_id: context.listId,
+          parent: context.id,
+          markdown_description: markdown,
+          ...(assignees.length ? { assignees } : {}),
+          ...(context.tags.length ? { tags: context.tags } : {}),
+          // The MCP tool takes the priority WORD, not ClickUp's 1-4.
+          ...(priority ? { priority: priority.label.toLowerCase() } : {}),
+        }),
+      )
+    : await cuPost(`/list/${encodeURIComponent(context.listId)}/task`, {
+        name,
+        markdown_content: markdown,
+        parent: context.id,
+        ...(assignees.length ? { assignees } : {}),
+        ...(context.tags.length ? { tags: context.tags } : {}),
+        ...(priority ? { priority: priority.id } : {}),
+      })
 
   return {
     id: String(created.id),
@@ -487,9 +670,12 @@ export async function createIssueSubtask(
       assignees: Array.isArray(created.assignees)
         ? created.assignees.map((a: any) => String(a?.username ?? a?.email ?? a?.id ?? ''))
         : [],
-      priority: created.priority?.priority
-        ? String(created.priority.priority)
-        : (priority?.label ?? null),
+      priority:
+        typeof created.priority === 'string'
+          ? created.priority.charAt(0).toUpperCase() + created.priority.slice(1)
+          : created.priority?.priority
+            ? String(created.priority.priority)
+            : (priority?.label ?? null),
       prioritySource: fromSeverity ? 'severity' : context.priority ? 'parent' : null,
       screenshots: 0,
       screenshotsFailed: 0,
@@ -517,6 +703,15 @@ export async function attachTaskFile(
   bytes: Uint8Array,
   contentType: string,
 ): Promise<UploadedAttachment> {
+  if (mcpProject()) {
+    const data = await mcpCall('clickup_attach_task_file', {
+      task_id: taskId,
+      file_name: filename,
+      file_data: Buffer.from(bytes).toString('base64'),
+    })
+    const a = data?.attachment ?? data ?? {}
+    return { id: String(a.id ?? ''), url: String(a.url ?? ''), title: String(a.title ?? filename) }
+  }
   const form = new FormData()
   form.append('attachment', new Blob([bytes as BlobPart], { type: contentType }), filename)
   const res = await fetch(`${API}/task/${encodeURIComponent(taskId)}/attachment`, {
@@ -556,6 +751,10 @@ export async function attachTaskFile(
 export async function postTaskComment(taskId: string, commentText: string): Promise<void> {
   const text = commentText.trim()
   if (!text) return
+  if (mcpProject()) {
+    await mcpCall('clickup_create_task_comment', { task_id: taskId, comment_text: text, notify_all: false })
+    return
+  }
   await cuPost(`/task/${encodeURIComponent(taskId)}/comment`, {
     comment_text: text,
     notify_all: false,
@@ -670,9 +869,12 @@ function formatCustomField(f: any): { name: string; value: string } | null {
 
 /** Full detail for one task (by internal task id), including embedded attachments. */
 export async function getTaskDetail(taskId: string): Promise<TaskDetail> {
-  const t = await cuFetch(
-    `/task/${encodeURIComponent(taskId)}?include_markdown_description=true`,
-  )
+  const t = mcpProject()
+    ? await mcpCall('clickup_get_task', {
+        task_id: taskId,
+        include: ['description', 'attachments', 'custom_fields'],
+      })
+    : await cuFetch(`/task/${encodeURIComponent(taskId)}?include_markdown_description=true`)
   const customId = t.custom_id ? String(t.custom_id) : null
   const description =
     String(t.markdown_description ?? '').trim() ||
@@ -683,13 +885,18 @@ export async function getTaskDetail(taskId: string): Promise<TaskDetail> {
     customId,
     displayId: customId ?? String(t.id),
     name: String(t.name ?? ''),
-    status: String(t.status?.status ?? ''),
+    status: typeof t.status === 'string' ? t.status : String(t.status?.status ?? ''),
     description,
     url: String(t.url ?? ''),
     listName: String(t.list?.name ?? ''),
     folderName: t.folder?.name ? String(t.folder.name) : null,
     spaceName: t.space?.name ? String(t.space.name) : null,
-    priority: t.priority?.priority ? String(t.priority.priority) : null,
+    priority:
+      typeof t.priority === 'string'
+        ? t.priority
+        : t.priority?.priority
+          ? String(t.priority.priority)
+          : null,
     assignees: (t.assignees ?? []).map((a: any) => String(a.username ?? a.email ?? a.id)),
     tags: (t.tags ?? []).map((tag: any) => String(tag.name ?? tag)),
     dueDate: epochToIso(t.due_date),
@@ -701,7 +908,9 @@ export async function getTaskDetail(taskId: string): Promise<TaskDetail> {
     attachments: (t.attachments ?? []).map((a: any) => ({
       id: String(a.id),
       title: String(a.title ?? a.id),
-      url: String(a.url ?? ''),
+      // The MCP task detail carries no file URL — its download tool hands out a
+      // SHORT-LIVED one per request, so record where to ask (`downloadAttachment`).
+      url: a.url ? String(a.url) : mcpProject() ? `${MCP_ATTACHMENT}${t.id}|${a.id}` : '',
       extension: String(a.extension ?? ''),
       size: Number(a.size ?? 0),
     })),
@@ -710,12 +919,14 @@ export async function getTaskDetail(taskId: string): Promise<TaskDetail> {
 
 /** Comments on a task, oldest first. */
 export async function getTaskComments(taskId: string): Promise<TaskComment[]> {
-  const data = await cuFetch(`/task/${encodeURIComponent(taskId)}/comment`)
+  const data = mcpProject()
+    ? await mcpCall('clickup_get_task_comments', { task_id: taskId })
+    : await cuFetch(`/task/${encodeURIComponent(taskId)}/comment`)
   const comments: any[] = data.comments ?? []
   return comments
     .map((c) => ({
       id: String(c.id),
-      text: String(c.comment_text ?? '').trim(),
+      text: String(c.comment_text ?? c.text ?? '').trim(),
       user: String(c.user?.username ?? c.user?.email ?? c.user?.id ?? 'unknown'),
       date: epochToIso(c.date),
     }))
@@ -727,6 +938,17 @@ export async function getTaskComments(taskId: string): Promise<TaskComment[]> {
  * fetch them WITHOUT the API token (sending it can make the storage host 403).
  */
 export async function downloadAttachment(url: string): Promise<Buffer> {
+  if (url.startsWith(MCP_ATTACHMENT) && mcpProject()) {
+    const [taskId, attachmentId] = url.slice(MCP_ATTACHMENT.length).split('|')
+    const data = await mcpCall('clickup_download_task_attachment', {
+      task_id: taskId,
+      attachment_id: attachmentId,
+    })
+    if (!data?.url) {
+      throw Object.assign(new Error('attachment download failed (no URL from ClickUp)'), { status: 502 })
+    }
+    url = String(data.url)
+  }
   const res = await fetch(url)
   if (!res.ok) {
     throw Object.assign(new Error(`attachment download failed (${res.status})`), {

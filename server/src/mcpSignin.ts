@@ -87,6 +87,10 @@ interface LiveJob extends McpSigninJob {
   text: string
   /** Where in `text` the most recent paste was sent, so an old prompt/refusal isn't re-read. */
   pasteMark: number
+  /** An escape sequence cut off at the end of the last chunk — finished by the next one. */
+  rawTail: string
+  /** The line still being printed (no newline yet) — `lines` holds only complete ones. */
+  partial: string
 }
 
 const MAX_LINES = 200
@@ -114,8 +118,52 @@ function scrub(s: string): string {
 const PASTE_PROMPT = /paste the redirect URL/i
 const PASTE_REFUSED = /doesn.t look like a redirect URL[^\n]*/i
 
+// eslint-disable-next-line no-control-regex -- see ANSI
+const ANSI_AT = new RegExp(ANSI.source, 'y')
+
+/**
+ * Where an escape sequence starts that the chunk ended in the MIDDLE of (-1: none).
+ * Walks the sequences in order: a complete one is skipped, a lone `ESC\` (an OSC
+ * terminator) is not a start, and an OSC whose terminator hasn't arrived yet — e.g.
+ * `ESC]8;;https://…ESC` cut before the `\` — is held back from its START, or its
+ * body would leak into the text as garbage.
+ */
+function openEscapeAt(raw: string): number {
+  for (let i = raw.indexOf('\x1B'); i !== -1; i = raw.indexOf('\x1B', i + 1)) {
+    ANSI_AT.lastIndex = i
+    const m = ANSI_AT.exec(raw)
+    if (m) {
+      i += m[0].length - 1
+      continue
+    }
+    const t = raw.slice(i)
+    if (
+      t === '\x1B' ||
+      (t[1] === '[' && /^\x1B\[[0-9;?]*[ -/]*$/.test(t)) ||
+      (t[1] === ']' && !/\x07|\x1B\\/.test(t))
+    ) {
+      return i
+    }
+  }
+  return -1
+}
+
+/**
+ * Output arrives in arbitrary CHUNKS, not lines: ClickUp's authorize URL (a ~500-char
+ * JWT client id) was split mid-`%2F`, and reading the URL from the first chunk handed
+ * the engineer a URL cut off inside `redirect_uri` — ClickUp: "Invalid redirect_uri".
+ * So an escape sequence cut at a chunk end is held back until it is complete, the URL
+ * is taken only once whitespace ENDS it, and `lines` only ever holds finished lines.
+ */
 function pushOutput(job: LiveJob, chunk: string): void {
-  const clean = scrub(chunk.replace(ANSI, '').replace(/\r(?!\n)/g, '\n'))
+  let raw = job.rawTail + chunk
+  job.rawTail = ''
+  const cut = openEscapeAt(raw)
+  if (cut !== -1 && raw.length - cut < 4096) {
+    job.rawTail = raw.slice(cut)
+    raw = raw.slice(0, cut)
+  }
+  const clean = scrub(raw.replace(ANSI, '').replace(/\r(?!\n)/g, '\n'))
   job.text += clean
   if (job.text.length > MAX_TEXT) {
     const drop = job.text.length - MAX_TEXT
@@ -124,7 +172,7 @@ function pushOutput(job: LiveJob, chunk: string): void {
   }
   if (!job.signInUrl) {
     // The first https URL after the CLI's "visit" line is the authorize URL.
-    const m = /visit[^\n]*\n\s*(https?:\/\/\S+)/i.exec(job.text)
+    const m = /visit[^\n]*\n\s*(https?:\/\/\S+)(?=\s)/i.exec(job.text)
     if (m) job.signInUrl = m[1]
   }
   // Only what came AFTER the last paste counts: a refusal re-prints the prompt, so
@@ -133,16 +181,19 @@ function pushOutput(job: LiveJob, chunk: string): void {
   const refused = PASTE_REFUSED.exec(since)
   if (refused) job.pasteError = refused[0].trim()
   job.awaitingPaste = PASTE_PROMPT.test(since)
-  for (const raw of clean.split('\n')) {
-    const line = raw.trimEnd()
+  const parts = (job.partial + clean).split('\n')
+  job.partial = parts.pop() ?? ''
+  for (const part of parts) {
+    const line = part.trimEnd()
     if (line.trim()) job.lines.push(line)
   }
   if (job.lines.length > MAX_LINES) job.lines.splice(0, job.lines.length - MAX_LINES)
 }
 
 function snapshot(job: LiveJob): McpSigninJob {
-  const { pty: _pty, timer: _timer, text: _text, pasteMark: _mark, ...rest } = job
-  return { ...rest, lines: [...rest.lines] }
+  const { pty: _pty, timer: _timer, text: _text, pasteMark: _mark, rawTail: _tail, partial, ...rest } = job
+  // The unfinished line too — the paste prompt has no newline after it.
+  return { ...rest, lines: partial.trim() ? [...rest.lines, partial.trimEnd()] : [...rest.lines] }
 }
 
 function finish(job: LiveJob, state: McpSigninState, error: string | null): void {
@@ -230,6 +281,8 @@ export function startMcpSignin(
     timer: null,
     text: '',
     pasteMark: 0,
+    rawTail: '',
+    partial: '',
   }
   current = job
 

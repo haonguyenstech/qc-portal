@@ -7,8 +7,8 @@ folder in the OS file explorer **on the machine running the server** (Finder / E
 the server is localhost, so the window appears on the user's own screen. All of them go through the
 single `revealFolderNative(dir)` helper in `folderPicker.ts`; never re-implement the per-platform
 open command. The canonical button is the shared `web/src/components/OpenFolderButton.tsx`
-(`open: () => Promise<{ ok, path }>` + a `label` for the success toast), used by `/tickets` and
-`/testcases`; `/skills`, `/mcp`, and `/templates` still carry equivalent inline copies — prefer the
+(`open: () => Promise<{ ok, path }>` + a `label` for the success toast), used by `/tickets`,
+`/testcases` and `/templates` (in its "Stored in" card under the template list); `/skills` and `/mcp` still carry equivalent inline copies — prefer the
 shared component for any new page and fold those in when you touch them. It lives in each page's
 "Editing … for `<project>`" header card next to the mono path chip + `exists`/`new` badge.
 

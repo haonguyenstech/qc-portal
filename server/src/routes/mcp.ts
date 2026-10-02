@@ -5,8 +5,18 @@ import crypto from 'node:crypto'
 import os from 'node:os'
 import path from 'node:path'
 import spawn from 'cross-spawn'
-import { CLAUDE_BIN, OAUTH_APPS, OAUTH_REDIRECT_BASE, mcpJsonFor } from '../config.js'
-import { resolveProject } from '../projectScope.js'
+import { CLAUDE_BIN, OAUTH_APPS, OAUTH_REDIRECT_BASE, PORT, mcpJsonFor } from '../config.js'
+import { projectIdForRoot, resolveProject } from '../projectScope.js'
+import {
+  HOSTED,
+  HEADERS_HELPER_RE,
+  claudeHeadersHelper,
+  helperProvider,
+  signOutHosted,
+  type HostedProvider,
+} from '../hostedMcp.js'
+import { trackerConflict, trackerOfEntry, trackerServers } from '../trackerMcp.js'
+import { azureLauncherArgs, azureSignin, azureSigninCreds, isAzureLauncher, signOutAzure } from '../azureSignin.js'
 import {
   cancelMcpSignin,
   getMcpSignin,
@@ -528,6 +538,28 @@ export function repairProjectMcpConfig(rootPath: string, attachBrowser = false):
     for (const entry of Object.values(servers)) {
       if (entry && typeof entry === 'object' && pinClickupMcpSdk(entry)) changed = true
     }
+    // A Jira headersHelper written on ANOTHER machine (AI Sync, a copied repo) names
+    // that machine's project id and port — point it at this portal's.
+    const projectId = projectIdForRoot(rootPath)
+    for (const entry of Object.values(servers)) {
+      const helper = entry && typeof entry === 'object' ? entry.headersHelper : undefined
+      const provider = typeof helper === 'string' ? helperProvider(helper) : null
+      if (projectId && provider && typeof helper === 'string' && HEADERS_HELPER_RE.test(helper)) {
+        const want = claudeHeadersHelper(PORT, projectId, provider)
+        if (helper !== want) {
+          entry.headersHelper = want
+          changed = true
+        }
+      }
+      // Same for the Azure DevOps launcher (azureSignin.ts): its args name the port + project.
+      if (projectId && entry && typeof entry === 'object' && isAzureLauncher(entry)) {
+        const want = azureLauncherArgs(PORT, projectId)
+        if (JSON.stringify(entry.args) !== JSON.stringify(want)) {
+          entry.args = want
+          changed = true
+        }
+      }
+    }
     const playwright = servers.playwright
     if (playwright) {
       // Attach mode first: it strips the flags the two calls below would otherwise
@@ -733,6 +765,23 @@ function verifyTrackerAuth(
     return withClickupToken(resolveProjectClickupToken(rootPath), verifyClickup)
   if (name === 'azure') return withAzureCreds(resolveProjectAzureCreds(rootPath), verifyAzure)
   if (name === 'jira') return withJiraCreds(resolveProjectJiraCreds(rootPath), verifyJira)
+  // The signed-in Azure DevOps server (any name): check the portal's login itself, so an
+  // expired sign-in reads "needs sign-in" instead of a green badge whose calls all fail.
+  if (trackerServers(rootPath, 'azure').some((x) => x.kind === 'oauth' && x.name === name)) {
+    const projectId = projectIdForRoot(rootPath)
+    const creds = projectId ? azureSigninCreds(projectId) : undefined
+    if (!creds) {
+      return Promise.resolve({
+        ok: false,
+        status: null,
+        detail:
+          projectId && azureSignin(projectId).needsOrg
+            ? 'Signed in to Microsoft — choose the organization above to finish.'
+            : 'Not signed in to Azure DevOps — sign in again.',
+      })
+    }
+    return withAzureCreds({ ...creds, pat: '' }, verifyAzure)
+  }
   return null
 }
 
@@ -982,6 +1031,12 @@ mcpRouter.post('/', (req, res) => {
   }
 
   const entry = sanitizeEntry(req.body)
+  const project = resolveProject(req)
+  const tracker = trackerOfEntry(name, entry)
+  const conflict =
+    (project && tracker ? trackerConflict(project.rootPath, tracker) : null) ??
+    (project ? duplicateOf(project.rootPath, entry, data.mcpServers) : null)
+  if (conflict) return res.status(409).json({ error: conflict })
   // The browser can't know this machine's home directory, so it never sends a
   // profile path — fill in (or correct) it here. See normalizePlaywrightProfile.
   if (name === 'playwright') normalizePlaywrightProfile(entry)
@@ -1036,7 +1091,7 @@ function sanitizeOauth(value: unknown): Record<string, string | number | boolean
 
 /** Keep only the .mcp.json fields Claude Code reads, with the right types. */
 function sanitizeEntry(raw: Record<string, unknown>): McpEntry {
-  const { command, args, url, env, type, headers, cwd, oauth } = raw
+  const { command, args, url, env, type, headers, cwd, oauth, headersHelper } = raw
   const entry: McpEntry = {}
   if (typeof type === 'string' && type.trim()) entry.type = type.trim()
   if (typeof command === 'string' && command.trim()) entry.command = command.trim()
@@ -1049,7 +1104,67 @@ function sanitizeEntry(raw: Record<string, unknown>): McpEntry {
   if (cleanHeaders) entry.headers = cleanHeaders
   const cleanOauth = entry.url ? sanitizeOauth(oauth) : undefined
   if (cleanOauth) entry.oauth = cleanOauth
+  // A command Claude Code runs for the server's headers — e.g. the portal's own Jira
+  // sign-in (`linkClaudeToPortalJira`). Dropping it on an edit would silently sign
+  // Claude Code out of a server the page still shows as connected.
+  if (entry.url && typeof headersHelper === 'string' && headersHelper.trim()) {
+    entry.headersHelper = headersHelper.trim()
+  }
   return entry
+}
+
+/**
+ * Point Claude Code's tracker server at the PORTAL's sign-in, so ONE browser sign-in
+ * covers the Tickets page, issue filing, QC runs and Chat. The entry keeps no token:
+ * a hosted server (Atlassian / ClickUp) gets a `headersHelper` that asks this portal for
+ * the current one (hostedMcp.ts `freshAuthHeader`); Azure DevOps gets the launcher that
+ * does the same before starting Microsoft's local server (azureSignin.ts). Reuses the
+ * project's existing signed-in entry for that tracker (whatever it is named), else adds
+ * `atlassian` / `clickup-oauth` / `azure-devops`; approves it so a run doesn't stop at
+ * the "new project server" gate.
+ */
+export function linkClaudeToPortalSignin(
+  rootPath: string,
+  projectId: string,
+  provider: HostedProvider | 'azure',
+): string {
+  const file = mcpJsonFor(rootPath)
+  const data = readMcp(file)
+  if (!data.mcpServers) data.mcpServers = {}
+  const tracker = provider === 'atlassian' ? 'jira' : provider
+  const name =
+    trackerServers(rootPath, tracker).find((x) => x.kind === 'oauth')?.name ??
+    { atlassian: 'atlassian', clickup: 'clickup-oauth', azure: 'azure-devops' }[provider]
+  if (provider === 'azure') {
+    data.mcpServers[name] = { type: 'stdio', command: 'node', args: azureLauncherArgs(PORT, projectId) }
+  } else {
+    const prev = data.mcpServers[name] ?? {}
+    data.mcpServers[name] = {
+      ...prev,
+      type: 'http',
+      url: typeof prev.url === 'string' && prev.url ? prev.url : HOSTED[provider].url,
+      headersHelper: claudeHeadersHelper(PORT, projectId, provider),
+    }
+  }
+  writeMcp(file, data)
+  approveMcpJsonServer(rootPath, name)
+  return name
+}
+
+export const linkClaudeToPortalJira = (rootPath: string, projectId: string) =>
+  linkClaudeToPortalSignin(rootPath, projectId, 'atlassian')
+
+/** The same server under another name: an identical url, or an identical command line. */
+function sameServer(a: McpEntry, b: McpEntry): boolean {
+  if (a.url || b.url) return !!a.url && !!b.url && a.url.replace(/\/+$/, '') === b.url.replace(/\/+$/, '')
+  return !!a.command && a.command === b.command && JSON.stringify(a.args ?? []) === JSON.stringify(b.args ?? [])
+}
+
+/** "Already added" for `entry`, or null — a server is connected once per project. */
+function duplicateOf(rootPath: string, entry: McpEntry, existing: Record<string, McpEntry>): string | null {
+  const all = { ...localProjectMcpServers(rootPath), ...existing }
+  const twin = Object.entries(all).find(([, e]) => e && typeof e === 'object' && sameServer(e, entry))
+  return twin ? `This server is already added to this project as "${twin[0]}" — test or edit that one instead.` : null
 }
 
 /**
@@ -1098,8 +1213,20 @@ mcpRouter.post('/import', (req, res) => {
     }
     if (entry.url && !entry.type) entry.type = 'http'
     if (name === 'playwright') normalizePlaywrightProfile(entry)
+    // Connected once per project — against what is there AND within this paste.
+    const dup = duplicateOf(project.rootPath, entry, { ...data.mcpServers, ...entries })
+    if (dup) return res.status(409).json({ error: `"${name}": ${dup}` })
     entries[name] = entry
   }
+  // One ticket tracker per project — against what is configured AND within this paste.
+  const pasted = [...new Set(names.map((n) => trackerOfEntry(n, entries[n])).filter((t) => !!t))]
+  if (pasted.length > 1) {
+    return res.status(409).json({
+      error: 'This paste connects more than one ticket tracker — a project uses one. Add just one of them.',
+    })
+  }
+  const conflict = pasted[0] ? trackerConflict(project.rootPath, pasted[0]) : null
+  if (conflict) return res.status(409).json({ error: conflict })
   Object.assign(data.mcpServers, entries)
   writeMcp(file, data)
   return res.status(201).json({ ok: true, added: names })
@@ -1225,6 +1352,10 @@ mcpRouter.put('/:name', (req, res) => {
     return res.status(400).json({ error: 'The url must start with http:// or https://.' })
   }
   if (entry.url && !entry.type) entry.type = 'http'
+  // An edit can turn a server INTO another tracker (a new url / name) — same rule.
+  const editedTracker = trackerOfEntry(to, entry)
+  const editConflict = editedTracker ? trackerConflict(project.rootPath, editedTracker, from) : null
+  if (editConflict) return res.status(409).json({ error: editConflict })
   // Same as POST /: the browser never knows this machine's Playwright profile path.
   if (to === 'playwright') normalizePlaywrightProfile(entry)
   // The Settings form has no field for a pre-registered OAuth client, so an edit
@@ -1319,14 +1450,31 @@ mcpRouter.delete('/:name', (req, res) => {
   const file = mcpPath(req)
   if (!file) return res.status(400).json({ error: 'project not found' })
 
+  const project = resolveProject(req)
+  const name = req.params.name
+  // Is this the hosted tracker server the portal's browser sign-in is linked to?
+  const tracker = project
+    ? (['clickup', 'jira', 'azure'] as const).find((t) =>
+        trackerServers(project.rootPath, t).some((x) => x.kind === 'oauth' && x.name === name),
+      )
+    : undefined
   const data = readMcp(file)
-  if (data.mcpServers && req.params.name in data.mcpServers) {
-    delete data.mcpServers[req.params.name]
+  if (data.mcpServers && name in data.mcpServers) {
+    delete data.mcpServers[name]
     writeMcp(file, data)
   }
-  const project = resolveProject(req)
-  if (project) removeLocalProjectMcpServer(project.rootPath, req.params.name)
-  return res.json({ ok: true })
+  if (project) removeLocalProjectMcpServer(project.rootPath, name)
+  // ONE login serves Tickets, runs and chat (hostedMcp.ts), so disconnecting its server
+  // ends it everywhere — otherwise /tickets kept loading through a login the MCP page
+  // no longer shows, with nothing left there to sign out of. Kept while ANOTHER hosted
+  // server for the same tracker is still configured.
+  let signedOut: 'clickup' | 'jira' | 'azure' | null = null
+  if (project && tracker && !trackerServers(project.rootPath, tracker).some((x) => x.kind === 'oauth')) {
+    if (tracker === 'azure') signOutAzure(project.id)
+    else signOutHosted({ provider: tracker === 'jira' ? 'atlassian' : 'clickup', projectId: project.id })
+    signedOut = tracker
+  }
+  return res.json({ ok: true, signedOut })
 })
 
 // ============================ OAuth ("click → authenticate") ============================
@@ -1604,6 +1752,11 @@ mcpRouter.post('/oauth/:provider/token', (req, res) => {
   if (!project) return res.status(400).json({ error: 'project not found' })
   const token = typeof req.body?.token === 'string' ? req.body.token.trim() : ''
   if (!token) return res.status(400).json({ error: 'token is required' })
+  if (providerId !== 'figma') {
+    // Re-saving a token over the built-in's own entry is a reconnect, not a second copy.
+    const conflict = trackerConflict(project.rootPath, providerId, providerId)
+    if (conflict) return res.status(409).json({ error: conflict })
+  }
 
   let extra: { url?: string; email?: string; orgUrl?: string; project?: string } | undefined
   if (providerId === 'jira') {

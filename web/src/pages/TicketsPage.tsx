@@ -1,3 +1,4 @@
+import { Link } from 'react-router-dom'
 import { useEffect, useRef, useState, type ReactElement } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
@@ -14,9 +15,11 @@ import {
   FileText,
   FolderDown,
   FolderGit2,
+  PlugZap,
   ListChecks,
   ListPlus,
   Loader2,
+  LogOut,
   Paperclip,
   ScrollText,
   Search,
@@ -53,6 +56,8 @@ import {
   clickupSubtasks,
   clickupWorkspaces,
   jiraStatus,
+  type SigninTracker,
+  setAzureSigninOrg,
   jiraTasks,
   jiraSubtasks,
   jiraWorkspaces,
@@ -72,6 +77,7 @@ import {
   type CrawlLogLine,
 } from '@/lib/api'
 import { OpenFolderButton } from '@/components/OpenFolderButton'
+import { useTrackerSignin } from '@/lib/useTrackerSignin'
 import {
   clearListBinding,
   loadListBinding,
@@ -559,6 +565,96 @@ function CrawlLogPanel({
         </div>
       )}
     </Card>
+  )
+}
+
+const SIGNIN_LABEL: Record<SigninTracker, string> = { jira: 'Jira', clickup: 'ClickUp', azure: 'Azure DevOps' }
+
+/**
+ * The strip shown above the browser while a tracker's browser sign-in is in use
+ * (`useTrackerSignin` — the ONE login per tracker): where it reads from, the Azure
+ * organization switch, and sign out. Signing IN happens on the MCP page; this page only
+ * points there when nothing is connected.
+ */
+function TrackerSignin({ tracker, projectId }: { tracker: SigninTracker; projectId: string }) {
+  const { status, signOut } = useTrackerSignin(tracker, projectId)
+  // Sign out asks once — a stray click drops the login everywhere at once.
+  const [confirmOut, setConfirmOut] = useState(false)
+  const label = SIGNIN_LABEL[tracker]
+  const queryClient = useQueryClient()
+  // Azure DevOps: an account often belongs to several organizations — switch here.
+  const switchOrg = useMutation({
+    mutationFn: (org: string) => setAzureSigninOrg(org, projectId),
+    onSuccess: (r, org) => {
+      if (!r.ok) {
+        toast.error(r.error, { description: 'Sign in for it on the MCP page.' })
+        return
+      }
+      toast.success(`Reading tickets from ${org}`, {
+        description: 'QC runs and Chat use it from their next start.',
+      })
+      for (const key of ['azure-signin', 'azure-status', 'mcp', 'mcp-health']) {
+        queryClient.invalidateQueries({ queryKey: [key, projectId] })
+      }
+      queryClient.removeQueries({ queryKey: ['ticket-workspaces'] })
+      queryClient.removeQueries({ queryKey: ['ticket-tasks'] })
+    },
+    onError: (err) =>
+      toast.error('Could not switch organization', {
+        description: err instanceof Error ? err.message : undefined,
+      }),
+  })
+  const orgs = status?.orgs ?? []
+
+  if (!status?.signedIn) return null
+  return (
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-2xl border border-border/60 bg-muted/40 px-4 py-2 text-xs text-muted-foreground">
+        <CheckCircle2 className="size-3.5 text-emerald-600" />
+        <span>
+          {label} signed in to{' '}
+          {tracker === 'azure' && orgs.length > 1 && !status.usingToken ? (
+            <Select
+              value={status.site?.name ?? ''}
+              onValueChange={(org) => switchOrg.mutate(org)}
+              disabled={switchOrg.isPending}
+            >
+              <SelectTrigger
+                aria-label="Azure DevOps organization"
+                className="inline-flex h-6 w-auto gap-1 rounded-full border-border/60 px-2 text-xs font-medium text-foreground shadow-none"
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {orgs.map((o) => (
+                  <SelectItem key={o} value={o} className="text-xs">
+                    {o}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          ) : (
+            <a href={status.site?.url} target="_blank" rel="noreferrer" className="font-medium text-foreground hover:underline">
+              {status.site?.name ?? status.site?.url}
+            </a>
+          )}
+          {status.usingToken
+            ? ' — the API token is used while both are set.'
+            : tracker === 'jira'
+              ? ' — attachments still need an API token.'
+              : ''}
+        </span>
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={() => (confirmOut ? signOut.mutate() : setConfirmOut(true))}
+          onBlur={() => setConfirmOut(false)}
+          disabled={signOut.isPending}
+          className={cn('ml-auto h-7 rounded-full px-2.5 text-xs', confirmOut && 'text-destructive')}
+        >
+          {signOut.isPending ? <Loader2 className="size-3.5 animate-spin" /> : <LogOut className="size-3.5" />}
+          {confirmOut ? 'Click again to sign out' : 'Sign out'}
+        </Button>
+      </div>
   )
 }
 
@@ -1255,17 +1351,24 @@ export default function TicketsPage() {
             <span className="flex h-12 w-12 items-center justify-center rounded-2xl border border-border/60 bg-muted/60 text-muted-foreground">
               <ListChecks className="h-5 w-5" />
             </span>
-            <p className="text-sm text-muted-foreground">
-              No ticket tracker is connected. Connect ClickUp, Jira, or Azure DevOps on the{' '}
-              <a href="/mcp" className="font-medium text-primary hover:underline">
-                MCP page
-              </a>{' '}
+            <p className="max-w-md text-sm text-muted-foreground">
+              No ticket tracker is connected to this project yet. Set up ClickUp, Jira or Azure
+              DevOps on the MCP page first — by browser sign-in or an API token — then come back
               to browse and crawl tickets.
             </p>
+            <Button asChild className="rounded-full transition-all duration-200 active:scale-[0.98]">
+              <Link to="/mcp">
+                <PlugZap className="size-4" />
+                Configure MCP
+              </Link>
+            </Button>
           </CardContent>
         </Card>
       ) : (
         <div className="space-y-6">
+          {activeProjectId && (
+            <TrackerSignin tracker={source} projectId={activeProjectId} />
+          )}
           {/* Browser */}
           <Card className="rounded-3xl border-border/60 shadow-none">
             <CardContent className="space-y-3 py-5">

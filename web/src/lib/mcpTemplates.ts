@@ -12,19 +12,14 @@ import {
   Database,
   Figma,
   FileSearch,
-  FolderOpen,
   GitBranch,
-  GitMerge,
   Globe,
-  Library,
   ListChecks,
   MonitorPlay,
   MousePointerClick,
   NotebookText,
-  Search,
   Smartphone,
   SquareKanban,
-  Workflow,
   type LucideIcon,
 } from 'lucide-react'
 import type { McpEntryInput } from './api'
@@ -68,7 +63,8 @@ export interface McpTemplate {
   builtin?: BuiltinMcp
 }
 
-export const MCP_TEMPLATE_CATEGORIES = ['QC essentials', 'Sign in (OAuth)', 'Code & docs', 'Browser & web', 'Data', 'Monitoring', 'Productivity']
+// Trimmed to what a QC engineer actually connects — anything else is a Paste JSON away.
+export const MCP_TEMPLATE_CATEGORIES = ['QC essentials', 'Sign in (OAuth)', 'Browser & web', 'Data', 'Code']
 
 /**
  * Hosted servers that use OAuth: added as a bare `{type:'http', url}` and signed in to
@@ -114,14 +110,6 @@ const OAUTH_TEMPLATES: McpTemplate[] = [
     Figma,
     'https://mcp.figma.com/mcp',
     'https://developers.figma.com/docs/figma-mcp-server/',
-  ),
-  oauthTemplate(
-    'linear',
-    'Linear',
-    'Issues, projects and cycles in Linear — sign in with your account.',
-    SquareKanban,
-    'https://mcp.linear.app/mcp',
-    'https://linear.app/docs/mcp',
   ),
   oauthTemplate(
     'atlassian',
@@ -249,7 +237,7 @@ export const MCP_TEMPLATES: McpTemplate[] = [
     name: 'github',
     label: 'GitHub',
     blurb: 'Repos, PRs, issues and Actions through GitHub’s hosted server.',
-    category: 'Code & docs',
+    category: 'Code',
     icon: GitBranch,
     entry: {
       type: 'http',
@@ -266,57 +254,6 @@ export const MCP_TEMPLATES: McpTemplate[] = [
       },
     ],
     docsUrl: 'https://github.com/github/github-mcp-server',
-  },
-  {
-    id: 'gitlab',
-    name: 'gitlab',
-    label: 'GitLab',
-    blurb: 'Projects, merge requests, issues and files on GitLab.',
-    category: 'Code & docs',
-    icon: GitMerge,
-    entry: {
-      type: 'stdio',
-      command: 'npx',
-      args: ['-y', '@modelcontextprotocol/server-gitlab'],
-      env: {
-        GITLAB_PERSONAL_ACCESS_TOKEN: '{{GITLAB_TOKEN}}',
-        GITLAB_API_URL: '{{GITLAB_API_URL}}',
-      },
-    },
-    fields: [
-      { key: 'GITLAB_TOKEN', label: 'Personal access token', placeholder: 'glpat-…', secret: true },
-      {
-        key: 'GITLAB_API_URL',
-        label: 'API URL (self-hosted only)',
-        placeholder: 'https://gitlab.example.com/api/v4',
-        optional: true,
-      },
-    ],
-    docsUrl: 'https://www.npmjs.com/package/@modelcontextprotocol/server-gitlab',
-  },
-  {
-    id: 'context7',
-    name: 'context7',
-    label: 'Context7',
-    blurb: 'Up-to-date library & framework docs, looked up on demand.',
-    category: 'Code & docs',
-    icon: Library,
-    entry: {
-      type: 'http',
-      url: 'https://mcp.context7.com/mcp',
-      headers: { CONTEXT7_API_KEY: '{{CONTEXT7_API_KEY}}' },
-    },
-    fields: [
-      {
-        key: 'CONTEXT7_API_KEY',
-        label: 'API key (optional)',
-        placeholder: 'ctx7sk-…',
-        secret: true,
-        optional: true,
-        hint: 'Works without one; a free key raises the rate limit.',
-      },
-    ],
-    docsUrl: 'https://github.com/upstash/context7',
   },
   {
     id: 'chrome-devtools',
@@ -342,22 +279,6 @@ export const MCP_TEMPLATES: McpTemplate[] = [
     needsUv: true,
   },
   {
-    id: 'brave-search',
-    name: 'brave-search',
-    label: 'Brave Search',
-    blurb: 'Web search results, for checking what a feature should behave like.',
-    category: 'Browser & web',
-    icon: Search,
-    entry: {
-      type: 'stdio',
-      command: 'npx',
-      args: ['-y', '@brave/brave-search-mcp-server'],
-      env: { BRAVE_API_KEY: '{{BRAVE_API_KEY}}' },
-    },
-    fields: [{ key: 'BRAVE_API_KEY', label: 'API key', secret: true, hint: 'brave.com/search/api' }],
-    docsUrl: 'https://github.com/brave/brave-search-mcp-server',
-  },
-  {
     id: 'postgres',
     name: 'postgres',
     label: 'PostgreSQL',
@@ -379,92 +300,6 @@ export const MCP_TEMPLATES: McpTemplate[] = [
       },
     ],
     docsUrl: 'https://www.npmjs.com/package/@modelcontextprotocol/server-postgres',
-  },
-  {
-    id: 'filesystem',
-    name: 'filesystem',
-    label: 'Filesystem',
-    blurb: 'Read and search files in one folder outside the project (logs, exports, fixtures).',
-    category: 'Data',
-    icon: FolderOpen,
-    entry: {
-      type: 'stdio',
-      command: 'npx',
-      args: ['-y', '@modelcontextprotocol/server-filesystem', '{{ALLOWED_DIR}}'],
-    },
-    fields: [
-      {
-        key: 'ALLOWED_DIR',
-        label: 'Allowed folder',
-        placeholder: '/path/to/folder',
-        prefill: 'project-root',
-        hint: 'The server can read and WRITE inside this folder only.',
-      },
-    ],
-    docsUrl: 'https://github.com/modelcontextprotocol/servers/tree/main/src/filesystem',
-  },
-  {
-    id: 'sentry',
-    name: 'sentry',
-    label: 'Sentry',
-    blurb: 'Look up the errors and stack traces behind a reported bug.',
-    category: 'Monitoring',
-    icon: Bug,
-    entry: {
-      type: 'stdio',
-      command: 'npx',
-      args: ['-y', '@sentry/mcp-server@latest'],
-      env: { SENTRY_ACCESS_TOKEN: '{{SENTRY_TOKEN}}', SENTRY_HOST: '{{SENTRY_HOST}}' },
-    },
-    fields: [
-      { key: 'SENTRY_TOKEN', label: 'User auth token', placeholder: 'sntryu_…', secret: true },
-      {
-        key: 'SENTRY_HOST',
-        label: 'Host (self-hosted only)',
-        placeholder: 'sentry.example.com',
-        optional: true,
-      },
-    ],
-    docsUrl: 'https://github.com/getsentry/sentry-mcp',
-  },
-  {
-    id: 'notion',
-    name: 'notion',
-    label: 'Notion',
-    blurb: 'Read specs, PRDs and test plans kept in Notion pages.',
-    category: 'Productivity',
-    icon: NotebookText,
-    entry: {
-      type: 'stdio',
-      command: 'npx',
-      args: ['-y', '@notionhq/notion-mcp-server'],
-      env: { NOTION_TOKEN: '{{NOTION_TOKEN}}' },
-    },
-    fields: [
-      {
-        key: 'NOTION_TOKEN',
-        label: 'Integration token',
-        placeholder: 'ntn_…',
-        secret: true,
-        hint: 'notion.so/profile/integrations — then share the pages with it.',
-      },
-    ],
-    docsUrl: 'https://github.com/makenotion/notion-mcp-server',
-  },
-  {
-    id: 'sequential-thinking',
-    name: 'sequential-thinking',
-    label: 'Sequential Thinking',
-    blurb: 'A scratchpad tool for step-by-step reasoning on tricky test plans.',
-    category: 'Productivity',
-    icon: Workflow,
-    entry: {
-      type: 'stdio',
-      command: 'npx',
-      args: ['-y', '@modelcontextprotocol/server-sequential-thinking'],
-    },
-    fields: [],
-    docsUrl: 'https://github.com/modelcontextprotocol/servers/tree/main/src/sequentialthinking',
   },
   ...OAUTH_TEMPLATES,
 ]
@@ -490,8 +325,8 @@ export function uniqueName(base: string, taken: Iterable<string>): string {
 /**
  * The template's entry with `{{KEY}}` replaced by the typed values. A string that
  * mentions an EMPTY field is dropped from its container (the arg, env var or header
- * goes away) — so an optional "self-hosted URL" left blank leaves no half-filled
- * `GITLAB_API_URL=""` behind for the server to choke on.
+ * goes away) — so an optional field left blank leaves no half-filled `KEY=""` behind
+ * for the server to choke on.
  */
 export function fillTemplate(t: McpTemplate, values: Record<string, string>): McpEntryInput {
   const empty = t.fields.filter((f) => !values[f.key]?.trim()).map((f) => `{{${f.key}}}`)

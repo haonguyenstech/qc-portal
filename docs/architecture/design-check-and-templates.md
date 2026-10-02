@@ -85,7 +85,11 @@ Count chips double as **filters** and the list has a search box: the question be
 26 findings is almost always "show me the ones that failed".
 
 **Project templates (`/templates` → `ProjectSettingsPage.tsx`, `routes/templates.ts`)** — plain-text
-files under `testing/templates/<key>.md`. The UI owns the catalog in `TEMPLATE_KINDS`; add a kind there
+files under `testing/templates/<key>.md`. The page is a list (left) + the selected template (right) —
+  `?kind=<key>` picks it, so other pages deep-link one (Run → Issues → `?kind=clickup-issue`, Design
+  Check → `?kind=design-check`). The content previews INLINE (rendered / source toggle, full-screen
+  dialog); a file can be dropped on the panel. An unsaved upload is held per kind on the page, so
+  switching templates in the list does not discard it. The UI owns the catalog in `TEMPLATE_KINDS`; add a kind there
 to expose a new upload slot. Current kinds:
 - `testcase` — structure Claude matches when drafting test cases (a per-run upload on `/testcases` still overrides it).
   **Seeded on project creation**: `initializeProjectFolder` (routes/projects.ts) copies the template

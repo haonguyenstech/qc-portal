@@ -359,6 +359,37 @@ server/src/
                     portal-wide. The URL is an OSC 8 hyperlink, so the ANSI strip's OSC
                     body must not be greedy (it would eat the visible URL); the `code=` of
                     a pasted URL (the pty echoes it) is masked; memory only, never logged
+                    Output is read in CHUNKS, not lines: ClickUp's authorize URL (a ~500-char
+                    JWT client id) arrived split mid-`%2F`, and taking the URL from the first
+                    chunk opened ClickUp with half a `redirect_uri` ("Invalid redirect_uri").
+                    So the URL is accepted only once whitespace ends it, an escape sequence
+                    cut at a chunk end is held back from its START (`openEscapeAt`), and
+                    `lines` holds finished lines (+ the open one in the snapshot)
+  hostedMcp.ts      the portal's OWN browser sign-in to a tracker's hosted MCP server (Atlassian,
+                    ClickUp): DCR + PKCE, state beside the DB (0600), and the headersHelper
+                    that hands the same login to Claude Code. clickupMcp.ts / atlassianMcp.ts
+                    are the per-provider halves; routes/trackerSignin.ts the shared routes
+  azureSignin.ts    the same ONE sign-in for Azure DevOps, through Microsoft Entra (no DCR, so
+                    not hostedMcp.ts): the public client of Microsoft's local server, a
+                    LOOPBACK redirect listener (the client takes only http://localhost:<port>/),
+                    tokens beside the DB, and the `node -e` launcher .mcp.json runs to start
+                    `@azure-devops/mcp --authentication envvar` with a fresh token
+  atlassianMcp.ts   the Tickets page's OWN browser sign-in to Jira: an MCP client of Atlassian's
+                    hosted server with its own OAuth (DCR + PKCE), state beside the DB (0600),
+                    used by jira.ts when the project has no API token. Not the MCP page's
+                    `atlassian` login (Claude Code's, unusable by the portal) - see
+                    tickets-and-overview.md
+  trackerMcp.ts     which .mcp.json server talks to ClickUp / Jira / Azure DevOps: the token built-in
+                    under its FIXED name, or the hosted server signed in to in the browser
+                    (url mcp.clickup.com / mcp.atlassian.com, any name). Chat's ticket
+                    hint names the real one (a hard-coded `mcp__clickup__*` does not exist
+                    in a sign-in-only project), and routes/clickup.ts says "signed in for
+                    runs and chat only" instead of a bare "not configured" — the hosted
+                    login is Claude Code's, scoped to the MCP server, so ticket crawl and
+                    Run → Issues filing (REST API) still need the API token. The MCP page's
+                    ClickUp / Jira form offers both ("Sign in with browser" adds the
+                    `clickup-oauth` / `atlassian` template, then Sign in opens) and lists
+                    which features each covers; never present sign-in as enough for those two
 
 web/src/
   App.tsx           two branches: `/ai-labs` renders BARE (no shell — see "QC AI Labs"),

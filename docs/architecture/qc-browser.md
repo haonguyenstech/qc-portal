@@ -21,9 +21,14 @@ before it was built, and again after: a turn was stopped mid-flight and the brow
 open **on the same page** (`/notes`), then a fresh turn snapshotted that live page without
 navigating; the window measured 2560x1410 maximized instead of 1619x936.
 
-- **Per project, opt-in** — `projects.persistentBrowser` (migration in `db.ts`, toggled by
-  the `QcBrowserCard` on `/mcp`). It changes which browser a project's runs drive, so it is
-  the engineer's call; existing projects default OFF and behave exactly as before.
+- **Per project, opt-in** — `projects.persistentBrowser` (migration in `db.ts`). It changes
+  which browser a project's runs drive, so it is the engineer's call; existing projects default
+  OFF and behave exactly as before.
+- **No UI any more.** The `QcBrowserCard` on `/mcp` (open / maximize / close the browser, attach
+  the project) was REMOVED on request — no project had attach mode on. The server side
+  (`qcBrowser.ts`, `routes/browser.ts`, the `persistentBrowser` column, `applyPlaywrightAttachMode`)
+  is untouched and still honoured if the column is set, so bringing it back is a UI-only change
+  (the card is in git history, removed after 0.12.9).
 - **The toggle rewrites `.mcp.json`** through `applyPlaywrightAttachMode` (routes/mcp.ts),
   called from the projects `PUT` route and from `repairProjectMcpConfig` at boot. Which
   flags come OFF in attached mode is load-bearing: `--viewport-size` **must** go (it

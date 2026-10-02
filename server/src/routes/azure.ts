@@ -8,6 +8,18 @@ import {
   withAzureCreds,
 } from '../azure.js'
 import { resolveProject } from '../projectScope.js'
+import { getProject } from '../db.js'
+import { isRemoteRequest } from '../remoteAccess.js'
+import {
+  LAUNCHER_MIN_VALID_MS,
+  azureSignin,
+  finishAzureSignin,
+  freshAzureToken,
+  markAzureLinked,
+  setAzureOrg,
+} from '../azureSignin.js'
+import { mountTrackerSignin } from './trackerSignin.js'
+import { linkClaudeToPortalSignin } from './mcp.js'
 import { crawlOneTicket } from '../crawl.js'
 import { getCrawlJob, listCrawlJobs, startCrawlJob } from '../crawlJobs.js'
 
@@ -26,10 +38,74 @@ const parseTicketKind = (v: unknown) => (v === 'feature' || v === 'bug' ? v : nu
 // in-app Connect creds take effect without a server restart.
 azureRouter.use((req, _res, next) => {
   const project = resolveProject(req)
-  const creds = project ? resolveProjectAzureCreds(project.rootPath) : undefined
-  void withAzureCreds(creds, async () => {
-    next()
-  })
+  void (async () => {
+    // A browser sign-in's token is refreshed HERE (async) before the sync resolver
+    // below reads it — the same split as routes/clickup.ts.
+    if (project && azureSignin(project.id).signedIn) await freshAzureToken(project.id)
+    const creds = project ? resolveProjectAzureCreds(project.rootPath) : undefined
+    await withAzureCreds(creds, async () => {
+      next()
+    })
+  })()
+})
+
+// The browser sign-in (azureSignin.ts): /oauth/status, /start, /callback, /signout.
+mountTrackerSignin(azureRouter, 'azure', {
+  finish: finishAzureSignin,
+  // A PAT in the `azure` entry wins over the sign-in (resolveProjectAzureCreds).
+  usingToken: (root) => {
+    const c = resolveProjectAzureCreds(root)
+    return !!c && !c.bearer
+  },
+})
+
+/**
+ * What the `.mcp.json` launcher (azureSignin.ts `AZURE_LAUNCHER`) fetches before it
+ * starts Microsoft's server: a token with at least 45 minutes left + the organization.
+ * Local callers only, and the EXACT project only — the same rules as the hosted
+ * servers' /oauth/headers.
+ */
+azureRouter.get('/oauth/token', async (req, res) => {
+  if (isRemoteRequest(req)) return res.status(403).json({ error: 'local only' })
+  const id = typeof req.query.projectId === 'string' ? req.query.projectId : ''
+  const project = id ? getProject(id) : undefined
+  if (!project) return res.json({ error: 'Unknown QC Portal project — reconnect Azure DevOps on the MCP page.' })
+  const signin = azureSignin(project.id)
+  if (signin.needsOrg) {
+    return res.json({ error: 'Choose the Azure DevOps organization on the QC Portal MCP page to finish signing in.' })
+  }
+  const token = await freshAzureToken(project.id, LAUNCHER_MIN_VALID_MS)
+  const org = signin.site?.cloudId
+  if (!token || !org) {
+    return res.json({
+      error: 'The Azure DevOps sign-in has expired or was removed — sign in again on the QC Portal (MCP or Tickets page).',
+    })
+  }
+  res.json({ token, org })
+})
+
+/** Choose / switch the organization this sign-in reads from (listed, or typed + checked). */
+azureRouter.post('/oauth/site', async (req, res) => {
+  const project = resolveProject(req)
+  if (!project) return res.status(400).json({ error: 'project not found' })
+  const org = typeof req.body?.org === 'string' ? req.body.org.trim().slice(0, 200) : ''
+  try {
+    const { first } = await setAzureOrg(project.id, org)
+    // Finishing a sign-in whose organization lookup failed: connect runs + chat now,
+    // exactly as the callback would have.
+    if (first) {
+      linkClaudeToPortalSignin(project.rootPath, project.id, 'azure')
+      markAzureLinked(project.id)
+    }
+    res.json({ ok: true, linked: first })
+  } catch (err) {
+    // The organization's tenant needs its own sign-in: not a failure — the page starts
+    // that sign-in (with this organization, so it goes to the right tenant).
+    if ((err as { resignin?: boolean }).resignin) {
+      return res.json({ ok: false, resignin: true, error: (err as Error).message })
+    }
+    fail(res, err)
+  }
 })
 
 function fail(res: import('express').Response, err: unknown) {

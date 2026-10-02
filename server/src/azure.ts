@@ -16,12 +16,16 @@
 //      button writes: AZURE_DEVOPS_ORG_URL / AZURE_DEVOPS_PAT /
 //      AZURE_DEVOPS_DEFAULT_PROJECT) — resolved per request via AsyncLocalStorage,
 //      so pasting fresh creds takes effect immediately, no server restart.
-//   2. The AZURE_DEVOPS_ORG_URL / AZURE_DEVOPS_PAT / AZURE_DEVOPS_DEFAULT_PROJECT
+//   2. The portal's browser sign-in (azureSignin.ts) — an Entra access token sent as a
+//      Bearer instead of the PAT. The routes refresh it before a request reads it.
+//   3. The AZURE_DEVOPS_ORG_URL / AZURE_DEVOPS_PAT / AZURE_DEVOPS_DEFAULT_PROJECT
 //      environment variables.
 
 import { AsyncLocalStorage } from 'node:async_hooks'
 import fs from 'node:fs'
 import { mcpJsonFor } from './config.js'
+import { azureSigninCreds } from './azureSignin.js'
+import { projectIdForRoot } from './projectScope.js'
 import type {
   Workspace,
   TaskHit,
@@ -38,6 +42,8 @@ export interface AzureCreds {
   orgUrl: string // e.g. https://dev.azure.com/your-org (no trailing slash)
   pat: string
   project?: string // optional default project (AZURE_DEVOPS_DEFAULT_PROJECT)
+  /** The browser sign-in's access token — used INSTEAD of `pat` when set. */
+  bearer?: string
 }
 
 // Per-request creds override. Set by withAzureCreds(); read by currentCreds().
@@ -83,7 +89,11 @@ export function resolveProjectAzureCreds(projectRoot: string): AzureCreds | unde
   } catch {
     /* no file / bad json */
   }
-  return undefined
+  // No PAT — the portal's browser sign-in, if any. Sync on purpose (like clickup.ts):
+  // the routes refresh the token first (`freshAzureToken`).
+  const projectId = projectIdForRoot(projectRoot)
+  const signin = projectId ? azureSigninCreds(projectId) : undefined
+  return signin ? { ...signin, pat: '' } : undefined
 }
 
 export function azureConfigured(): boolean {
@@ -96,9 +106,18 @@ function creds(): AzureCreds {
   return c
 }
 
-/** Azure DevOps PAT auth: HTTP Basic with an empty username and the PAT as password. */
+/** PAT auth is HTTP Basic with an empty username and the PAT as password; the browser
+ *  sign-in's token is a Bearer. */
 function authHeader(c: AzureCreds): string {
+  if (c.bearer) return `Bearer ${c.bearer}`
   return `Basic ${Buffer.from(`:${c.pat}`).toString('base64')}`
+}
+
+/** What "the credential was refused" means, in the words of how it was given. */
+function rejected(c: AzureCreds | undefined, why: string): string {
+  return c?.bearer
+    ? `Azure DevOps refused the browser sign-in (${why}). Sign in again on the MCP or Tickets page.`
+    : `Azure DevOps rejected the PAT (${why}).`
 }
 
 function statusError(message: string, status: number): Error {
@@ -128,7 +147,7 @@ async function azFetch(url: string, init?: RequestInit): Promise<any> {
     const invalid = res.status === 401 || res.status === 403
     throw statusError(
       invalid
-        ? 'Azure DevOps rejected the PAT (invalid, expired, or missing a required scope).'
+        ? rejected(c, 'invalid, expired, or missing a required scope')
         : `Azure DevOps API ${res.status}: ${body.slice(0, 200)}`,
       502,
     )
@@ -136,7 +155,7 @@ async function azFetch(url: string, init?: RequestInit): Promise<any> {
   if (res.status === 204) return null
   if (ctype.includes('text/html')) {
     // A sign-in page came back with a 200 — the PAT is not authenticating.
-    throw statusError('Azure DevOps rejected the PAT (invalid or expired — got a sign-in page).', 502)
+    throw statusError(rejected(c, 'invalid or expired — got a sign-in page'), 502)
   }
   return res.json()
 }
@@ -165,7 +184,9 @@ export async function verifyToken(): Promise<{ ok: boolean; status: number | nul
       return {
         ok: false,
         status: res.status,
-        detail: 'PAT rejected by Azure DevOps (got a sign-in page). Disconnect and reconnect with a fresh PAT.',
+        detail: c.bearer
+          ? rejected(c, 'got a sign-in page')
+          : 'PAT rejected by Azure DevOps (got a sign-in page). Disconnect and reconnect with a fresh PAT.',
       }
     }
     const body = await res.text().catch(() => '')
@@ -174,7 +195,9 @@ export async function verifyToken(): Promise<{ ok: boolean; status: number | nul
       ok: false,
       status: res.status,
       detail: invalid
-        ? 'PAT rejected by Azure DevOps (invalid, expired, or missing scope). Disconnect and reconnect with a fresh PAT.'
+        ? c.bearer
+          ? rejected(c, `HTTP ${res.status}`)
+          : 'PAT rejected by Azure DevOps (invalid, expired, or missing scope). Disconnect and reconnect with a fresh PAT.'
         : `Azure DevOps API ${res.status}: ${body.slice(0, 120)}`,
     }
   } catch (e) {

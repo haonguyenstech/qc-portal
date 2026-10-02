@@ -17,6 +17,13 @@ const AUTH_URL =
   'https://mcp.example.com/authorize?response_type=code&client_id=abc&code_challenge=xyz' +
   '&redirect_uri=http%3A%2F%2Flocalhost%3A49754%2Fcallback&state=GOOD&resource=https%3A%2F%2Fmcp.example.com%2Fmcp'
 
+// ClickUp's real shape: a ~500-char JWT client id, so the CLI's write reaches the pty
+// in more than one chunk — split here mid-`%2F` AND mid-escape-sequence on purpose.
+const LONG_URL =
+  'https://mcp.clickup.com/oauth/authorize?response_type=code&client_id=mcp-client-' +
+  'x'.repeat(420) +
+  '&code_challenge=abc&code_challenge_method=S256&redirect_uri=http%3A%2F%2Flocalhost%3A50116%2Fcallback&state=GOOD'
+
 fs.writeFileSync(
   FAKE,
   `#!/usr/bin/env node
@@ -25,9 +32,18 @@ const w = (s) => process.stdout.write(s)
 if (cmd !== 'mcp') process.exit(2)
 if (sub === 'logout') { w('Signed out of "' + name + '". Run \`claude mcp login ' + name + '\` to authenticate again.\\n'); process.exit(0) }
 if (name === 'unapproved') { w('"unapproved" is from .mcp.json and awaiting approval. Run \`claude\` in this directory to review it first.\\n'); process.exit(1) }
-const url = ${JSON.stringify(AUTH_URL)}
+;(async () => {
+const url = name === 'chunked' ? ${JSON.stringify(LONG_URL)} : ${JSON.stringify(AUTH_URL)}
 w('Starting authentication for "' + name + '"\\u2026\\n')
-w('Visit this URL to authorize:\\n  \\x1b]8;;' + url + '\\x1b\\\\' + url + '\\x1b]8;;\\x1b\\\\\\n\\n')
+const visit = 'Visit this URL to authorize:\\n  \\x1b]8;;' + url + '\\x1b\\\\' + url + '\\x1b]8;;\\x1b\\\\\\n\\n'
+if (name === 'chunked') {
+  // Cut inside the visible URL's "%2F", then again inside the closing OSC 8 sequence.
+  const a = visit.indexOf('http%3A%', visit.indexOf('\\x1b\\\\')) + 'http%3A%'.length
+  const b = visit.lastIndexOf('\\x1b]8;;') + 3
+  w(visit.slice(0, a)); await new Promise((r) => setTimeout(r, 300))
+  w(visit.slice(a, b)); await new Promise((r) => setTimeout(r, 300))
+  w(visit.slice(b))
+} else w(visit)
 w('Waiting for authorization\\u2026 (^C to cancel)\\n')
 const prompt = () => w('Or paste the redirect URL here: ')
 prompt()
@@ -37,6 +53,7 @@ require('node:readline').createInterface({ input: process.stdin }).on('line', (l
   w("That doesn't look like a redirect URL for this sign-in \\u2014 paste the full address from the browser page this sign-in opened.\\n")
   prompt()
 })
+})()
 `,
   { mode: 0o755 },
 )
@@ -84,6 +101,19 @@ test('reads the OSC 8 URL whole, refuses a wrong paste, succeeds on the right on
   assert.equal(done.state, 'succeeded')
   assert.equal(done.exitCode, 0)
   assert.equal(successes, 1)
+})
+
+test('a URL split across output chunks is read WHOLE (ClickUp: "Invalid redirect_uri")', { skip }, async () => {
+  const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-signin-chunked-'))
+  assert.equal(startMcpSignin(projectRoot, 'p-chunked', 'chunked', () => {}).ok, true)
+  const job = await until(
+    () => getMcpSignin('p-chunked', 'chunked'),
+    (j) => !!j?.signInUrl && !!j?.awaitingPaste,
+  )
+  assert.equal(job!.signInUrl, LONG_URL)
+  // The log shows it as ONE line too, not two halves.
+  assert.ok(job!.lines.some((l) => l.trim() === LONG_URL))
+  cancelMcpSignin('p-chunked', 'chunked')
 })
 
 test('a failed sign-in reports the CLI’s own reason', { skip }, async () => {

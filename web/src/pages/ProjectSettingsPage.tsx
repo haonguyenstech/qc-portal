@@ -3,22 +3,23 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import ReactMarkdown, { type Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import { useSearchParams } from 'react-router-dom'
 import {
   ClipboardList,
+  Code2,
   Eye,
+  FileCog,
   FileSpreadsheet,
   FileText,
   FileUp,
-  FolderGit2,
-  FolderOpen,
   FolderTree,
   ListChecks,
   Loader2,
+  Maximize2,
   PencilLine,
   RotateCcw,
   Save,
   Send,
-  Settings,
   TriangleAlert,
   Trash2,
   X,
@@ -55,6 +56,7 @@ import {
 } from '@/lib/api'
 import { useProjects } from '@/lib/project-context'
 import { CsvTable, looksLikeCsv } from '@/components/CsvTable'
+import { OpenFolderButton } from '@/components/OpenFolderButton'
 
 // Markdown preview styling (GFM tables included) — mirrors the block used by the
 // Knowledge/Memory previews so a markdown template (e.g. the default testcase.md,
@@ -176,6 +178,33 @@ async function readTemplateFile(file: File): Promise<string> {
   return (await file.text()).trim()
 }
 
+/** A sample issue rendered through the template — the ClickUp card exactly as
+ *  `renderIssueTemplate` builds it for the Issues tab. */
+function IssueCardPreview({ text }: { text: string }) {
+  const card = renderIssueTemplate(text, SAMPLE_ISSUE_VARS, SAMPLE_ISSUE_VARS.heading)
+  return (
+    <div className="rounded-2xl border border-border/60 bg-card">
+      <div className="border-b border-border/60 bg-muted/40 px-3.5 py-2">
+        <p className="text-[10px] font-semibold tracking-wide text-muted-foreground uppercase">
+          Name
+        </p>
+        <p className="text-sm font-semibold break-words">{card.title}</p>
+      </div>
+      <div className={cn(MD_CLASS, 'px-3.5 py-2.5 [&_li]:text-foreground/90 [&_p]:text-foreground/90')}>
+        {card.description ? (
+          <ReactMarkdown remarkPlugins={[remarkGfm]} components={MD_COMPONENTS}>
+            {card.description}
+          </ReactMarkdown>
+        ) : (
+          <p className="text-muted-foreground italic">
+            Empty — the issue would be filed with its text as written instead.
+          </p>
+        )}
+      </div>
+    </div>
+  )
+}
+
 /**
  * Write / edit the ClickUp issue template by hand: the text on the left, what a real
  * issue becomes on the right. The preview renders through the SAME function the
@@ -210,7 +239,6 @@ function IssueTemplateEditor({
   })
 
   const problems = issueTemplateProblems(text)
-  const card = renderIssueTemplate(text, SAMPLE_ISSUE_VARS, SAMPLE_ISSUE_VARS.heading)
   const unchanged = savedContent !== null && text === savedContent
   const tooBig = new Blob([text]).size > MAX_BYTES
   const blocked = problems.some((p) => p.blocking)
@@ -297,25 +325,7 @@ function IssueTemplateEditor({
             <p className="mb-2 text-[11px] font-semibold tracking-wide text-muted-foreground uppercase">
               Preview · a sample issue as the ClickUp card
             </p>
-            <div className="rounded-2xl border border-border/60 bg-card">
-              <div className="border-b border-border/60 bg-muted/40 px-3.5 py-2">
-                <p className="text-[10px] font-semibold tracking-wide text-muted-foreground uppercase">
-                  Name
-                </p>
-                <p className="text-sm font-semibold break-words">{card.title}</p>
-              </div>
-              <div className={cn(MD_CLASS, 'px-3.5 py-2.5 [&_li]:text-foreground/90 [&_p]:text-foreground/90')}>
-                {card.description ? (
-                  <ReactMarkdown remarkPlugins={[remarkGfm]} components={MD_COMPONENTS}>
-                    {card.description}
-                  </ReactMarkdown>
-                ) : (
-                  <p className="text-muted-foreground italic">
-                    Empty — the issue would be filed with its text as written instead.
-                  </p>
-                )}
-              </div>
-            </div>
+            <IssueCardPreview text={text} />
             <p className="mt-2 text-[11px] text-muted-foreground">
               Assignee and tags come from the parent ticket, priority from the issue&apos;s
               severity, and screenshots are attached and posted as a comment — the template
@@ -365,27 +375,186 @@ function IssueTemplateEditor({
   )
 }
 
-/** One template: upload a file (csv / md / txt / json / excel) → preview → save.
- *  No manual typing — the content always comes from an uploaded file. */
-function TemplateCard({
+/** A parsed upload waiting to be saved. Lives on the page (per kind), so switching
+ *  between templates in the list does not throw away an unsaved upload. */
+interface PendingUpload {
+  name: string
+  content: string
+}
+
+type TemplateState = 'unsaved' | 'saved' | 'unset'
+
+function templateState(saved: ProjectTemplate | undefined, pending: PendingUpload | null): TemplateState {
+  return pending ? 'unsaved' : saved ? 'saved' : 'unset'
+}
+
+function StatusPill({ saved, pending }: { saved?: ProjectTemplate; pending: PendingUpload | null }) {
+  const state = templateState(saved, pending)
+  return (
+    <span
+      className={cn(
+        'shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold ring-1',
+        state === 'unsaved' &&
+          'bg-amber-100 text-amber-700 ring-amber-600/20 dark:bg-amber-500/15 dark:text-amber-300 dark:ring-amber-400/25',
+        state === 'saved' &&
+          'bg-emerald-100 text-emerald-700 ring-emerald-600/20 dark:bg-emerald-500/15 dark:text-emerald-300 dark:ring-emerald-400/25',
+        state === 'unset' && 'bg-muted font-medium text-muted-foreground ring-border/60',
+      )}
+    >
+      {state === 'unsaved' ? 'Unsaved' : state === 'saved' ? `Saved · ${formatBytes(saved!.size)}` : 'Not set'}
+    </span>
+  )
+}
+
+/** One row of the template list: icon, name, and whether the project has one. */
+function TemplateNavItem({
+  kind,
+  saved,
+  pending,
+  active,
+  onSelect,
+}: {
+  kind: TemplateKind
+  saved: ProjectTemplate | undefined
+  pending: PendingUpload | null
+  active: boolean
+  onSelect: () => void
+}) {
+  const Icon = kind.icon
+  const state = templateState(saved, pending)
+  return (
+    <button
+      type="button"
+      // Tour anchor: a guide step points at one specific kind (`[data-tour="template-testcase"]`).
+      data-tour={`template-${kind.key}`}
+      aria-current={active ? 'true' : undefined}
+      onClick={onSelect}
+      className={cn(
+        'flex w-full items-center gap-3 rounded-2xl px-2.5 py-2 text-left transition-all duration-200 active:scale-[0.98]',
+        active ? 'bg-muted' : 'hover:bg-muted/60',
+      )}
+    >
+      <span
+        className={cn(
+          'flex size-9 shrink-0 items-center justify-center rounded-xl transition-colors',
+          active
+            ? 'bg-foreground text-background'
+            : 'border border-border/60 bg-muted/60 text-muted-foreground',
+        )}
+      >
+        <Icon className="size-4" />
+      </span>
+      <span className="min-w-0 flex-1 leading-tight">
+        <span className="block truncate text-sm font-medium">{kind.label}</span>
+        <span className="mt-0.5 flex items-center gap-1.5 text-[11px] text-muted-foreground">
+          <span
+            className={cn(
+              'size-1.5 shrink-0 rounded-full',
+              state === 'unsaved' && 'bg-amber-500',
+              state === 'saved' && 'bg-emerald-500',
+              state === 'unset' && 'bg-muted-foreground/40',
+            )}
+          />
+          {state === 'unsaved' ? 'Unsaved upload' : state === 'saved' ? `Saved · ${formatBytes(saved!.size)}` : 'Not set'}
+        </span>
+      </span>
+    </button>
+  )
+}
+
+type ContentView = 'preview' | 'source'
+
+/** The template's content: rendered (CSV table / Markdown / sample ClickUp card), or as source. */
+function TemplateBody({
+  kind,
+  name,
+  content,
+  view,
+}: {
+  kind: TemplateKind
+  name: string
+  content: string
+  view: ContentView
+}) {
+  if (view === 'source') {
+    return (
+      <pre className="font-mono text-[12px] leading-relaxed break-words whitespace-pre-wrap">{content}</pre>
+    )
+  }
+  if (kind.key === ISSUE_TEMPLATE_KEY) {
+    return (
+      <div className="max-w-3xl space-y-2">
+        <p className="text-[11px] font-semibold tracking-wide text-muted-foreground uppercase">
+          A sample issue as the ClickUp card
+        </p>
+        <IssueCardPreview text={content} />
+      </div>
+    )
+  }
+  // Uploaded CSV/Excel is stored as CSV text inside the .md — show it as a table.
+  if (looksLikeCsv(name, content)) return <CsvTable csv={content} />
+  // A markdown template (e.g. the default testcase.md with pipe tables) must be
+  // rendered, not dumped as raw text.
+  if (looksLikeMarkdown(name)) {
+    return (
+      <div className={MD_CLASS}>
+        <ReactMarkdown remarkPlugins={[remarkGfm]} components={MD_COMPONENTS}>
+          {content}
+        </ReactMarkdown>
+      </div>
+    )
+  }
+  return <pre className="font-mono text-[12px] leading-relaxed break-words whitespace-pre-wrap">{content}</pre>
+}
+
+function ViewToggle({ view, onChange }: { view: ContentView; onChange: (v: ContentView) => void }) {
+  return (
+    <div className="inline-flex shrink-0 rounded-full border border-border/60 bg-muted/60 p-0.5">
+      {(['preview', 'source'] as const).map((v) => (
+        <button
+          key={v}
+          type="button"
+          onClick={() => onChange(v)}
+          aria-pressed={view === v}
+          className={cn(
+            'flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[11px] font-medium capitalize transition-colors',
+            view === v ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground',
+          )}
+        >
+          {v === 'preview' ? <Eye className="size-3" /> : <Code2 className="size-3" />}
+          {v}
+        </button>
+      ))}
+    </div>
+  )
+}
+
+/** The selected template: what it does, its content inline, and every action on it.
+ *  Content comes from an uploaded file (drop it anywhere on the panel, or browse);
+ *  the ClickUp issue template can also be written by hand. */
+function TemplatePanel({
   kind,
   projectId,
   saved,
   hasDefault,
+  pending,
+  onPending,
 }: {
   kind: TemplateKind
   projectId: string
   saved: ProjectTemplate | undefined
   // Whether the portal ships a default for this kind (templates/project-templates/).
   hasDefault: boolean
+  pending: PendingUpload | null
+  onPending: (p: PendingUpload | null) => void
 }) {
   const queryClient = useQueryClient()
   const Icon = kind.icon
   const fileInput = useRef<HTMLInputElement>(null)
-  // A freshly uploaded-and-parsed file awaiting save (null once saved/cleared).
-  const [pending, setPending] = useState<{ name: string; content: string } | null>(null)
   const [reading, setReading] = useState(false)
-  const [showPreview, setShowPreview] = useState(false)
+  const [dragging, setDragging] = useState(false)
+  const [view, setView] = useState<ContentView>('preview')
+  const [expanded, setExpanded] = useState(false)
   const [confirmReset, setConfirmReset] = useState(false)
   const [confirmRemove, setConfirmRemove] = useState(false)
   const [editing, setEditing] = useState(false)
@@ -394,7 +563,7 @@ function TemplateCard({
     mutationFn: (content: string) => saveTemplate(kind.key, content, projectId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['templates', projectId] })
-      setPending(null)
+      onPending(null)
       setEditing(false)
       toast.success('Template saved', {
         description: `${kind.label} · testing/templates/${kind.key}.md`,
@@ -412,7 +581,7 @@ function TemplateCard({
     mutationFn: () => resetTemplateToDefault(kind.key, projectId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['templates', projectId] })
-      setPending(null)
+      onPending(null)
       setConfirmReset(false)
       toast.success('Default template restored', {
         description: `${kind.label} · testing/templates/${kind.key}.md`,
@@ -428,7 +597,7 @@ function TemplateCard({
     mutationFn: () => deleteTemplate(kind.key, projectId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['templates', projectId] })
-      setPending(null)
+      onPending(null)
       setConfirmRemove(false)
       toast.success('Template removed', { description: kind.label })
     },
@@ -438,10 +607,16 @@ function TemplateCard({
       }),
   })
 
-  async function onPick(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0]
-    e.target.value = '' // allow re-picking the same file
-    if (!file) return
+  const busy = save.isPending || remove.isPending || reset.isPending || reading
+
+  async function ingest(file: File) {
+    const ext = `.${file.name.split('.').pop()?.toLowerCase() ?? ''}`
+    if (!ACCEPT.split(',').includes(ext)) {
+      toast.error('Unsupported file type', {
+        description: `${file.name} — use CSV, Markdown, TXT, JSON or Excel.`,
+      })
+      return
+    }
     setReading(true)
     try {
       const content = await readTemplateFile(file)
@@ -453,7 +628,8 @@ function TemplateCard({
         toast.error('Template too large', { description: 'Parsed content exceeds 200 KB.' })
         return
       }
-      setPending({ name: file.name, content })
+      onPending({ name: file.name, content })
+      setView('preview')
     } catch (err) {
       toast.error('Could not read the file', {
         description: err instanceof Error ? err.message : 'Unsupported or corrupt file',
@@ -463,181 +639,256 @@ function TemplateCard({
     }
   }
 
-  const busy = save.isPending || remove.isPending || reset.isPending || reading
-  // What to preview: the pending upload if any, else the saved content.
-  const previewName = pending ? pending.name : saved ? `${kind.key}.md` : null
-  const previewContent = pending ? pending.content : (saved?.content ?? '')
-  // Uploaded CSV/Excel is stored as CSV text inside the .md — show it as a table.
-  const previewIsCsv = previewName ? looksLikeCsv(previewName, previewContent) : false
-  // Otherwise a markdown template (e.g. the default testcase.md with pipe tables)
-  // must be rendered, not dumped as raw text.
-  const previewIsMarkdown = !previewIsCsv && previewName ? looksLikeMarkdown(previewName) : false
+  function onPick(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]
+    e.target.value = '' // allow re-picking the same file
+    if (file) void ingest(file)
+  }
+
+  function onDragOver(e: React.DragEvent) {
+    if (!e.dataTransfer.types.includes('Files')) return
+    e.preventDefault()
+    if (!busy) setDragging(true)
+  }
+
+  function onDragLeave(e: React.DragEvent) {
+    if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDragging(false)
+  }
+
+  function onDrop(e: React.DragEvent) {
+    e.preventDefault()
+    setDragging(false)
+    const file = e.dataTransfer.files?.[0]
+    if (file && !busy) void ingest(file)
+  }
+
+  // What to show: the pending upload if any, else the saved content.
+  const contentName = pending ? pending.name : saved ? `${kind.key}.md` : null
+  const content = pending ? pending.content : (saved?.content ?? '')
+  const lineCount = content ? content.split(/\r?\n/).length : 0
 
   return (
-    <Card className="overflow-hidden rounded-3xl border-border/60 shadow-none transition-all duration-200 hover:-translate-y-0.5 hover:border-border hover:shadow-sm">
-      <div className="flex items-center gap-2 border-b border-border/60 bg-muted/60 px-4 py-2.5">
-        <span className="flex size-7 shrink-0 items-center justify-center rounded-xl border border-border/60 bg-muted/60 text-muted-foreground">
-          <Icon className="size-4" />
-        </span>
-        <div className="min-w-0 flex-1">
-          <p className="text-sm font-medium leading-tight">{kind.label}</p>
-          <p className="truncate font-mono text-[11px] text-muted-foreground">
-            testing/templates/{kind.key}.md
-          </p>
-        </div>
-        {pending ? (
-          <span className="shrink-0 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-700 ring-1 ring-amber-600/20">
-            Unsaved
-          </span>
-        ) : saved ? (
-          <span className="shrink-0 rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-semibold text-emerald-700 ring-1 ring-emerald-600/20">
-            Saved · {formatBytes(saved.size)}
-          </span>
-        ) : (
-          <span className="shrink-0 rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
-            Not set
-          </span>
-        )}
-      </div>
-      <CardContent className="space-y-3 p-4">
-        <p className="text-xs text-muted-foreground">{kind.description}</p>
+    <Card
+      onDragOver={onDragOver}
+      onDragLeave={onDragLeave}
+      onDrop={onDrop}
+      className="relative min-w-0 gap-0 overflow-hidden rounded-3xl border-border/60 py-0 shadow-none"
+    >
+      <input ref={fileInput} type="file" accept={ACCEPT} onChange={onPick} className="hidden" />
 
-        <input ref={fileInput} type="file" accept={ACCEPT} onChange={onPick} className="hidden" />
-
-        {previewName ? (
-          <div className="flex items-center gap-2 rounded-xl border border-border/60 bg-muted/60 px-3 py-2">
-            <FileText className="size-4 shrink-0 text-muted-foreground" />
-            <span className="min-w-0 flex-1 truncate text-sm">{previewName}</span>
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              onClick={() => (kind.editable ? setEditing(true) : setShowPreview(true))}
-              disabled={!previewContent}
-              className="h-7 shrink-0 gap-1.5 rounded-full px-2.5 text-xs"
-            >
-              {kind.editable ? (
-                <>
-                  <PencilLine className="size-3.5" /> Preview &amp; edit
-                </>
-              ) : (
-                <>
-                  <Eye className="size-3.5" /> Preview
-                </>
-              )}
-            </Button>
-            {pending && (
-              <button
-                type="button"
-                onClick={() => setPending(null)}
-                disabled={busy}
-                className="shrink-0 rounded-xl p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-                aria-label="Discard upload"
-              >
-                <X className="size-3.5" />
-              </button>
-            )}
+      {/* Header: what this template is + every action on it */}
+      <div className="space-y-2.5 border-b border-border/60 px-5 py-4">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-3">
+          <div className="flex min-w-0 flex-1 basis-64 items-center gap-3">
+            <span className="flex size-10 shrink-0 items-center justify-center rounded-2xl border border-border/60 bg-muted/60 text-muted-foreground">
+              <Icon className="size-4" />
+            </span>
+            <div className="min-w-0 space-y-0.5">
+              <div className="flex flex-wrap items-center gap-2">
+                <h2 className="text-base leading-tight font-semibold tracking-tight">{kind.label}</h2>
+                <StatusPill saved={saved} pending={pending} />
+              </div>
+              <p className="truncate font-mono text-[11px] text-muted-foreground">
+                testing/templates/{kind.key}.md
+              </p>
+            </div>
           </div>
-        ) : (
-          <button
-            type="button"
-            onClick={() => fileInput.current?.click()}
-            disabled={busy}
-            className="flex w-full flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-border/60 py-8 text-center text-muted-foreground transition-colors hover:border-border hover:bg-muted/60 hover:text-foreground"
-          >
-            {reading ? (
-              <Loader2 className="size-6 animate-spin" />
-            ) : (
-              <FileUp className="size-6" />
-            )}
-            <span className="text-sm font-medium">
-              {reading ? 'Reading file…' : 'Upload a template file'}
-            </span>
-            <span className="flex items-center gap-1 text-[11px]">
-              <FileSpreadsheet className="size-3" />
-              CSV, Markdown, TXT, JSON or Excel (.xlsx)
-            </span>
-          </button>
-        )}
 
-        <div className="flex items-center gap-2">
-          {pending && (
-            <Button
-              onClick={() => save.mutate(pending.content)}
-              disabled={busy}
-              className="rounded-full transition-all duration-200 active:scale-[0.98]"
-            >
-              {save.isPending ? (
-                <>
-                  <Loader2 className="size-4 animate-spin" />
-                  Saving…
-                </>
-              ) : (
-                <>
-                  <Save className="size-4" />
-                  {saved ? 'Replace template' : 'Save template'}
-                </>
-              )}
-            </Button>
-          )}
-          {previewName && (
-            <Button
-              variant="outline"
-              onClick={() => fileInput.current?.click()}
-              disabled={busy}
-              size="sm"
-              className="rounded-full transition-all duration-200 active:scale-[0.98]"
-            >
-              <FileUp className="size-3.5" />
-              {pending ? 'Pick another' : 'Replace'}
-            </Button>
-          )}
-          {kind.editable && !pending && !saved && (
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => setEditing(true)}
-              disabled={busy}
-              className="rounded-full transition-all duration-200 active:scale-[0.98]"
-            >
-              <PencilLine className="size-3.5" />
-              Write one
-            </Button>
-          )}
-          {hasDefault && !pending && (
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => (saved ? setConfirmReset(true) : reset.mutate())}
-              disabled={busy}
-              className="rounded-full transition-all duration-200 active:scale-[0.98]"
-              title="Put back the template the portal ships with"
-            >
-              {reset.isPending ? (
-                <Loader2 className="size-3.5 animate-spin" />
-              ) : (
-                <RotateCcw className="size-3.5" />
-              )}
-              {saved ? 'Reset to default' : 'Use default'}
-            </Button>
-          )}
-          {saved && !pending && (
-            <Button
-              variant="ghost"
-              onClick={() => setConfirmRemove(true)}
-              disabled={busy}
-              className="ml-auto rounded-full text-muted-foreground transition-all duration-200 hover:text-destructive active:scale-[0.98]"
-            >
-              {remove.isPending ? (
-                <Loader2 className="size-4 animate-spin" />
-              ) : (
-                <Trash2 className="size-4" />
-              )}
-              Remove
-            </Button>
-          )}
+          <div className="flex shrink-0 flex-wrap items-center gap-2">
+            {pending ? (
+              <>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => onPending(null)}
+                  disabled={busy}
+                  className="rounded-full text-muted-foreground hover:text-foreground"
+                >
+                  <X className="size-3.5" />
+                  Discard
+                </Button>
+                {kind.editable && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setEditing(true)}
+                    disabled={busy}
+                    className="rounded-full transition-all duration-200 active:scale-[0.98]"
+                  >
+                    <PencilLine className="size-3.5" />
+                    Edit
+                  </Button>
+                )}
+                <Button
+                  size="sm"
+                  onClick={() => save.mutate(pending.content)}
+                  disabled={busy}
+                  className="rounded-full transition-all duration-200 active:scale-[0.98]"
+                >
+                  {save.isPending ? <Loader2 className="size-3.5 animate-spin" /> : <Save className="size-3.5" />}
+                  {save.isPending ? 'Saving…' : saved ? 'Replace template' : 'Save template'}
+                </Button>
+              </>
+            ) : saved ? (
+              <>
+                {kind.editable && (
+                  <Button
+                    size="sm"
+                    onClick={() => setEditing(true)}
+                    disabled={busy}
+                    className="rounded-full transition-all duration-200 active:scale-[0.98]"
+                  >
+                    <PencilLine className="size-3.5" />
+                    Edit
+                  </Button>
+                )}
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => fileInput.current?.click()}
+                  disabled={busy}
+                  className="rounded-full transition-all duration-200 active:scale-[0.98]"
+                >
+                  {reading ? <Loader2 className="size-3.5 animate-spin" /> : <FileUp className="size-3.5" />}
+                  Replace
+                </Button>
+                {hasDefault && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setConfirmReset(true)}
+                    disabled={busy}
+                    title="Put back the template the portal ships with"
+                    className="rounded-full transition-all duration-200 active:scale-[0.98]"
+                  >
+                    <RotateCcw className="size-3.5" />
+                    Reset to default
+                  </Button>
+                )}
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={() => setConfirmRemove(true)}
+                  disabled={busy}
+                  title="Remove template"
+                  aria-label="Remove template"
+                  className="size-8 rounded-full text-muted-foreground transition-all duration-200 hover:text-destructive active:scale-[0.98]"
+                >
+                  {remove.isPending ? <Loader2 className="size-4 animate-spin" /> : <Trash2 className="size-4" />}
+                </Button>
+              </>
+            ) : null}
+          </div>
         </div>
-      </CardContent>
+        <p className="max-w-3xl text-xs leading-relaxed text-muted-foreground">{kind.description}</p>
+      </div>
+
+      {pending && (
+        <div className="flex items-center gap-2 border-b border-amber-200/70 bg-amber-50/70 px-5 py-2 text-xs text-amber-800 dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-300">
+          <TriangleAlert className="size-3.5 shrink-0" />
+          <span className="min-w-0">
+            Previewing <span className="font-medium">{pending.name}</span> — not used until you{' '}
+            {saved ? 'replace the saved template' : 'save it'}.
+          </span>
+        </div>
+      )}
+
+      {contentName ? (
+        <>
+          <div className="flex items-center gap-2 border-b border-border/60 bg-muted/30 px-5 py-2">
+            <FileText className="size-3.5 shrink-0 text-muted-foreground" />
+            <span className="min-w-0 truncate font-mono text-[11px] text-muted-foreground">
+              {contentName}
+              <span className="text-muted-foreground/70">
+                {' '}
+                · {lineCount} lines{pending ? ' · unsaved upload' : ''}
+              </span>
+            </span>
+            <div className="ml-auto flex shrink-0 items-center gap-1.5">
+              <ViewToggle view={view} onChange={setView} />
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={() => setExpanded(true)}
+                title="Open full screen"
+                aria-label="Open full screen"
+                className="size-7 rounded-full text-muted-foreground hover:text-foreground"
+              >
+                <Maximize2 className="size-3.5" />
+              </Button>
+            </div>
+          </div>
+          <div className="max-h-[calc(100vh-19rem)] min-h-64 overflow-auto px-5 py-4">
+            <TemplateBody kind={kind} name={contentName} content={content} view={view} />
+          </div>
+        </>
+      ) : (
+        /* Empty: one drop target with every way to get a template in */
+        <div className="p-5">
+          <div className="flex flex-col items-center justify-center gap-4 rounded-2xl border border-dashed border-border/70 px-6 py-14 text-center">
+            <span className="flex size-12 items-center justify-center rounded-2xl border border-border/60 bg-muted/60 text-muted-foreground">
+              {reading ? <Loader2 className="size-5 animate-spin" /> : <FileUp className="size-5" />}
+            </span>
+            <div className="space-y-1">
+              <p className="text-sm font-medium">
+                {reading ? 'Reading file…' : 'No template yet — drop a file here'}
+              </p>
+              <p className="flex items-center justify-center gap-1 text-xs text-muted-foreground">
+                <FileSpreadsheet className="size-3" />
+                CSV, Markdown, TXT, JSON or Excel (.xlsx) · up to 200 KB
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center justify-center gap-2">
+              <Button
+                size="sm"
+                onClick={() => fileInput.current?.click()}
+                disabled={busy}
+                className="rounded-full transition-all duration-200 active:scale-[0.98]"
+              >
+                <FileUp className="size-3.5" />
+                Browse files
+              </Button>
+              {kind.editable && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setEditing(true)}
+                  disabled={busy}
+                  className="rounded-full transition-all duration-200 active:scale-[0.98]"
+                >
+                  <PencilLine className="size-3.5" />
+                  Write one
+                </Button>
+              )}
+              {hasDefault && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => reset.mutate()}
+                  disabled={busy}
+                  title="Start from the template the portal ships with"
+                  className="rounded-full transition-all duration-200 active:scale-[0.98]"
+                >
+                  {reset.isPending ? (
+                    <Loader2 className="size-3.5 animate-spin" />
+                  ) : (
+                    <RotateCcw className="size-3.5" />
+                  )}
+                  Use default
+                </Button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {dragging && (
+        <div className="pointer-events-none absolute inset-2 z-10 flex flex-col items-center justify-center gap-2 rounded-[1.25rem] border-2 border-dashed border-foreground/30 bg-background/85 backdrop-blur-sm">
+          <FileUp className="size-6 text-foreground" />
+          <p className="text-sm font-medium">Drop to preview as the {kind.label.toLowerCase()}</p>
+          <p className="text-xs text-muted-foreground">Nothing is saved until you confirm.</p>
+        </div>
+      )}
 
       {kind.editable && editing && (
         <IssueTemplateEditor
@@ -645,7 +896,7 @@ function TemplateCard({
           savedContent={saved?.content ?? null}
           hasDefault={hasDefault}
           saving={save.isPending}
-          onSave={(content) => save.mutate(content)}
+          onSave={(c) => save.mutate(c)}
           onClose={() => setEditing(false)}
         />
       )}
@@ -683,11 +934,7 @@ function TemplateCard({
               disabled={remove.isPending}
               className="active:scale-[0.98]"
             >
-              {remove.isPending ? (
-                <Loader2 className="size-4 animate-spin" />
-              ) : (
-                <Trash2 className="size-4" />
-              )}
+              {remove.isPending ? <Loader2 className="size-4 animate-spin" /> : <Trash2 className="size-4" />}
               Remove template
             </Button>
           </DialogFooter>
@@ -724,44 +971,29 @@ function TemplateCard({
               disabled={reset.isPending}
               className="active:scale-[0.98]"
             >
-              {reset.isPending ? (
-                <Loader2 className="size-4 animate-spin" />
-              ) : (
-                <RotateCcw className="size-4" />
-              )}
+              {reset.isPending ? <Loader2 className="size-4 animate-spin" /> : <RotateCcw className="size-4" />}
               Reset to default
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
 
-      <Dialog open={showPreview} onOpenChange={setShowPreview}>
+      <Dialog open={expanded} onOpenChange={setExpanded}>
         <DialogContent className="flex max-h-[92vh] w-[97vw] flex-col gap-0 overflow-hidden p-0 sm:max-w-[90rem]">
-          <DialogHeader className="shrink-0 space-y-1 border-b border-border/60 bg-muted/30 px-5 py-3">
-            <DialogTitle className="flex items-center gap-2 text-base">
-              <Icon className="h-4 w-4 text-muted-foreground" />
-              {kind.label}
-            </DialogTitle>
-            <DialogDescription className="text-xs">
-              {previewName ?? `${kind.key}.md`}
-              {pending ? ' · unsaved upload' : saved ? ` · testing/templates/${kind.key}.md` : ''}
-              {previewIsCsv ? ' · shown as a table' : ''}
-            </DialogDescription>
+          <DialogHeader className="shrink-0 flex-row items-center gap-3 space-y-0 border-b border-border/60 bg-muted/30 px-5 py-3 pr-12">
+            <div className="min-w-0 flex-1 space-y-1">
+              <DialogTitle className="flex items-center gap-2 text-base">
+                <Icon className="size-4 text-muted-foreground" />
+                {kind.label}
+              </DialogTitle>
+              <DialogDescription className="truncate font-mono text-xs">
+                {pending ? `${pending.name} · unsaved upload` : `testing/templates/${kind.key}.md`}
+              </DialogDescription>
+            </div>
+            <ViewToggle view={view} onChange={setView} />
           </DialogHeader>
           <div className="min-h-0 flex-1 overflow-auto px-5 py-4">
-            {previewIsCsv ? (
-              <CsvTable csv={previewContent} />
-            ) : previewIsMarkdown ? (
-              <div className={MD_CLASS}>
-                <ReactMarkdown remarkPlugins={[remarkGfm]} components={MD_COMPONENTS}>
-                  {previewContent}
-                </ReactMarkdown>
-              </div>
-            ) : (
-              <pre className="overflow-x-auto font-mono text-[12px] leading-relaxed whitespace-pre-wrap break-words">
-                {previewContent}
-              </pre>
-            )}
+            {contentName && <TemplateBody kind={kind} name={contentName} content={content} view={view} />}
           </div>
         </DialogContent>
       </Dialog>
@@ -769,41 +1001,21 @@ function TemplateCard({
   )
 }
 
-/** Button that reveals the project's testing/templates folder in the OS file explorer. */
-function OpenFolderButton({ projectId }: { projectId: string }) {
-  const mutation = useMutation({
-    mutationFn: () => openTemplatesFolder(projectId),
-    onSuccess: (res) => toast.success('Opened templates folder', { description: res.path }),
-    onError: (err) =>
-      toast.error('Failed to open folder', {
-        description: err instanceof Error ? err.message : 'Unknown error',
-      }),
-  })
-  return (
-    <Button
-      variant="outline"
-      size="sm"
-      onClick={() => mutation.mutate()}
-      disabled={mutation.isPending}
-      className="shrink-0 gap-1.5 rounded-full active:scale-[0.98]"
-    >
-      {mutation.isPending ? (
-        <Loader2 className="size-3.5 animate-spin" />
-      ) : (
-        <FolderOpen className="size-3.5" />
-      )}
-      Open folder
-    </Button>
-  )
-}
-
-export default function ProjectSettingsPage() {
-  const { activeProjectId, activeProject } = useProjects()
+/** List + selected template for one project. Keyed by project, so unsaved uploads
+ *  never leak from one project into another. */
+function TemplatesWorkspace({
+  projectId,
+  rootPath,
+}: {
+  projectId: string
+  rootPath: string | undefined
+}) {
+  const [params, setParams] = useSearchParams()
+  const [pending, setPending] = useState<Record<string, PendingUpload | null>>({})
 
   const { data: templates, isLoading } = useQuery({
-    queryKey: ['templates', activeProjectId],
-    queryFn: () => listTemplates(activeProjectId as string),
-    enabled: !!activeProjectId,
+    queryKey: ['templates', projectId],
+    queryFn: () => listTemplates(projectId),
   })
 
   // Which kinds the portal ships a default for — decides where "Reset to default" shows.
@@ -813,24 +1025,121 @@ export default function ProjectSettingsPage() {
     staleTime: Infinity,
   })
 
-  if (!activeProjectId) {
-    return (
-      <div className="mx-auto max-w-6xl space-y-6">
-        <header className="flex items-start gap-3">
-          <span className="mt-0.5 flex size-11 shrink-0 items-center justify-center rounded-2xl bg-foreground text-background">
-            <Settings className="size-5" />
-          </span>
-          <div className="space-y-1">
-            <h1 className="text-3xl font-semibold tracking-tight">Templates</h1>
-            <p className="text-sm text-muted-foreground">
-              Per-project file templates and preferences.
-            </p>
+  // `?kind=` deep-links one template (Run → Issues links straight to the ClickUp one).
+  const requested = params.get('kind')
+  const kind = TEMPLATE_KINDS.find((k) => k.key === requested) ?? TEMPLATE_KINDS[0]
+  const select = (key: string) =>
+    setParams(
+      (p) => {
+        p.set('kind', key)
+        return p
+      },
+      { replace: true },
+    )
+
+  const byKey = new Map((templates ?? []).map((t) => [t.key, t]))
+  const defaultKeys = new Set(defaults?.keys ?? [])
+  const hasTemplates = (templates?.length ?? 0) > 0
+  const folder = rootPath ? `${rootPath}/testing/templates` : 'testing/templates'
+
+  return (
+    <div data-tour="templates" className="grid items-start gap-5 lg:grid-cols-[17rem_minmax(0,1fr)]">
+      <aside className="space-y-3 lg:sticky lg:top-4">
+        <nav
+          aria-label="Templates"
+          className="grid gap-1 rounded-3xl border border-border/60 bg-card p-2 sm:grid-cols-3 lg:grid-cols-1"
+        >
+          {TEMPLATE_KINDS.map((k) => (
+            <TemplateNavItem
+              key={k.key}
+              kind={k}
+              saved={byKey.get(k.key)}
+              pending={pending[k.key] ?? null}
+              active={k.key === kind.key}
+              onSelect={() => select(k.key)}
+            />
+          ))}
+        </nav>
+
+        <div className="space-y-2.5 rounded-3xl border border-border/60 bg-muted/30 p-4">
+          <div className="flex items-center justify-between gap-2">
+            <span className="flex items-center gap-1.5 text-[11px] font-medium tracking-wide text-muted-foreground uppercase">
+              <FolderTree className="size-3.5" />
+              Stored in
+            </span>
+            <span
+              className={cn(
+                'rounded-full px-1.5 py-0.5 text-[10px] font-medium',
+                hasTemplates
+                  ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300'
+                  : 'bg-amber-50 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300',
+              )}
+            >
+              {hasTemplates ? 'exists' : 'new'}
+            </span>
           </div>
-        </header>
+          <p className="font-mono text-[11px] leading-relaxed break-all text-foreground/80" title={folder}>
+            {folder}
+          </p>
+          <OpenFolderButton open={() => openTemplatesFolder(projectId)} label="templates" />
+        </div>
+      </aside>
+
+      {isLoading ? (
+        <Card className="items-center justify-center gap-2 rounded-3xl border-border/60 py-24 text-sm text-muted-foreground shadow-none">
+          <Loader2 className="size-5 animate-spin" />
+          Loading templates…
+        </Card>
+      ) : (
+        <TemplatePanel
+          key={kind.key}
+          kind={kind}
+          projectId={projectId}
+          saved={byKey.get(kind.key)}
+          hasDefault={defaultKeys.has(kind.key)}
+          pending={pending[kind.key] ?? null}
+          onPending={(p) => setPending((m) => ({ ...m, [kind.key]: p }))}
+        />
+      )}
+    </div>
+  )
+}
+
+export default function ProjectSettingsPage() {
+  const { activeProjectId, activeProject } = useProjects()
+
+  return (
+    <div className="mx-auto max-w-6xl space-y-6">
+      <header data-tour="header" className="flex items-start gap-3">
+        <span className="flex size-11 shrink-0 items-center justify-center rounded-2xl bg-foreground text-background">
+          <FileCog className="size-5" />
+        </span>
+        <div className="min-w-0 space-y-1">
+          <h1 className="text-3xl font-semibold tracking-tight">Templates</h1>
+          <p className="text-sm text-muted-foreground">
+            The shape of generated test cases, Design Check runs and ClickUp issues
+            {activeProject ? (
+              <>
+                {' '}
+                for <span className="font-medium text-foreground">{activeProject.name}</span>
+              </>
+            ) : null}
+            . The QC skill and the Portal both read them.
+          </p>
+        </div>
+      </header>
+
+      {activeProjectId ? (
+        <TemplatesWorkspace
+          key={activeProjectId}
+          projectId={activeProjectId}
+          rootPath={activeProject?.rootPath}
+        />
+      ) : (
         <Card className="rounded-3xl border-dashed border-border/60 shadow-none">
           <CardContent className="flex flex-col items-center justify-center gap-3 py-20 text-center">
             <div className="flex size-12 items-center justify-center rounded-2xl border border-border/60 bg-muted/60 text-muted-foreground">
-              <Settings className="size-6 text-muted-foreground" />
+              <FileCog className="size-6" />
             </div>
             <div className="space-y-1">
               <p className="text-sm font-medium">No project selected</p>
@@ -840,97 +1149,7 @@ export default function ProjectSettingsPage() {
             </div>
           </CardContent>
         </Card>
-      </div>
-    )
-  }
-
-  const byKey = new Map((templates ?? []).map((t) => [t.key, t]))
-  const defaultKeys = new Set(defaults?.keys ?? [])
-  const hasTemplates = (templates?.length ?? 0) > 0
-
-  return (
-    <div className="mx-auto max-w-6xl space-y-8">
-      <header className="space-y-4">
-        <div data-tour="header" className="flex items-start gap-3">
-          <span className="flex size-11 shrink-0 items-center justify-center rounded-2xl bg-foreground text-background">
-            <Settings className="size-5" />
-          </span>
-          <div className="space-y-1">
-            <h1 className="text-3xl font-semibold tracking-tight">Templates</h1>
-            <p className="text-sm text-muted-foreground">
-              Per-project file templates{activeProject ? ` for ${activeProject.name}` : ''}. Upload
-              a file (the ClickUp issue template can also be written here); it's stored under{' '}
-              <span className="font-mono text-foreground">testing/templates/</span> so the QC skill
-              and the Portal can reuse it.
-            </p>
-          </div>
-        </div>
-
-        {/* Per-project context: makes it unmistakable which testing/templates is being edited. */}
-        {activeProject && (
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-2xl border border-border/60 bg-card px-4 py-3 shadow-none">
-            <span className="flex items-center gap-2">
-              <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-border/60 bg-muted/60 text-muted-foreground">
-                <FolderGit2 className="h-4 w-4" />
-              </span>
-              <span className="leading-tight">
-                <span className="block text-[11px] uppercase tracking-wide text-muted-foreground">
-                  Editing templates for
-                </span>
-                <span className="block text-sm font-semibold tracking-tight">
-                  {activeProject.name}
-                </span>
-              </span>
-            </span>
-            <div className="ml-auto flex min-w-0 items-center gap-2">
-              <span
-                className="flex min-w-0 items-center gap-1.5 rounded-full border border-border/60 bg-muted/50 px-3 py-1.5 font-mono text-xs text-muted-foreground"
-                title={`${activeProject.rootPath}/testing/templates`}
-              >
-                <FolderTree className="h-3.5 w-3.5 shrink-0 text-primary/70" />
-                <span className="truncate">{activeProject.rootPath}/testing/templates</span>
-                <span
-                  className={cn(
-                    'ml-1 shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium',
-                    hasTemplates ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700',
-                  )}
-                >
-                  {hasTemplates ? 'exists' : 'new'}
-                </span>
-              </span>
-              <OpenFolderButton projectId={activeProjectId} />
-            </div>
-          </div>
-        )}
-      </header>
-
-      <section data-tour="templates" className="space-y-3">
-        <div className="flex items-center gap-2">
-          <FileText className="size-4 text-muted-foreground" />
-          <h2 className="text-sm font-semibold tracking-tight">File templates</h2>
-        </div>
-        {isLoading ? (
-          <div className="flex items-center gap-2 px-1 py-6 text-sm text-muted-foreground">
-            <Loader2 className="size-4 animate-spin" />
-            Loading templates…
-          </div>
-        ) : (
-          <div className="space-y-4">
-            {TEMPLATE_KINDS.map((kind) => (
-              // Wrapper carries the tour anchor so a guide step can point at one
-              // specific template kind (`[data-tour="template-testcase"]`).
-              <div key={kind.key} data-tour={`template-${kind.key}`}>
-                <TemplateCard
-                  kind={kind}
-                  projectId={activeProjectId}
-                  saved={byKey.get(kind.key)}
-                  hasDefault={defaultKeys.has(kind.key)}
-                />
-              </div>
-            ))}
-          </div>
-        )}
-      </section>
+      )}
     </div>
   )
 }

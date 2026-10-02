@@ -16,11 +16,21 @@
 //      button writes: JIRA_URL / JIRA_USERNAME / JIRA_API_TOKEN) — resolved per
 //      request via AsyncLocalStorage, so pasting fresh creds takes effect
 //      immediately, no server restart.
-//   2. The JIRA_URL / JIRA_USERNAME / JIRA_API_TOKEN environment variables.
+//   2. The portal's own browser sign-in to Atlassian's hosted MCP server
+//      (atlassianMcp.ts) — no API token at all. Every read below then goes through
+//      the Atlassian MCP tools instead of REST, returning the SAME normalized shapes.
+//   3. The JIRA_URL / JIRA_USERNAME / JIRA_API_TOKEN environment variables.
 
 import { AsyncLocalStorage } from 'node:async_hooks'
 import fs from 'node:fs'
 import { mcpJsonFor } from './config.js'
+import { projectIdForRoot } from './projectScope.js'
+import {
+  atlassianAccessToken,
+  atlassianSignin,
+  atlassianSite,
+  callAtlassianTool,
+} from './atlassianMcp.js'
 import type {
   Workspace,
   TaskHit,
@@ -33,6 +43,9 @@ export interface JiraCreds {
   url: string // site base, e.g. https://acme.atlassian.net (no trailing slash)
   email: string
   token: string
+  /** Set when this project is signed in through the browser instead of a token:
+   *  reads go through the Atlassian MCP tools for this project (atlassianMcp.ts). */
+  mcpProjectId?: string
 }
 
 // Per-request creds override. Set by withJiraCreds(); read by currentCreds().
@@ -70,15 +83,45 @@ export function resolveProjectJiraCreds(projectRoot: string): JiraCreds | undefi
   try {
     const raw = fs.readFileSync(mcpJsonFor(projectRoot), 'utf8')
     const env = JSON.parse(raw)?.mcpServers?.jira?.env
-    if (!env || typeof env !== 'object') return undefined
-    const url = deref(env.JIRA_URL).replace(/\/+$/, '')
-    const email = deref(env.JIRA_USERNAME)
-    const token = deref(env.JIRA_API_TOKEN)
-    if (url && email && token) return { url, email, token }
+    // No `jira` entry is NOT "not configured" yet — the browser sign-in below may be.
+    if (env && typeof env === 'object') {
+      const url = deref(env.JIRA_URL).replace(/\/+$/, '')
+      const email = deref(env.JIRA_USERNAME)
+      const token = deref(env.JIRA_API_TOKEN)
+      if (url && email && token) return { url, email, token }
+    }
   } catch {
     /* no file / bad json */
   }
+  // No API token — fall back to the portal's browser sign-in, when there is one.
+  const projectId = projectIdForRoot(projectRoot)
+  if (projectId) {
+    const signin = atlassianSignin(projectId)
+    if (signin.signedIn && signin.site) {
+      return { url: signin.site.url, email: '', token: '', mcpProjectId: projectId }
+    }
+  }
   return undefined
+}
+
+/** The project to call MCP tools for, when this request is signed in rather than tokened. */
+function mcpProject(): string | null {
+  return currentCreds()?.mcpProjectId ?? null
+}
+
+/** One Atlassian MCP tool call for the current project's Jira site. */
+async function mcpCall(name: string, args: Record<string, unknown>): Promise<any> {
+  const projectId = mcpProject()!
+  const site = atlassianSite(projectId)
+  return callAtlassianTool(projectId, name, { cloudId: site.cloudId, ...args })
+}
+
+/** The first array in a tool result — the tools wrap lists differently
+ *  (`{issues}`, `{values}`, a bare array). */
+function listIn(data: any, ...keys: string[]): any[] {
+  if (Array.isArray(data)) return data
+  for (const k of keys) if (Array.isArray(data?.[k])) return data[k]
+  return []
 }
 
 export function jiraConfigured(): boolean {
@@ -124,6 +167,7 @@ async function jiraFetch(pathAndQuery: string, init?: RequestInit): Promise<any>
 export async function verifyToken(): Promise<{ ok: boolean; status: number | null; detail: string }> {
   const c = currentCreds()
   if (!c) return { ok: false, status: null, detail: 'No Jira credentials are configured.' }
+  if (c.mcpProjectId) return { ok: true, status: null, detail: `Signed in to ${c.url}.` }
   try {
     const ctrl = new AbortController()
     const timer = setTimeout(() => ctrl.abort(), 6000)
@@ -255,6 +299,21 @@ export function adfToMarkdown(doc: any): string {
 export async function getWorkspaces(): Promise<Workspace[]> {
   const out: Workspace[] = []
   const MAX = 100
+  if (mcpProject()) {
+    for (let startAt = 0, page = 0; page < 5 && out.length < MAX; page++) {
+      const data = await mcpCall('getVisibleJiraProjects', {
+        action: 'browse',
+        expandIssueTypes: false,
+        maxResults: 50,
+        startAt,
+      })
+      const values = listIn(data, 'values', 'projects')
+      for (const p of values) out.push({ id: String(p.key), name: `${String(p.name ?? p.key)} (${String(p.key)})` })
+      if (data?.isLast !== false || values.length === 0) break
+      startAt += values.length
+    }
+    return out.slice(0, MAX)
+  }
   let startAt = 0
   for (let page = 0; page < 5; page++) {
     const data = await jiraFetch(
@@ -289,12 +348,30 @@ function toHit(issue: any): TaskHit {
     status: String(f.status?.name ?? ''),
     statusColor: statusColorFor(f),
     listName: String(f.project?.name ?? f.project?.key ?? ''),
-    url: issue.self && key ? `${creds().url}/browse/${key}` : '',
+    url: key ? `${creds().url}/browse/${key}` : '',
     parent: f.parent?.key ? String(f.parent.key) : null,
   }
 }
 
 const HIT_FIELDS = ['summary', 'status', 'parent', 'project', 'issuetype', 'updated']
+
+/** Run a JQL search through whichever backend this request has. */
+async function searchIssues(jql: string): Promise<any[]> {
+  if (mcpProject()) {
+    const data = await mcpCall('searchJiraIssuesUsingJql', {
+      jql,
+      fields: HIT_FIELDS,
+      maxResults: 100,
+      responseContentFormat: 'adf',
+    })
+    return listIn(data, 'issues')
+  }
+  const data = await jiraFetch('/search/jql', {
+    method: 'POST',
+    body: JSON.stringify({ jql, fields: HIT_FIELDS, maxResults: 100 }),
+  })
+  return data.issues ?? []
+}
 
 /**
  * Search top-level issues in a Jira project by key or summary substring. Mirrors
@@ -310,11 +387,7 @@ export async function searchTasks(projectKey: string, query: string): Promise<Ta
   if (q) clauses.push(`(summary ~ "${jqlEscape(q)}*" OR key = "${jqlEscape(q)}")`)
   const jql = `${clauses.join(' AND ')} ORDER BY updated DESC`
 
-  const data = await jiraFetch('/search/jql', {
-    method: 'POST',
-    body: JSON.stringify({ jql, fields: HIT_FIELDS, maxResults: 100 }),
-  })
-  return (data.issues ?? []).map(toHit)
+  return (await searchIssues(jql)).map(toHit)
 }
 
 /**
@@ -323,11 +396,7 @@ export async function searchTasks(projectKey: string, query: string): Promise<Ta
  */
 export async function getSubtasks(parentKey: string): Promise<TaskHit[]> {
   const jql = `parent = "${jqlEscape(parentKey)}" ORDER BY created ASC`
-  const data = await jiraFetch('/search/jql', {
-    method: 'POST',
-    body: JSON.stringify({ jql, fields: HIT_FIELDS, maxResults: 100 }),
-  })
-  return (data.issues ?? [])
+  return (await searchIssues(jql))
     .filter((i: any) => String(i.key) !== String(parentKey))
     .map(toHit)
 }
@@ -343,9 +412,16 @@ function isoOrNull(v: unknown): string | null {
 /** Full detail for one issue (by key), including embedded attachments. */
 export async function getTaskDetail(key: string): Promise<TaskDetail> {
   const c = creds()
-  const issue = await jiraFetch(
-    `/issue/${encodeURIComponent(key)}?fields=*all&expand=names`,
-  )
+  const issue = c.mcpProjectId
+    ? unwrapIssue(
+        await mcpCall('getJiraIssue', {
+          issueIdOrKey: key,
+          fields: ['*all'],
+          expand: 'names',
+          responseContentFormat: 'adf',
+        }),
+      )
+    : await jiraFetch(`/issue/${encodeURIComponent(key)}?fields=*all&expand=names`)
   const f = issue.fields ?? {}
   const assignee = f.assignee?.displayName ?? f.assignee?.emailAddress
   const attachments: TaskAttachment[] = (f.attachment ?? []).map((a: any) => ({
@@ -389,12 +465,25 @@ export async function getTaskDetail(key: string): Promise<TaskDetail> {
   }
 }
 
+/** getJiraIssue may answer with the issue itself or wrapped in `{issue}`. */
+function unwrapIssue(data: any): any {
+  if (data?.fields) return data
+  if (data?.issue?.fields) return data.issue
+  throw Object.assign(new Error('Atlassian returned no issue for that key.'), { status: 404 })
+}
+
 /** Comments on an issue, oldest first. */
 export async function getTaskComments(key: string): Promise<TaskComment[]> {
-  const data = await jiraFetch(
-    `/issue/${encodeURIComponent(key)}/comment?orderBy=created&maxResults=100`,
-  )
-  const comments: any[] = data.comments ?? []
+  const data = mcpProject()
+    ? unwrapIssue(
+        await mcpCall('getJiraIssue', {
+          issueIdOrKey: key,
+          fields: ['comment'],
+          responseContentFormat: 'adf',
+        }),
+      ).fields?.comment
+    : await jiraFetch(`/issue/${encodeURIComponent(key)}/comment?orderBy=created&maxResults=100`)
+  const comments: any[] = data?.comments ?? []
   return comments.map((c) => ({
     id: String(c.id),
     text: adfToMarkdown(c.body),
@@ -409,6 +498,18 @@ export async function getTaskComments(key: string): Promise<TaskComment[]> {
  */
 export async function downloadAttachment(url: string): Promise<Buffer> {
   const c = creds()
+  if (c.mcpProjectId) {
+    // The MCP server has no attachment tool. Try the sign-in's token against the
+    // file URL; Atlassian scopes it to the MCP server, so this usually fails — and
+    // the crawl reports it per file instead of failing the ticket.
+    const token = atlassianAccessToken(c.mcpProjectId)
+    const res = token ? await fetch(url, { headers: { Authorization: `Bearer ${token}` } }).catch(() => null) : null
+    if (res?.ok) return Buffer.from(await res.arrayBuffer())
+    throw Object.assign(
+      new Error('attachments need the Jira API token — the browser sign-in cannot download files'),
+      { status: 502 },
+    )
+  }
   const res = await fetch(url, { headers: { Authorization: authHeader(c) } })
   if (!res.ok) {
     throw Object.assign(new Error(`attachment download failed (${res.status})`), { status: 502 })

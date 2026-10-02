@@ -4,6 +4,7 @@ import path from 'node:path'
 import { PORT, skillsDirFor, testingDirFor, ticketsDirFor } from '../config.js'
 import { getDatabaseRow } from '../db.js'
 import { issueTemplateBlock } from '../chatIssueTemplate.js'
+import { trackerServers } from '../trackerMcp.js'
 import { dbMapDocName } from '../dbMap.js'
 import { resolveProject } from '../projectScope.js'
 import { ensureQcBrowser } from '../qcBrowser.js'
@@ -1291,16 +1292,42 @@ function ticketMeta(dir: string, folder: string): TicketMeta {
  * for a Jira issue, get nothing, and report the ticket as missing. So an unknown source
  * asks for the project's tracker generically and lets tool discovery settle it.
  */
-function liveLookupHint(meta: TicketMeta): string {
-  if (meta.source === 'clickup') {
+function liveLookupHint(meta: TicketMeta, root: string): string {
+  if (meta.source === 'clickup' || meta.source === 'jira') {
+    // Name the server that is REALLY in this project's .mcp.json — the token built-in or
+    // the hosted one signed in to in the browser (trackerMcp.ts). A hard-coded
+    // `mcp__clickup__…` is a tool that doesn't exist in a project that only signed in.
+    const servers = trackerServers(root, meta.source)
+    const label = meta.source === 'clickup' ? 'ClickUp' : 'Jira'
+    const builtin = servers.find((s) => s.kind === 'token')
+    const hosted = servers.filter((s) => s.kind === 'oauth').map((s) => `"${s.name}"`)
+    if (builtin && meta.source === 'clickup') {
+      return (
+        `live state via the ClickUp MCP — mcp__clickup__get_task with task_id "${meta.taskId}" ` +
+        `(and mcp__clickup__get_task_comments for the thread)` +
+        (hosted.length ? `; the signed-in ClickUp server ${hosted.join(', ')} works too` : '')
+      )
+    }
+    if (builtin || hosted.length) {
+      const names = [...(builtin ? [`"${builtin.name}"`] : []), ...hosted]
+      return (
+        `live state via the ${label} MCP server ${names.join(' or ')} (tools mcp__<server>__*) — ` +
+        `use its get-task / get-issue tool for id "${meta.taskId}", and its comments tool for the thread`
+      )
+    }
     return (
-      `live state via the ClickUp MCP — mcp__clickup__get_task with task_id "${meta.taskId}" ` +
-      `(and mcp__clickup__get_task_comments for the thread)`
+      `live state via the ${label} MCP for id "${meta.taskId}" — no ${label} server is in this ` +
+      `project's .mcp.json, so say the answer is the snapshot if none of your tools reaches ${label}`
     )
   }
-  if (meta.source === 'jira' || meta.source === 'azure') {
-    const server = meta.source === 'jira' ? 'Jira' : 'Azure DevOps'
-    return `live state via the ${server} MCP server ("${meta.source}") for id "${meta.taskId}"`
+  if (meta.source === 'azure') {
+    // The PAT built-in (`azure`) or the browser-signed-in server (`azure-devops` by
+    // default) — whichever this project really has.
+    const names = trackerServers(root, 'azure').map((s) => `"${s.name}"`)
+    return names.length
+      ? `live state via the Azure DevOps MCP server ${names.join(' or ')} (tools mcp__<server>__*) for id "${meta.taskId}"`
+      : `live state via the Azure DevOps MCP for id "${meta.taskId}" — no Azure DevOps server is in this ` +
+          `project's .mcp.json, so say the answer is the snapshot if none of your tools reaches Azure DevOps`
   }
   return (
     `live state via whichever ticket MCP this project has configured (ClickUp / Jira / Azure) ` +
@@ -1428,7 +1455,7 @@ function resolveMentions(
         `- TICKET ${label} — read ${files.map((f) => path.join(dir, f)).join(', ')}` +
           ` (its attachments, if any, are in ${path.join(dir, 'attachments')}).` +
           ` These files are a SNAPSHOT${meta.crawledAt ? ` crawled ${meta.crawledAt}` : ''}; ` +
-          `${liveLookupHint(meta)}.`,
+          `${liveLookupHint(meta, root)}.`,
       )
       liveTickets = true
       resolved.push({ kind: 'ticket', label })

@@ -8,6 +8,8 @@ import {
   withJiraCreds,
 } from '../jira.js'
 import { resolveProject } from '../projectScope.js'
+import { finishAtlassianSignin } from '../atlassianMcp.js'
+import { mountTrackerSignin } from './trackerSignin.js'
 import { crawlOneTicket } from '../crawl.js'
 import { getCrawlJob, listCrawlJobs, startCrawlJob } from '../crawlJobs.js'
 
@@ -30,6 +32,16 @@ jiraRouter.use((req, _res, next) => {
   void withJiraCreds(creds, async () => {
     next()
   })
+})
+
+// ---- Browser sign-in (no API token) — the portal's own Atlassian MCP login ----
+// One shared implementation with ClickUp's (routes/trackerSignin.ts).
+mountTrackerSignin(jiraRouter, 'atlassian', {
+  finish: finishAtlassianSignin,
+  usingToken: (root) => {
+    const rest = resolveProjectJiraCreds(root)
+    return !!rest && !rest.mcpProjectId
+  },
 })
 
 function fail(res: import('express').Response, err: unknown) {

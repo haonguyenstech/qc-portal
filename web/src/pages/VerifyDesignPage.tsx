@@ -1843,7 +1843,7 @@ export default function VerifyDesignPage() {
                   Using the <span className="font-medium">project checklist</span>
                   <span className="block text-[11px] text-muted-foreground">
                     From{' '}
-                    <Link to="/templates" className="underline-offset-2 hover:underline">
+                    <Link to="/templates?kind=design-check" className="underline-offset-2 hover:underline">
                       Settings → File templates
                     </Link>
                     , applied to every run. The model reports a finding for every item.
@@ -1883,7 +1883,7 @@ export default function VerifyDesignPage() {
                   <span className="block text-[11px] text-muted-foreground">
                     The check runs on the ticket alone. Upload one for this run, or save a reusable
                     one in{' '}
-                    <Link to="/templates" className="underline-offset-2 hover:underline">
+                    <Link to="/templates?kind=design-check" className="underline-offset-2 hover:underline">
                       Settings → File templates
                     </Link>
                     .

@@ -26,17 +26,13 @@ import {
   LogOut,
   ListChecks,
   Loader2,
-  Maximize2,
-  MonitorPlay,
   MousePointerClick,
   PencilLine,
-  Play,
   Plug,
   PlugZap,
   Plus,
   Search,
   Smartphone,
-  Square,
   SquareKanban,
   Unplug,
   X,
@@ -70,11 +66,6 @@ import {
   mcpOauthStatus,
   mcpUvStatus,
   mcpMaestroStatus,
-  maximizeQcBrowser,
-  qcBrowserStatus,
-  startQcBrowser,
-  stopQcBrowser,
-  updateProject,
   connectMaestro,
   openMcpFolder,
   removeMcp,
@@ -84,8 +75,9 @@ import {
   testMcp,
   type McpEntryInput,
   type McpOauthProvider,
+  type SigninTracker,
 } from '@/lib/api'
-import type { McpServer, Project } from '@/lib/types'
+import type { McpServer } from '@/lib/types'
 import { useProjects } from '@/lib/project-context'
 import {
   BUILTIN_MCP_NAMES,
@@ -100,6 +92,8 @@ import {
   type McpTemplate,
   type McpTemplateField,
 } from '@/lib/mcpTemplates'
+import { useTrackerSignin } from '@/lib/useTrackerSignin'
+import { AzureOrgPrompt } from '@/components/AzureOrgPrompt'
 
 const OAUTH_META: Record<
   McpOauthProvider,
@@ -177,6 +171,10 @@ const CARD_STATUS: Record<string, { label: string; cls: string; Icon: typeof Fig
   pending: { label: 'Pending approval', cls: 'bg-amber-50 text-amber-700', Icon: Clock },
   'needs-auth': { label: 'Needs auth', cls: 'bg-amber-50 text-amber-700', Icon: KeyRound },
   failed: { label: 'Failed', cls: 'bg-red-50 text-red-700', Icon: AlertCircle },
+  // A hosted tracker server Claude Code reaches with its OWN older login, while the
+  // portal's sign-in (Tickets, issue filing) isn't done — "Connected" + a Sign in
+  // button side by side read as a contradiction.
+  partial: { label: 'Runs & chat only', cls: 'bg-amber-50 text-amber-700', Icon: AlertCircle },
 }
 
 /**
@@ -458,6 +456,147 @@ function nameProblem(name: string, taken: Set<string>): string | null {
   return null
 }
 
+/** Which tracker a server is the portal's browser sign-in for: a hosted MCP URL (Jira,
+ *  ClickUp), or the Azure DevOps launcher (server/src/azureSignin.ts) — a `node -e`
+ *  that fetches the portal's token before starting Microsoft's local server. */
+const SIGNIN_LABEL: Record<SigninTracker, string> = { jira: 'Jira', clickup: 'ClickUp', azure: 'Azure DevOps' }
+
+/** The ticket tracker this project already has (token built-in or signed-in server) —
+ *  a project reads tickets from ONE (server: trackerConflict in trackerMcp.ts). */
+function connectedTrackerOf(servers: McpServer[]): { tracker: SigninTracker; name: string } | null {
+  for (const sv of servers) {
+    const t = isSigninTracker(sv.name) ? sv.name : signinTrackerOf(sv)
+    if (t) return { tracker: t, name: sv.name }
+  }
+  return null
+}
+
+function signinTrackerOf(server: McpServer | undefined): SigninTracker | null {
+  const url = server?.url ?? ''
+  if (/^https:\/\/mcp\.atlassian\.com\//i.test(url)) return 'jira'
+  if (/^https:\/\/mcp\.clickup\.com\//i.test(url)) return 'clickup'
+  const args = server?.args ?? []
+  if (server?.command === 'node' && args[0] === '-e' && args[1]?.includes('/api/azure/oauth/token')) return 'azure'
+  return null
+}
+
+/** What each way of connecting a tracker covers — shown under the choice. */
+const MODE_COVERS: { feature: string; browser: Record<string, boolean>; only?: string[] }[] = [
+  // The browser sign-in is the portal's own (useTrackerSignin): it reads Tickets and
+  // files issues itself, and hands the same login to Claude Code for runs and chat.
+  { feature: 'QC runs, Chat, AI team (MCP tools)', browser: { clickup: true, jira: true, azure: true, figma: true } },
+  { feature: 'Browsing & crawling on Tickets', browser: { clickup: true, jira: true, azure: true }, only: ['clickup', 'jira', 'azure'] },
+  // Design Check reaches Figma through whichever Figma MCP server the project has.
+  { feature: 'Design Check against Figma', browser: { figma: true }, only: ['figma'] },
+  // Atlassian's MCP server has no attachment download.
+  { feature: 'Ticket attachments', browser: { jira: false }, only: ['jira'] },
+  // Run → Issues files to ClickUp only.
+  { feature: 'Filing issues from Run → Issues', browser: { clickup: true }, only: ['clickup'] },
+]
+
+function ConnectModeChoice({
+  tracker,
+  mode,
+  onMode,
+  label,
+  browserName,
+}: {
+  tracker: string
+  mode: 'browser' | 'token'
+  onMode: (m: 'browser' | 'token') => void
+  label: string
+  browserName: string
+}) {
+  const options = [
+    { id: 'browser' as const, title: 'Sign in with browser', hint: 'No token — log in on the provider’s page', icon: KeyRound },
+    { id: 'token' as const, title: 'API token', hint: 'Paste a personal token', icon: PlugZap },
+  ]
+  return (
+    <div className="space-y-2">
+      <div className="grid gap-2 sm:grid-cols-2" role="radiogroup" aria-label={`How to connect ${label}`}>
+        {options.map((o) => (
+          <button
+            key={o.id}
+            type="button"
+            role="radio"
+            aria-checked={mode === o.id}
+            onClick={() => onMode(o.id)}
+            className={cn(
+              'flex items-start gap-2.5 rounded-2xl border p-3 text-left transition-all duration-200 active:scale-[0.99]',
+              mode === o.id
+                ? 'border-primary/50 bg-primary/[0.05]'
+                : 'border-border/60 hover:border-border hover:bg-muted/40',
+            )}
+          >
+            <o.icon className={cn('mt-0.5 h-4 w-4 shrink-0', mode === o.id ? 'text-primary' : 'text-muted-foreground')} />
+            <span className="leading-tight">
+              <span className="block text-sm font-semibold tracking-tight">{o.title}</span>
+              <span className="mt-0.5 block text-[11px] text-muted-foreground">{o.hint}</span>
+            </span>
+          </button>
+        ))}
+      </div>
+      <div className="space-y-1 rounded-xl bg-muted/50 px-3 py-2">
+        {MODE_COVERS.filter((c) => !c.only || c.only.includes(tracker)).map((c) => {
+          const ok = mode === 'token' || !!c.browser[tracker]
+          return (
+            <p key={c.feature} className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+              {ok ? (
+                <CheckCircle2 className="h-3 w-3 shrink-0 text-emerald-600" />
+              ) : (
+                <AlertCircle className="h-3 w-3 shrink-0 text-amber-600" />
+              )}
+              <span className={ok ? 'text-foreground/80' : ''}>{c.feature}</span>
+              {!ok && <span className="text-amber-700">— needs the API token</span>}
+            </p>
+          )
+        })}
+      </div>
+      {mode === 'browser' && !isSigninTracker(tracker) && (
+        <p className="text-[11px] leading-snug text-muted-foreground">
+          Adds <code className="font-mono">{browserName}</code>, the provider’s hosted server, then
+          opens its sign-in page. Claude Code keeps the login — nothing secret in .mcp.json — and
+          asks again when it expires.
+        </p>
+      )}
+      {mode === 'browser' && isSigninTracker(tracker) && (
+        <p className="text-[11px] leading-snug text-muted-foreground">
+          One sign-in for everything: Tickets{tracker === 'clickup' ? ', issue filing' : ''}, QC
+          runs and Chat. Saved as <code className="font-mono">{browserName}</code> with no key in
+          .mcp.json — Claude Code asks the portal for the login each time it connects.
+          {tracker === 'azure' &&
+            ' Sign in on the computer running the portal (Microsoft returns to localhost). Each run or chat turn gets a fresh token that lasts about an hour.'}
+        </p>
+      )}
+    </div>
+  )
+}
+
+/**
+ * The tracker built-ins that can ALSO be connected by signing in in the browser: the
+ * provider's hosted server (an OAuth template). Two different things get connected, so
+ * the form has to say which features each one covers — the hosted server's token
+ * belongs to Claude Code and only reaches its MCP tools (runs, chat), while ticket
+ * crawling and Run → Issues filing call the provider's REST API with the API token.
+ */
+const BROWSER_SIGNIN_ALT: Partial<Record<SigninTracker, string>> = {
+  clickup: 'clickup-oauth',
+  jira: 'atlassian',
+  // Not a hosted server: Microsoft's local one, started with the portal's token.
+  azure: 'azure-devops',
+}
+const isSigninTracker = (id: string | undefined): id is SigninTracker =>
+  id === 'jira' || id === 'clickup' || id === 'azure'
+/**
+ * Built-ins whose "Sign in with browser" is simply the provider's hosted OAuth template,
+ * signed in through Claude Code (`claude mcp login`, the sign-in dialog) — no portal
+ * login behind it, because nothing on the portal side reads it.
+ */
+const HOSTED_SIGNIN_ALT: Partial<Record<string, string>> = { figma: 'figma-oauth' }
+/** Hosted templates a built-in's "Sign in with browser" already adds — one tile per
+ *  service, the choice is made inside it. */
+const COVERED_BY_BUILTIN = new Set([...Object.values(BROWSER_SIGNIN_ALT), ...Object.values(HOSTED_SIGNIN_ALT)])
+
 /**
  * "Add server": pick a ready-made template and fill its fields, or paste any MCP
  * config (JSON in the usual shapes, or a `claude mcp add` line). Either way the
@@ -471,6 +610,10 @@ function AddServerDialog({
   projectRoot,
   existingNames,
   onAdded,
+  onTrackerSignin,
+  trackerSigninPending,
+  connectedTracker,
+  onSigninTab,
 }: {
   open: boolean
   onOpenChange: (open: boolean) => void
@@ -478,20 +621,34 @@ function AddServerDialog({
   projectRoot?: string
   existingNames: string[]
   onAdded: (names: string[]) => void
+  /** Start the portal's browser sign-in for a tracker. Owned by the PAGE, not this
+   *  dialog: the dialog closes straight away, and whatever watches for the sign-in to
+   *  land must outlive it. */
+  onTrackerSignin: (tracker: SigninTracker, org?: string) => void
+  trackerSigninPending: boolean
+  /** The ticket tracker already connected — the other two are refused while it is. */
+  connectedTracker: { tracker: SigninTracker; name: string } | null
+  /** A sign-in tab opened in the Add click (OAuth servers), or null to drop one that
+   *  will not be used (the add failed). */
+  onSigninTab: (tab: Window | null) => void
 }) {
   const [tab, setTab] = useState<'templates' | 'paste'>('templates')
   const [query, setQuery] = useState('')
+  const [category, setCategory] = useState<string>('All')
   const [picked, setPicked] = useState<McpTemplate | null>(null)
   const [templateName, setTemplateName] = useState('')
   const [values, setValues] = useState<Record<string, string>>({})
   const [pasted, setPasted] = useState('')
   // Name edits for pasted servers, keyed by the name as pasted.
   const [renames, setRenames] = useState<Record<string, string>>({})
+  // ClickUp / Jira / Azure DevOps only: sign in in the browser or paste an API token.
+  const [authMode, setAuthMode] = useState<'browser' | 'token'>('browser')
 
   const taken = useMemo(() => new Set(existingNames), [existingNames])
 
   function pick(t: McpTemplate) {
     setPicked(t)
+    setAuthMode('browser')
     setTemplateName(uniqueName(t.name, taken))
     setValues(
       Object.fromEntries(
@@ -517,7 +674,19 @@ function AddServerDialog({
   // A built-in keeps its fixed name, so only a name clash matters (the tile is
   // disabled once it is configured).
   const templateProblem = picked && !picked.builtin ? nameProblem(templateName.trim(), taken) : null
-  const missingField = picked?.fields.find((f) => !f.optional && !values[f.key]?.trim())
+  // The signed-in server for this built-in, when "Sign in with browser" is chosen.
+  const signinTracker = isSigninTracker(picked?.id) ? picked.id : undefined
+  const hostedAlt = picked && !signinTracker ? MCP_TEMPLATES.find((t) => t.id === HOSTED_SIGNIN_ALT[picked.id]) : undefined
+  const browserName = signinTracker
+    ? BROWSER_SIGNIN_ALT[signinTracker]
+    : hostedAlt
+      ? uniqueName(hostedAlt.name, taken)
+      : undefined
+  const viaBrowser = !!browserName && authMode === 'browser'
+  // Already signed in under the template's name → adding it again would only make a copy.
+  const missingField = viaBrowser
+    ? undefined
+    : picked?.fields.find((f) => !f.optional && !values[f.key]?.trim())
   const templateEntry = picked ? fillTemplate(picked, values) : null
 
   const { data: oauth } = useQuery({
@@ -588,21 +757,40 @@ function AddServerDialog({
       onOpenChange(false)
       onAdded(res.added)
     },
-    onError: (err) =>
+    onError: (err) => {
+      onSigninTab(null)
       toast.error('Could not add server', {
         description: err instanceof Error ? err.message : 'Unknown error',
-      }),
+      })
+    },
   })
 
   function submitTemplate() {
+    if (viaBrowser && signinTracker) {
+      // The portal's own sign-in; its callback writes (or links) the server entry.
+      // Azure: the organization field is optional — an org URL or a bare name.
+      const org = values.ORG_URL?.trim().replace(/\/+$/, '').split('/').pop()
+      onTrackerSignin(signinTracker, signinTracker === 'azure' ? org || undefined : undefined)
+      onOpenChange(false)
+      return
+    }
+    if (viaBrowser && hostedAlt && browserName) {
+      // Add the hosted server, then sign in to it — in a tab opened NOW, in this click.
+      // (`add` closes the dialog itself once the entry is saved.)
+      onSigninTab(openSigninTab())
+      add.mutate({ [browserName]: hostedAlt.entry })
+      return
+    }
     if (!picked || !templateEntry || templateProblem || missingField) return
     if (picked.builtin) {
       if (!maestroBlocked) connectBuiltin.mutate(picked)
       return
     }
+    // A sign-in template (a hosted server with no token): same — its tab opens now.
+    if (picked.category === 'Sign in (OAuth)') onSigninTab(openSigninTab())
     add.mutate({ [templateName.trim()]: templateEntry })
   }
-  const pending = add.isPending || connectBuiltin.isPending
+  const pending = add.isPending || connectBuiltin.isPending || trackerSigninPending
 
   const pasteBlocked =
     !parsed.ok || pastedRows.some((r) => r.problem || r.error) || pastedRows.length === 0
@@ -625,16 +813,26 @@ function AddServerDialog({
   }, [picked, templateEntry, values, templateName])
 
   const q = query.trim().toLowerCase()
-  const visible = MCP_TEMPLATES.filter(
+  // The hosted ClickUp / Atlassian templates are what the ClickUp / Jira built-ins'
+  // "Sign in with browser" adds — listing them too showed every tracker twice. Still
+  // shown once added, so the tile says so.
+  const listed = MCP_TEMPLATES.filter((t) => !COVERED_BY_BUILTIN.has(t.id) || taken.has(t.name))
+  const matches = listed.filter(
     (t) => !q || `${t.label} ${t.blurb} ${t.category}`.toLowerCase().includes(q),
   )
+  // A search that empties the chosen category falls back to All rather than an empty list.
+  const activeCategory =
+    category !== 'All' && !matches.some((t) => t.category === category) ? 'All' : category
+  const visible = activeCategory === 'All' ? matches : matches.filter((t) => t.category === activeCategory)
 
   return (
     <Dialog open={open} onOpenChange={(o) => !add.isPending && !connectBuiltin.isPending && onOpenChange(o)}>
-      <DialogContent className="max-h-[88vh] overflow-y-auto overflow-x-hidden sm:max-w-2xl">
+      <DialogContent className="max-h-[88vh] gap-4 overflow-y-auto overflow-x-hidden sm:max-w-3xl">
         <DialogHeader className="min-w-0">
-          <DialogTitle className="flex items-center gap-2">
-            <Plus className="h-4 w-4" />
+          <DialogTitle className="flex items-center gap-2.5">
+            <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-foreground text-background">
+              <Plus className="h-4 w-4" />
+            </span>
             Add MCP server
           </DialogTitle>
           <DialogDescription>
@@ -663,60 +861,164 @@ function AddServerDialog({
                     autoFocus
                     value={query}
                     onChange={(e) => setQuery(e.target.value)}
-                    placeholder="Search templates…"
+                    placeholder={`Search ${listed.length} servers…`}
                     aria-label="Search templates"
                     className="h-9 rounded-full pl-8 text-sm"
                   />
                 </div>
-                {MCP_TEMPLATE_CATEGORIES.map((cat) => {
-                  const items = visible.filter((t) => t.category === cat)
-                  if (!items.length) return null
-                  return (
-                    <div key={cat} className="space-y-1.5">
-                      <div className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-                        {cat}
-                      </div>
-                      <div className="grid gap-2 sm:grid-cols-2">
-                        {items.map((t) => {
-                          const added = taken.has(t.name)
-                          // A built-in exists once per project, under its fixed name.
-                          const locked = added && !!t.builtin
-                          return (
-                            <button
-                              key={t.id}
-                              type="button"
-                              onClick={() => pick(t)}
-                              disabled={locked}
-                              className="flex min-w-0 items-start gap-2.5 rounded-2xl border border-border/60 p-3 text-left transition-all duration-200 hover:-translate-y-0.5 hover:border-border hover:shadow-sm active:scale-[0.99] disabled:pointer-events-none disabled:opacity-55"
-                            >
-                              <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl border border-border/60 bg-muted/60 text-muted-foreground">
-                                <t.icon className="h-4 w-4" />
-                              </span>
-                              <span className="min-w-0 flex-1 leading-tight">
-                                <span className="flex items-center gap-1.5 text-sm font-semibold tracking-tight">
-                                  <span className="truncate">{t.label}</span>
-                                  {added && (
-                                    <span className="shrink-0 rounded-full bg-emerald-50 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700">
-                                      Added
-                                    </span>
-                                  )}
-                                </span>
-                                <span className="mt-0.5 line-clamp-2 block text-xs text-muted-foreground">
-                                  {t.blurb}
-                                </span>
-                              </span>
-                            </button>
-                          )
-                        })}
-                      </div>
-                    </div>
-                  )
-                })}
-                {!visible.length && (
-                  <p className="py-6 text-center text-sm text-muted-foreground">
-                    No template matches — use <b>Paste JSON</b> for any other server.
-                  </p>
-                )}
+                {/* Categories as one row of pills: the list stays one screen tall instead of
+                    seven stacked sections. "All" still groups by category below. */}
+                <div className="-mx-1 flex gap-1.5 overflow-x-auto px-1 pb-0.5" role="tablist" aria-label="Category">
+                  {['All', ...MCP_TEMPLATE_CATEGORIES].map((c) => {
+                    const count = c === 'All' ? matches.length : matches.filter((t) => t.category === c).length
+                    if (c !== 'All' && !count) return null
+                    const on = activeCategory === c
+                    return (
+                      <button
+                        key={c}
+                        type="button"
+                        role="tab"
+                        aria-selected={on}
+                        onClick={() => setCategory(c)}
+                        className={cn(
+                          'flex shrink-0 items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-medium transition-all duration-200 active:scale-[0.97]',
+                          on
+                            ? 'border-foreground bg-foreground text-background'
+                            : 'border-border/60 text-muted-foreground hover:border-border hover:text-foreground',
+                        )}
+                      >
+                        {c}
+                        <span className={cn('tabular-nums', on ? 'text-background/70' : 'text-muted-foreground/70')}>
+                          {count}
+                        </span>
+                      </button>
+                    )
+                  })}
+                </div>
+                <div className="max-h-[52vh] space-y-4 overflow-y-auto pr-1">
+                  {MCP_TEMPLATE_CATEGORIES.map((cat) => {
+                    const items = visible.filter((t) => t.category === cat)
+                    if (!items.length) return null
+                    return (
+                      <section key={cat} className="space-y-2">
+                        {activeCategory === 'All' && (
+                          <h3 className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                            {cat}
+                          </h3>
+                        )}
+                        {cat === 'QC essentials' && connectedTracker && (
+                          <p className="flex items-start gap-1.5 rounded-xl bg-muted/60 px-3 py-2 text-[11px] leading-snug text-muted-foreground">
+                            <Info className="mt-px h-3.5 w-3.5 shrink-0" />
+                            <span>
+                              One ticket tracker per project. This one uses{' '}
+                              <b className="text-foreground">{SIGNIN_LABEL[connectedTracker.tracker]}</b> (
+                              <code className="font-mono">{connectedTracker.name}</code>) — to switch, disconnect it
+                              first, then add the other.
+                            </span>
+                          </p>
+                        )}
+                        <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                          {items.map((t) => {
+                            // A service is connected ONCE per project, in whatever form — the
+                            // template's own name, its sign-in twin (`clickup-oauth`, `figma-oauth`…),
+                            // or, for a tracker, any server of it (the server refuses a second too).
+                            const addedAs =
+                              [t.name, BROWSER_SIGNIN_ALT[t.id as SigninTracker], HOSTED_SIGNIN_ALT[t.id]].find(
+                                (n): n is string => !!n && taken.has(n),
+                              ) ??
+                              (isSigninTracker(t.id) && connectedTracker?.tracker === t.id
+                                ? connectedTracker.name
+                                : undefined)
+                            const added = !!addedAs
+                            const locked = added
+                            // One ticket tracker per project: the others wait until it is removed.
+                            const otherTracker =
+                              !added &&
+                              !!connectedTracker &&
+                              isSigninTracker(t.id) &&
+                              t.id !== connectedTracker.tracker
+                            const dualMode = !!t.builtin && (isSigninTracker(t.id) || !!HOSTED_SIGNIN_ALT[t.id])
+                            const inUse = connectedTracker ? SIGNIN_LABEL[connectedTracker.tracker] : ''
+                            // What the tile is, and — when it can't be picked — why, and what to do.
+                            const tip = otherTracker ? (
+                              <>
+                                <b>One ticket tracker per project.</b> This project already reads its tickets
+                                from {inUse} (<code className="font-mono">{connectedTracker?.name}</code>). To use{' '}
+                                {t.label} instead, disconnect <code className="font-mono">{connectedTracker?.name}</code>{' '}
+                                in the server list first, then add {t.label}.
+                              </>
+                            ) : locked ? (
+                              <>
+                                <b>Already added</b> as <code className="font-mono">{addedAs}</code> — a server is
+                                connected once per project. Test, edit or disconnect it in the server list; to
+                                connect it another way, disconnect it first.
+                              </>
+                            ) : (
+                              <>
+                                {t.blurb}
+                                {dualMode && (
+                                  <span className="mt-1 block opacity-80">
+                                    Connect by signing in with your browser (no token) or with an API token — you
+                                    choose on the next step.
+                                  </span>
+                                )}
+                              </>
+                            )
+                            return (
+                              <Tooltip key={t.id}>
+                                <TooltipTrigger asChild>
+                                  {/* A disabled button gets no pointer events, so the tooltip hangs on
+                                      this wrapper — the locked tiles are the ones that most need it. */}
+                                  <span className="block min-w-0" tabIndex={locked || otherTracker ? 0 : -1}>
+                                    <button
+                                      type="button"
+                                      onClick={() => pick(t)}
+                                      disabled={locked || otherTracker}
+                                      className="group flex w-full min-w-0 items-center gap-2.5 rounded-2xl border border-border/60 bg-card px-3 py-2.5 text-left transition-all duration-200 hover:-translate-y-0.5 hover:border-border hover:shadow-sm active:scale-[0.99] disabled:pointer-events-none disabled:opacity-55"
+                                    >
+                                      <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-muted/70 text-muted-foreground transition-colors group-hover:bg-foreground group-hover:text-background">
+                                        <t.icon className="h-4 w-4" />
+                                      </span>
+                                      <span className="min-w-0 flex-1 leading-tight">
+                                        <span className="flex items-center gap-1.5">
+                                          <span className="truncate text-[13px] font-semibold tracking-tight">{t.label}</span>
+                                          {added ? (
+                                            <span className="shrink-0 rounded-full bg-emerald-50 px-1.5 py-px text-[10px] font-medium text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-400">
+                                              Added
+                                            </span>
+                                          ) : otherTracker ? (
+                                            <span className="shrink-0 rounded-full bg-amber-50 px-1.5 py-px text-[10px] font-medium text-amber-700 dark:bg-amber-500/15 dark:text-amber-400">
+                                              Remove {inUse} first
+                                            </span>
+                                          ) : dualMode ? (
+                                            <span className="shrink-0 rounded-full bg-muted px-1.5 py-px text-[10px] font-medium text-muted-foreground">
+                                              Sign in · token
+                                            </span>
+                                          ) : null}
+                                        </span>
+                                        <span className="mt-0.5 block truncate text-[11px] text-muted-foreground">
+                                          {t.blurb}
+                                        </span>
+                                      </span>
+                                    </button>
+                                  </span>
+                                </TooltipTrigger>
+                                <TooltipContent side="bottom" className="max-w-72 text-xs leading-snug">
+                                  {tip}
+                                </TooltipContent>
+                              </Tooltip>
+                            )
+                          })}
+                        </div>
+                      </section>
+                    )
+                  })}
+                  {!visible.length && (
+                    <p className="py-10 text-center text-sm text-muted-foreground">
+                      No template matches — use <b>Paste JSON</b> for any other server.
+                    </p>
+                  )}
+                </div>
               </div>
             ) : (
               <div className="min-w-0 space-y-3">
@@ -747,7 +1049,30 @@ function AddServerDialog({
                   </a>
                 </div>
 
-                {picked.builtin ? (
+                {browserName && (
+                  <ConnectModeChoice
+                    tracker={picked.id}
+                    mode={authMode}
+                    onMode={setAuthMode}
+                    label={picked.label}
+                    browserName={browserName}
+                  />
+                )}
+                {viaBrowser && signinTracker === 'azure' && (
+                  <Field label="Organization (optional)">
+                    <Input
+                      value={values.ORG_URL ?? ''}
+                      onChange={(e) => setValues((m) => ({ ...m, ORG_URL: e.target.value }))}
+                      placeholder="your-org or https://dev.azure.com/your-org"
+                      aria-label="Azure DevOps organization"
+                      className="h-9 text-xs"
+                    />
+                    <p className="text-[11px] text-muted-foreground">
+                      Leave empty to use your account's first organization — you can switch on the Tickets page.
+                    </p>
+                  </Field>
+                )}
+                {viaBrowser ? null : picked.builtin ? (
                   <p className="text-[11px] leading-snug text-muted-foreground">
                     Saved as <code className="font-mono">{picked.name}</code> — the portal finds
                     this built-in by that name, so keep it unless you know what relies on it.
@@ -765,7 +1090,7 @@ function AddServerDialog({
                     )}
                   </Field>
                 )}
-                {picked.fields.map((f, i) => (
+                {!viaBrowser && picked.fields.map((f, i) => (
                   <TemplateFieldInput
                     key={f.key}
                     field={f}
@@ -774,7 +1099,7 @@ function AddServerDialog({
                     onChange={(v) => setValues((m) => ({ ...m, [f.key]: v }))}
                   />
                 ))}
-                {picked.builtin && tokenUrl(picked.builtin) && (
+                {!viaBrowser && picked.builtin && tokenUrl(picked.builtin) && (
                   <a
                     href={tokenUrl(picked.builtin)}
                     target="_blank"
@@ -806,7 +1131,7 @@ function AddServerDialog({
                       </code>
                     </div>
                   ) : null)}
-                {picked.needsUv && (
+                {picked.needsUv && !viaBrowser && (
                   <p className="flex items-start gap-1.5 rounded-xl bg-amber-50 px-2.5 py-2 text-[11px] leading-snug text-amber-700">
                     <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
                     Runs through <code>uvx</code> — needs Astral's uv installed on this machine.
@@ -909,11 +1234,21 @@ function AddServerDialog({
           {tab === 'templates' ? (
             <Button
               onClick={submitTemplate}
-              disabled={!picked || !!templateProblem || !!missingField || maestroBlocked || pending}
+              disabled={
+                !picked ||
+                (!viaBrowser && (!!templateProblem || !!missingField || maestroBlocked)) ||
+                pending
+              }
               className="rounded-full transition-all duration-200 active:scale-[0.98]"
             >
-              {pending ? <Loader2 className="h-4 w-4 animate-spin" /> : <PlugZap className="h-4 w-4" />}
-              Add &amp; test
+              {pending ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : viaBrowser ? (
+                <KeyRound className="h-4 w-4" />
+              ) : (
+                <PlugZap className="h-4 w-4" />
+              )}
+              {viaBrowser ? 'Add & sign in' : 'Add & test'}
             </Button>
           ) : (
             <Button
@@ -1422,6 +1757,31 @@ function EditServerForm({
   )
 }
 
+/**
+ * Open the tab a provider sign-in will use NOW, inside the click. Jira / ClickUp do the
+ * same (useTrackerSignin); for any other OAuth server the sign-in URL only exists after
+ * the server is added and `claude mcp login` has started — a window opened then is a
+ * popup the browser blocks, which is why the sign-in page never opened by itself. The
+ * tab says what it is waiting for until `SignInDialog` points it at the provider. Null
+ * when the browser blocks even this; the dialog's "Open sign-in page" still works.
+ */
+function openSigninTab(): Window | null {
+  const tab = window.open('', '_blank')
+  try {
+    tab?.document.write(
+      '<!doctype html><title>Signing in…</title><body style="font:15px system-ui;display:grid;place-items:center;height:90vh;margin:0;color:#555">Preparing the sign-in page…</body>',
+    )
+  } catch {
+    /* cross-origin already — nothing to write */
+  }
+  return tab
+}
+
+/** Send a tab opened by `openSigninTab` to the provider's sign-in page. */
+function pointTab(tab: Window, url: string): void {
+  tab.location.href = url
+}
+
 /** A remote server: the only kind `claude mcp login` can sign in to. */
 function isRemoteServer(s: McpServer | undefined): boolean {
   return !!s && (s.type === 'http' || s.type === 'sse' || (!s.command && !!s.url))
@@ -1440,12 +1800,18 @@ function isRemoteServer(s: McpServer | undefined): boolean {
 function SignInDialog({
   name,
   projectId,
+  tab,
   onClose,
   onSignedIn,
 }: {
   name: string
   projectId: string
-  onClose: () => void
+  /** A tab opened in the click that started this (`openSigninTab`) — pointed at the
+   *  sign-in page as soon as it is known. */
+  tab: Window | null
+  /** `signedIn`: whether this dialog saw the sign-in succeed (the page tests the row
+   *  either way, but only once). */
+  onClose: (signedIn: boolean) => void
   onSignedIn: (name: string) => void
 }) {
   const [jobId, setJobId] = useState<string | null>(null)
@@ -1455,6 +1821,10 @@ function SignInDialog({
   const start = useMutation({
     mutationFn: () => startMcpSignin(name, projectId),
     onSuccess: (res) => setJobId(res.job.id),
+    // Could not even start: close the tab still saying "Preparing…".
+    onError: () => {
+      if (tab && !tab.closed && !openedInTab) tab.close()
+    },
   })
   // Start once on open; "Try again" calls it again.
   useEffect(() => {
@@ -1462,9 +1832,26 @@ function SignInDialog({
     // eslint-disable-next-line react-hooks/exhaustive-deps -- once per open
   }, [])
 
+  // Whether the waiting tab has been sent to the provider (see the poll below).
+  const [openedInTab, setOpenedInTab] = useState(false)
   const { data } = useQuery({
     queryKey: ['mcp-signin', projectId, name, jobId],
-    queryFn: () => getMcpSignin(name, projectId),
+    queryFn: async () => {
+      const res = await getMcpSignin(name, projectId)
+      const job = res.job
+      if (tab && !tab.closed && !openedInTab && job?.id === jobId) {
+        // The moment the URL is known, send the waiting tab there — the browser then
+        // shows the sign-in page by itself, as it does for Jira / ClickUp.
+        if (job.signInUrl) {
+          pointTab(tab, job.signInUrl)
+          setOpenedInTab(true)
+        } else if (job.state === 'failed' || job.state === 'cancelled') {
+          // Failed before there was a page: don't leave a tab saying "Preparing…".
+          tab.close()
+        }
+      }
+      return res
+    },
     enabled: !!jobId,
     refetchInterval: (q) => (q.state.data?.job?.state === 'running' ? 1000 : false),
     gcTime: 0,
@@ -1472,6 +1859,7 @@ function SignInDialog({
   // A job from an earlier attempt must not be read as this one's result.
   const job = data?.job && data.job.id === jobId ? data.job : null
   const state = start.isPending ? 'starting' : start.isError ? 'failed' : (job?.state ?? 'starting')
+
 
   // Announce a success once per job, however many polls report it.
   const announced = useRef<string | null>(null)
@@ -1495,7 +1883,8 @@ function SignInDialog({
   function close() {
     // Leaving mid-sign-in cancels it, so the CLI's callback port isn't held for 10 min.
     if (job?.state === 'running') cancelMcpSignin(name, projectId).catch(() => undefined)
-    onClose()
+    if (tab && !tab.closed && !openedInTab) tab.close()
+    onClose(!!job && announced.current === job.id)
   }
 
   async function copyLink() {
@@ -1572,7 +1961,9 @@ function SignInDialog({
               </div>
               <p className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
                 <Loader2 className="h-3 w-3 animate-spin" />
-                Waiting — on this computer, this finishes by itself once you allow access.
+                {openedInTab
+                  ? 'Opened in a new tab — sign in and allow access there; this finishes by itself.'
+                  : 'Waiting — on this computer, this finishes by itself once you allow access.'}
               </p>
             </div>
 
@@ -1687,6 +2078,24 @@ function ConnectServices({
   const [confirmDisconnect, setConfirmDisconnect] = useState<string | null>(null)
   // OAuth sign-in dialog for a remote (http/sse) server.
   const [signinName, setSigninName] = useState<string | null>(null)
+  // The tab opened in the click that leads to that sign-in (`openSigninTab`).
+  const signinTab = useRef<Window | null>(null)
+  /** Start Claude Code's sign-in for `name` in a tab opened right now, in the click. */
+  function signInWithTab(name: string) {
+    signinTab.current = openSigninTab()
+    setSigninName(name)
+  }
+  // The hosted tracker servers (Atlassian, ClickUp) sign in through the portal's own
+  // login (useTrackerSignin) — one login for Tickets, filing, runs and chat. When it
+  // lands, re-test that row (like `afterSignin`) so it turns green by itself.
+  const jiraSignin = useTrackerSignin('jira', projectId, () => void afterTrackerSignin('jira'))
+  const clickupSignin = useTrackerSignin('clickup', projectId, () => void afterTrackerSignin('clickup'))
+  const azureSignin = useTrackerSignin('azure', projectId, () => void afterTrackerSignin('azure'))
+  const signins = { jira: jiraSignin, clickup: clickupSignin, azure: azureSignin }
+  const signinFor = (name: string) => {
+    const tracker = signinTrackerOf(serverByName[name])
+    return tracker ? signins[tracker] : null
+  }
   // Header values for the details dialog, fetched alongside the env on reveal.
   const [fullHeaders, setFullHeaders] = useState<Record<string, string> | null>(null)
 
@@ -1710,11 +2119,22 @@ function ConnectServices({
   const disconnect = useMutation({
     mutationFn: (name: string) => removeMcp(name, projectId),
     onMutate: (name) => setDisconnectingNames((s) => new Set(s).add(name)),
-    onSuccess: (_, name) => {
+    onSuccess: (res, name) => {
       toast.success(`${name} disconnected`, {
-        description: "Removed from this project's .mcp.json.",
+        description: res?.signedOut
+          ? `Removed from this project's .mcp.json and signed out of ${SIGNIN_LABEL[res.signedOut]} — Tickets no longer uses it.`
+          : "Removed from this project's .mcp.json.",
       })
       forgetStatus([name])
+      if (res?.signedOut) {
+        // The Tickets page must not keep showing tickets from the login that just ended.
+        for (const key of [`${res.signedOut}-signin`, `${res.signedOut}-status`]) {
+          queryClient.invalidateQueries({ queryKey: [key, projectId] })
+        }
+        queryClient.removeQueries({ queryKey: ['ticket-workspaces'] })
+        queryClient.removeQueries({ queryKey: ['ticket-tasks'] })
+        queryClient.removeQueries({ queryKey: ['clickup-list-tasks'] })
+      }
       return refresh()
     },
     onError: (err) =>
@@ -2137,15 +2557,25 @@ function ConnectServices({
     const usesHeaderToken = Object.keys(serverByName[name]?.headers ?? {}).length > 0
     return (
       <>
-        {remote && status === 'needs-auth' && (
+        {(remote || signinFor(name)) &&
+          (status === 'needs-auth' || (signinFor(name)?.status && !signinFor(name)?.status?.signedIn)) && (
           <Button
             size="sm"
-            onClick={() => setSigninName(name)}
+            onClick={() => {
+              const portal = signinFor(name)
+              if (portal) portal.start.mutate()
+              else signInWithTab(name)
+            }}
+            title={
+              signinFor(name) && status === 'connected'
+                ? 'Runs and chat already work — this sign-in lets Tickets and issue filing use it too'
+                : undefined
+            }
             disabled={testing || disconnecting}
             className="h-8 rounded-full px-3 text-xs font-medium transition-all duration-200 active:scale-[0.98]"
           >
             <KeyRound className="h-3.5 w-3.5" />
-            Sign in
+            {signinFor(name) && status === 'connected' ? 'Sign in for Tickets' : 'Sign in'}
           </Button>
         )}
         <Button
@@ -2223,7 +2653,13 @@ function ConnectServices({
         }
         subtitle={meta.blurb}
         status={statusByName[name]}
-        badge={<CardStatusBadge configured status={statusByName[name]} checking={checkingStatus} />}
+        badge={
+          <CardStatusBadge
+            configured
+            status={statusByName[name]}
+            checking={checkingStatus || testingNames.has(name)}
+          />
+        }
         actions={checkingStatus ? null : connectedActions(name)}
       >
         {!checkingStatus && resultLine(name)}
@@ -2243,6 +2679,14 @@ function ConnectServices({
   // server, and parallel approvals would race on the same ~/.claude.json write.
   async function afterAdd(names: string[]) {
     forgetStatus(names)
+    // Added from a sign-in template, with its tab already open: go straight to signing
+    // in — a new OAuth server is never signed in yet, and the ~7s test first is what
+    // made the sign-in page feel like it never came.
+    if (signinTab.current && names.length === 1) {
+      await queryClient.invalidateQueries({ queryKey: ['mcp', projectId] })
+      setSigninName(names[0])
+      return
+    }
     await refresh()
     // Read the refreshed list, not the props: this closure predates the refetch.
     const fresh = queryClient.getQueryData<McpServer[]>(['mcp', projectId]) ?? []
@@ -2256,9 +2700,26 @@ function ConnectServices({
     if (needsSignin) setSigninName(needsSignin)
   }
 
+  async function afterTrackerSignin(tracker: SigninTracker) {
+    // The callback may have just ADDED the entry — refetch the LIST only (instant) for its
+    // name, then test that one row. Waiting on the full live-health refresh first (a
+    // `claude mcp list`, ~7s, twice via afterSignin) left the new row with no badge at
+    // all for ~20s, which read as "signed in, but nothing happened".
+    await queryClient.invalidateQueries({ queryKey: ['mcp', projectId] })
+    const fresh = queryClient.getQueryData<McpServer[]>(['mcp', projectId]) ?? []
+    const row = fresh.find((s) => signinTrackerOf(s) === tracker)
+    if (!row) return
+    forgetStatus([row.name])
+    await test.mutateAsync(row.name).catch(() => undefined)
+  }
+
   async function afterSignin(name: string) {
+    // Test THIS row straight away — it shows "Checking…" at once and its own result in
+    // ~7s. Waiting on the project-wide health refresh first (another `claude mcp list`)
+    // left the just-signed-in row with no badge at all for 10-15s, which read as "signed
+    // in, but the page didn't notice" — the same fix as afterTrackerSignin.
     forgetStatus([name])
-    await refresh()
+    void queryClient.invalidateQueries({ queryKey: ['mcp-oauth', projectId] })
     await test.mutateAsync(name).catch(() => undefined)
   }
 
@@ -2266,8 +2727,10 @@ function ConnectServices({
     mutationFn: (name: string) => logoutMcpSignin(name, projectId),
     onSuccess: (res, name) => {
       toast.success(`Signed out of ${name}`, { description: res.detail })
+      // Like afterSignin: test this row at once ("Checking…", then "needs sign-in")
+      // rather than waiting on a project-wide health refresh with no badge.
       forgetStatus([name])
-      return refresh()
+      return test.mutateAsync(name).catch(() => undefined)
     },
     onError: (err, name) =>
       toast.error(`Could not sign out of ${name}`, {
@@ -2284,14 +2747,39 @@ function ConnectServices({
   }
 
   function customCard(server: McpServer) {
+    // A tracker connected ONLY by browser sign-in: say what that leaves out, here where
+    // the engineer sees it as "connected", not later as a failed crawl.
+    const portal = signinFor(server.name)
+    const live = statusByName[server.name]
+    const partial = !!portal?.status && !portal.status.signedIn && live === 'connected'
+    const signinNote = portal
+      ? portal.status?.needsOrg
+        ? ' · signed in to Microsoft — choose the organization above to finish'
+        : portal.status?.signedIn
+        ? ` · signed in to ${portal.status.site?.name ?? 'the workspace'} — Tickets, QC runs and Chat`
+        : partial
+          ? ' · QC runs and Chat work; sign in once more so Tickets and issue filing can use it too'
+          : ' · not signed in — sign in once for Tickets, QC runs and Chat'
+      : ''
     return (
       <ServerRow
         key={server.name}
         icon={iconForServer(server.name)}
         title={<span className="truncate font-mono">{server.name}</span>}
-        subtitle={`${server.type ?? 'stdio'}${server.source === 'local' ? ' · local scope' : ''}`}
-        status={statusByName[server.name]}
-        badge={<CardStatusBadge configured status={statusByName[server.name]} checking={checkingStatus} />}
+        subtitle={
+          `${server.type ?? 'stdio'}${server.source === 'local' ? ' · local scope' : ''}` +
+          signinNote
+        }
+        status={partial ? 'pending' : live}
+        badge={
+          <CardStatusBadge
+            configured
+            status={partial ? 'partial' : live}
+            // A row being tested says so — a just-added / just-signed-in server has no
+            // status yet, and no badge at all read as "nothing happened".
+            checking={checkingStatus || testingNames.has(server.name)}
+          />
+        }
         actions={checkingStatus ? null : connectedActions(server.name)}
       >
         {!checkingStatus && resultLine(server.name)}
@@ -2320,6 +2808,22 @@ function ConnectServices({
           Add server
         </Button>
       </div>
+
+      {/* Only beside an Azure DevOps server row — the step belongs to that server. */}
+      {azureSignin.status?.needsOrg &&
+        !azureSignin.waiting &&
+        Object.values(serverByName).some((x) => signinTrackerOf(x) === 'azure') && (
+        <AzureOrgPrompt
+          projectId={projectId}
+          signin={azureSignin}
+          onLinked={() => {
+            queryClient.invalidateQueries({ queryKey: ['azure-signin', projectId] })
+            queryClient.invalidateQueries({ queryKey: ['azure-status', projectId] })
+            queryClient.invalidateQueries({ queryKey: ['ticket-workspaces'] })
+            void afterTrackerSignin('azure')
+          }}
+        />
+      )}
 
       {/* One list of the servers this project HAS — built-ins first, then anything
           added from a template or pasted. Connecting a new one (built-in or not) is
@@ -2350,6 +2854,13 @@ function ConnectServices({
         projectRoot={projectRoot}
         existingNames={existingNames}
         onAdded={afterAdd}
+        onTrackerSignin={(t, org) => signins[t].start.mutate(org)}
+        trackerSigninPending={Object.values(signins).some((x) => x.start.isPending)}
+        connectedTracker={connectedTrackerOf(Object.values(serverByName) as McpServer[])}
+        onSigninTab={(tab) => {
+          if (!tab && signinTab.current && !signinTab.current.closed) signinTab.current.close()
+          signinTab.current = tab
+        }}
       />
       )}
       {editName && serverByName[editName] && (
@@ -2369,7 +2880,19 @@ function ConnectServices({
           key={signinName}
           name={signinName}
           projectId={projectId}
-          onClose={() => setSigninName(null)}
+          tab={signinTab.current}
+          onClose={(signedIn) => {
+            const name = signinName
+            signinTab.current = null
+            setSigninName(null)
+            // Closed WITHOUT signing in: a server added straight into sign-in was never
+            // tested (afterAdd skips it), so test it now — otherwise its row has no badge.
+            // A successful sign-in is already being tested by afterSignin.
+            if (!signedIn && name) {
+              forgetStatus([name])
+              test.mutate(name)
+            }
+          }}
           onSignedIn={afterSignin}
         />
       )}
@@ -2465,214 +2988,6 @@ function UvWarning() {
   )
 }
 
-/**
- * THE QC BROWSER card — one long-lived browser window the portal owns, which
- * Playwright MCP attaches to over CDP instead of launching its own.
- *
- * It exists because of two things a QC engineer hit constantly:
- *  - **Stop closed the browser.** Stopping a chat turn kills the `claude` child, which
- *    tears down its MCP servers, which closes the browser they launched. There was no
- *    way to pause a flow, fix a step and continue — the logins, the filled form and the
- *    page you were on all went with it.
- *  - **The window was never full screen.** The MCP launched a default-size window and
- *    we pinned `--viewport-size 1280x720` on top, so the app rendered in a small box.
- *
- * Attaching fixes both. The toggle is per project because it changes which browser that
- * project's runs drive; the browser itself is one per machine, so status/Start/Stop are
- * global.
- */
-function QcBrowserCard({ project }: { project: Project }) {
-  const queryClient = useQueryClient()
-  const { data, isFetching } = useQuery({
-    queryKey: ['qc-browser'],
-    queryFn: qcBrowserStatus,
-    refetchInterval: 10_000,
-    staleTime: 5_000,
-  })
-  const attached = project.persistentBrowser === true
-
-  const start = useMutation({
-    mutationFn: () => startQcBrowser(),
-    onSuccess: () => {
-      toast.success('QC browser opened', {
-        description: 'It stays open when you press Stop, so you can adjust and continue.',
-      })
-      queryClient.invalidateQueries({ queryKey: ['qc-browser'] })
-    },
-    onError: (err) =>
-      toast.error('Could not open the QC browser', {
-        description: err instanceof Error ? err.message : 'Unknown error',
-      }),
-  })
-  const stop = useMutation({
-    mutationFn: stopQcBrowser,
-    onSuccess: () => {
-      toast.success('QC browser closed')
-      queryClient.invalidateQueries({ queryKey: ['qc-browser'] })
-    },
-    onError: (err) =>
-      toast.error('Could not close the QC browser', {
-        description: err instanceof Error ? err.message : 'Unknown error',
-      }),
-  })
-  const maximize = useMutation({
-    mutationFn: maximizeQcBrowser,
-    onSuccess: () => toast.success('Window maximized'),
-    onError: (err) =>
-      toast.error('Could not resize the window', {
-        description: err instanceof Error ? err.message : 'Unknown error',
-      }),
-  })
-  const toggle = useMutation({
-    mutationFn: (next: boolean) => updateProject(project.id, { persistentBrowser: next }),
-    onSuccess: (_res, next) => {
-      toast.success(next ? 'Browser automation attached' : 'Back to a per-run browser', {
-        description: next
-          ? "This project's Playwright now drives the QC browser, which survives Stop."
-          : 'Playwright will launch (and close) its own browser again.',
-      })
-      queryClient.invalidateQueries({ queryKey: ['projects'] })
-      queryClient.invalidateQueries({ queryKey: ['mcp', project.id] })
-      queryClient.invalidateQueries({ queryKey: ['mcp-health', project.id] })
-    },
-    onError: (err) =>
-      toast.error('Could not change the setting', {
-        description: err instanceof Error ? err.message : 'Unknown error',
-      }),
-  })
-
-  const running = data?.running === true
-  const noBrowser = data && data.available.length === 0
-
-  return (
-    <Card className="rounded-3xl border-border/60 shadow-none">
-      <CardContent className="flex flex-col gap-4 p-5">
-        <div className="flex flex-wrap items-start gap-3">
-          <span className="flex size-10 shrink-0 items-center justify-center rounded-2xl bg-foreground text-background">
-            <MonitorPlay className="size-5" />
-          </span>
-          <div className="min-w-0 flex-1 space-y-1">
-            <div className="flex flex-wrap items-center gap-2">
-              <p className="font-semibold">QC browser</p>
-              <span
-                title={running ? data?.version : 'Not running'}
-                className={cn(
-                  'flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium',
-                  isFetching && !data
-                    ? 'bg-muted text-muted-foreground'
-                    : running
-                      ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-400'
-                      : 'bg-muted text-muted-foreground',
-                )}
-              >
-                {isFetching && !data ? (
-                  <Loader2 className="size-3 animate-spin" />
-                ) : (
-                  <span
-                    className={cn(
-                      'size-1.5 rounded-full',
-                      running ? 'bg-emerald-500' : 'bg-muted-foreground/50',
-                    )}
-                  />
-                )}
-                {isFetching && !data ? 'Checking' : running ? 'Open' : 'Closed'}
-              </span>
-              {attached && (
-                <span className="rounded-full bg-sky-500/10 px-2 py-0.5 text-[11px] font-medium text-sky-700 dark:text-sky-400">
-                  This project attaches to it
-                </span>
-              )}
-            </div>
-            <p className="text-sm text-muted-foreground">
-              A browser window the portal owns, so pressing <span className="font-medium">Stop</span>{' '}
-              pauses the run instead of closing it — the pages, logins and half-filled forms stay
-              put, you fix what you need, and the next message carries on from there. It also opens{' '}
-              <span className="font-medium">maximized</span> rather than in a 1280×720 box.
-            </p>
-          </div>
-        </div>
-
-        {noBrowser ? (
-          <p className="rounded-2xl border border-amber-300/70 bg-amber-50 px-3 py-2 text-xs text-amber-900">
-            Neither Microsoft Edge nor Google Chrome was found on the machine running the portal.
-            Install one (or set <code className="font-mono">QC_BROWSER_PATH</code>) to use this.
-          </p>
-        ) : (
-          <div className="flex flex-wrap items-center gap-2">
-            <Button
-              type="button"
-              size="sm"
-              variant={running ? 'outline' : 'default'}
-              disabled={start.isPending || running}
-              onClick={() => start.mutate()}
-              className="h-9 rounded-full active:scale-[0.98]"
-            >
-              {start.isPending ? <Loader2 className="size-4 animate-spin" /> : <Play className="size-4" />}
-              {running ? 'Already open' : 'Open browser'}
-            </Button>
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              disabled={maximize.isPending || !running}
-              onClick={() => maximize.mutate()}
-              title="Resize the window to fill the screen"
-              className="h-9 rounded-full active:scale-[0.98]"
-            >
-              {maximize.isPending ? (
-                <Loader2 className="size-4 animate-spin" />
-              ) : (
-                <Maximize2 className="size-4" />
-              )}
-              Maximize
-            </Button>
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              disabled={stop.isPending || !running}
-              onClick={() => stop.mutate()}
-              className="h-9 rounded-full active:scale-[0.98]"
-            >
-              {stop.isPending ? <Loader2 className="size-4 animate-spin" /> : <Square className="size-4" />}
-              Close
-            </Button>
-            <Button
-              type="button"
-              size="sm"
-              variant={attached ? 'outline' : 'default'}
-              disabled={toggle.isPending}
-              onClick={() => toggle.mutate(!attached)}
-              className="ml-auto h-9 rounded-full active:scale-[0.98]"
-            >
-              {toggle.isPending ? (
-                <Loader2 className="size-4 animate-spin" />
-              ) : attached ? (
-                <Unplug className="size-4" />
-              ) : (
-                <Plug className="size-4" />
-              )}
-              {attached ? 'Detach this project' : 'Attach this project'}
-            </Button>
-          </div>
-        )}
-
-        {running && (
-          <p className="font-mono text-[11px] text-muted-foreground">
-            {data?.endpoint}
-            {data?.version ? ` · ${data.version}` : ''}
-            {!data?.startedHere && ' · started outside this portal session — close it yourself'}
-          </p>
-        )}
-      </CardContent>
-    </Card>
-  )
-}
-
-// Persisted health cache — the live probe (`claude mcp list`) is slow, so we keep
-// the last-known { name: status } map per project in localStorage. On reload the
-// cards seed from it and show their previous Connected/… badge INSTANTLY, while a
-// fresh probe runs quietly in the background instead of flashing "Checking".
 type HealthMap = Record<string, McpServer['status']>
 function healthCacheKey(projectId: string) {
   return `qc.mcpHealth.${projectId}`
@@ -2898,7 +3213,6 @@ export default function McpPage() {
 
       <UvWarning />
 
-      {activeProject && <QcBrowserCard project={activeProject} />}
 
       <ConnectServices
         projectId={activeProjectId}

@@ -20,6 +20,9 @@ import {
 import { IMGBB_API_KEY, testResultDirFor, ticketsDirFor } from '../config.js'
 import { uploadImageToImgbb } from '../imgbb.js'
 import { resolveProject } from '../projectScope.js'
+import { trackerServers } from '../trackerMcp.js'
+import { finishClickupSignin, refreshClickupSignin } from '../clickupMcp.js'
+import { mountTrackerSignin } from './trackerSignin.js'
 import { revealFolderNative } from '../folderPicker.js'
 import { crawlOneTicket, safeSegment } from '../crawl.js'
 import { getCrawlJob, listCrawlJobs, startCrawlJob } from '../crawlJobs.js'
@@ -66,12 +69,36 @@ function resolveRunScreenshot(rootPath: string, slug: string, rel: string): stri
 // Resolve the ClickUp token from the request's project (.mcp.json) for the whole
 // request, so the in-app Connect token is used without a server restart. Falls
 // back to the env var when the project has no token of its own.
-clickupRouter.use((req, _res, next) => {
+clickupRouter.use((req, res, next) => {
   const project = resolveProject(req)
-  const tok = project ? resolveProjectClickupToken(project.rootPath) : undefined
-  void withClickupToken(tok, async () => {
-    next()
-  })
+  void (async () => {
+    // A browser sign-in's token is refreshed HERE (async) before the sync resolver
+    // below reads it — clickup.ts and its ~15 callers read the token synchronously.
+    if (project) await refreshClickupSignin(project.id).catch(() => undefined)
+    const tok = project ? resolveProjectClickupToken(project.rootPath) : undefined
+    // A hosted ClickUp server signed in only through Claude Code (`claude mcp login`)
+    // reaches runs and chat, not these REST routes — say how to fix that, instead of a
+    // bare "not configured" to an engineer whose MCP page shows ClickUp as connected.
+    const claudeOnly =
+      !tok && !!project && trackerServers(project.rootPath, 'clickup').some((x) => x.kind === 'oauth')
+    res.locals.clickupMissing = claudeOnly
+      ? 'ClickUp is signed in for runs and chat only. Click "Sign in to ClickUp with browser" ' +
+        '(Tickets page or MCP page) once — that one sign-in covers Tickets and issue filing too.'
+      : 'ClickUp is not connected — sign in with the browser, or add an API token on the MCP page.'
+    await withClickupToken(tok, async () => {
+      next()
+    })
+  })()
+})
+
+// ---- Browser sign-in (no API token) — shared with Jira (routes/trackerSignin.ts) ----
+mountTrackerSignin(clickupRouter, 'clickup', {
+  finish: finishClickupSignin,
+  // A personal `pk_…` token in .mcp.json wins over the sign-in's `mcp:` marker.
+  usingToken: (root) => {
+    const t = resolveProjectClickupToken(root)
+    return !!t && !t.startsWith('mcp:')
+  },
 })
 
 function fail(res: import('express').Response, err: unknown) {
@@ -84,7 +111,7 @@ clickupRouter.get('/status', (_req, res) => {
 })
 
 clickupRouter.get('/workspaces', async (_req, res) => {
-  if (!clickupConfigured()) return res.status(400).json({ error: 'ClickUp is not configured' })
+  if (!clickupConfigured()) return res.status(400).json({ error: res.locals.clickupMissing })
   try {
     res.json(await getWorkspaces())
   } catch (err) {
@@ -94,7 +121,7 @@ clickupRouter.get('/workspaces', async (_req, res) => {
 })
 
 clickupRouter.get('/tasks', async (req, res) => {
-  if (!clickupConfigured()) return res.status(400).json({ error: 'ClickUp is not configured' })
+  if (!clickupConfigured()) return res.status(400).json({ error: res.locals.clickupMissing })
   const team = typeof req.query.team === 'string' ? req.query.team : ''
   const q = typeof req.query.q === 'string' ? req.query.q : ''
   if (!team) return res.status(400).json({ error: 'team is required' })
@@ -106,7 +133,7 @@ clickupRouter.get('/tasks', async (req, res) => {
 })
 
 clickupRouter.get('/spaces', async (req, res) => {
-  if (!clickupConfigured()) return res.status(400).json({ error: 'ClickUp is not configured' })
+  if (!clickupConfigured()) return res.status(400).json({ error: res.locals.clickupMissing })
   const team = typeof req.query.team === 'string' ? req.query.team : ''
   if (!team) return res.status(400).json({ error: 'team is required' })
   try {
@@ -117,7 +144,7 @@ clickupRouter.get('/spaces', async (req, res) => {
 })
 
 clickupRouter.get('/lists', async (req, res) => {
-  if (!clickupConfigured()) return res.status(400).json({ error: 'ClickUp is not configured' })
+  if (!clickupConfigured()) return res.status(400).json({ error: res.locals.clickupMissing })
   const space = typeof req.query.space === 'string' ? req.query.space : ''
   if (!space) return res.status(400).json({ error: 'space is required' })
   try {
@@ -128,7 +155,7 @@ clickupRouter.get('/lists', async (req, res) => {
 })
 
 clickupRouter.get('/docs', async (req, res) => {
-  if (!clickupConfigured()) return res.status(400).json({ error: 'ClickUp is not configured' })
+  if (!clickupConfigured()) return res.status(400).json({ error: res.locals.clickupMissing })
   const team = typeof req.query.team === 'string' ? req.query.team : ''
   const q = typeof req.query.q === 'string' ? req.query.q : ''
   if (!team) return res.status(400).json({ error: 'team is required' })
@@ -140,7 +167,7 @@ clickupRouter.get('/docs', async (req, res) => {
 })
 
 clickupRouter.get('/list-tasks', async (req, res) => {
-  if (!clickupConfigured()) return res.status(400).json({ error: 'ClickUp is not configured' })
+  if (!clickupConfigured()) return res.status(400).json({ error: res.locals.clickupMissing })
   const list = typeof req.query.list === 'string' ? req.query.list : ''
   const q = typeof req.query.q === 'string' ? req.query.q : ''
   if (!list) return res.status(400).json({ error: 'list is required' })
@@ -152,7 +179,7 @@ clickupRouter.get('/list-tasks', async (req, res) => {
 })
 
 clickupRouter.get('/subtasks', async (req, res) => {
-  if (!clickupConfigured()) return res.status(400).json({ error: 'ClickUp is not configured' })
+  if (!clickupConfigured()) return res.status(400).json({ error: res.locals.clickupMissing })
   const parent = typeof req.query.parent === 'string' ? req.query.parent : ''
   if (!parent) return res.status(400).json({ error: 'parent is required' })
   try {
@@ -169,7 +196,7 @@ clickupRouter.get('/subtasks', async (req, res) => {
  * (common) needs to say so up front rather than produce unassigned bugs.
  */
 clickupRouter.get('/issues/filing-context', async (req, res) => {
-  if (!clickupConfigured()) return res.status(400).json({ error: 'ClickUp is not configured' })
+  if (!clickupConfigured()) return res.status(400).json({ error: res.locals.clickupMissing })
   const parent = typeof req.query.parent === 'string' ? req.query.parent.trim() : ''
   if (!parent) return res.status(400).json({ error: 'parent is required' })
   try {
@@ -180,7 +207,7 @@ clickupRouter.get('/issues/filing-context', async (req, res) => {
 })
 
 clickupRouter.post('/issues/subtasks', async (req, res) => {
-  if (!clickupConfigured()) return res.status(400).json({ error: 'ClickUp is not configured' })
+  if (!clickupConfigured()) return res.status(400).json({ error: res.locals.clickupMissing })
 
   // Optional — only needed to attach screenshots (resolved from the run's output folder).
   const project = resolveProject(req)
@@ -306,7 +333,7 @@ clickupRouter.post('/issues/subtasks', async (req, res) => {
 // Crawl ONE ticket synchronously (kept for single-ticket callers). The heavy
 // lifting lives in crawl.ts so the background job runner shares it exactly.
 clickupRouter.post('/crawl', async (req, res) => {
-  if (!clickupConfigured()) return res.status(400).json({ error: 'ClickUp is not configured' })
+  if (!clickupConfigured()) return res.status(400).json({ error: res.locals.clickupMissing })
   const project = resolveProject(req)
   if (!project) return res.status(400).json({ error: 'project not found' })
 
@@ -329,7 +356,7 @@ clickupRouter.post('/crawl', async (req, res) => {
  *   { projectId, model?, tickets: [{ id, displayId, name }] }
  */
 clickupRouter.post('/crawl/jobs', (req, res) => {
-  if (!clickupConfigured()) return res.status(400).json({ error: 'ClickUp is not configured' })
+  if (!clickupConfigured()) return res.status(400).json({ error: res.locals.clickupMissing })
   const project = resolveProject(req)
   if (!project) return res.status(400).json({ error: 'project not found' })
 

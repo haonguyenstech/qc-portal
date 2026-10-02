@@ -1433,7 +1433,7 @@ function CardFormatStrip({
           size="sm"
           className="h-8 rounded-full text-xs text-muted-foreground hover:text-foreground"
         >
-          <Link to="/templates">{template ? 'Edit template' : 'Set up template'}</Link>
+          <Link to="/templates?kind=clickup-issue">{template ? 'Edit template' : 'Set up template'}</Link>
         </Button>
       </div>
     </div>
