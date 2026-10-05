@@ -31,6 +31,8 @@ import {
   Plug,
   PlugZap,
   Plus,
+  RefreshCw,
+  ScrollText,
   Search,
   Smartphone,
   SquareKanban,
@@ -67,6 +69,7 @@ import {
   mcpUvStatus,
   mcpMaestroStatus,
   connectMaestro,
+  diagnoseMcp,
   openMcpFolder,
   removeMcp,
   updateMcp,
@@ -77,7 +80,7 @@ import {
   type McpOauthProvider,
   type SigninTracker,
 } from '@/lib/api'
-import type { McpServer } from '@/lib/types'
+import type { McpDiagnosis, McpServer } from '@/lib/types'
 import { useProjects } from '@/lib/project-context'
 import {
   BUILTIN_MCP_NAMES,
@@ -2045,6 +2048,236 @@ function SignInDialog({
 }
 
 /** Token-connect cards for ClickUp/Figma/Jira (paste a personal token) + no-auth Playwright/Mobile. */
+/** A titled monospace block with a copy button, for the error-log dialog. */
+function LogBlock({ title, text, tone }: { title: string; text: string; tone?: 'error' }) {
+  if (!text.trim()) return null
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-center justify-between">
+        <p className="text-xs font-medium text-muted-foreground">{title}</p>
+        <button
+          type="button"
+          onClick={() =>
+            navigator.clipboard.writeText(text).then(
+              () => toast.success(`${title} copied`),
+              () => toast.error('Could not copy'),
+            )
+          }
+          className="flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] text-muted-foreground transition-all duration-200 hover:bg-muted hover:text-foreground"
+        >
+          <Copy className="h-3 w-3" /> Copy
+        </button>
+      </div>
+      <pre
+        className={cn(
+          'max-h-72 overflow-auto whitespace-pre-wrap break-all rounded-2xl border border-border/60 bg-muted/60 p-3 font-mono text-[11px] leading-relaxed',
+          tone === 'error' && 'border-red-200 bg-red-50/60 text-red-900 dark:border-red-900/50 dark:bg-red-950/30 dark:text-red-200',
+        )}
+      >
+        {text}
+      </pre>
+    </div>
+  )
+}
+
+/** Plain-text report of a diagnosis — what "Copy all" puts on the clipboard to send someone. */
+function diagnosisText(d: McpDiagnosis): string {
+  return [
+    `MCP server: ${d.name} (${d.transport})`,
+    `Result: ${d.ok ? 'OK' : 'FAILED'} — ${d.summary}`,
+    d.hint ? `Likely fix: ${d.hint}` : '',
+    `Target: ${d.target}`,
+    d.cwd ? `Folder: ${d.cwd}` : '',
+    d.exitCode !== undefined ? `Exit code: ${d.exitCode ?? '-'}${d.signal ? ` (${d.signal})` : ''}` : '',
+    `Duration: ${(d.durationMs / 1000).toFixed(1)}s`,
+    '',
+    '--- Steps ---',
+    ...d.steps.map((s) => `[${s.level}] ${s.text}`),
+    d.stderr.trim() ? `\n--- stderr ---\n${d.stderr}` : '',
+    d.stdout.trim() ? `\n--- stdout ---\n${d.stdout}` : '',
+    ...d.claudeLogs.map((l) => `\n--- Claude Code log ${l.file} ---\n${l.lines.join('\n')}`),
+  ]
+    .filter((l) => l !== '')
+    .join('\n')
+}
+
+/**
+ * "Error log" for one server: the portal launches it as configured and shows exactly
+ * what it printed (stderr/stdout/exit code), plus Claude Code's own connection logs.
+ * `claude mcp list` only says "Failed to connect" — this is where the WHY is.
+ */
+function McpLogDialog({
+  name,
+  projectId,
+  onClose,
+}: {
+  name: string | null
+  projectId: string
+  onClose: () => void
+}) {
+  const q = useQuery({
+    queryKey: ['mcp-diagnose', projectId, name],
+    queryFn: () => diagnoseMcp(name!, projectId),
+    enabled: !!name,
+    staleTime: Infinity,
+    gcTime: 0,
+    retry: false,
+  })
+  const d = q.data
+  const running = q.isFetching
+  return (
+    <Dialog open={!!name} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="max-h-[90vh] overflow-y-auto rounded-3xl sm:max-w-3xl">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2 font-semibold tracking-tight">
+            <ScrollText className="h-4 w-4" /> Error log — {name}
+          </DialogTitle>
+          <DialogDescription>
+            The portal starts this server itself, exactly as configured, and records everything it
+            prints. Tokens and passwords are masked.
+          </DialogDescription>
+        </DialogHeader>
+
+        {running && (
+          <div className="flex items-center gap-2 rounded-2xl border border-border/60 bg-muted/60 p-4 text-sm text-muted-foreground">
+            <Loader2 className="h-4 w-4 animate-spin" />
+            Starting {name} and waiting for its answer… (a first <code>uvx</code>/<code>npx</code> start
+            can take up to a minute)
+          </div>
+        )}
+        {!running && q.error && (
+          <p className="rounded-2xl bg-red-50 p-3 text-sm text-red-700 dark:bg-red-950/40 dark:text-red-300">
+            {q.error instanceof Error ? q.error.message : 'Diagnosis failed'}
+          </p>
+        )}
+        {!running && d && (
+          <div className="space-y-4">
+            <div
+              className={cn(
+                'space-y-1.5 rounded-2xl p-3 text-sm',
+                d.ok
+                  ? 'bg-emerald-50 text-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300'
+                  : 'bg-red-50 text-red-800 dark:bg-red-950/40 dark:text-red-300',
+              )}
+            >
+              <p className="flex items-start gap-2 font-medium">
+                {d.ok ? (
+                  <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" />
+                ) : (
+                  <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                )}
+                <span className="min-w-0 break-words">{d.summary}</span>
+              </p>
+              {d.hint && (
+                <p className="flex items-start gap-2 text-xs">
+                  <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                  <span className="min-w-0 break-words">
+                    <span className="font-semibold">Likely fix: </span>
+                    {d.hint}
+                  </span>
+                </p>
+              )}
+            </div>
+
+            <div className="grid gap-x-4 gap-y-1 text-xs sm:grid-cols-[auto_1fr]">
+              <span className="text-muted-foreground">Target</span>
+              <code className="break-all font-mono">{d.target || '—'}</code>
+              {d.cwd && (
+                <>
+                  <span className="text-muted-foreground">Folder</span>
+                  <code className="break-all font-mono">{d.cwd}</code>
+                </>
+              )}
+              {d.exitCode !== undefined && (
+                <>
+                  <span className="text-muted-foreground">Exit code</span>
+                  <code className="font-mono">
+                    {d.exitCode ?? '—'}
+                    {d.signal ? ` (${d.signal})` : ''}
+                  </code>
+                </>
+              )}
+              <span className="text-muted-foreground">Duration</span>
+              <code className="font-mono">{(d.durationMs / 1000).toFixed(1)}s</code>
+            </div>
+
+            {d.steps.length > 0 && (
+              <ul className="space-y-1 rounded-2xl border border-border/60 p-3 text-xs">
+                {d.steps.map((s, i) => (
+                  <li key={i} className="flex items-start gap-2">
+                    {s.level === 'ok' ? (
+                      <CheckCircle2 className="mt-0.5 h-3 w-3 shrink-0 text-emerald-600" />
+                    ) : s.level === 'error' ? (
+                      <AlertCircle className="mt-0.5 h-3 w-3 shrink-0 text-red-600" />
+                    ) : s.level === 'warn' ? (
+                      <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0 text-amber-600" />
+                    ) : (
+                      <Info className="mt-0.5 h-3 w-3 shrink-0 text-muted-foreground" />
+                    )}
+                    <span className="min-w-0 break-all font-mono">{s.text}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+
+            <LogBlock title="stderr (what the server printed)" text={d.stderr} tone={d.ok ? undefined : 'error'} />
+            <LogBlock title="stdout" text={d.stdout} />
+
+            <div className="space-y-2">
+              <p className="text-xs font-medium text-muted-foreground">
+                Claude Code&apos;s own connection log
+                {d.claudeLogDir && (
+                  <code className="ml-1 break-all font-mono text-[10px] font-normal">{d.claudeLogDir}</code>
+                )}
+              </p>
+              {d.claudeLogs.length === 0 ? (
+                <p className="text-xs text-muted-foreground">
+                  None yet — Claude Code writes one the first time it starts this server (a run, a chat,
+                  or Test).
+                </p>
+              ) : (
+                d.claudeLogs.map((l) => (
+                  <LogBlock
+                    key={l.file}
+                    title={`${new Date(l.modifiedAt).toLocaleString()} · ${l.file}`}
+                    text={l.lines.join('\n')}
+                    tone={l.lines.some((x) => x.includes('[ERROR]')) ? 'error' : undefined}
+                  />
+                ))
+              )}
+            </div>
+          </div>
+        )}
+
+        <DialogFooter className="gap-2">
+          {d && !running && (
+            <Button
+              variant="outline"
+              onClick={() =>
+                navigator.clipboard.writeText(diagnosisText(d)).then(
+                  () => toast.success('Error log copied', { description: 'Paste it to whoever is helping.' }),
+                  () => toast.error('Could not copy'),
+                )
+              }
+              className="rounded-full border-border/60 shadow-none transition-all duration-200 active:scale-[0.98]"
+            >
+              <Copy className="h-4 w-4" /> Copy all
+            </Button>
+          )}
+          <Button
+            onClick={() => q.refetch()}
+            disabled={running}
+            className="rounded-full transition-all duration-200 active:scale-[0.98]"
+          >
+            {running ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+            Run again
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 function ConnectServices({
   projectId,
   projectRoot,
@@ -2154,6 +2387,8 @@ function ConnectServices({
     Record<string, { ok: boolean; detail: string }>
   >({})
   const [testingNames, setTestingNames] = useState<Set<string>>(() => new Set())
+  // Server whose error-log dialog is open (McpLogDialog).
+  const [logName, setLogName] = useState<string | null>(null)
   // Drop everything remembered about a server NAME — its last test result and its
   // badge in the (localStorage-backed) health map. Without this a server disconnected
   // and then added again under the same name showed the OLD "Connected" at once, and
@@ -2541,7 +2776,18 @@ function ConnectServices({
         ) : (
           <AlertCircle className="mt-0.5 h-3 w-3 shrink-0" />
         )}
-        <span className="min-w-0 break-words">{result.detail}</span>
+        <span className="min-w-0 break-words">
+          {result.detail}
+          {!result.ok && (
+            <button
+              type="button"
+              onClick={() => setLogName(name)}
+              className="ml-1.5 font-medium underline underline-offset-2 hover:no-underline"
+            >
+              View error log
+            </button>
+          )}
+        </span>
       </p>
     )
   }
@@ -2594,6 +2840,9 @@ function ConnectServices({
         </Button>
         <RowIconButton label="Details" onClick={() => openDetails(name)} disabled={disconnecting}>
           <FileJson className="h-3.5 w-3.5" />
+        </RowIconButton>
+        <RowIconButton label="Error log" onClick={() => setLogName(name)} disabled={disconnecting}>
+          <ScrollText className="h-3.5 w-3.5" />
         </RowIconButton>
         <RowIconButton label="Edit" onClick={() => setEditName(name)} disabled={disconnecting || testing}>
           <PencilLine className="h-3.5 w-3.5" />
@@ -2899,6 +3148,7 @@ function ConnectServices({
 
       {detailsDialog()}
       {disconnectDialog()}
+      <McpLogDialog name={logName} projectId={projectId} onClose={() => setLogName(null)} />
     </div>
   )
 }

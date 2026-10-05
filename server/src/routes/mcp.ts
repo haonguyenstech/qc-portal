@@ -37,6 +37,7 @@ import {
 } from '../azure.js'
 import { resolveProjectJiraCreds, verifyToken as verifyJira, withJiraCreds } from '../jira.js'
 import { runMcpCapabilityTest } from '../mcpCapabilityTest.js'
+import { diagnoseMcpServer } from '../mcpDiagnose.js'
 import { maestroEnvFor, probeMaestro, type MaestroPreflight } from '../maestro.js'
 import { agentProfileDir, isForeignProfileDir } from '../browserProfile.js'
 import { cdpEndpoint, writePlaywrightMcpConfig } from '../qcBrowser.js'
@@ -1424,6 +1425,45 @@ mcpRouter.get('/test/:name', async (req, res) => {
   // An approval may have just changed what `mcp list` reports — drop the memory.
   invalidateMcpHealth(project.rootPath)
   res.json(result)
+})
+
+/**
+ * Error log for ONE server: launch it as configured and record stderr/stdout/exit,
+ * plus Claude Code's own mcp-logs for it. Secrets are scrubbed in mcpDiagnose.ts.
+ */
+mcpRouter.get('/diagnose/:name', async (req, res) => {
+  const project = resolveProject(req)
+  if (!project) return res.status(400).json({ error: 'project not found' })
+  const name = req.params.name
+  const entry =
+    readMcp(mcpJsonFor(project.rootPath)).mcpServers?.[name] ??
+    localProjectMcpServers(project.rootPath)[name]
+  if (!entry) return res.status(404).json({ error: `No server named "${name}".` })
+  try {
+    const d = await diagnoseMcpServer(project.rootPath, name, entry)
+    // A tracker server starts and lists its tools with a DEAD token too — the badge
+    // checks the credential against the tracker, so the log must as well, or the two
+    // disagree ("Needs auth" on the row, "Connected" in the log).
+    const auth = d.ok ? verifyTrackerAuth(name, project.rootPath) : null
+    if (auth) {
+      const v = await auth
+      d.steps.push({
+        level: v.ok ? 'ok' : 'error',
+        text: `Credential check against the tracker: ${v.ok ? 'accepted' : v.detail}${v.status ? ` (HTTP ${v.status})` : ''}`,
+      })
+      if (!v.ok) {
+        d.ok = false
+        d.summary = `The server starts, but the tracker rejects its credential: ${v.detail}`
+        d.hint =
+          v.status === 401
+            ? 'The token / e-mail pair is wrong or expired. For Jira use an UNSCOPED classic API token and the account e-mail; reconnect with the new one.'
+            : undefined
+      }
+    }
+    res.json(d)
+  } catch (err) {
+    res.status(500).json({ error: (err as Error).message })
+  }
 })
 
 /**

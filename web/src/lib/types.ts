@@ -13,6 +13,27 @@ export interface StreamMessage { runId: string; event: LogEvent }
 export type SkillSyncState = 'in-sync' | 'update-available' | 'customized' | 'missing'
 export interface SkillSummary { name: string; description: string; files: string[]; sync?: SkillSyncState }
 export interface SkillFile { name: string; content: string }
+/** GET /api/mcp/diagnose/:name — one server launched by hand, secrets scrubbed. */
+export interface McpDiagnosis {
+  name: string
+  transport: 'stdio' | 'http' | 'sse' | 'unknown'
+  ok: boolean
+  summary: string
+  hint?: string
+  target: string
+  cwd?: string
+  durationMs: number
+  exitCode?: number | null
+  signal?: string | null
+  serverInfo?: string
+  toolCount?: number
+  steps: { level: 'ok' | 'warn' | 'error' | 'info'; text: string }[]
+  stderr: string
+  stdout: string
+  claudeLogs: { file: string; modifiedAt: string; lines: string[] }[]
+  claudeLogDir?: string
+}
+
 export interface McpServer { name: string; command?: string; args?: string[]; url?: string; type?: string; env?: Record<string, string>; headers?: Record<string, string>; oauth?: Record<string, string | number | boolean>; cwd?: string; source: string; status?: string }
 
 export interface ClaudeModelInfo {

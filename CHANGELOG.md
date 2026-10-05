@@ -3,6 +3,33 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.12.11 — 2026-10-05
+
+**See why an MCP server won't connect**
+
+### Added
+
+- **An Error log for every MCP server.** A new *Error log* button on each row of the MCP
+  page (and a *View error log* link under a failed Test) starts that server exactly as it is
+  configured and shows what really happened: each step, everything the server printed, its
+  exit code, and Claude Code's own connection log for it. Before, the page could only say
+  "Failed to connect". This matters most when a server works on one computer and not on
+  another. Tokens and passwords are hidden everywhere in the log, and *Copy all* gives you
+  the whole log as text to send to whoever is helping.
+- **A likely fix for the common failures.** The log names the usual causes and what to do:
+  `uv`/`uvx` or Node not installed, a command path copied from another computer (for example
+  `C:\Users\someone\.local\bin\uvx.exe`), the renamed ClickUp key, a token Jira rejects,
+  certificate or proxy problems on a company network, and a package that would not download.
+
+### Fixed
+
+- **The log agrees with the status badge.** For Jira, ClickUp and Azure DevOps it checks
+  the credential with the tracker itself, as the badge does. The Jira server starts and lists
+  its tools even with an expired token, so without this check the log would say "Connected"
+  next to a "Needs auth" badge. Servers that use the portal's browser sign-in (Jira /
+  ClickUp *Sign in with browser*) are checked with that sign-in, so they no longer show a
+  false 401.
+
 ## 0.12.10 — 2026-10-02
 
 **One sign-in per tracker — now with Azure DevOps — and a tidier MCP page**

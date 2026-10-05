@@ -1,6 +1,7 @@
 import type {
   ClaudeModelTestResult,
   ClaudeStatus,
+  McpDiagnosis,
   McpServer,
   Project,
   QcBrowserStatus,
@@ -2338,6 +2339,13 @@ export function renameMcp(
   return request(
     `/api/mcp/${encodeURIComponent(name)}/rename?projectId=${encodeURIComponent(projectId)}`,
     { method: 'POST', body: JSON.stringify({ newName, projectId }) },
+  )
+}
+
+/** Error log for one server: launches it as configured and returns stderr/exit + Claude's mcp-logs. */
+export function diagnoseMcp(name: string, projectId: string): Promise<McpDiagnosis> {
+  return request(
+    `/api/mcp/diagnose/${encodeURIComponent(name)}?projectId=${encodeURIComponent(projectId)}`,
   )
 }
 

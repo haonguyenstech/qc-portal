@@ -343,6 +343,27 @@ server/src/
                     writes) minus anything secret-named, and PUT carries it over when the
                     url is unchanged, because the Settings form has no field for it and
                     used to drop it silently on every save
+  mcpDiagnose.ts    the MCP page's "Error log" (GET /api/mcp/diagnose/:name). `claude mcp
+                    list` only ever says "Failed to connect", and the real cause is on the
+                    server's STDERR, which the CLI swallows. So it launches the server
+                    ITSELF as configured (command/args/env/cwd, `${VAR}` expanded, through
+                    spawnEnv) and speaks `initialize` + `tools/list`, or POSTs the
+                    handshake to a remote url; records stderr/stdout (ANSI stripped, 64KB
+                    cap), exit code, timing; and reads Claude Code's own per-server log
+                    (`<cache>/claude-cli-nodejs/<slug(project)>/mcp-logs-<slug(name)>/`,
+                    slug = every non-alphanumeric -> "-"). EVERY env/header value of the
+                    entry is scrubbed from ALL returned text, Claude's log included.
+                    `hintFor` maps the failures we have met (uvx missing, a full path
+                    copied from another machine, clickup-mcp's renamed key, 401, TLS/proxy)
+                    to a one-line fix. 0 tools after a good handshake is reported as a fail
+                    A remote entry's `headersHelper` (the portal's own Jira/ClickUp sign-in)
+                    is RUN first and its headers sent — skipping it gave a 401 for a server
+                    whose badge said Connected. With no header and no helper the server
+                    uses Claude Code's OAuth token, which the portal cannot read: a 401 is
+                    then expected, and the verdict comes from Claude Code's newest log
+                    The route adds the SAME tracker credential check the badge uses
+                    (`verifyTrackerAuth`): mcp-atlassian handshakes and lists 63 tools with a
+                    dead token, so without it the log said Connected beside "Needs auth"
   mcpSignin.ts      the job behind that Sign in. The portal never runs OAuth itself:
                     `claude mcp login` does discovery / client registration / PKCE and
                     keeps + REFRESHES the token in Claude Code's credential store, which
