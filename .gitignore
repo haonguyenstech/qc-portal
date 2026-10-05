@@ -20,3 +20,11 @@ settings-projects-*.png
 
 # Built installer artefacts (the .exe / .dmg are release downloads, not source)
 installer/*/dist/
+
+# Written by the portal itself when THIS repo is registered as a project: the
+# qc-testing skill (a copy of templates/skills/qc-testing), the per-project testing/
+# store (templates copy, notes) and its .mcp.json. The canonical sources live under
+# templates/; these copies are per-machine runtime state.
+/.claude/skills/qc-testing/
+/testing/
+/.mcp.json
