@@ -13,9 +13,12 @@ import {
 } from '../db.js'
 import {
   cancelRun,
+  getQueueState,
   parseReport,
   pauseRun,
+  rerunRun,
   resolveRunOutDir,
+  resumeQueue,
   resumeRun,
   startRun,
 } from '../runManager.js'
@@ -241,6 +244,7 @@ qcRouter.post('/run', (req, res) => {
     kind,
     headless,
     dataPolicy,
+    testAccount,
   } = req.body ?? {}
   if (typeof projectId !== 'string' || !projectId.trim()) {
     return res.status(400).json({ error: 'projectId is required' })
@@ -304,6 +308,11 @@ qcRouter.post('/run', (req, res) => {
   // creating test data; anything else (missing, unknown, a stray string) stays
   // read-only, so a malformed body can never authorize a mutation.
   const dataPolicyClean: 'readonly' | 'seed' = dataPolicy === 'seed' ? 'seed' : 'readonly'
+  // "Sign in as": a label from environments.md, quoted into the prompt — one line, capped.
+  const testAccountClean =
+    typeof testAccount === 'string' && testAccount.trim()
+      ? testAccount.replace(/[\r\n"]+/g, ' ').trim().slice(0, 160)
+      : undefined
   try {
     const summary = startRun({
       projectId: projectId.trim(),
@@ -319,6 +328,7 @@ qcRouter.post('/run', (req, res) => {
       kind: runKind,
       headless: headlessClean,
       dataPolicy: dataPolicyClean,
+      testAccount: testAccountClean,
     })
     return res.status(201).json({ runId: summary.id, ...summary })
   } catch (err) {
@@ -445,4 +455,26 @@ qcRouter.post('/runs/:id/resume', (req, res) => {
     const status = (err as { status?: number }).status ?? 500
     res.status(status).json({ error: (err as Error).message })
   }
+})
+
+/** Start a NEW run from the exact request an earlier, finished run was created with. */
+qcRouter.post('/runs/:id/rerun', (req, res) => {
+  try {
+    const summary = rerunRun(req.params.id)
+    res.status(201).json({ runId: summary.id, ...summary })
+  } catch (err) {
+    const status = (err as { status?: number }).status ?? 500
+    res.status(status).json({ error: (err as Error).message })
+  }
+})
+
+/** The run queue: what's waiting, and whether it is held after an AI-account failure. */
+qcRouter.get('/queue', (_req, res) => {
+  res.json(getQueueState())
+})
+
+/** Lift a held queue (the engineer fixed the AI account) and start the next run. */
+qcRouter.post('/queue/resume', (_req, res) => {
+  const waiting = resumeQueue()
+  res.json({ ok: true, waiting })
 })

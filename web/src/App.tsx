@@ -8,6 +8,7 @@ import {
   ArrowUpCircle,
   CheckCircle2,
   BookText,
+  LifeBuoy,
   Check,
   ChevronRight,
   ChevronsDownUp,
@@ -1035,8 +1036,27 @@ function VersionFooter({ collapsed }: { collapsed: boolean }) {
         if (log?.status?.ok === false) {
           toast.error('Update did not complete — still on the previous version', {
             id: 'qc-update',
-            description: log.status.error ?? 'The launcher reported a failure.',
+            description:
+              (log.status.error ?? 'The launcher reported a failure.') +
+              (log.status.backup
+                ? ` Your local changes were saved to ${log.status.backup} (git apply --3way to restore).`
+                : ''),
             duration: Infinity,
+          })
+          return
+        }
+        // The install had local edits: the update replaced them, after saving a patch.
+        // Say so and where — and DON'T auto-reload, or the one message that tells the
+        // engineer their changes still exist flashes past in 600ms.
+        if (log?.status?.ok && log.status.backup) {
+          const file = log.status.backup
+          toast.warning('Update complete — your local changes were replaced', {
+            id: 'qc-update',
+            description:
+              `They were saved first to ${file}. To re-apply them, run in the install folder: ` +
+              `git apply --3way "${file}"`,
+            duration: Infinity,
+            action: { label: 'Reload', onClick: () => window.location.reload() },
           })
           return
         }
@@ -1101,6 +1121,22 @@ function VersionFooter({ collapsed }: { collapsed: boolean }) {
           </TooltipTrigger>
           <TooltipContent side="right" className="font-medium">
             Documentation
+          </TooltipContent>
+        </Tooltip>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <a
+              href={SUPPORT_URL}
+              target="_blank"
+              rel="noopener noreferrer"
+              aria-label="Support"
+              className="flex size-9 items-center justify-center rounded-xl text-muted-foreground transition-all duration-200 hover:bg-muted hover:text-foreground active:scale-95"
+            >
+              <LifeBuoy className="size-4" />
+            </a>
+          </TooltipTrigger>
+          <TooltipContent side="right" className="font-medium">
+            Support — report a bug or request a feature
           </TooltipContent>
         </Tooltip>
         <Tooltip>
@@ -1250,8 +1286,8 @@ function VersionFooter({ collapsed }: { collapsed: boolean }) {
           </div>
         )}
 
-        {/* Tier 3 — the two reading pages, split evenly on their own hairline. */}
-        <div className="grid grid-cols-2 border-t border-sidebar-border/60 divide-x divide-sidebar-border/60">
+        {/* Tier 3 — the two reading pages + the support board, split evenly on their own hairline. */}
+        <div className="grid grid-cols-3 border-t border-sidebar-border/60 divide-x divide-sidebar-border/60">
           <NavLink
             to="/document"
             className={({ isActive }) =>
@@ -1276,6 +1312,16 @@ function VersionFooter({ collapsed }: { collapsed: boolean }) {
             <ScrollText className="size-3.5 shrink-0" />
             Releases
           </NavLink>
+          <a
+            href={SUPPORT_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            title="Report a bug or request a feature on the QC Portal Support board"
+            className="flex h-8 items-center justify-center gap-1.5 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+          >
+            <LifeBuoy className="size-3.5 shrink-0" />
+            Support
+          </a>
         </div>
       </div>
     </div>
@@ -1346,6 +1392,10 @@ function CollapsedSearchButton({ onClick }: { onClick: () => void }) {
 // `/remote` belongs here too: publishing the portal is a property of the MACHINE,
 // not of any project, and it is exactly what someone setting the portal up on a
 // fresh install wants before registering anything.
+// The QC Portal Support board (bugs, ideas, questions) — a separate app on Cloudflare,
+// so it opens in its own tab instead of being a route here.
+const SUPPORT_URL = 'https://qc-portal-support.nnvanhao.workers.dev/'
+
 const PROJECT_AGNOSTIC_PREFIXES = ['/settings', '/projects', '/releases', '/document', '/remote']
 function isProjectAgnostic(pathname: string): boolean {
   return PROJECT_AGNOSTIC_PREFIXES.some(

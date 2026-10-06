@@ -455,6 +455,8 @@ export interface CreateSubtaskInput {
   severity?: string | null
   /** Pre-fetched parent context, so filing N issues costs ONE parent lookup, not N. */
   context?: IssueFilingContext
+  /** Give the subtask the parent's assignees (the project's setting; default true). */
+  inheritAssignees?: boolean
 }
 
 /**
@@ -518,6 +520,10 @@ export interface AppliedIssueFields {
   screenshotsError: string | null
   /** Whether the evidence comment was posted on the card. */
   commented: boolean
+  /** Screenshot links were written into the card's description (`clickupEvidence`). */
+  evidenceInDescription?: boolean
+  /** The project chose not to inherit the parent's assignees, so none were sent. */
+  assigneesSkipped?: boolean
 }
 
 /**
@@ -627,7 +633,10 @@ export async function createIssueSubtask(
   //   - tags:      an array of tag NAMES that exist in the space
   //   - priority:  an integer 1-4 (Urgent…Low) — from the ISSUE's severity first, since
   //                a feature ticket usually carries no priority of its own
-  const assignees = context.assignees.map((a) => a.id)
+  //   (assignees only when the project keeps `clickupInheritAssignees` on — a team that
+  //   triages its own bugs wants them unassigned, and used to patch this line out)
+  const inheritAssignees = input.inheritAssignees !== false
+  const assignees = inheritAssignees ? context.assignees.map((a) => a.id) : []
   const fromSeverity = severityPriority(input.severity)
   const priority = fromSeverity ?? context.priority
 
@@ -681,6 +690,7 @@ export async function createIssueSubtask(
       screenshotsFailed: 0,
       screenshotsError: null,
       commented: false,
+      assigneesSkipped: !inheritAssignees,
     },
   }
 }

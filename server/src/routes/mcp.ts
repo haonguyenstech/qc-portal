@@ -40,7 +40,11 @@ import { runMcpCapabilityTest } from '../mcpCapabilityTest.js'
 import { diagnoseMcpServer } from '../mcpDiagnose.js'
 import { maestroEnvFor, probeMaestro, type MaestroPreflight } from '../maestro.js'
 import { agentProfileDir, isForeignProfileDir } from '../browserProfile.js'
-import { cdpEndpoint, writePlaywrightMcpConfig } from '../qcBrowser.js'
+import {
+  cdpEndpoint,
+  writeHeadlessPlaywrightMcpConfig,
+  writePlaywrightMcpConfig,
+} from '../qcBrowser.js'
 import type { McpServer } from '../types.js'
 import { killSpawnedTree, spawnEnv } from '../toolPath.js'
 
@@ -477,7 +481,15 @@ function applyPlaywrightWindowConfig(entry: McpEntry, attach: boolean): boolean 
     changed = dropArg(args, '--config', true) || changed
   } else {
     changed = dropArg(args, '--viewport-size', true) || changed
-    const cfg = writePlaywrightMcpConfig()
+    // A project saved HEADLESS (the MCP page's checkbox puts `--headless` in the args) has
+    // no window to maximize: the headed file's `viewport: null` then renders at headless
+    // Chrome's 800x600 default — field report: every headless run's screenshots came out
+    // at a mobile-ish size. It needs the headless file, which pins a desktop viewport. The
+    // per-run override can't rescue it either: it sees `--headless` already there and
+    // leaves the config alone (playwrightRunMode.ts, reason 'already').
+    const cfg = args.includes('--headless')
+      ? writeHeadlessPlaywrightMcpConfig()
+      : writePlaywrightMcpConfig()
     if (cfg) changed = setArg(args, '--config', cfg) || changed
   }
   if (changed) entry.args = args

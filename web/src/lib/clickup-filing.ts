@@ -16,6 +16,7 @@
  */
 import { useEffect, useState } from 'react'
 import type { AppliedIssueFields } from './api'
+import { useProjects } from './project-context'
 
 /**
  * One thing that can become a ClickUp subtask. `description` is already the final
@@ -63,18 +64,65 @@ export function screenshotErrorSentence(err?: string | null): string | undefined
   return err.replace(/^ClickUp attachment \d+: /, '') || undefined
 }
 
+/**
+ * The project's ClickUp filing preferences (Project settings → Templates → ClickUp issue),
+ * with the original behavior as the default. ONE reading of them, so every sentence that
+ * describes filing — the preview, the toast, the panel intros — says the same thing.
+ */
+export interface FilingPrefs {
+  inheritAssignees: boolean
+  evidence: 'comment' | 'description'
+}
+
+export function filingPrefs(
+  p?: { clickupInheritAssignees?: boolean; clickupEvidence?: string } | null,
+): FilingPrefs {
+  return {
+    inheritAssignees: p?.clickupInheritAssignees !== false,
+    evidence: p?.clickupEvidence === 'description' ? 'description' : 'comment',
+  }
+}
+
+/** The filing preferences of one project (a run's own project, not necessarily the active one). */
+export function useFilingPrefs(projectId?: string | null): FilingPrefs {
+  const { projects } = useProjects()
+  return filingPrefs(projects.find((p) => p.id === projectId))
+}
+
+/** "…inherits the parent's assignee and tags" / "…is left unassigned and gets the parent's tags". */
+export function assigneeClause(prefs: FilingPrefs): string {
+  return prefs.inheritAssignees
+    ? "inherits the parent's assignee and tags"
+    : "is left unassigned and gets the parent's tags"
+}
+
+/**
+ * Where the screenshots end up. `imgbb` matters only for the description mode: without
+ * an imgbb key there is no public URL before the card exists, so they are attached.
+ */
+export function evidenceClause(prefs: FilingPrefs, imgbb?: boolean): string {
+  if (prefs.evidence === 'comment') return 'attached and posted as a comment'
+  return imgbb === false
+    ? 'attached to the card (no comment)'
+    : "linked in the card's description (no comment)"
+}
+
 /** Long-form version of a created card's inherited fields, for the chip's tooltip. */
 export function appliedSummary(applied?: AppliedIssueFields): string | undefined {
   if (!applied) return undefined
   const parts = [
     applied.assignees.length
       ? `Assigned to ${applied.assignees.join(', ')}`
-      : 'Unassigned (the parent ticket has no assignee)',
+      : applied.assigneesSkipped
+        ? 'Unassigned (this project files bugs unassigned)'
+        : 'Unassigned (the parent ticket has no assignee)',
     applied.priority
       ? `Priority ${applied.priority}${applied.prioritySource === 'severity' ? ' (from the issue severity)' : applied.prioritySource === 'parent' ? ' (from the parent ticket)' : ''}`
       : 'No priority (neither the issue nor the parent had one)',
     applied.screenshots
-      ? `${applied.screenshots} screenshot${applied.screenshots === 1 ? '' : 's'} attached${applied.commented ? ' and posted as a comment' : ''}`
+      ? applied.evidenceInDescription
+        ? `${applied.screenshots} screenshot${applied.screenshots === 1 ? '' : 's'} linked in the description`
+        : `${applied.screenshots} screenshot${applied.screenshots === 1 ? '' : 's'} attached${applied.commented ? ' and posted as a comment' : ''}`
       : 'No screenshots attached',
   ]
   if (applied.screenshotsFailed) {

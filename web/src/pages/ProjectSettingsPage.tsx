@@ -52,9 +52,12 @@ import {
   openTemplatesFolder,
   resetTemplateToDefault,
   saveTemplate,
+  updateProject,
   type ProjectTemplate,
 } from '@/lib/api'
 import { useProjects } from '@/lib/project-context'
+import { Checkbox } from '@/components/ui/checkbox'
+import { assigneeClause, evidenceClause, useFilingPrefs } from '@/lib/clickup-filing'
 import { CsvTable, looksLikeCsv } from '@/components/CsvTable'
 import { OpenFolderButton } from '@/components/OpenFolderButton'
 
@@ -211,7 +214,68 @@ function IssueCardPreview({ text }: { text: string }) {
  * Issues tab files with (`renderIssueTemplate`), against a sample issue, so what you
  * see here is what lands in ClickUp. Placeholders are clicked in, not remembered.
  */
+/**
+ * How a QC finding is FILED to ClickUp, beside the template that decides how it is
+ * WORDED. Field report: a team wanted bugs left unassigned and the screenshots inside
+ * the card's description, patched their install to get it, and lost the patch on the
+ * next update (the updater resets tracked files). Per project, so it survives updates;
+ * the defaults are the original behavior.
+ */
+function ClickupFilingOptions({ projectId }: { projectId: string }) {
+  const queryClient = useQueryClient()
+  const prefs = useFilingPrefs(projectId)
+  const save = useMutation({
+    mutationFn: (body: { clickupInheritAssignees?: boolean; clickupEvidence?: 'comment' | 'description' }) =>
+      updateProject(projectId, body),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['projects'] })
+      toast.success('ClickUp filing updated')
+    },
+    onError: (err) =>
+      toast.error('Could not save', { description: err instanceof Error ? err.message : undefined }),
+  })
+  return (
+    <div className="space-y-2 border-b border-border/60 bg-muted/30 px-5 py-3">
+      <p className="text-[11px] font-semibold tracking-wide text-muted-foreground uppercase">
+        When an issue is filed
+      </p>
+      <label className="flex cursor-pointer items-start gap-2 text-xs">
+        <Checkbox
+          className="mt-0.5"
+          checked={prefs.inheritAssignees}
+          disabled={save.isPending}
+          onChange={(e) => save.mutate({ clickupInheritAssignees: e.target.checked })}
+        />
+        <span>
+          <span className="font-medium">Assign it to the parent ticket&apos;s assignee</span>
+          <span className="block text-muted-foreground">
+            Off: the bug is created unassigned, for teams that triage before assigning.
+          </span>
+        </span>
+      </label>
+      <label className="flex cursor-pointer items-start gap-2 text-xs">
+        <Checkbox
+          className="mt-0.5"
+          checked={prefs.evidence === 'description'}
+          disabled={save.isPending}
+          onChange={(e) =>
+            save.mutate({ clickupEvidence: e.target.checked ? 'description' : 'comment' })
+          }
+        />
+        <span>
+          <span className="font-medium">Put the screenshots in the card&apos;s description</span>
+          <span className="block text-muted-foreground">
+            Instead of a separate comment. Linking them inline needs an imgbb key (IMGBB_API_KEY);
+            without one they are attached to the card and no comment is posted.
+          </span>
+        </span>
+      </label>
+    </div>
+  )
+}
+
 function IssueTemplateEditor({
+  projectId,
   initial,
   savedContent,
   hasDefault,
@@ -219,6 +283,7 @@ function IssueTemplateEditor({
   onSave,
   onClose,
 }: {
+  projectId: string
   initial: string
   /** What is on disk now — saving identical text is a no-op, so the button says so. */
   savedContent: string | null
@@ -228,6 +293,7 @@ function IssueTemplateEditor({
   onClose: () => void
 }) {
   const [text, setText] = useState(initial)
+  const prefs = useFilingPrefs(projectId)
   const area = useRef<HTMLTextAreaElement>(null)
   const loadDefault = useMutation({
     mutationFn: () => getTemplateDefault(ISSUE_TEMPLATE_KEY),
@@ -327,9 +393,9 @@ function IssueTemplateEditor({
             </p>
             <IssueCardPreview text={text} />
             <p className="mt-2 text-[11px] text-muted-foreground">
-              Assignee and tags come from the parent ticket, priority from the issue&apos;s
-              severity, and screenshots are attached and posted as a comment — the template
-              only decides the wording.
+              Each card {assigneeClause(prefs)}, takes its priority from the issue&apos;s
+              severity, and gets its screenshots {evidenceClause(prefs)} — the template only
+              decides the wording.
             </p>
           </div>
         </div>
@@ -818,6 +884,7 @@ function TemplatePanel({
               </Button>
             </div>
           </div>
+          {kind.key === ISSUE_TEMPLATE_KEY && <ClickupFilingOptions projectId={projectId} />}
           <div className="max-h-[calc(100vh-19rem)] min-h-64 overflow-auto px-5 py-4">
             <TemplateBody kind={kind} name={contentName} content={content} view={view} />
           </div>
@@ -892,6 +959,7 @@ function TemplatePanel({
 
       {kind.editable && editing && (
         <IssueTemplateEditor
+          projectId={projectId}
           initial={pending?.content ?? saved?.content ?? ''}
           savedContent={saved?.content ?? null}
           hasDefault={hasDefault}

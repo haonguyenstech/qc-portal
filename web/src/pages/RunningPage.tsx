@@ -5,6 +5,7 @@ import { toast } from 'sonner'
 import {
   ArrowRight,
   ChevronDown,
+  KeyRound,
   Clock,
   Loader2,
   Pause,
@@ -18,7 +19,16 @@ import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { cn } from '@/lib/utils'
-import { cancelRun, listCrawledTickets, listRuns, pauseRun, resumeRun } from '@/lib/api'
+import {
+  cancelRun,
+  getRunQueue,
+  listCrawledTickets,
+  listRuns,
+  pauseRun,
+  resumeRun,
+  resumeRunQueue,
+} from '@/lib/api'
+import type { RunQueueState } from '@/lib/api'
 import { useProjects } from '@/lib/project-context'
 import { useRunStream } from '@/lib/useRunStream'
 import { StatusBadge } from '@/lib/status'
@@ -469,6 +479,57 @@ function QueuedRow({
   )
 }
 
+/**
+ * Shown while the queue is HELD: a run failed because the AI account itself refused
+ * (signed out / usage limit), so the waiting runs were kept instead of being started
+ * into the same wall one by one. Resuming is the engineer's call — only they know the
+ * account is fixed.
+ */
+function QueueHoldBanner({
+  hold,
+  waiting,
+  onResume,
+  busy,
+}: {
+  hold: NonNullable<RunQueueState['hold']>
+  waiting: number
+  onResume: () => void
+  busy: boolean
+}) {
+  const auth = hold.kind === 'auth'
+  return (
+    <Card className="rounded-3xl border-amber-500/40 bg-amber-50/60 py-0 shadow-none dark:bg-amber-500/5">
+      <CardContent className="flex flex-wrap items-start gap-3 p-5">
+        <span className="flex size-9 shrink-0 items-center justify-center rounded-2xl bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-400">
+          <KeyRound className="size-4" />
+        </span>
+        <div className="min-w-0 flex-1 space-y-1">
+          <p className="text-sm font-semibold">
+            Queue paused —{' '}
+            {auth ? 'the AI account is signed out' : 'the AI account hit its usage limit'}
+          </p>
+          <p className="text-sm text-muted-foreground">
+            {waiting} queued run{waiting === 1 ? ' is' : 's are'} waiting instead of failing one by
+            one.{' '}
+            {auth
+              ? 'Reconnect the account (sidebar → Auto Agent, or run `claude /login`), then resume.'
+              : 'Wait for the limit to reset or switch account, then resume.'}
+          </p>
+          <p className="break-words font-mono text-xs text-muted-foreground">
+            <Link to={`/run/${hold.runId}`} className="hover:underline">
+              {hold.message}
+            </Link>
+          </p>
+        </div>
+        <Button size="sm" onClick={onResume} disabled={busy} className="shrink-0 rounded-full">
+          {busy ? <Loader2 className="size-4 animate-spin" /> : <Play className="size-4" />}
+          Resume queue
+        </Button>
+      </CardContent>
+    </Card>
+  )
+}
+
 export default function RunningPage() {
   const { activeProject } = useProjects()
   const queryClient = useQueryClient()
@@ -494,6 +555,31 @@ export default function RunningPage() {
   }
 
   const [busyId, setBusyId] = useState<string | null>(null)
+
+  // Portal-wide (the queue is shared by every project), polled with the run list.
+  const { data: queueState } = useQuery({
+    queryKey: ['run-queue'],
+    queryFn: getRunQueue,
+    refetchInterval: 4000,
+  })
+  const [resumingQueue, setResumingQueue] = useState(false)
+  async function onResumeQueue() {
+    setResumingQueue(true)
+    try {
+      const r = await resumeRunQueue()
+      toast.success('Queue resumed', {
+        description: `${r.waiting} run${r.waiting === 1 ? '' : 's'} will start in order.`,
+      })
+      queryClient.invalidateQueries({ queryKey: ['run-queue'] })
+      queryClient.invalidateQueries({ queryKey: ['runs'] })
+    } catch (err) {
+      toast.error('Failed to resume the queue', {
+        description: err instanceof Error ? err.message : 'Unknown error',
+      })
+    } finally {
+      setResumingQueue(false)
+    }
+  }
 
   // In-progress runs include paused ones so they stay visible (with a Resume).
   const active = (runs ?? []).filter(
@@ -598,6 +684,15 @@ export default function RunningPage() {
         </Button>
       </header>
 
+      {queueState?.hold && (
+        <QueueHoldBanner
+          hold={queueState.hold}
+          waiting={queueState.queued.length}
+          onResume={onResumeQueue}
+          busy={resumingQueue}
+        />
+      )}
+
       {!activeProject ? (
         <Card className="rounded-3xl border-amber-200 bg-amber-50/50 shadow-none">
           <CardContent className="flex items-center gap-2 p-5 text-sm font-medium text-amber-700">
@@ -667,7 +762,11 @@ export default function RunningPage() {
                 </span>
                 <span className="text-xs text-muted-foreground">
                   · runs one at a time, in this order
-                  {live.length > 0 ? ' — starts when the current run finishes' : ''}
+                  {queueState?.hold
+                    ? ' — paused until you resume the queue'
+                    : live.length > 0
+                      ? ' — starts when the current run finishes'
+                      : ''}
                 </span>
               </div>
               <Card className="overflow-hidden rounded-3xl border-border/60 py-0 shadow-none">

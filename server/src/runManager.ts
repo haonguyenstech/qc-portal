@@ -2,7 +2,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { testResultDirFor } from './config.js'
 import { runQc } from './claude.js'
-import type { RunHandle } from './claude.js'
+import type { RunFailure, RunHandle } from './claude.js'
 import { groundReport } from './groundingCheck.js'
 import { fillExecutedTestcases } from './fillTestcases.js'
 import { runKnowledgeUpdate } from './learn.js'
@@ -13,9 +13,11 @@ import {
   appendEvent,
   getProject,
   getRun,
+  getRunRequest,
   getRunSession,
   insertRun,
   newRunId,
+  setRunRequest,
   setRunSession,
   updateRun,
 } from './db.js'
@@ -23,6 +25,20 @@ import * as hub from './hub.js'
 import type { CreateRunBody, LogEvent, Project, RunDataPolicy, RunSummary } from './types.js'
 
 const active = new Map<string, RunHandle>()
+
+/**
+ * The device each live MOBILE run is driving ('' = Auto, i.e. whatever Maestro lists
+ * first). Survey 2026-09: "while the AI tests, it owns the simulator and I can't use it" —
+ * the Run form shows which device is taken so the engineer can boot a second one and
+ * pick it, instead of finding out by tapping a phone that's being driven.
+ */
+const activeDevice = new Map<string, { ticketId: string; deviceId: string }>()
+
+/** A run stopped holding its slot (done / error / pause / cancel). */
+function release(id: string): void {
+  active.delete(id)
+  activeDevice.delete(id)
+}
 
 // QC runs execute ONE AT A TIME, globally — they all drive the same Playwright
 // browser profile, so parallel runs would fight over it. Extra runs are inserted
@@ -37,13 +53,73 @@ interface QueuedRun {
 }
 const queue: QueuedRun[] = []
 
+/**
+ * The queue is HELD after a run fails because of the AI account itself (logged out,
+ * token expired, usage/rate limit — see classifyRunFailure). Every run behind it would
+ * fail identically, so they stay `queued` instead of being burned one by one; the
+ * engineer fixes the account and resumes the queue from the Running page. In memory,
+ * like the queue itself: a restart turns queued runs into errors anyway.
+ */
+export interface QueueHold {
+  kind: RunFailure['kind']
+  message: string
+  /** The run whose failure set the hold. */
+  runId: string
+  since: string
+}
+let hold: QueueHold | null = null
+
 function now(): string {
   return new Date().toISOString()
 }
 
+/** Whether a new/resumed run has to wait instead of starting now. */
+function mustWait(): boolean {
+  return active.size > 0 || queue.length > 0 || hold !== null
+}
+
+function holdNotice(h: QueueHold): string {
+  return h.kind === 'auth'
+    ? 'Queue paused: the AI account is signed out or its sign-in expired. Reconnect it ' +
+        '(sidebar -> Auto Agent, or `claude /login`), then press "Resume queue" on the Running page.'
+    : 'Queue paused: the AI account hit its usage / rate limit. Wait for it to reset (or switch ' +
+        'account), then press "Resume queue" on the Running page.'
+}
+
+function holdQueue(runId: string, failure: RunFailure): void {
+  // Nothing waiting = nothing to protect. Holding an empty queue would only make the
+  // engineer's NEXT run sit in it after they fixed the account; unheld, that run starts
+  // and — if the account is still broken — fails in seconds with the same reason.
+  if (queue.length === 0) return
+  hold = { kind: failure.kind, message: failure.message, runId, since: now() }
+  // Tell every waiting run WHY it isn't starting — their logs are what the engineer opens.
+  for (const q of queue) record(q.id, { ts: now(), kind: 'system', text: holdNotice(hold) })
+}
+
+export function getQueueState(): {
+  hold: QueueHold | null
+  queued: string[]
+  /** Devices live mobile runs are driving right now ('' = Auto). */
+  busyDevices: { runId: string; ticketId: string; deviceId: string }[]
+} {
+  return {
+    hold,
+    queued: queue.map((q) => q.id),
+    busyDevices: [...activeDevice].map(([runId, d]) => ({ runId, ...d })),
+  }
+}
+
+/** Lift the hold and start the next waiting run. Returns how many runs were waiting. */
+export function resumeQueue(): number {
+  const waiting = queue.length
+  hold = null
+  startNextQueued()
+  return waiting
+}
+
 /** Start the oldest still-queued run, if nothing is running. */
 function startNextQueued(): void {
-  if (active.size > 0) return
+  if (active.size > 0 || hold) return
   const next = queue.shift()
   if (!next) return
   // Skip runs the user canceled while they were waiting.
@@ -377,6 +453,7 @@ function spawnRun(
     kind?: 'ticket' | 'flow'
     headless?: boolean
     dataPolicy?: RunDataPolicy
+    testAccount?: string
   },
   resumeSessionId?: string,
 ): void {
@@ -450,6 +527,7 @@ function spawnRun(
       // Not stored on the row: a resume only ever says "continue where you left off",
       // and the kept session already carries the policy it was started under.
       dataPolicy: body.dataPolicy,
+      testAccount: body.testAccount,
       // Read off the row, not recomputed, so a resumed run keeps writing into the
       // folder it already created (and a legacy row stays untokened).
       outDirSuffix: runRow?.outDirToken
@@ -462,17 +540,36 @@ function spawnRun(
     {
       onSession: (sessionId) => setRunSession(id, sessionId),
       onEvent: (event) => record(id, event),
-      onDone: async ({ success }) => {
+      onDone: async ({ success, failure }) => {
         // The per-run MCP config describes this spawn only; a resume writes a fresh one.
         clearPlaywrightRunConfig(id)
         // Pause/cancel both kill the child; if either status is already set,
         // keep the user's action from being overwritten by the process exit.
         const current = getRun(id)
         if (current?.status === 'paused' || current?.status === 'canceled') {
-          active.delete(id)
+          release(id)
           startNextQueued()
           return
         }
+        // The AI account itself refused (signed out / out of usage): nothing was tested,
+        // and every queued run would fail the same way — so hold the queue instead of
+        // letting it start the next one into the same wall.
+        if (failure) {
+          const finishedAt = now()
+          updateRun(id, { status: 'error', finishedAt })
+          record(id, {
+            ts: finishedAt,
+            kind: 'error',
+            text:
+              (failure.kind === 'auth'
+                ? 'AI account problem — the Claude CLI is not signed in: '
+                : 'AI account problem — usage / rate limit reached: ') + failure.message,
+          })
+          release(id)
+          holdQueue(id, failure)
+          return
+        }
+
         // Resolve THIS run's folder by its token. Matching on the ticket prefix (the
         // old behavior) let a finishing run adopt a folder an earlier run had written.
         const slug = resolveRunOutDir(
@@ -624,25 +721,28 @@ function spawnRun(
             })
         }
 
-        active.delete(id)
+        release(id)
         startNextQueued()
       },
       onError: (message) => {
         const currentStatus = getRun(id)?.status
         if (currentStatus === 'paused' || currentStatus === 'canceled') {
-          active.delete(id)
+          release(id)
           startNextQueued()
           return
         }
         record(id, { ts: now(), kind: 'error', text: message })
         updateRun(id, { status: 'error', finishedAt: now() })
-        active.delete(id)
+        release(id)
         startNextQueued()
       },
     },
   )
 
   active.set(id, handle)
+  if (target !== 'web') {
+    activeDevice.set(id, { ticketId: body.ticketId, deviceId: body.deviceId?.trim() ?? '' })
+  }
 }
 
 export function startRun(body: CreateRunBody): RunSummary {
@@ -652,8 +752,9 @@ export function startRun(body: CreateRunBody): RunSummary {
   }
 
   // One run at a time: if anything is already running (or waiting), this run
-  // joins the queue and starts automatically when its turn comes.
-  const mustQueue = active.size > 0 || queue.length > 0
+  // joins the queue and starts automatically when its turn comes. A held queue
+  // (AI account problem) also queues it — starting it would only fail the same way.
+  const mustQueue = mustWait()
 
   const id = newRunId()
   const summary: RunSummary = {
@@ -685,13 +786,18 @@ export function startRun(body: CreateRunBody): RunSummary {
     finishedAt: null,
   }
   insertRun(summary)
+  // Kept so this exact run can be re-run later (rerunRun) and resumed with its own
+  // skill / device (resumeRun).
+  setRunRequest(id, body)
 
   if (mustQueue) {
     queue.push({ id, project, body })
     record(id, {
       ts: now(),
       kind: 'system',
-      text: `Run queued (position ${queue.length}) — QC runs execute one at a time; it starts when the current run finishes.`,
+      text: hold
+        ? `Run queued (position ${queue.length}). ${holdNotice(hold)}`
+        : `Run queued (position ${queue.length}) — QC runs execute one at a time; it starts when the current run finishes.`,
     })
   } else {
     spawnRun(id, project, body)
@@ -710,7 +816,7 @@ export function pauseRun(id: string): boolean {
   const handle = active.get(id)
   if (handle) {
     handle.cancel()
-    active.delete(id)
+    release(id)
   }
   updateRun(id, { status: 'paused' })
   record(id, { ts: now(), kind: 'system', text: 'Run paused — resume to continue.' })
@@ -738,10 +844,15 @@ export function resumeRun(id: string): boolean {
     )
   }
 
+  // The stored request carries what the row doesn't — the skill (named in the resume
+  // prompt) and the pinned device; rows from before it was kept fall back to the row.
+  const stored = getRunRequest(id)
   const body: CreateRunBody = {
     projectId: project.id,
     ticketId: run.ticketId,
     appUrl: run.appUrl,
+    skill: stored?.skill,
+    deviceId: stored?.deviceId,
     // Carried over or the resume prompt calls an E2E flow's slug a ticket.
     kind: run.kind,
     // Same reason as `kind`: without it a run started headless would resume headed.
@@ -752,13 +863,15 @@ export function resumeRun(id: string): boolean {
   // One run at a time — resuming while another run is live can't start now, so
   // the run rejoins the queue and continues automatically when the current run
   // finishes (instead of failing the resume).
-  if (active.size > 0 || queue.length > 0) {
+  if (mustWait()) {
     updateRun(id, { status: 'queued', finishedAt: null })
     queue.push({ id, project, body, resumeSessionId: sessionId })
     record(id, {
       ts: now(),
       kind: 'system',
-      text: `Resume queued (position ${queue.length}) — another QC run is in progress; it continues automatically when that run finishes.`,
+      text: hold
+        ? `Resume queued (position ${queue.length}). ${holdNotice(hold)}`
+        : `Resume queued (position ${queue.length}) — another QC run is in progress; it continues automatically when that run finishes.`,
     })
     return true
   }
@@ -768,6 +881,46 @@ export function resumeRun(id: string): boolean {
 
   spawnRun(id, project, body, sessionId)
   return true
+}
+
+/** A run in one of these states is finished and may be re-run. */
+const RERUNNABLE: RunSummary['status'][] = ['passed', 'failed', 'error', 'canceled']
+
+/**
+ * Start a NEW run from the exact request an earlier run was created with — same
+ * tickets, URL, target, device, steps, notes, model and data policy. The old run is
+ * left untouched (it's history); the new one gets its own id and output folder.
+ */
+export function rerunRun(id: string): RunSummary {
+  const run = getRun(id)
+  if (!run) throw Object.assign(new Error('run not found'), { status: 404 })
+  if (!RERUNNABLE.includes(run.status)) {
+    throw Object.assign(new Error('only a finished run can be re-run — stop it first'), {
+      status: 409,
+    })
+  }
+  const body = getRunRequest(id)
+  if (!body) {
+    throw Object.assign(
+      new Error(
+        'This run was recorded before re-run existed, so its options were not kept — ' +
+          'start it again from the Run page.',
+      ),
+      { status: 409 },
+    )
+  }
+  if (!run.projectId || !getProject(run.projectId)) {
+    throw Object.assign(new Error('the project this run belonged to no longer exists'), {
+      status: 409,
+    })
+  }
+  const summary = startRun({ ...body, projectId: run.projectId })
+  record(summary.id, {
+    ts: now(),
+    kind: 'system',
+    text: `Re-run of an earlier run (${run.ticketId}, ${run.createdAt.slice(0, 16).replace('T', ' ')}).`,
+  })
+  return summary
 }
 
 /**
@@ -786,6 +939,7 @@ export function shutdownActiveRuns(): number {
     }
   }
   active.clear()
+  activeDevice.clear()
 
   for (const id of ids) {
     const run = getRun(id)
@@ -806,11 +960,14 @@ export function cancelRun(id: string): boolean {
   const run = getRun(id)
   if (handle) {
     handle.cancel()
-    active.delete(id)
+    release(id)
   }
   // A queued run just leaves the queue — nothing was spawned yet.
   const queuedIdx = queue.findIndex((q) => q.id === id)
   if (queuedIdx >= 0) queue.splice(queuedIdx, 1)
+  // A hold protects waiting runs; with none left there is nothing to protect, and a
+  // hold over an empty queue would trap the engineer's next run behind it.
+  if (queue.length === 0) hold = null
   // A canceled run is terminal — covers live ('running'), 'paused' and 'queued' runs.
   if (run && (run.status === 'running' || run.status === 'paused' || run.status === 'queued')) {
     const finishedAt = now()

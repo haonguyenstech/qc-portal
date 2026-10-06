@@ -679,6 +679,8 @@ projectsRouter.put('/:id', (req, res) => {
     persistentBrowser,
     autoLearnModel,
     defaultSkill,
+    clickupInheritAssignees,
+    clickupEvidence,
   } = req.body ?? {}
   const partial: {
     name?: string
@@ -692,6 +694,8 @@ projectsRouter.put('/:id', (req, res) => {
     persistentBrowser?: boolean
     autoLearnModel?: string
     defaultSkill?: string
+    clickupInheritAssignees?: boolean
+    clickupEvidence?: 'comment' | 'description'
   } = {}
   if (typeof name === 'string' && name.trim()) partial.name = name.trim()
   if (typeof pinned === 'boolean') partial.pinned = pinned
@@ -703,6 +707,12 @@ projectsRouter.put('/:id', (req, res) => {
   }
   if (typeof autoLearn === 'boolean') partial.autoLearn = autoLearn
   if (typeof persistentBrowser === 'boolean') partial.persistentBrowser = persistentBrowser
+  if (typeof clickupInheritAssignees === 'boolean') {
+    partial.clickupInheritAssignees = clickupInheritAssignees
+  }
+  if (clickupEvidence === 'comment' || clickupEvidence === 'description') {
+    partial.clickupEvidence = clickupEvidence
+  }
   if (typeof autoLearnModel === 'string' && KNOWN_MODELS.has(autoLearnModel)) {
     partial.autoLearnModel = autoLearnModel
   }

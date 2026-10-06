@@ -100,7 +100,9 @@ export function writePlaywrightMcpConfig(): string | null {
  * window) plus `--start-maximized`, and headless Chrome has no window to fill — the
  * page then renders at Chrome's 800x600 default, which is a mobile-ish layout that
  * fires the wrong breakpoints and makes every screenshot the wrong shape. So headless
- * pins a real desktop viewport instead (same 1440x900 the API scanner uses).
+ * pins a real desktop viewport instead: 1920x1080, the Full HD screen most QC engineers
+ * and their users actually have (it was 1440x900, the API scanner's size, until a team
+ * patched their own install to 1920x1080 and lost the patch on the next update).
  */
 export function playwrightHeadlessMcpConfigPath(): string {
   return path.join(path.dirname(DB_PATH), 'playwright-mcp-headless.json')
@@ -111,7 +113,7 @@ export function writeHeadlessPlaywrightMcpConfig(): string | null {
   const body = {
     browser: {
       launchOptions: { headless: true },
-      contextOptions: { viewport: { width: 1440, height: 900 } },
+      contextOptions: { viewport: { width: 1920, height: 1080 } },
     },
   }
   try {

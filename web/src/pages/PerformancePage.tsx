@@ -2037,7 +2037,7 @@ function PerformanceWorkbench({
 
   return (
     <div className="mx-auto max-w-6xl space-y-8">
-      <header className="space-y-4">
+      <header data-tour="header" className="space-y-4">
         <div className="flex items-start gap-3">
           <span className="mt-0.5 flex size-11 shrink-0 items-center justify-center rounded-2xl bg-foreground text-background">
             <Gauge className="size-5" />
@@ -2079,11 +2079,11 @@ function PerformanceWorkbench({
 
       <Tabs value={tab} onValueChange={setTab} className="gap-6">
         <TabsList className="rounded-full">
-          <TabsTrigger value="page" className="gap-1.5">
+          <TabsTrigger value="page" data-tour="tab-page" className="gap-1.5">
             <Timer className="size-3.5" />
             Page load
           </TabsTrigger>
-          <TabsTrigger value="load" className="gap-1.5">
+          <TabsTrigger value="load" data-tour="tab-load" className="gap-1.5">
             <Rocket className="size-3.5" />
             API load test
           </TabsTrigger>
@@ -2091,7 +2091,7 @@ function PerformanceWorkbench({
 
         {/* ------------------------------------------------ page load */}
         <TabsContent value="page" className="space-y-5">
-          <Card className="rounded-3xl border-border/60 shadow-none">
+          <Card data-tour="page-form" className="rounded-3xl border-border/60 shadow-none">
             <CardContent className="space-y-4 p-5">
               <div className="space-y-1.5">
                 <Label htmlFor="perf-url">Page URL</Label>
@@ -2299,7 +2299,7 @@ function PerformanceWorkbench({
             </Card>
           )}
 
-          <Card className="rounded-3xl border-border/60 shadow-none">
+          <Card data-tour="load-form" className="rounded-3xl border-border/60 shadow-none">
             <CardContent className="space-y-5 p-5">
               <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
                 <div className="space-y-1.5">
@@ -2558,12 +2558,14 @@ function PerformanceWorkbench({
 
           {/* Keyed by project: switching project is a different report entirely, and a
               remount reloads that project's saved requirements without an effect. */}
-          <NfrReportPanel
-                key={activeProjectId}
-                projectId={activeProjectId}
-                projectName={activeProject?.name}
-                jobs={loadJobs}
-              />
+          <div data-tour="nfr">
+            <NfrReportPanel
+              key={activeProjectId}
+              projectId={activeProjectId}
+              projectName={activeProject?.name}
+              jobs={loadJobs}
+            />
+          </div>
 
           <RecentRuns
             jobs={loadJobs}

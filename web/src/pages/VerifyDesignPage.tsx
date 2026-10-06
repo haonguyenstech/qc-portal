@@ -70,7 +70,7 @@ import {
   type VerifyLogLine,
 } from '@/lib/api'
 import { ClickupFilingBar } from '@/components/ClickupFilingBar'
-import type { FilingItem } from '@/lib/clickup-filing'
+import { assigneeClause, useFilingPrefs, type FilingItem } from '@/lib/clickup-filing'
 import { OpenFolderButton } from '@/components/OpenFolderButton'
 import { McpRequiredNotice } from '@/components/McpRequiredNotice'
 import { useProjects } from '@/lib/project-context'
@@ -537,6 +537,7 @@ function FindingsPanel({
   /** The crawled ticket's own ClickUp URL, prefilled as the parent to file under. */
   parentTicketUrl: string
 }) {
+  const prefs = useFilingPrefs(projectId)
   const findings = result.findings
   const counts = findings.reduce<Record<string, number>>((acc, f) => {
     acc[f.category] = (acc[f.category] ?? 0) + 1
@@ -756,7 +757,7 @@ function FindingsPanel({
               </h3>
               <p className="mt-0.5 max-w-xl text-xs leading-relaxed text-muted-foreground">
                 Tick the findings worth logging, then create them as subtasks under a parent
-                ClickUp ticket. Each one inherits the parent&apos;s assignee and tags and takes its
+                ClickUp ticket. Each one {assigneeClause(prefs)} and takes its
                 priority from the severity beside it — the same filing a QC run&apos;s issues use.
                 Matches can&apos;t be filed.
               </p>

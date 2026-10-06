@@ -520,10 +520,23 @@ and waiting on one is waiting on nobody.
 `package.json` FROM DISK, and `git reset --hard` moves it before the steps that can
 still fail — so a failed build reports the new version while running the old bundle,
 and the browser would announce "update complete" and reload onto it. The launcher
-therefore writes `data/update-status.json` (`{ok, error, version, at}`, cleared to
+therefore writes `data/update-status.json` (`{ok, error, version, at, backup}`, cleared to
 `{ok:null,running:true}` at the start so a stale marker can't answer for this run), and
 `GET /api/version/update-log` returns it alongside the log tail. The UI reports failure
 from the MARKER, never from the version number.
+
+**Local edits are saved before the reset, never silently discarded.** `git reset --hard`
+is deliberate (a dirty `package-lock.json` used to block every update), but it also wiped
+an engineer's own patches to their install without a word — field report: ClickUp filing
+and headless-viewport patches gone after "Update now", unrecoverable from git.
+`backupLocalEdits()` runs after the fetch and before the reset: every edited TRACKED file
+except `package-lock.json` goes into `data/update-backups/<time>-<sha>.patch` (data/ is
+gitignored, so the reset can't touch it), restorable with `git apply --3way <file>`. If the
+edits exist but can't be saved, the update STOPS before changing anything. The path rides
+in `update-status.json` as `backup`, and the UI then shows a persistent toast naming it
+instead of auto-reloading past it. git runs there with no shell: the file list may hold
+spaces. Verified in a throwaway clone: two edited files saved, the lockfile skipped, reset
+done, `git apply --3way` restored both cleanly.
 
 **The in-flight guard is a lease, not a latch.** `updateStarted = true` forever was
 justified by "the updater restarts the server, giving a fresh process" — true only when

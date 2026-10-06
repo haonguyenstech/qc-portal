@@ -30,6 +30,7 @@ import { Input } from '@/components/ui/input'
 import {
   appliedSummary,
   errorSentence,
+  evidenceClause,
   priorityFromSeverity,
   screenshotErrorSentence,
   useDebounced,
@@ -91,6 +92,11 @@ function FilingPreview({
 
   const { context } = state
   const names = context.assignees.map((a) => a.username).filter(Boolean)
+  // The project's filing preferences come back with the context (older server: defaults).
+  const prefs = {
+    inheritAssignees: context.settings?.inheritAssignees !== false,
+    evidence: context.settings?.evidence === 'description' ? ('description' as const) : ('comment' as const),
+  }
 
   // Group the priorities these items will get, so "High x3, Normal x1" is visible
   // rather than a promise that priority is "handled".
@@ -122,7 +128,12 @@ function FilingPreview({
         {context.name ? <span className="text-muted-foreground"> · {context.name}</span> : null}
       </p>
       <FilingRow icon={<UserRound className="size-3" />} label="Assignee">
-        {names.length ? (
+        {!prefs.inheritAssignees ? (
+          <span className="text-muted-foreground">
+            none — this project files bugs unassigned
+            {names.length ? ` (the parent's ${names.join(', ')} is not copied)` : ''}
+          </span>
+        ) : names.length ? (
           names.join(', ')
         ) : (
           <span className="text-amber-700">
@@ -158,7 +169,7 @@ function FilingPreview({
       {showEvidence && (
         <FilingRow icon={<MessageSquare className="size-3" />} label="Evidence">
           {shots > 0
-            ? `${shots} screenshot${shots === 1 ? '' : 's'} attached to the cards and posted as a comment`
+            ? `${shots} screenshot${shots === 1 ? '' : 's'} ${evidenceClause(prefs, context.settings?.imgbb)}`
             : `no screenshots on the selected ${noun}s`}
         </FilingRow>
       )}
@@ -247,10 +258,23 @@ export function ClickupFilingBar({
       // point of the automation is the fields, so a silent success hides its own work.
       const shots = result.created.reduce((n, t) => n + (t.applied?.screenshots ?? 0), 0)
       const missed = result.created.reduce((n, t) => n + (t.applied?.screenshotsFailed ?? 0), 0)
-      const who = result.created[0]?.applied?.assignees ?? []
-      const parts = [who.length ? `assigned to ${who.join(', ')}` : 'unassigned (parent has no assignee)']
+      const first = result.created[0]?.applied
+      const who = first?.assignees ?? []
+      const parts = [
+        who.length
+          ? `assigned to ${who.join(', ')}`
+          : first?.assigneesSkipped
+            ? 'unassigned (project setting)'
+            : 'unassigned (parent has no assignee)',
+      ]
       if (showEvidence || shots || missed) {
-        parts.push(`${shots} screenshot${shots === 1 ? '' : 's'} attached`)
+        parts.push(
+          `${shots} screenshot${shots === 1 ? '' : 's'} ${
+            result.created.some((t) => t.applied?.evidenceInDescription)
+              ? 'linked in the description'
+              : 'attached'
+          }`,
+        )
       }
       if (missed) {
         const why = screenshotErrorSentence(

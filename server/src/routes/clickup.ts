@@ -199,12 +199,46 @@ clickupRouter.get('/issues/filing-context', async (req, res) => {
   if (!clickupConfigured()) return res.status(400).json({ error: res.locals.clickupMissing })
   const parent = typeof req.query.parent === 'string' ? req.query.parent.trim() : ''
   if (!parent) return res.status(400).json({ error: 'parent is required' })
+  // The project's filing preferences ride along, so the preview says what WILL happen
+  // (unassigned / links in the description) rather than the defaults.
+  const project = resolveProject(req)
   try {
-    res.json(await getIssueFilingContext(parent))
+    res.json({
+      ...(await getIssueFilingContext(parent)),
+      settings: {
+        inheritAssignees: project?.clickupInheritAssignees !== false,
+        evidence: project?.clickupEvidence === 'description' ? 'description' : 'comment',
+        imgbb: !!IMGBB_API_KEY,
+      },
+    })
   } catch (err) {
     fail(res, err)
   }
 })
+
+/** Description cap shared with createIssueSubtask (markdown_content is cut at 6000). */
+const MAX_ISSUE_DESCRIPTION = 6000
+
+/**
+ * The issue's description with its screenshots appended as images — the
+ * `clickupEvidence: 'description'` mode. The base text is trimmed so the evidence block
+ * survives the 6000-character cap instead of being the part that gets cut off.
+ */
+function withEvidenceLinks(
+  description: string,
+  shots: { title: string; url: string }[],
+  severity: string | null,
+): string {
+  const block = [
+    `**QC evidence** — ${shots.length} screenshot${shots.length === 1 ? '' : 's'} from the automated run:`,
+    '',
+    ...shots.map((a) => `![${a.title}](${a.url})`),
+    '',
+    `_Filed from the QC Portal${severity ? ` · severity **${severity}**` : ''}._`,
+  ].join('\n')
+  const room = Math.max(0, MAX_ISSUE_DESCRIPTION - block.length - 2)
+  return `${description.slice(0, room).trimEnd()}\n\n${block}`
+}
 
 clickupRouter.post('/issues/subtasks', async (req, res) => {
   if (!clickupConfigured()) return res.status(400).json({ error: res.locals.clickupMissing })
@@ -243,66 +277,94 @@ clickupRouter.post('/issues/subtasks', async (req, res) => {
   if (!parentTask) return res.status(400).json({ error: 'parentTask is required' })
   if (!issues.length) return res.status(400).json({ error: 'issues is required' })
 
+  // The project's filing preferences (Project settings → ClickUp). No project in the
+  // request = the original behavior.
+  const inheritAssignees = project?.clickupInheritAssignees !== false
+  const evidenceMode: 'comment' | 'description' =
+    project?.clickupEvidence === 'description' ? 'description' : 'comment'
+
   try {
     // ONE parent lookup for the whole batch: the assignees / tags / priority we inherit
     // can't change between issues, and re-fetching per issue cost N extra API calls.
     const context = await getIssueFilingContext(parentTask)
     const created = []
     for (const issue of issues) {
+      // Best-effort throughout: the screenshots make the ClickUp card show the evidence
+      // instead of a dead local path, but a failed upload never fails the subtask.
+      const uploaded: { title: string; url: string }[] = []
+      let failed = 0
+      let failedError: string | null = null
+      const shots: { rel: string; abs: string }[] = []
+      if (project && slug) {
+        for (const rel of issue.screenshots) {
+          const abs = resolveRunScreenshot(project.rootPath, slug, rel)
+          if (abs) shots.push({ rel, abs })
+          else {
+            failed++
+            failedError ??= `missing on disk: ${rel}`
+          }
+        }
+      }
+      // Prefer imgbb (free host) when a key is configured — a ClickUp workspace at its
+      // storage limit (GBUSED_005) rejects every attachment, so hosting the screenshot on
+      // imgbb and embedding its URL is the way the evidence still shows up inline. No key
+      // -> the classic attachment, which needs the card to exist first.
+      const upload = async (shot: { rel: string; abs: string }, taskId: string | null) => {
+        try {
+          const bytes = fs.readFileSync(shot.abs)
+          if (IMGBB_API_KEY) {
+            const url = await uploadImageToImgbb(bytes, path.basename(shot.abs), IMGBB_API_KEY)
+            uploaded.push({ title: path.basename(shot.abs), url })
+            return
+          }
+          if (!taskId) return
+          const ext = path.extname(shot.abs).toLowerCase()
+          const att = await attachTaskFile(
+            taskId,
+            path.basename(shot.abs),
+            bytes,
+            IMAGE_CONTENT_TYPE[ext] ?? 'application/octet-stream',
+          )
+          if (att.url) uploaded.push({ title: att.title, url: att.url })
+          else {
+            failed++
+            failedError ??= `no upload URL returned for ${shot.rel}`
+          }
+        } catch (err) {
+          failed++
+          failedError ??= err instanceof Error ? err.message : String(err)
+        }
+      }
+
+      // `clickupEvidence: 'description'` with imgbb: the links are known BEFORE the card
+      // exists, so they go straight into its description and no comment is posted.
+      // Without imgbb there is no URL until the card exists, so the files are attached
+      // (they show in the card's attachments panel) — still no comment.
+      let description = issue.description
+      let evidenceInDescription = false
+      if (evidenceMode === 'description' && IMGBB_API_KEY && shots.length) {
+        for (const shot of shots) await upload(shot, null)
+        if (uploaded.length) {
+          description = withEvidenceLinks(description, uploaded, issue.severity)
+          evidenceInDescription = true
+        }
+      }
+
       const task = await createIssueSubtask({
         parentTask,
         context,
         name: issue.title,
-        description: issue.description,
+        description,
         severity: issue.severity,
+        inheritAssignees,
       })
-      // Best-effort: attach the QC screenshots so the image shows on the ClickUp
-      // card instead of a dead local path. Never fail the subtask over an upload.
-      const uploaded: { title: string; url: string }[] = []
-      let failed = 0
-      let failedError: string | null = null
-      if (project && slug && issue.screenshots.length) {
-        for (const rel of issue.screenshots) {
-          const abs = resolveRunScreenshot(project.rootPath, slug, rel)
-          if (!abs) {
-            failed++
-            failedError ??= `missing on disk: ${rel}`
-            continue
-          }
-          try {
-            const bytes = fs.readFileSync(abs)
-            // Prefer imgbb (free host) when a key is configured — a ClickUp workspace
-            // at its storage limit (GBUSED_005) rejects every attachment, so hosting
-            // the screenshot on imgbb and embedding its URL in the comment is the way
-            // the evidence still shows up inline. No key -> the classic attachment.
-            if (IMGBB_API_KEY) {
-              const url = await uploadImageToImgbb(bytes, path.basename(abs), IMGBB_API_KEY)
-              uploaded.push({ title: path.basename(abs), url })
-            } else {
-              const ext = path.extname(abs).toLowerCase()
-              const att = await attachTaskFile(
-                task.id,
-                path.basename(abs),
-                bytes,
-                IMAGE_CONTENT_TYPE[ext] ?? 'application/octet-stream',
-              )
-              if (att.url) uploaded.push({ title: att.title, url: att.url })
-              else {
-                failed++
-                failedError ??= `no upload URL returned for ${rel}`
-              }
-            }
-          } catch (err) {
-            /* best-effort — keep the subtask even if an attachment fails */
-            failed++
-            failedError ??= err instanceof Error ? err.message : String(err)
-          }
-        }
+
+      if (!evidenceInDescription) {
+        for (const shot of shots) await upload(shot, task.id)
       }
-      // Also drop the image evidence into a comment on the subtask, so it's
+      // Default mode: also drop the image evidence into a comment on the subtask, so it's
       // visible inline in the discussion thread (not just the attachments panel).
-      // Best-effort — never fail the subtask over a comment.
-      if (uploaded.length) {
+      if (evidenceMode === 'comment' && uploaded.length) {
         try {
           const body = [
             `🔍 **QC evidence** — ${uploaded.length} screenshot${uploaded.length === 1 ? '' : 's'} from the automated run:`,
@@ -320,6 +382,7 @@ clickupRouter.post('/issues/subtasks', async (req, res) => {
       task.applied.screenshots = uploaded.length
       task.applied.screenshotsFailed = failed
       task.applied.screenshotsError = failedError
+      task.applied.evidenceInDescription = evidenceInDescription
       created.push(task)
     }
     res.status(201).json({ created })

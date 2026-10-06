@@ -10,7 +10,7 @@ import {
   GROUNDING_CHECK,
   GROUNDING_CHECK_MODEL,
 } from './config.js'
-import type { LogEvent, Project, RunSummary } from './types.js'
+import type { CreateRunBody, LogEvent, Project, RunSummary } from './types.js'
 import { renameSourceCredential } from './sourceRepo.js'
 
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true })
@@ -132,6 +132,17 @@ db.exec(`
   const cols = db.prepare(`PRAGMA table_info(runs)`).all() as { name: string }[]
   if (!cols.some((c) => c.name === 'outDirToken')) {
     db.exec(`ALTER TABLE runs ADD COLUMN outDirToken TEXT`)
+  }
+}
+
+// Migration: the run's own create request (CreateRunBody as JSON), so a finished run
+// can be RE-RUN in one click and a paused one resumes with the skill / device it was
+// started with. NULL = a row from before this landed; those can't be re-run (the
+// tickets, steps and notes they were started with were never recorded).
+{
+  const cols = db.prepare(`PRAGMA table_info(runs)`).all() as { name: string }[]
+  if (!cols.some((c) => c.name === 'requestJson')) {
+    db.exec(`ALTER TABLE runs ADD COLUMN requestJson TEXT`)
   }
 }
 
@@ -289,6 +300,10 @@ db.exec(`
   // Playwright MCP launch (and, on Stop, close) its own. OFF for existing projects:
   // it changes what a browser run drives, so it is the engineer's call per project.
   addCol('persistentBrowser', `INTEGER NOT NULL DEFAULT 0`)
+  // ClickUp filing preferences — defaults are the original behavior (inherit the
+  // parent's assignees; screenshots posted as a comment). See Project in types.ts.
+  addCol('clickupInheritAssignees', `INTEGER NOT NULL DEFAULT 1`)
+  addCol('clickupEvidence', `TEXT NOT NULL DEFAULT 'comment'`)
 }
 
 // Migration: per-project default QC skill — the skill auto-selected on the Launch
@@ -504,6 +519,8 @@ function rowToProject(row: Record<string, unknown>): Project {
     autoLearnModel: (row.autoLearnModel as string | null) || 'haiku',
     defaultSkill: (row.defaultSkill as string | null) ?? '',
     persistentBrowser: Number(row.persistentBrowser ?? 0) === 1,
+    clickupInheritAssignees: Number(row.clickupInheritAssignees ?? 1) === 1,
+    clickupEvidence: row.clickupEvidence === 'description' ? 'description' : 'comment',
     syncKey: (row.syncKey as string | null) ?? '',
   }
 }
@@ -569,6 +586,8 @@ export function createProject(name: string, rootPath: string, isDefault = false)
     defaultSkill: '',
     // Off by default: attaching changes which browser a run drives, so it's opt-in.
     persistentBrowser: false,
+    clickupInheritAssignees: true,
+    clickupEvidence: 'comment',
     // Minted on demand (`ensureSyncKey`), not here — a project that is never shared
     // never needs one.
     syncKey: '',
@@ -603,6 +622,8 @@ export function updateProject(
       | 'autoLearnModel'
       | 'defaultSkill'
       | 'persistentBrowser'
+      | 'clickupInheritAssignees'
+      | 'clickupEvidence'
       | 'syncKey'
     >
   >,
@@ -620,11 +641,19 @@ export function updateProject(
       'autoLearnModel',
       'defaultSkill',
       'persistentBrowser',
+      'clickupInheritAssignees',
+      'clickupEvidence',
       'syncKey',
     ] as const
   ).filter((k) => k in partial)
   if (keys.length === 0) return
-  const boolCols = new Set(['pinned', 'groundingCheck', 'autoLearn', 'persistentBrowser'])
+  const boolCols = new Set([
+    'pinned',
+    'groundingCheck',
+    'autoLearn',
+    'persistentBrowser',
+    'clickupInheritAssignees',
+  ])
   const setClause = keys.map((k) => `${k} = ?`).join(', ')
   const values = keys.map((k) =>
     boolCols.has(k) ? (partial[k as keyof typeof partial] ? 1 : 0) : (partial[k] as string),
@@ -1078,6 +1107,7 @@ function rowToSummary(row: Record<string, unknown>): RunSummary {
     totalAcs: Number(row.totalAcs),
     createdAt: row.createdAt as string,
     finishedAt: (row.finishedAt as string | null) ?? null,
+    canRerun: typeof row.requestJson === 'string' && row.requestJson.length > 0,
   }
 }
 
@@ -1142,6 +1172,26 @@ export function setRunSession(id: string, sessionId: string): void {
 export function getRunSession(id: string): string | null {
   const row = getRunSessionStmt.get(id) as { sessionId: string | null } | undefined
   return row?.sessionId ?? null
+}
+
+const setRunRequestStmt = db.prepare(`UPDATE runs SET requestJson = ? WHERE id = ?`)
+const getRunRequestStmt = db.prepare(`SELECT requestJson FROM runs WHERE id = ?`)
+
+/** Keep the request a run was created from, so it can be re-run as-is later. */
+export function setRunRequest(id: string, body: CreateRunBody): void {
+  setRunRequestStmt.run(JSON.stringify(body), id)
+}
+
+/** The request a run was created from, or null for a row recorded before it was kept. */
+export function getRunRequest(id: string): CreateRunBody | null {
+  const row = getRunRequestStmt.get(id) as { requestJson: string | null } | undefined
+  if (!row?.requestJson) return null
+  try {
+    const parsed = JSON.parse(row.requestJson) as CreateRunBody
+    return parsed && typeof parsed.ticketId === 'string' ? parsed : null
+  } catch {
+    return null
+  }
 }
 
 export function listRuns(projectId?: string): RunSummary[] {

@@ -69,6 +69,7 @@ import { toCurl } from '@/lib/curl'
 import { KVEditor } from '@/components/ApiKvEditor'
 import { AssertionEditor } from '@/components/ApiAssertionEditor'
 import { CurlImportDialog } from '@/components/CurlImportDialog'
+import { ApiSpecImportDialog } from '@/components/ApiSpecImportDialog'
 import { endpointFromDraft, stashLoadEndpoint } from '@/lib/loadEndpoint'
 import { deriveName, emptyDraft, uniqueName, type ApiDraft } from '@/lib/apiDraft'
 import { formatJsonBody, prettyJsonOrRaw } from '@/lib/apiJson'
@@ -665,10 +666,10 @@ function ScanPageDialog({
     let ok = 0
     for (const r of selected) {
       const draft = scanToDraft(r)
-      const base = deriveName(draft)
-      let name = base
-      let n = 2
-      while (taken.has(name)) name = `${base} (${n++})`.slice(0, 60)
+      // `uniqueName`, not a hand-rolled "(2)" suffix: the server's NAME_RE has no
+      // parenthesis, so the second scanned call to an endpoint already in the collection
+      // was rejected — and swallowed by the catch below — and silently never imported.
+      const name = uniqueName(deriveName(draft), taken)
       taken.add(name)
       try {
         await saveApiRequest(projectId, name, {
@@ -1778,6 +1779,73 @@ function StepChip({ n, children }: { n: number; children: React.ReactNode }) {
 }
 
 
+// ---------------------------------------------------------------- resizable collection rail
+
+/**
+ * Width of the Collection rail, dragged by its right edge and remembered per machine.
+ * Field report: on an ordinary laptop the fixed 228–248px rail cut every scanned request
+ * down to "GET /api/v1/pat…", so a freshly scanned collection could not be sorted without
+ * hovering each row. Clamped so the builder beside it always keeps room to work.
+ */
+const RAIL_KEY = 'qc.apiTesting.railWidth'
+const RAIL_DEFAULT = 248
+const RAIL_MIN = 220
+const RAIL_MAX = 560
+
+function loadRailWidth(): number {
+  try {
+    const n = Number(localStorage.getItem(RAIL_KEY))
+    return Number.isFinite(n) && n >= RAIL_MIN && n <= RAIL_MAX ? n : RAIL_DEFAULT
+  } catch {
+    return RAIL_DEFAULT
+  }
+}
+
+function saveRailWidth(n: number): void {
+  try {
+    if (n === RAIL_DEFAULT) localStorage.removeItem(RAIL_KEY)
+    else localStorage.setItem(RAIL_KEY, String(n))
+  } catch {
+    /* storage unavailable */
+  }
+}
+
+function useRailWidth() {
+  const [width, setWidth] = useState(loadRailWidth)
+  const startDrag = (e: React.PointerEvent<HTMLElement>) => {
+    e.preventDefault()
+    const startX = e.clientX
+    const startW = width
+    let last = startW
+    const move = (ev: PointerEvent) => {
+      last = Math.round(Math.min(RAIL_MAX, Math.max(RAIL_MIN, startW + ev.clientX - startX)))
+      setWidth(last)
+    }
+    const up = () => {
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', up)
+      document.body.style.removeProperty('cursor')
+      document.body.style.removeProperty('user-select')
+      saveRailWidth(last)
+    }
+    // Keep the resize cursor (and no text selection) while the pointer is off the handle.
+    document.body.style.cursor = 'col-resize'
+    document.body.style.userSelect = 'none'
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', up)
+  }
+  const nudge = (delta: number) => {
+    const next = Math.min(RAIL_MAX, Math.max(RAIL_MIN, width + delta))
+    setWidth(next)
+    saveRailWidth(next)
+  }
+  const reset = () => {
+    setWidth(RAIL_DEFAULT)
+    saveRailWidth(RAIL_DEFAULT)
+  }
+  return { width, startDrag, nudge, reset }
+}
+
 export default function ApiTestingPage() {
   const { activeProjectId } = useProjects()
   if (!activeProjectId) {
@@ -1794,6 +1862,7 @@ export default function ApiTestingPage() {
 
 function ApiTesting({ projectId }: { projectId: string }) {
   const queryClient = useQueryClient()
+  const rail = useRailWidth()
   const draftKey = `qc.apiTest.draft.${projectId}`
 
   // Which half of the page is showing. It lives in the URL (`?tab=flows`) rather than in
@@ -1816,6 +1885,7 @@ function ApiTesting({ projectId }: { projectId: string }) {
   const [res, setRes] = useState<ApiSendResult | null>(null)
   const [aiResult, setAiResult] = useState<AiCheckResult | null>(null)
   const [curlOpen, setCurlOpen] = useState(false)
+  const [specOpen, setSpecOpen] = useState(false)
   const [scanOpen, setScanOpen] = useState(false)
   const [manageEnvOpen, setManageEnvOpen] = useState(false)
   // "New request" writes the record straight away, so the button needs a pending state
@@ -2644,6 +2714,16 @@ function ApiTesting({ projectId }: { projectId: string }) {
           <Button
             variant="outline"
             size="sm"
+            onClick={() => setSpecOpen(true)}
+            className="gap-1.5 rounded-full active:scale-[0.98]"
+            title="Import every endpoint from an OpenAPI / Swagger file or a Postman collection"
+          >
+            <FileJson className="size-3.5" />
+            Import OpenAPI / Postman
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
             onClick={copyCurl}
             disabled={!draft.url}
             className="gap-1.5 rounded-full active:scale-[0.98]"
@@ -2691,12 +2771,34 @@ function ApiTesting({ projectId }: { projectId: string }) {
           on the Flows tab, so switching back keeps the response you were reading. */}
       <div
         className={cn(
-          'grid gap-5 lg:grid-cols-[minmax(228px,248px)_minmax(0,1fr)]',
+          'grid gap-5 lg:grid-cols-[var(--rail-w)_minmax(0,1fr)]',
           tab === 'flows' && 'hidden',
         )}
+        style={{ '--rail-w': `${rail.width}px` } as React.CSSProperties}
       >
         {/* ---------------------------------------------------------- 1. collection */}
         <aside className="space-y-4 lg:sticky lg:top-4 lg:self-start">
+          {/* Drag the rail's right edge to widen it (double-click resets, arrow keys nudge).
+              Only on the side-by-side layout — stacked, the rail is already full width. */}
+          <div
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Resize the collection"
+            aria-valuemin={RAIL_MIN}
+            aria-valuemax={RAIL_MAX}
+            aria-valuenow={rail.width}
+            tabIndex={0}
+            title="Drag to resize · double-click to reset"
+            onPointerDown={rail.startDrag}
+            onDoubleClick={rail.reset}
+            onKeyDown={(e) => {
+              if (e.key === 'ArrowLeft') rail.nudge(-24)
+              else if (e.key === 'ArrowRight') rail.nudge(24)
+            }}
+            className="group/rail absolute -right-3.5 top-0 z-10 hidden h-full w-2 cursor-col-resize lg:block"
+          >
+            <span className="mx-auto block h-full w-px bg-transparent transition-colors group-hover/rail:bg-border group-focus-visible/rail:bg-primary" />
+          </div>
           <section className="space-y-2 rounded-2xl border border-border/60 bg-card p-3 shadow-none">
             <div className="flex items-center justify-between gap-2 px-0.5">
               <span className="inline-flex min-w-0 items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
@@ -3018,7 +3120,7 @@ function ApiTesting({ projectId }: { projectId: string }) {
                                     "not filled in", not as a blank line. */}
                                 <span
                                   className={cn(
-                                    'min-w-0 truncate pl-0.5 text-[10px]',
+                                    'line-clamp-2 min-w-0 break-all pl-0.5 text-[10px]',
                                     item.url
                                       ? 'font-mono text-muted-foreground/70'
                                       : 'italic text-muted-foreground/60',
@@ -3719,6 +3821,13 @@ function ApiTesting({ projectId }: { projectId: string }) {
         open={curlOpen}
         onOpenChange={setCurlOpen}
         onImport={importCurlDraft}
+      />
+
+      <ApiSpecImportDialog
+        projectId={projectId}
+        open={specOpen}
+        onOpenChange={setSpecOpen}
+        existingNames={(saved ?? []).map((s) => s.name)}
       />
 
       <ScanPageDialog

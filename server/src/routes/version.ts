@@ -182,7 +182,13 @@ versionRouter.get('/update-log', (_req, res) => {
   // How the launcher says the run ENDED. The version in package.json is not that
   // answer: `git reset` moves it before the steps that can still fail, so a failed
   // build leaves the new number on disk with the old build running.
-  let status: { ok: boolean | null; error?: string; version?: string; at?: string } | null = null
+  let status: {
+    ok: boolean | null
+    error?: string
+    version?: string
+    at?: string
+    backup?: string | null
+  } | null = null
   try {
     status = JSON.parse(fs.readFileSync(path.join(dataDir, 'update-status.json'), 'utf8')) as typeof status
   } catch {

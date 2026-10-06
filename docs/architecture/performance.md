@@ -675,3 +675,7 @@ a k6 in `~/.local/bin` resolves under a stale PATH.
 | Endpoints per test | 20 | Beyond that the per-endpoint table stops being readable |
 | Page loads per audit | 10 | 3 is enough to average out noise |
 | Settle window | 30s | |
+
+## Guide tour
+
+The page has a route tour (`components/RouteGuideTour.tsx`, `PAGE_GUIDES['/performance']`) — added after the 2026-09 survey, where this was one of the pages QC most asked to be shown and one of the least used. Its steps point at `data-tour` anchors on the page; renaming or removing one makes that step vanish silently, so keep them.

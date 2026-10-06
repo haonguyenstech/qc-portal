@@ -3,6 +3,61 @@
 All notable changes to **QC Portal** are recorded here. The version shown in the
 sidebar footer matches the `version` in the repo root `package.json`.
 
+## 0.12.12 — 2026-10-06
+
+**Runs that fail fast, wait for you, and re-run in one click — from your survey feedback**
+
+### Added
+
+- **Re-run a run in one click.** *Re-run* on Run detail and History starts a new run with the
+  same tickets, URL, device and options — no more rebuilding the Run form after a failure.
+  (Hidden for runs recorded before this version, which did not keep their settings.)
+- **"Sign in as" on the Run page.** Pick a test account from the project's accounts sheet
+  and the run signs in with it. The prompt carries only the account's label, never its
+  password, and nothing secret is typed into Instructions any more.
+- **Import OpenAPI / Swagger / Postman into API Testing.** OpenAPI 3 and Swagger 2 (JSON or
+  YAML) and Postman v2.1 collections: preview the requests, untick what you don't want, and
+  they are saved under their tag or folder.
+- **Guide tours for Responsive and Performance.** Click *Guide* on either page for a short
+  walkthrough. The API Testing tour now covers the import and the resizable sidebar.
+- **Support link in the sidebar.** *Support* (next to Docs and Releases) opens the QC
+  Portal Support board, where you can report a bug, ask a question or request a feature and
+  follow what happens to it.
+- **ClickUp filing preferences per project.** Under Templates → ClickUp issue template you
+  can choose whether a filed bug inherits the parent's assignees and whether screenshots go
+  in a comment or in the description. Defaults are unchanged.
+
+### Changed
+
+- **A run that cannot start says so in minutes, not half an hour.** The run first checks
+  that the app opens and the sign-in works; if not, it writes a Blocked report naming the
+  reason and stops (measured: 76 seconds against an unreachable URL). A run that streams
+  nothing for 20 minutes is stopped as stalled (`QC_RUN_IDLE_MINUTES`), and Run detail
+  explains sign-in, usage-limit and stalled failures.
+- **Headless runs use a 1920×1080 browser** (was 1440×900), so screenshots match a full-HD
+  screen.
+- **The device picker shows a device a run is driving** ("in use by a run") and suggests
+  booting a second simulator to test by hand meanwhile.
+- **API Testing's collection sidebar can be widened** (drag its edge, 220–560px, remembered)
+  and long URLs wrap instead of being cut off.
+- **Chat answers get to the point.** Answer first, no preamble or recap, natural phrasing in
+  your own language instead of a word-for-word translation.
+
+### Fixed
+
+- **An expired AI account no longer burns the whole queue.** When a run fails because the
+  account is signed out or out of usage, the queue is held: queued runs stay queued, the
+  Running page shows a banner, and *Resume queue* continues them.
+- **Update now keeps a copy of your local changes.** Before `qc-portal --update` resets the
+  install it saves your edits as a patch in `data/update-backups/` (restore with
+  `git apply --3way`), and stops if it cannot. The toast says where the patch went. Note: the
+  update that brings this still runs the old updater — save `git diff > ~/qc-portal-local.patch`
+  once before it if you have local edits.
+- **A headless project ran with the headed browser config** after a restart, so its runs
+  rendered at about 800×600. It now gets the headless config.
+- **Scanned API requests with a duplicate name were silently dropped.** They are now saved
+  with a " (2)" suffix.
+
 ## 0.12.11 — 2026-10-05
 
 **See why an MCP server won't connect**

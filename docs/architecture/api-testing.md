@@ -115,6 +115,29 @@ The page is a three-pane workspace, not a vertical stack, and `/api-testing` is 
   finds the builder) and `tab-flows` on the last step. Moving a block means moving its `data-tour`
   with it; re-walk all 9 steps after restructuring.
 
+## Importing a whole spec, and a rail you can widen (survey 2026-09)
+
+- **Import OpenAPI / Postman** (`components/ApiSpecImportDialog.tsx`, parser in
+  `lib/apiSpecImport.ts`): OpenAPI 3.x and Swagger 2.0 (JSON **or YAML**) and Postman
+  Collection v2 → one saved request per operation, filed under its first **tag** / its
+  **folder** ("Parent / Child" for nested folders). Previewed first, every row untickable.
+  - Names follow the same rule as Scan and cURL (`deriveName` + `uniqueName`), computed with
+    a leading `{{baseUrl}}` stripped and `{id}` unbraced, or every name read "GET baseUrl …" /
+    "7BpetId 7D".
+  - An absolute server URL is used as-is; a relative or missing one becomes `{{baseUrl}}` and
+    the dialog says to set it under Environment. Postman's own `{{vars}}` already use the
+    portal's syntax and are listed, not rewritten. Path params (`{petId}`) stay in the URL.
+  - Bodies come from the media `example` → first `examples` entry → a sample built from the
+    schema. That sampler stops at a `$ref` already being expanded (Pet → Owner → Pet) — a
+    depth cap alone produced a body six copies deep. Form-data / file / GraphQL bodies are
+    not supported and are reported, never silently dropped.
+  - `yaml` is loaded with a dynamic import, so it's a separate chunk only fetched for YAML.
+- **The Collection rail is resizable** (220–560px, drag its right edge, double-click resets,
+  ←/→ nudge; `qc.apiTesting.railWidth` in localStorage). The fixed 228–248px rail cut every
+  scanned `METHOD /path` name short on a laptop. URLs in the rail wrap to two lines.
+- **Scan import's duplicate names were silently lost**: it suffixed ` (2)`, which the server's
+  `NAME_RE` rejects, and the per-row catch swallowed it. It uses `uniqueName` now.
+
 ## API Testing flows (run a collection, Postman-style)
 
 `/api-testing` sends one request at a time; a real acceptance criterion is usually a **scenario**

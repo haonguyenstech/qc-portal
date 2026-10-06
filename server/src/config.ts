@@ -70,6 +70,14 @@ export const GROUNDING_CHECK_MODEL = process.env.QC_GROUNDING_CHECK_MODEL?.trim(
 // can be embedded in ClickUp comments as hotlinks — a workaround for a ClickUp
 // workspace that has hit its "Over allocated storage" limit (GBUSED_005). When
 // set, issue screenshots upload to imgbb instead of ClickUp's attachment endpoint.
+// A QC run that streams NOTHING for this many minutes is stopped as stalled (0 = never).
+// Before this a hung run sat there until someone noticed. Generous on purpose: writing a
+// large report.md streams nothing until the Write completes, which can take minutes.
+export const RUN_IDLE_MINUTES = (() => {
+  const n = Number(process.env.QC_RUN_IDLE_MINUTES ?? 20)
+  return Number.isFinite(n) && n >= 0 ? n : 20
+})()
+
 export const IMGBB_API_KEY = process.env.IMGBB_API_KEY?.trim() || ''
 
 // The `claude` binary. Override with QC_CLAUDE_BIN if not on PATH.

@@ -1376,3 +1376,14 @@ that looks like a create request (`wantsTrackerCreate`, English + Vietnamese, li
 a follow-up "ok, go" still has it through the resumed CLI session. Added before the attachments are
 cut, so a team bot doing the filing gets it too. No template saved → no block. The placeholder list
 MIRRORS `ISSUE_TEMPLATE_VARS` in `web/src/lib/issueTemplate.ts` — keep them in step.
+
+## How an answer reads (`STYLE_BLOCK`)
+
+Survey 2026-09: "the chat's language isn't natural and it's long-winded". `FACTS_BLOCK` and
+`DEFECTS_BLOCK` govern what may be claimed; `STYLE_BLOCK` (added right after them, unrecorded,
+fixed text) governs how it is said — answer first, no preamble / restated question / closing
+recap, short sentences, length follows the question. It deliberately does **not** pick a
+language: the engineer's own message decides that, and the rule is only that it reads like a
+native-speaking colleague rather than a translation. An action's own output format wins over
+it. Test-case generation got the same "native phrasing, not a translation" line in its style
+block (`testcaseGen.ts`).

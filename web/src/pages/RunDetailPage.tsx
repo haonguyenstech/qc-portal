@@ -33,6 +33,7 @@ import {
   Image as ImageIcon,
   ListChecks,
   Loader2,
+  RotateCcw,
   Send,
   TabletSmartphone,
   Terminal,
@@ -66,12 +67,19 @@ import {
   listRunFiles,
   listTemplates,
   openRunFolder,
+  rerunRun,
   runFileUrl,
   screenshotUrl,
   type RunFile,
 } from '@/lib/api'
 import { ClickupFilingBar } from '@/components/ClickupFilingBar'
-import { severityMeta, type FilingItem } from '@/lib/clickup-filing'
+import {
+  assigneeClause,
+  evidenceClause,
+  severityMeta,
+  useFilingPrefs,
+  type FilingItem,
+} from '@/lib/clickup-filing'
 import {
   ISSUE_TEMPLATE_KEY,
   buildIssueVars,
@@ -723,7 +731,15 @@ function parseIssues(md: string | null): ParsedIssue[] {
 // the event log. This scans the log for the real failure reason and surfaces it up
 // front, with a plain-language explanation for the common Playwright/MCP cases.
 
-type FailureCategory = 'playwright' | 'mcp' | 'connection' | 'interrupted' | 'exit' | 'error'
+type FailureCategory =
+  | 'account'
+  | 'stalled'
+  | 'playwright'
+  | 'mcp'
+  | 'connection'
+  | 'interrupted'
+  | 'exit'
+  | 'error'
 
 interface FailureDiagnosis {
   category: FailureCategory
@@ -742,6 +758,15 @@ const SIG_CONNECTION =
   /econnrefused|econnreset|enotfound|etimedout|epipe|connection (?:refused|reset|closed|timed out|error|lost)|failed to (?:start|connect|launch|initialize|respond)|timed out|timeout|not responding|unresponsive|\bhang|\bhung|stalled|deadline exceeded/i
 // The portal restarted/stopped mid-run (server shutdown, update, crash) — the run's
 // child was killed and reconcile flagged it. Unambiguous, so it's classified first.
+// The AI account itself refused — signed out, or out of usage. Matched on ERROR events
+// only (the server writes "AI account problem — …", the CLI's own stderr says "Not logged
+// in"): a tool result where the APP under test says "rate limit" is a finding, not this.
+const SIG_ACCOUNT =
+  /ai account problem|not logged in|please run \/login|oauth token (?:has )?expired|usage limit|hit your (?:usage )?limit/i
+// The server's idle watchdog stopped the run (claude.ts) — it went silent, so the last
+// step in the log is where it hung. Checked before Playwright: the last tool is often a
+// browser one, but "it stopped responding" is the fact, not the browser.
+const SIG_STALLED = /run stopped: no activity from the ai/i
 const SIG_INTERRUPTED =
   /\binterrupted\b|server (?:stopped|restarted|was shut down|shutdown|shutting down)|did not finish/i
 
@@ -781,6 +806,8 @@ function diagnoseFailure(log: LogEvent[], status: string): FailureDiagnosis | nu
   let sawMcp = false
   let sawConnection = false
   let sawInterrupted = false
+  let sawAccount = false
+  let sawStalled = false
 
   for (const e of log) {
     const text = e.text ?? ''
@@ -802,6 +829,8 @@ function diagnoseFailure(log: LogEvent[], status: string): FailureDiagnosis | nu
     if (!signalsFailure) continue
 
     if (SIG_INTERRUPTED.test(text)) sawInterrupted = true
+    if (e.kind === 'error' && SIG_ACCOUNT.test(text)) sawAccount = true
+    if (e.kind === 'error' && SIG_STALLED.test(text)) sawStalled = true
     if (SIG_PLAYWRIGHT.test(text) || isBrowserTool(e.tool)) sawPlaywright = true
     if (SIG_MCP.test(text)) sawMcp = true
     if (SIG_CONNECTION.test(text)) sawConnection = true
@@ -814,8 +843,39 @@ function diagnoseFailure(log: LogEvent[], status: string): FailureDiagnosis | nu
 
   const evidence = raw.slice(-4)
 
-  // Classify — most specific first. A server interruption is unambiguous, so it
-  // wins even if the run had touched the browser earlier.
+  // Classify — most specific first. An AI-account refusal means nothing was tested at
+  // all, so it outranks everything; a server interruption is unambiguous next.
+  if (sawAccount) {
+    const limit = evidence.some((l) => /limit/i.test(l)) && !evidence.some((l) => /log ?in/i.test(l))
+    return {
+      category: 'account',
+      title: limit
+        ? 'The AI account hit its usage limit'
+        : 'The AI account is signed out',
+      detail:
+        'The Claude CLI refused to work before testing started, so nothing in the app was ' +
+        'tested and no report was written. Runs waiting in the queue were held, not failed.',
+      hint: limit
+        ? 'Wait for the limit to reset (or switch account), press "Resume queue" on the Running ' +
+          'page if runs are waiting, then Re-run this one.'
+        : 'Reconnect the account (sidebar → Auto Agent, or run `claude /login`), press "Resume ' +
+          'queue" on the Running page if runs are waiting, then Re-run this one.',
+      evidence,
+    }
+  }
+  if (sawStalled) {
+    return {
+      category: 'stalled',
+      title: 'The run stalled and was stopped',
+      detail:
+        'The AI stopped producing any output for too long, so the portal ended the run instead ' +
+        `of letting it hang${lastBrowserTool ? ` (its last browser step was \`${lastBrowserTool}\`)` : ''}.`,
+      hint:
+        'Re-run it. If it stalls at the same step again, open the full log to see that step — ' +
+        'a page that never finishes loading or a device that stopped answering is the usual cause.',
+      evidence,
+    }
+  }
   if (sawInterrupted) {
     return {
       category: 'interrupted',
@@ -892,6 +952,16 @@ function diagnoseFailure(log: LogEvent[], status: string): FailureDiagnosis | nu
 }
 
 const FAILURE_TONE: Record<FailureCategory, { ring: string; icon: string; chip: string }> = {
+  stalled: {
+    ring: 'border-amber-500/30 bg-amber-50/60 dark:bg-amber-500/5',
+    icon: 'bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-400',
+    chip: 'bg-amber-100 text-amber-800 dark:bg-amber-500/15 dark:text-amber-400',
+  },
+  account: {
+    ring: 'border-amber-500/30 bg-amber-50/60 dark:bg-amber-500/5',
+    icon: 'bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-400',
+    chip: 'bg-amber-100 text-amber-800 dark:bg-amber-500/15 dark:text-amber-400',
+  },
   playwright: {
     ring: 'border-red-500/30 bg-red-50/60 dark:bg-red-500/5',
     icon: 'bg-red-100 text-red-600 dark:bg-red-500/15 dark:text-red-400',
@@ -1446,12 +1516,16 @@ function FiledCardsPreview({
   onOpenChange,
   items,
   templated,
+  projectId,
 }: {
   open: boolean
   onOpenChange: (open: boolean) => void
   items: FilingItem[]
   templated: boolean
+  projectId: string
 }) {
+  const prefs = useFilingPrefs(projectId)
+  const evidence = `Screenshots are ${evidenceClause(prefs)} separately.`
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="flex max-h-[90vh] w-[95vw] flex-col gap-0 overflow-hidden p-0 sm:max-w-3xl">
@@ -1462,8 +1536,8 @@ function FiledCardsPreview({
           </DialogTitle>
           <DialogDescription className="text-xs">
             {templated
-              ? `Worded by testing/templates/${ISSUE_TEMPLATE_KEY}.md. Screenshots are attached and posted as a comment separately.`
-              : 'No project template — each card carries the issue text as written. Screenshots are attached and posted as a comment separately.'}
+              ? `Worded by testing/templates/${ISSUE_TEMPLATE_KEY}.md. ${evidence}`
+              : `No project template — each card carries the issue text as written. ${evidence}`}
           </DialogDescription>
         </DialogHeader>
         <div className="min-h-0 flex-1 space-y-3 overflow-auto px-5 py-4">
@@ -1521,6 +1595,7 @@ function IssueClickupPanel({
   appUrl: string
   slug: string | null
 }) {
+  const prefs = useFilingPrefs(projectId)
   const issues = parseIssues(issuesMd)
   // The project's ClickUp issue template (/templates). Same query key as that page,
   // so saving it there refreshes the wording here.
@@ -1605,9 +1680,8 @@ function IssueClickupPanel({
             </h3>
             <p className="mt-0.5 max-w-xl text-xs leading-relaxed text-muted-foreground">
               Pick the issues worth filing, then create them as subtasks under a parent ClickUp
-              ticket. Each one inherits the parent&apos;s assignee and tags, takes its priority
-              from the issue&apos;s own severity, and gets its screenshots attached and posted as
-              a comment.
+              ticket. Each one {assigneeClause(prefs)}, takes its priority from the issue&apos;s
+              own severity, and gets its screenshots {evidenceClause(prefs)}.
             </p>
           </div>
         </div>
@@ -1670,6 +1744,7 @@ function IssueClickupPanel({
         onOpenChange={setShowCards}
         items={filingItems}
         templated={!!template}
+        projectId={projectId}
       />
 
       {/* Screenshot lightbox */}
@@ -2277,6 +2352,23 @@ export default function RunDetailPage() {
     },
   })
 
+  // Re-run: a NEW run with this run's exact options (tickets, URL, device, notes…).
+  const rerunMutation = useMutation({
+    mutationFn: () => rerunRun(id),
+    onSuccess: (next) => {
+      toast.success(next.status === 'queued' ? 'Re-run queued' : 'Re-run started', {
+        description: 'Same tickets, URL and options as this run.',
+      })
+      queryClient.invalidateQueries({ queryKey: ['runs'] })
+      navigate(`/run/${next.runId}`)
+    },
+    onError: (err) => {
+      toast.error('Could not re-run', {
+        description: err instanceof Error ? err.message : 'Re-run failed.',
+      })
+    },
+  })
+
   // The executed test-case sheet — fetched here (shares the cache with the table)
   // so the hero summary can count the REAL per-case statuses (Passed/Failed/
   // Blocked/Cancelled/Untested) instead of the report's ad-hoc buckets.
@@ -2529,6 +2621,23 @@ export default function RunDetailPage() {
                 </Button>
               )}
               {filesSlug && <OpenFolderButton open={() => openRunFolder(run.id)} label="run output" />}
+              {!isRunActive && run.canRerun && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => rerunMutation.mutate()}
+                  disabled={rerunMutation.isPending}
+                  title="Start a new run with the same tickets, URL and options"
+                  className="rounded-full transition-all duration-200 active:scale-[0.98]"
+                >
+                  {rerunMutation.isPending ? (
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  ) : (
+                    <RotateCcw className="mr-2 h-4 w-4" />
+                  )}
+                  Re-run
+                </Button>
+              )}
               {!isRunActive && (
                 <Button
                   variant="outline"

@@ -296,3 +296,7 @@ Chromes are launched outside `runManager`, so a restart mid-sweep would orphan
 them), `web/src/App.tsx` (`/responsive`) and `web/src/lib/nav.ts` (Testing group —
 it takes a URL and answers a pass/fail question about it, the same shape as Design
 Check next door).
+
+## Guide tour
+
+The page has a route tour (`components/RouteGuideTour.tsx`, `PAGE_GUIDES['/responsive']`) — added after the 2026-09 survey, where this was one of the pages QC most asked to be shown and one of the least used. Its steps point at `data-tour` anchors on the page; renaming or removing one makes that step vanish silently, so keep them.

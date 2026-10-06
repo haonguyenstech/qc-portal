@@ -310,6 +310,66 @@ function writeUpdateStatus(status) {
   }
 }
 
+/**
+ * Save what `git reset --hard` is about to throw away, BEFORE it does.
+ *
+ * Field report: an engineer patched their install (ClickUp filing, the headless
+ * viewport), pressed Update now, and every edit was gone — the reset is deliberate
+ * (see updateSteps) but it was also silent, and uncommitted work cannot be recovered
+ * from git afterwards. So any edited tracked file except package-lock.json (which
+ * `npm install` rewrites on its own) is written to data/update-backups/ as a patch
+ * first; `git apply --3way <file>` puts it back on the new version. data/ is
+ * gitignored, so the reset never touches the backup.
+ *
+ * Returns { file, files } when something was saved, null when there was nothing to
+ * save, or { error } when it could not be saved — the caller then STOPS the update:
+ * an update that destroys work it was unable to keep a copy of is the bug this fixes.
+ */
+function backupLocalEdits() {
+  // No shell: git is a real executable everywhere, and a shell would split the file
+  // names (the install path may contain spaces) and choke on pathspec characters.
+  const git = (args) =>
+    spawnSync('git', args, {
+      cwd: ROOT,
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: GIT_TIMEOUT_MS,
+      maxBuffer: 256 * 1024 * 1024,
+    })
+  const st = git(['status', '--porcelain', '--untracked-files=no'])
+  if (st.status !== 0) return { error: `\`git status\` failed: ${(st.stderr || '').trim() || st.error?.message || 'unknown error'}` }
+  const files = st.stdout
+    .split(/\r?\n/)
+    .filter(Boolean)
+    // "XY path" or "XY old -> new" for a rename; the new name is what is on disk.
+    .map((line) => line.slice(3).split(' -> ').pop().replace(/^"|"$/g, ''))
+    .filter((f) => f && f !== 'package-lock.json')
+  if (!files.length) return null
+  const diff = git(['diff', '--binary', 'HEAD', '--', ...files])
+  if (diff.status !== 0 || !diff.stdout.trim()) {
+    return { error: `could not read the local edits (\`git diff\` failed: ${(diff.stderr || '').trim() || 'no output'})` }
+  }
+  const head = (git(['rev-parse', '--short', 'HEAD']).stdout || '').trim() || 'unknown'
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+  const dir = path.join(DATA_DIR, 'update-backups')
+  const file = path.join(dir, `${stamp}-${head}.patch`)
+  const header =
+    `# Local edits saved by \`qc-portal --update\` before it reset this install to the\n` +
+    `# upstream version. They were made on top of commit ${head}.\n` +
+    `# Files: ${files.join(', ')}\n` +
+    `# To put them back (from the install folder):  git apply --3way "${file}"\n\n`
+  try {
+    fs.mkdirSync(dir, { recursive: true })
+    fs.writeFileSync(file, header + diff.stdout)
+  } catch (err) {
+    return { error: `could not write the backup to ${dir}: ${err.message}` }
+  }
+  return { file, files }
+}
+
+/** Set by updateSteps when local edits were saved, so the status marker can name the file. */
+let localBackup = null
+
 /** The update steps, in order. Returns a failure sentence, or null when all passed. */
 function updateSteps() {
   if (fs.existsSync(path.join(ROOT, '.git'))) {
@@ -317,6 +377,19 @@ function updateSteps() {
     const branch = currentBranch()
     let failure = run('git', ['fetch', 'origin', branch], GIT_TIMEOUT_MS)
     if (failure) return failure
+    // The reset below discards every edit to a tracked file — keep a copy first, and
+    // refuse to go on without one.
+    const backup = backupLocalEdits()
+    if (backup?.error) {
+      return `Local changes to this install were found but ${backup.error}. The update was stopped so they are not lost — nothing was changed.`
+    }
+    if (backup) {
+      localBackup = backup.file
+      console.log(
+        `Saved your local changes to ${backup.files.length} file(s) (${backup.files.join(', ')}) before updating:\n  ${backup.file}\n` +
+          `  They will be replaced by the new version. To re-apply them afterwards: git apply --3way "${backup.file}"`,
+      )
+    }
     // Force the checkout to match the remote. A plain `git pull --ff-only` aborts
     // the moment a tracked file is dirty, and `npm install` routinely rewrites the
     // tracked package-lock.json (different npm version / platform-specific optional
@@ -359,7 +432,7 @@ async function update() {
   const failure = updateSteps()
   if (failure) {
     console.error(`Update failed: ${failure}`)
-    writeUpdateStatus({ ok: false, error: failure, version: readPkgVersion() })
+    writeUpdateStatus({ ok: false, error: failure, version: readPkgVersion(), backup: localBackup })
     if (wasRunning) {
       // The old build is still on disk, so this normally succeeds even when the
       // update did not. Reported either way — this line is what the UI shows.
@@ -370,7 +443,7 @@ async function update() {
   }
 
   console.log(`Updated to v${readPkgVersion()}.`)
-  writeUpdateStatus({ ok: true, version: readPkgVersion() })
+  writeUpdateStatus({ ok: true, version: readPkgVersion(), backup: localBackup })
   if (wasRunning) {
     console.log('Restarting…')
     await start({ open: false })

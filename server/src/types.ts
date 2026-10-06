@@ -36,6 +36,11 @@ export interface Project {
   autoLearnModel: string // model alias for that reflection
   defaultSkill: string // skill auto-selected on the Launch QC Run page ('' = no default)
   persistentBrowser: boolean // drive the portal-owned QC browser over CDP (survives Stop)
+  // Filing a QC finding to ClickUp (Project settings → ClickUp). Defaults keep the original
+  // behavior; a team that wants unassigned bugs with the evidence inside the card's
+  // description switches them here instead of patching its install (an update resets it).
+  clickupInheritAssignees: boolean // give the new subtask the parent ticket's assignees
+  clickupEvidence: 'comment' | 'description' // where the screenshots go on the card
   // Identity that survives a rename or a move, so AI Sync / import can tell "the same
   // project, on another machine" from "a different project that happens to be called
   // the same thing". Generated lazily; copied onto the guest's project by the first
@@ -108,6 +113,9 @@ export interface RunSummary {
   totalAcs: number
   createdAt: string // ISO
   finishedAt: string | null
+  // Whether the request this run was created from was kept (runs.requestJson), i.e. it
+  // can be re-run in one click. False for rows recorded before that column existed.
+  canRerun?: boolean
 }
 
 export interface RunDetail extends RunSummary {
@@ -172,6 +180,10 @@ export interface CreateRunBody {
   // behavior); 'seed' means the engineer authorized this run to create the data its
   // cases need instead of marking them Blocked. See RunDataPolicy.
   dataPolicy?: RunDataPolicy
+  // "Sign in as" on the Run form: the LABEL of a row in testing/environments.md (username +
+  // role), never a password — the run reads that row's credentials from the file itself.
+  // Omitted = the run picks a suitable account from the sheet, the previous behavior.
+  testAccount?: string
   // Advanced mode: a single run that covers a connected feature spanning several
   // tickets. `ticketId` is the lead ticket; `relatedTickets` are the rest, and
   // `workflowSteps` is the ordered end-to-end flow Claude should exercise.

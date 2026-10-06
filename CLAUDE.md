@@ -580,6 +580,7 @@ holds the actionable recipe; `web/src/pages/McpPage.tsx` is the canonical implem
 | `QC_BROWSER_PORT` | `19222` | CDP port for the QC browser (deliberately not 9222 — that's the engineer's own Chrome) |
 | `QC_BROWSER_PROFILE_DIR` | `~/.pw-agent-profile-qc` | QC browser profile; separate from the self-launch one because Chrome won't open a profile twice |
 | `QC_BROWSER_PATH` | _(unset)_ | explicit browser executable, when neither Edge nor Chrome is where we look |
+| `QC_RUN_IDLE_MINUTES` | `20` | a QC run that streams nothing for this long is stopped as stalled (`0` = never); see "Stalled runs" in `docs/architecture/runs.md` |
 | `QC_K6_BIN` | `k6` | path to the k6 binary, for an install that isn't on PATH (Performance › API load test) |
 | `QC_CLOUDFLARED_BIN` | _(unset)_ | explicit path to the `cloudflared` binary, for an install the PATH lookup can't find (Remote access) |
 | `QC_REMOTE_FORCE_GUARD` | `0` | treat EVERY request as if it arrived through the tunnel, so the access gate can be tested without publishing one. A development switch, not a security control |

@@ -149,6 +149,8 @@ function AccountsEditor({
     mutationFn: () => saveAccounts(content, projectId),
     onSuccess: (res) => {
       queryClient.setQueryData(['accounts', projectId], res)
+      // The Run form's "Sign in as" list is parsed from this sheet.
+      queryClient.invalidateQueries({ queryKey: ['run-accounts', projectId] })
       toast.success('Environments saved', {
         description: 'Claude will use these URLs and accounts for login steps.',
       })
@@ -170,6 +172,7 @@ function AccountsEditor({
         size: 0,
         savedAt: null,
       })
+      queryClient.invalidateQueries({ queryKey: ['run-accounts', projectId] })
       toast.success('Environments cleared')
     },
     onError: (err) =>

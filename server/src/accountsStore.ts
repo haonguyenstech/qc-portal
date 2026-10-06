@@ -78,3 +78,79 @@ export function hasAccounts(root: string): boolean {
     return false
   }
 }
+
+// ---------------------------------------------------------------- run account picker
+
+/**
+ * One test account the Run form can offer as "Sign in as". Only the IDENTITY leaves
+ * the server — the username plus its role / environment — never a password: the run
+ * reads the credentials from environments.md itself, so the picked label is all that
+ * reaches the prompt, the stored run request and localStorage.
+ */
+export interface RunAccountOption {
+  /** What the run is told to sign in as, e.g. "qa.admin@acme.test (Admin)". */
+  label: string
+  /** Secondary text for the picker (environment / URL), may be empty. */
+  detail: string
+}
+
+// Column headers, matched loosely (EN + VI) because the sheet is whatever the team
+// uploaded. A password-ish column is never read, even when it also says "user".
+const SECRET_COL = /pass|mật ?khẩu|\bpwd\b|secret|otp|\bpin\b|token|key/i
+// Strongest first: an "Account type" column must not win over a "Username" one.
+const USER_COLS = [/user ?name|e-?mail|\blogin\b/i, /tài khoản|\baccount\b|\buser\b/i]
+const ROLE_COL = /role|vai trò|persona|\btype\b|loại|nhóm|quyền|permission|description|mô tả|purpose/i
+const ENV_COL = /\benv|environment|môi trường|\burl\b|site|server/i
+
+function splitRow(line: string): string[] {
+  return line
+    .trim()
+    .replace(/^\|/, '')
+    .replace(/\|$/, '')
+    .split('|')
+    .map((c) => c.replace(/\*\*|`/g, '').trim())
+}
+
+/** Every account row found in the sheet's markdown tables (deduped, capped). */
+export function parseRunAccounts(markdown: string): RunAccountOption[] {
+  const lines = markdown.split(/\r?\n/)
+  const out: RunAccountOption[] = []
+  const seen = new Set<string>()
+  for (let i = 0; i + 1 < lines.length; i++) {
+    const header = lines[i].trim()
+    const sep = lines[i + 1].trim()
+    if (!header.startsWith('|') || !/^\|?\s*:?-{2,}/.test(sep)) continue
+    const cols = splitRow(header)
+    const usable = (re: RegExp) => cols.findIndex((c) => re.test(c) && !SECRET_COL.test(c))
+    const userIdx = USER_COLS.map(usable).find((idx) => idx >= 0) ?? -1
+    if (userIdx < 0) continue
+    const roleIdx = cols.findIndex(
+      (c, j) => j !== userIdx && ROLE_COL.test(c) && !SECRET_COL.test(c),
+    )
+    const envIdx = cols.findIndex(
+      (c, j) => j !== userIdx && j !== roleIdx && ENV_COL.test(c) && !SECRET_COL.test(c),
+    )
+    let j = i + 2
+    for (; j < lines.length && lines[j].trim().startsWith('|'); j++) {
+      const cells = splitRow(lines[j])
+      const user = cells[userIdx]?.trim() ?? ''
+      // Blank / placeholder cells aren't accounts.
+      if (!user || /^[-–—.]+$/.test(user)) continue
+      const role = roleIdx >= 0 ? (cells[roleIdx] ?? '').trim() : ''
+      const env = envIdx >= 0 ? (cells[envIdx] ?? '').trim() : ''
+      const label = (role ? `${user} (${role})` : user).slice(0, 160)
+      if (seen.has(label)) continue
+      seen.add(label)
+      out.push({ label, detail: env.slice(0, 160) })
+      if (out.length >= 50) return out
+    }
+    i = j - 1
+  }
+  return out
+}
+
+/** The project's pickable test accounts — empty when it has no sheet. */
+export function listRunAccounts(root: string): RunAccountOption[] {
+  const doc = readAccounts(root)
+  return doc.exists ? parseRunAccounts(doc.content) : []
+}

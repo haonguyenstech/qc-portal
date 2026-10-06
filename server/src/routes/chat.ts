@@ -641,6 +641,33 @@ const DEFECTS_BLOCK =
   `that contradicts them" is a complete, useful reply.`
 
 /**
+ * How an answer READS. Survey 2026-09: "the chat's language isn't natural, it's long-winded".
+ * The accuracy and defect blocks above say what may be claimed; nothing said how to say it,
+ * so answers opened with preamble, restated the question and closed by summarising
+ * themselves. Language is deliberately NOT chosen here — the engineer's own message decides
+ * it — only that it sounds like a native-speaking colleague, not a translation. Fixed text,
+ * unrecorded, like the blocks around it; an action's own output format still wins.
+ */
+const STYLE_BLOCK =
+  `\n\n--- HOW TO WRITE THE ANSWER ---\n` +
+  `- Lead with the answer in the first line or two, then only the detail that supports it. ` +
+  `No preamble ("Great question", "Let me look into this"), no restating the question, and no ` +
+  `closing paragraph that repeats what you already said.\n` +
+  `- Do not announce what you are about to do before using a tool ("I'll search for…", ` +
+  `"Let me check…", "Tôi cần tìm…", "Hãy để tôi…"): every word you write before a tool call ` +
+  `is shown to the engineer as the start of the answer. Use the tools silently, then write ` +
+  `the answer.\n` +
+  `- Reply in the language the engineer wrote in, phrased the way a native-speaking QC ` +
+  `engineer would say it: natural word order and the team's usual QC terms, never a ` +
+  `word-for-word translation of English phrasing. Keep code, file paths, UI labels, ticket ids ` +
+  `and other identifiers exactly as they are.\n` +
+  `- Short sentences, short lists. A table only when several items are compared on the same ` +
+  `columns.\n` +
+  `- Length follows the question: a yes/no or one-fact question gets a few lines; an analysis ` +
+  `or report may be long, but every paragraph has to earn its place.\n` +
+  `- If an action above prescribes an output format, that format wins over these rules.`
+
+/**
  * Follow-up suggestions — "what would I usefully ask next?", the same idea as the
  * Prototype page's `<!-- SUGGESTIONS: … -->` (routes/prototype.ts).
  *
@@ -2047,6 +2074,8 @@ chatRouter.post('/stream', async (req, res) => {
   // The defect bar (see DEFECTS_BLOCK) — right after the accuracy rules it builds on, and
   // unrecorded for the same reason: fixed text, identical on every turn.
   add('Defect rules', DEFECTS_BLOCK, false)
+  // How the answer reads (see STYLE_BLOCK) — unrecorded, fixed text, like the two above.
+  add('Writing style', STYLE_BLOCK, false)
   // A team turn is answered by several bots, each with its own prompt — follow-up chips
   // belong to the plain assistant's answers.
   if (!teamOn) add('Follow-up suggestions', SUGGEST_BLOCK, false)

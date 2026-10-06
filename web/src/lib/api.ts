@@ -137,6 +137,10 @@ export function updateProject(
      * launch (and, on Stop, close) its own. Rewrites the project's .mcp.json.
      */
     persistentBrowser?: boolean
+    /** Filing to ClickUp: give the new subtask the parent ticket's assignees. */
+    clickupInheritAssignees?: boolean
+    /** Filing to ClickUp: screenshots as a comment, or as links in the description. */
+    clickupEvidence?: 'comment' | 'description'
   },
 ): Promise<Project> {
   return request(`/api/projects/${encodeURIComponent(id)}`, {
@@ -273,6 +277,11 @@ export function createRun(body: {
    * comes back Blocked; 'seed' authorizes the run to create the data its cases need.
    */
   dataPolicy?: 'readonly' | 'seed'
+  /**
+   * "Sign in as": the label of a test account in testing/environments.md. Only the
+   * label is sent — the run reads that row's credentials from the file itself.
+   */
+  testAccount?: string
 }): Promise<{ runId: string } & RunSummary> {
   return request('/api/qc/run', { method: 'POST', body: JSON.stringify(body) })
 }
@@ -356,6 +365,31 @@ export function pauseRun(id: string): Promise<void> {
 /** Continue a previously paused run from where it stopped. */
 export function resumeRun(id: string): Promise<void> {
   return request(`/api/qc/runs/${encodeURIComponent(id)}/resume`, { method: 'POST' })
+}
+
+/** Start a NEW run with the exact options a finished run was started with. */
+export function rerunRun(id: string): Promise<RunSummary & { runId: string }> {
+  return request(`/api/qc/runs/${encodeURIComponent(id)}/rerun`, { method: 'POST' })
+}
+
+/**
+ * The portal-wide run queue. `hold` is set when a run failed because of the AI account
+ * itself (signed out / usage limit): the waiting runs stay queued until it's resumed.
+ */
+export interface RunQueueState {
+  hold: { kind: 'auth' | 'limit'; message: string; runId: string; since: string } | null
+  queued: string[]
+  /** Devices live mobile runs are driving right now (`deviceId` '' = Auto). */
+  busyDevices?: { runId: string; ticketId: string; deviceId: string }[]
+}
+
+export function getRunQueue(): Promise<RunQueueState> {
+  return request('/api/qc/queue')
+}
+
+/** Lift a held queue once the AI account is fixed; the next waiting run starts. */
+export function resumeRunQueue(): Promise<{ ok: boolean; waiting: number }> {
+  return request('/api/qc/queue/resume', { method: 'POST' })
 }
 
 // ---- Skills ----
@@ -813,6 +847,8 @@ export interface ClickupFilingContext {
   assignees: { id: number; username: string }[]
   tags: string[]
   priority: { id: number; label: string } | null
+  /** The project's filing preferences, so the preview says what WILL happen. */
+  settings?: { inheritAssignees: boolean; evidence: 'comment' | 'description'; imgbb: boolean }
 }
 
 /** What was actually applied to a filed bug — reported back so the panel can say so. */
@@ -825,6 +861,10 @@ export interface AppliedIssueFields {
   /** First reason a screenshot upload failed (e.g. ClickUp storage full). */
   screenshotsError: string | null
   commented: boolean
+  /** Screenshot links were written into the card's description instead of a comment. */
+  evidenceInDescription?: boolean
+  /** The project chose not to inherit the parent's assignees. */
+  assigneesSkipped?: boolean
 }
 
 export function clickupIssueFilingContext(
@@ -1719,6 +1759,17 @@ export interface AccountsDoc {
 /** Read the project's environments & test-accounts sheet. */
 export function getAccounts(projectId: string): Promise<AccountsDoc> {
   return request(`/api/accounts?projectId=${encodeURIComponent(projectId)}`)
+}
+
+/** One "Sign in as" option on the Run form — an identity, never a password. */
+export interface RunAccountOption {
+  label: string // e.g. "qa.admin@acme.test (Admin)"
+  detail: string // environment / URL column, may be empty
+}
+
+/** The test accounts found in the project's environments.md, for the Run form. */
+export function listRunAccounts(projectId: string): Promise<{ accounts: RunAccountOption[] }> {
+  return request(`/api/accounts/run-options?projectId=${encodeURIComponent(projectId)}`)
 }
 
 /** Create/overwrite the sheet (blank content clears it). */
@@ -2661,7 +2712,17 @@ export async function pingHealth(): Promise<boolean> {
 export interface UpdateLog {
   lines: string[]
   /** How the launcher says the last run ENDED — null when no update has run here. */
-  status: { ok: boolean | null; error?: string; version?: string; at?: string } | null
+  status: {
+    ok: boolean | null
+    error?: string
+    version?: string
+    at?: string
+    /**
+     * Set when the install had local edits: the patch the launcher saved them to before
+     * `git reset --hard` replaced them (bin/qc-portal.mjs `backupLocalEdits`).
+     */
+    backup?: string | null
+  } | null
   path: string
 }
 

@@ -426,7 +426,8 @@ Use your browser/Playwright tool to OPEN this URL and explore the actual running
 - Each step is ONE short, imperative action, verb first: e.g. "Click 'Send OTP'", "Enter <Email data>", "Observe UI". One action per numbered line — do not merge several actions into one line.
 - Do NOT explain WHY, restate the ticket, quote acceptance-criteria text, or add commentary inside steps or expected results ("because…", "per AC…", "this verifies…", "as expected because…"). Keep only what a tester needs to DO and to CHECK.
 - Expected result: state the observable outcome briefly and tie it to the step it applies to ("At step 3, the 'Appointment Management' screen is shown"). No long prose paragraphs, no rationale.
-- Use the exact UI labels / field names instead of describing them; trim filler words. If a step or expected line runs long, split or shorten it.`
+- Use the exact UI labels / field names instead of describing them; trim filler words. If a step or expected line runs long, split or shorten it.
+- Whatever language the cases are written in, phrase them the way a native-speaking QC engineer writes test cases: natural word order and the team's usual QC wording — never a word-for-word translation of English phrasing. UI labels stay exactly as the product shows them.`
 
   // The attached spec. A ticket that only LINKS to its spec has no acceptance criteria
   // of its own, so the spec has to be treated as a first-class requirement source — not

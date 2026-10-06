@@ -1490,7 +1490,7 @@ function ResponsiveWorkbench({ projectId }: { projectId: string }) {
     // App.tsx) precisely so the device row can use it, and a cap here would take
     // it straight back.
     <div className="space-y-5">
-      <header className="flex flex-wrap items-center gap-3">
+      <header data-tour="header" className="flex flex-wrap items-center gap-3">
         <span className="flex size-11 shrink-0 items-center justify-center rounded-2xl bg-foreground text-background">
           <Smartphone className="size-5" />
         </span>
@@ -1503,7 +1503,7 @@ function ResponsiveWorkbench({ projectId }: { projectId: string }) {
       </header>
 
       {/* ---- the URL, shared by both tabs ---- */}
-      <Card className="rounded-3xl border-border/60 shadow-none">
+      <Card data-tour="url" className="rounded-3xl border-border/60 shadow-none">
         <CardContent className="flex flex-wrap items-center gap-2 py-3">
           <Input
             value={draftUrl}
@@ -1551,7 +1551,7 @@ function ResponsiveWorkbench({ projectId }: { projectId: string }) {
             <CardContent className="flex flex-wrap items-center gap-2 py-3">
               <Popover>
                 <PopoverTrigger asChild>
-                  <Button variant="outline" className="rounded-full">
+                  <Button data-tour="devices" variant="outline" className="rounded-full">
                     <Smartphone className="size-4" />
                     {devices.length === 1 ? devices[0].label : `${devices.length} devices`}
                     <ChevronDown className="size-3.5" />
@@ -1627,6 +1627,7 @@ function ResponsiveWorkbench({ projectId }: { projectId: string }) {
                       setCaptureOpen(true)
                     }}
                     aria-label="Capture these devices"
+                    data-tour="capture"
                   >
                     {currentJob?.status === 'running' ? (
                       <Loader2 className="size-4 animate-spin" />
@@ -1691,7 +1692,7 @@ function ResponsiveWorkbench({ projectId }: { projectId: string }) {
                 />
                 Device frame
               </label>
-              <label className="flex items-center gap-2 text-xs">
+              <label data-tour="sync" className="flex items-center gap-2 text-xs">
                 <Checkbox
                   checked={prefs.syncActions}
                   onCheckedChange={(v) => setPrefs((p) => ({ ...p, syncActions: Boolean(v) }))}
@@ -1709,7 +1710,7 @@ function ResponsiveWorkbench({ projectId }: { projectId: string }) {
                   </TooltipContent>
                 </Tooltip>
               </label>
-              <label className="flex items-center gap-2 text-xs">
+              <label data-tour="proxy" className="flex items-center gap-2 text-xs">
                 <Checkbox
                   checked={prefs.proxy}
                   onCheckedChange={(v) => {

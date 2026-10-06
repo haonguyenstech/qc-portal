@@ -13,6 +13,14 @@ function clickTab(name: string) {
 const clickTour = (name: string) =>
   document.querySelector<HTMLElement>(`[data-tour="${name}"]`)?.click()
 
+// A Radix TabsTrigger switches on MOUSEDOWN (left button), not on click — `.click()`
+// alone leaves the tab where it was and the step spotlights a panel that isn't showing.
+const pressTab = (name: string) => {
+  const el = document.querySelector<HTMLElement>(`[data-tour="${name}"]`)
+  el?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0 }))
+  el?.click()
+}
+
 /**
  * Every step points at ONE element that really exists on the page, anchored by a
  * `data-tour` attribute rather than a generic tag selector. Two rules learned from
@@ -36,7 +44,7 @@ const PAGE_GUIDES: Record<string, TourStep[]> = {
   ],
   '/api-testing': [
     { selector: '[data-tour="header"]', title: 'Test APIs from the portal', body: 'Build repeatable HTTP checks against local, staging, or deployed APIs. The portal proxies requests through its server, so browser CORS restrictions do not prevent you testing localhost or protected environments.', placement: 'bottom' },
-    { selector: '[data-tour="import"]', title: 'Start from a real request', body: 'Import a cURL command when you already have a working request, or scan a browser page to discover the APIs it calls. This captures the practical endpoint, method, and request shape before you refine it.', placement: 'bottom' },
+    { selector: '[data-tour="import"]', title: 'Start from a real request', body: 'Import a cURL command when you already have a working request, import a whole OpenAPI / Swagger file or Postman collection to get every endpoint at once, or scan a browser page to discover the APIs it calls. Drag the collection’s right edge to widen it when names are cut off.', placement: 'bottom' },
     { selector: '[data-tour="page-tabs"]', title: 'Two ways to test an API', body: 'Requests is one call at a time — build it, send it, read the verdict. Flows chains several saved requests into one scenario (log in, capture the token, then the steps that need it). The tab you are on is in the URL, so a scenario can be shared or bookmarked.', placement: 'bottom', action: () => clickTour('tab-requests') },
     { selector: '[data-tour="request"]', title: 'Define the request target', body: 'Set the method and full URL, including route parameters. Keep environment-specific values in variables or captures where possible so a saved request can be reused safely.', placement: 'bottom', action: () => clickTour('tab-requests') },
     { selector: '[data-tour="config"]', title: 'Build a complete check', body: 'Params for query values, Headers for authentication and content type, Body for payload data, Assertions for response checks, and Capture to reuse values such as IDs or tokens in later requests.', placement: 'top' },
@@ -44,6 +52,24 @@ const PAGE_GUIDES: Record<string, TourStep[]> = {
     { selector: '[data-tour="tab-capture"]', title: 'Use captures to chain endpoints', body: 'Capture a value from one response — an access token, a created record id, a pagination cursor — and reference it in a following request. This turns isolated calls into a realistic API flow.', placement: 'bottom', action: () => clickTour('tab-capture') },
     { selector: '[data-tour="response"]', title: 'Read and save the result', body: 'After sending, inspect status, timing, response body, and assertion results. Save reliable requests to the project so regression checks do not need to be rebuilt next time.', placement: 'top' },
     { selector: '[data-tour="tab-flows"]', title: 'Chain requests into a scenario', body: 'Open Flows when one call is not the test. Pick the saved requests, order them, choose the account to run as, and run: every step is graded by its own assertions, a failure stops the run (unless the step is marked soft), and the summary is saved with the project as evidence.', placement: 'bottom', action: () => clickTour('tab-flows') },
+  ],
+  // Survey 2026-09: Responsive and Performance were the two pages QC most asked to be
+  // shown how to use — and the two with almost no users.
+  '/responsive': [
+    { selector: '[data-tour="header"]', title: 'One page, many devices', body: 'Check how a page looks on phones, tablets and desktops side by side. Look at it live first, then capture real screenshots and measured findings as evidence for a ticket.', placement: 'bottom' },
+    { selector: '[data-tour="url"]', title: 'Load the page to check', body: 'Paste any URL this machine can reach — a local dev server, staging, production — and press Load. If the page refuses to be shown in a frame, a banner below says so and offers the fix.', placement: 'bottom' },
+    { selector: '[data-tour="devices"]', title: 'Pick the devices', body: 'Choose from iPhone, Android, foldable, tablet and desktop presets — search by name or by width (a bug report quoting 412px finds every phone that is 412 wide). Add a custom size for anything else.', placement: 'bottom' },
+    { selector: '[data-tour="sync"]', title: 'Do it once, on every device', body: 'With Sync actions on, a click, a keystroke or a scroll on one device is replayed on the others — so you walk a flow once and watch it on all screens. It needs frames the page may drive: tick Via portal if it reports the frames are another origin.', placement: 'bottom' },
+    { selector: '[data-tour="proxy"]', title: 'When a page will not frame', body: 'Via portal fetches the page through the portal server so a site that forbids framing still shows. It sends no cookies, so a page behind a login shows its login screen — use Capture (next step) with Signed in for those.', placement: 'bottom' },
+    { selector: '[data-tour="capture"]', title: 'Capture the evidence', body: 'The camera drives a REAL emulated device for each one picked — true viewport, pixel ratio, mobile user agent and touch — and returns screenshots plus findings measured in the page, such as “the body scrolls 74px wider than the screen because table.lines is 448px”. Tick Signed in to reuse the QC browser’s login.', placement: 'bottom' },
+  ],
+  '/performance': [
+    { selector: '[data-tour="header"]', title: 'Two kinds of speed test', body: 'Page load measures how long a page takes in a real browser (first visit and returning visit, kept apart). API load test fires many concurrent requests at an endpoint with k6 and shows whether it slows down under load. Nothing is written into your project.', placement: 'bottom' },
+    { selector: '[data-tour="tab-page"]', title: 'Page load', body: 'Start here for “this screen feels slow”. It records load time, layout shift, blocking time, JavaScript errors and a request timeline, and flags the same API being called more often than it should be.', placement: 'bottom', action: () => pressTab('tab-page') },
+    { selector: '[data-tour="page-form"]', title: 'Measure a page', body: 'Enter the page URL and how many loads to average, then Measure. For a page behind a login, use the sign-in step below the form first — the audit then reuses that session.', placement: 'bottom', action: () => pressTab('tab-page') },
+    { selector: '[data-tour="tab-load"]', title: 'API load test', body: 'For “does the API hold up with many users”. Needs k6 installed — the badge at the top says whether it is.', placement: 'bottom', action: () => pressTab('tab-load') },
+    { selector: '[data-tour="load-form"]', title: 'Configure the load', body: 'Pick an endpoint (paste a cURL or reuse a saved API Testing request), the number of virtual users and the duration. Start small: a load test against a shared environment is real traffic.', placement: 'bottom', action: () => pressTab('tab-load') },
+    { selector: '[data-tour="nfr"]', title: 'Read the verdict and report it', body: 'Set the non-functional requirements (for example p95 under 800ms, error rate under 1%) and the report judges one or more runs against them — PASS, FAILED, MIXED or PERFORMANCE RISK — and exports to PDF or Word for the client.', placement: 'top', action: () => pressTab('tab-load') },
   ],
   '/instructions': [
     { selector: '[data-tour="header"]', title: 'Manage QC context', body: 'This is the persistent project context Claude can use during QC work. It is split across five tabs so each kind of guidance lives in the right place. This tour walks through each one.', placement: 'bottom', action: () => clickTab('instructions') },

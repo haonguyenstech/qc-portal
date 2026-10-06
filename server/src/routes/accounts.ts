@@ -4,7 +4,12 @@ import { resolveProject } from '../projectScope.js'
 import { revealFolderNative } from '../folderPicker.js'
 import { syncContextPointer } from '../contextPointer.js'
 import { testingDirFor } from '../config.js'
-import { deleteAccounts, readAccounts, writeAccounts } from '../accountsStore.js'
+import {
+  deleteAccounts,
+  listRunAccounts,
+  readAccounts,
+  writeAccounts,
+} from '../accountsStore.js'
 import { allCodes, codeFor, deleteTotp, listTotp, upsertTotp } from '../totp.js'
 
 export const accountsRouter = Router()
@@ -86,6 +91,16 @@ accountsRouter.get('/', (req, res) => {
   const project = resolveProject(req)
   if (!project) return res.status(400).json({ error: 'project not found' })
   res.json(readAccounts(project.rootPath))
+})
+
+/**
+ * GET /api/accounts/run-options — the test accounts the Run form offers as "Sign in
+ * as": identities only (username + role / environment), never a password.
+ */
+accountsRouter.get('/run-options', (req, res) => {
+  const project = resolveProject(req)
+  if (!project) return res.status(400).json({ error: 'project not found' })
+  res.json({ accounts: listRunAccounts(project.rootPath) })
 })
 
 /** PUT /api/accounts — create/overwrite (blank content clears it). Body: { content }. */

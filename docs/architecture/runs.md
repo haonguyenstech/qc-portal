@@ -184,6 +184,26 @@ rule that panel enforces for BOTH — don't fork it to change one of them.
   `{"error":"ClickUp API 404: {…}"}`. `errorSentence()` unwraps both layers for this panel — don't
   print the envelope at the engineer.
 
+### Per-project filing preferences (`clickupInheritAssignees`, `clickupEvidence`)
+
+Field report (2026-10): a team wanted bugs filed UNASSIGNED and the screenshots inside the
+card's description rather than a comment, patched `clickup.ts` / `routes/clickup.ts` and ~8
+UI strings in their install to get it, and lost the lot on the next update. Both are
+per-project settings now (Templates → ClickUp issue template → "When an issue is filed"),
+defaulting to the original behavior.
+
+- `clickupInheritAssignees: false` → `createIssueSubtask` sends no `assignees`;
+  `applied.assigneesSkipped` lets the result say "unassigned (project setting)" rather than
+  blaming the parent.
+- `clickupEvidence: 'description'` → with an imgbb key the screenshots are uploaded BEFORE
+  the card is created and appended to its description (`withEvidenceLinks`, which trims the
+  body so the evidence survives the 6000-char cap); without one there is no URL until the
+  card exists, so they are attached — in both cases no comment is posted.
+- `GET /issues/filing-context` returns `settings` so the preview describes what WILL happen,
+  and every sentence that describes filing (preview, toast, panel intros, the template editor)
+  is built from `assigneeClause` / `evidenceClause` in `lib/clickup-filing.ts`.
+- `server/test/clickupFiling.test.ts` drives the route against a faked ClickUp + imgbb.
+
 ## One run, one output folder (`runs.outDirToken`)
 
 A QC run's results live in `testing/test-result/<folder>/`, and the folder used to be named by the
@@ -271,9 +291,10 @@ project's saved default; this overrides it for one run.
 - **Headless needs its own `--config`.** The headed one says `viewport: null` +
   `--start-maximized` (fill the real window); headless has no window, so the page would
   render at Chrome's 800x600 default — mobile-ish breakpoints and wrongly-shaped screenshots.
-  `writeHeadlessPlaywrightMcpConfig()` pins 1440x900 instead. Verified end to end: a real CLI
-  run with a generated config reported `innerWidth/innerHeight` = 1440x900 and opened no
-  window.
+  `writeHeadlessPlaywrightMcpConfig()` pins 1920x1080 instead (1440x900 until 2026-10; verified
+  end to end at that size: a real CLI run with a generated config reported
+  `innerWidth/innerHeight` = 1440x900 and opened no window). A project saved headless on the
+  MCP page gets the same file at boot (`applyPlaywrightWindowConfig`, routes/mcp.ts).
 - **Attach mode wins.** When the project drives the portal-owned QC browser
   (`--cdp-endpoint`), that browser is a window the portal already opened and the MCP launches
   nothing, so headless is impossible: the checkbox is disabled with a pointer to the MCP page
@@ -338,6 +359,19 @@ emulator manager. adb knows the answer, so `androidDeviceNames()` asks it and
   the portal being broken instead.
 
 
+### Which device a live run is holding (`busyDevices`)
+
+Survey 2026-09: "while the AI tests on mobile it owns the only simulator, so I can't use the
+device at the same time". Pinning a run to a device already worked; what was missing was
+saying so. `runManager` records the device each live mobile run drives (`activeDevice`, ''
+= Auto) and `GET /api/qc/queue` returns it as `busyDevices`; the picker marks that chip
+"in use by a run" and tells the engineer to boot a second simulator and pick it.
+
+Runs still execute ONE AT A TIME, portal-wide — including two mobile runs on two different
+devices. Running those in parallel (a queue keyed by resource: the Playwright profile vs
+`device:<id>`) was considered and deliberately not done: nobody asked for throughput, and it
+breaks the "one at a time, in this order" promise the Run form and Running page make.
+
 ## Why a run graded fewer cases than the same suite in Chat (test data, waves, mobile recipes)
 
 The reported symptom: on `/qc-run` a suite comes back with a large **Blocked / Not Tested** count —
@@ -397,3 +431,67 @@ sends no `--model` at all — Terminal/Chat parity. `/chat` has defaulted to tha
 of the quality gap was simply that runs always pinned Sonnet while chat ran on the engineer's own
 model. The stored default stays `sonnet` (a run shouldn't silently get more expensive); switching is
 one click.
+
+## When the AI account fails: the queue is HELD, not burned (`runManager` hold)
+
+Field report (survey, 2026-09): the engineer sets up an evening's queue, the shared AI
+credential expires, and **every** queued run starts, fails and turns red in turn — then the
+whole queue has to be rebuilt by hand.
+
+- **`claude.ts` classifies the CLI's OWN refusal** (`classifyRunFailure`): `auth` (not logged
+  in, token expired) or `limit` (usage / rate limit, 429, overloaded). It reads only the
+  `result` text of an `is_error` result — or stderr when no result arrived at all. **Never tool
+  output**: the app under test answering 401 / 429 is a finding, not a reason to stop. That is
+  also why there's no bare `401` / `unauthorized` in the patterns.
+- **On such a failure `runManager` holds the queue**: the run is marked `error` with an
+  "AI account problem — …" line, the runs waiting stay `queued` (each one gets a log line saying
+  why), and `startNextQueued` refuses to start anything while held. A run started or resumed
+  while held joins the queue. **An empty queue is never held** — nothing to protect, and a hold
+  there would only make the engineer's next run sit after they fixed the account. For the same
+  reason, canceling the last waiting run lifts the hold.
+- **Lifting it is the engineer's call** — only they know the account is fixed: the Running page
+  shows `QueueHoldBanner` with **Resume queue** (`POST /api/qc/queue/resume`,
+  `GET /api/qc/queue`). In memory, like the queue itself.
+- RunDetail's `diagnoseFailure` has an `account` category (ERROR events only, same reason).
+
+## Re-run (`runs.requestJson`)
+
+`startRun` stores the run's whole `CreateRunBody` as `runs.requestJson`; `rerunRun`
+(`POST /api/qc/runs/:id/rerun`) starts a **new** run from it — same tickets, URL, target, device,
+steps, notes, model, data policy, account. The old run is untouched history. Only finished runs
+(`passed`/`failed`/`error`/`canceled`) re-run. `RunSummary.canRerun` is false for rows recorded
+before the column existed, and the **Re-run** buttons (RunDetail header, History rows for
+failed/error/canceled) are hidden for them rather than failing on click.
+
+This is not "remembering the ticket" in the sense of the section above: nothing is pre-filled
+into the form — it's an explicit action on one specific run.
+
+`resumeRun` also reads the stored request now: it used to rebuild the body without `skill` and
+`deviceId`, so a resumed run of a custom skill was told to "resume the qc-testing skill".
+
+## Stalled runs and fail-fast (idle watchdog, PRECONDITION CHECK)
+
+- **Idle watchdog** (`claude.ts`): a run that streams nothing for `QC_RUN_IDLE_MINUTES`
+  (default 20, `0` = off) is killed and recorded with "Run stopped: no activity from the AI…",
+  after a half-time warning. Generous on purpose — a large `report.md` Write streams nothing
+  until it completes. RunDetail diagnoses it as `stalled` (before Playwright, because the last
+  tool is often a browser one but "it went silent" is the fact).
+- **PRECONDITION CHECK** (prompt): before Phase 2 the run makes one attempt to reach the target
+  and sign in; if that fails it writes the three mandatory sections with every case ⛔ Blocked
+  for that one reason and stops. Field report: a run against a down environment walked all 7
+  phases and took ~30 minutes to say "all blocked".
+
+## "Sign in as" — the test account (`CreateRunBody.testAccount`)
+
+Field report: a login case could not be run from `/qc-run`, because the only way to name an
+account was to type its password into the notes (which then lives in the run request, in
+localStorage and in the prompt).
+
+- `accountsStore.parseRunAccounts` reads `testing/environments.md`'s markdown tables and offers
+  **identities only** — username/email + role, environment as detail. A password-ish column
+  (`pass`, `mật khẩu`, `otp`, `token`, `key`…) is never read; a "Username" column beats an
+  "Account type" one. `GET /api/accounts/run-options`.
+- The Run form's `RunAccountPicker` (step 2) sends the LABEL; the prompt says "sign in as
+  <label>, credentials are in environments.md". A remembered pick that left the sheet is dropped,
+  not sent — same rule as the device. Saving/clearing the sheet invalidates `['run-accounts']`.
+- 2FA was already solved by `totpPromptHint`; the picker just says how many authenticators exist.

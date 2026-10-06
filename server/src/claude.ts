@@ -1,6 +1,6 @@
 import spawn from 'cross-spawn'
 import type { ChildProcess } from 'node:child_process'
-import { CLAUDE_BIN } from './config.js'
+import { CLAUDE_BIN, RUN_IDLE_MINUTES } from './config.js'
 import { usageFromResultObject } from './claudeExec.js'
 import { recordUsage } from './db.js'
 import type { LogEvent, Phase, RunDataPolicy } from './types.js'
@@ -13,7 +13,13 @@ export interface RunHandle {
 
 interface RunCallbacks {
   onEvent: (e: LogEvent) => void
-  onDone: (result: { success: boolean; resultText: string }) => void
+  onDone: (result: {
+    success: boolean
+    resultText: string
+    // Set when the CLI itself refused to work — logged out, or out of usage. Every run
+    // queued behind this one would fail the same way, so runManager holds the queue.
+    failure: RunFailure | null
+  }) => void
   onError: (message: string) => void
   onSession?: (sessionId: string) => void
 }
@@ -104,6 +110,37 @@ function now() {
 }
 
 /**
+ * Why the CLI refused to work, when the reason is the AI ACCOUNT rather than the run:
+ * `auth` = logged out / token expired, `limit` = usage or rate limit. Both fail every
+ * run behind this one identically — observed in the field as a whole evening's queue
+ * turning red one item at a time after the shared credential expired.
+ */
+export type RunFailureKind = 'auth' | 'limit'
+export interface RunFailure {
+  kind: RunFailureKind
+  /** The CLI's own words (trimmed), shown to the engineer as-is. */
+  message: string
+}
+
+// Matched ONLY against the CLI's own error — the `result` text of an `is_error` result,
+// or stderr when no result arrived at all. Never against tool output: the app under
+// test answering 401/429 is a finding, not a reason to stop the queue. Hence no bare
+// "401" / "unauthorized" here — only the CLI's and the API's phrasings.
+const AUTH_FAILURE =
+  /not logged in|please run \/login|invalid api key|authentication[_ ]error|oauth token (?:has )?expired|token has expired|credentials? (?:have |has )?expired/i
+const LIMIT_FAILURE =
+  /usage limit|hit your (?:usage )?limit|limit reached|rate[ _-]?limit|api error:? 429|overloaded|quota (?:exceeded|exhausted)|credit balance is too low|out of (?:extra )?usage/i
+
+export function classifyRunFailure(text: string): RunFailure | null {
+  const t = text.trim()
+  if (!t) return null
+  const message = t.length > 300 ? `${t.slice(0, 299)}…` : t
+  if (AUTH_FAILURE.test(t)) return { kind: 'auth', message }
+  if (LIMIT_FAILURE.test(t)) return { kind: 'limit', message }
+  return null
+}
+
+/**
  * Mobile runs get sent to the skill's Maestro recipes explicitly.
  *
  * The skill's own capture recipes are Playwright-shaped (`browser_evaluate` with a
@@ -159,6 +196,7 @@ export function runQc(
     mcpConfigPath?: string
     resumeSessionId?: string // continue a previously paused session instead of starting fresh
     totpHint?: string // prompt block telling the run how to fetch live authenticator (2FA) codes
+    testAccount?: string // "Sign in as": a row label from testing/environments.md (no password)
   },
   cb: RunCallbacks,
 ): RunHandle {
@@ -320,6 +358,17 @@ export function runQc(
         ``,
         `Follow the skill literally and in order through all 7 phases.`,
         ``,
+        // FAIL FAST — reported from the field: a run whose environment was down still
+        // walked all 7 phases (planning, waves, subagents) and took ~30 minutes to say
+        // "everything Blocked". One reachability check up front turns that into minutes.
+        `PRECONDITION CHECK — before Phase 2, make ONE attempt to reach the test target: open ` +
+          `the App URL (or launch the app on the device) and, if the cases need a login, sign in ` +
+          `once with the account you will use. If the target does not load, the sign-in is ` +
+          `rejected, or the browser/device tool you need is unavailable, STOP there: write ` +
+          `report.md with the three mandatory sections below, grade every case ⛔ Blocked with ` +
+          `that ONE reason (quote the exact error you saw), and end the run. Do NOT plan waves, ` +
+          `capture evidence or fan out subagents against an environment you cannot reach.`,
+        ``,
         // COVERAGE — the second-biggest source of ungraded cases after the data policy.
         // A large suite (measured: 120 cases) captured in ONE Phase-4 pass runs out of
         // budget mid-way, so whole feature areas reach Phase 5 with nothing on disk and
@@ -460,6 +509,22 @@ export function runQc(
     const totpHint = opts.totpHint?.trim()
     if (totpHint) lines.push(``, totpHint)
 
+    // "Sign in as" from the Run form — field report: an engineer could not get a login
+    // case to run because there was no way to say WHICH account to use, short of typing
+    // the password into the notes. The label names a row of environments.md; the
+    // credentials stay in that file and are read from it, never put in this prompt.
+    const account = opts.testAccount?.trim()
+    if (account) {
+      lines.push(
+        ``,
+        `TEST ACCOUNT — the QC engineer picked the account for this run: "${account}". Its ` +
+          `credentials are in testing/environments.md (the row for that user). Use exactly that ` +
+          `account for every sign-in in this run, not another row. If the row is missing or its ` +
+          `sign-in is rejected, that is the PRECONDITION CHECK failing: report it as ⛔ Blocked ` +
+          `with the exact error. Never write the password into the report, issues or notes.`,
+      )
+    }
+
     const notes = opts.instructions?.trim()
     if (notes) {
       lines.push(
@@ -519,11 +584,66 @@ export function runQc(
 
   cb.onEvent({ ts: now(), kind: 'system', text: `Started QC run for ${opts.ticketId}` })
 
+  // IDLE WATCHDOG — a run that streams nothing for RUN_IDLE_MINUTES is stopped as
+  // stalled instead of sitting there until someone notices. Warns at half-time first.
+  const idleMs = RUN_IDLE_MINUTES * 60_000
+  const fmtMin = (ms: number) => {
+    const m = Math.round((ms / 60_000) * 10) / 10
+    return `${m} minute${m === 1 ? '' : 's'}`
+  }
+  let lastActivity = Date.now()
+  let idleWarned = false
+  let stalled = false
+  const touch = () => {
+    lastActivity = Date.now()
+    idleWarned = false
+  }
+  const watchdog =
+    idleMs > 0
+      ? setInterval(
+          () => {
+            const idle = Date.now() - lastActivity
+            if (idle >= idleMs) {
+              stalled = true
+              clearInterval(watchdog!)
+              cb.onEvent({
+                ts: now(),
+                kind: 'error',
+                text:
+                  `Run stopped: no activity from the AI for ${fmtMin(idleMs)} — it looks stalled. ` +
+                  `The last step in the log is where it got stuck.`,
+              })
+              killTree(child, 'SIGTERM')
+              setTimeout(() => {
+                if (!exited) killTree(child, 'SIGKILL')
+              }, 4000).unref()
+            } else if (!idleWarned && idle >= idleMs / 2) {
+              idleWarned = true
+              cb.onEvent({
+                ts: now(),
+                kind: 'system',
+                text:
+                  `No activity from the AI for ${fmtMin(idle)}. It may be busy writing a large ` +
+                  `file — or stuck. It is stopped automatically after ${fmtMin(idleMs)} of silence.`,
+              })
+            }
+          },
+          Math.max(50, Math.min(30_000, idleMs / 4)),
+        )
+      : null
+  watchdog?.unref()
+
   let stdoutBuf = ''
   let lastResult = ''
+  let resultSeen = false
+  let resultIsError = false
+  // Last few KB of stderr: when the CLI dies before printing a result (logged out on
+  // some versions), this is the only place its reason appears.
+  let stderrTail = ''
 
   child.stdout?.setEncoding('utf8')
   child.stdout?.on('data', (chunk: string) => {
+    touch()
     stdoutBuf += chunk
     let nl: number
     while ((nl = stdoutBuf.indexOf('\n')) !== -1) {
@@ -536,8 +656,12 @@ export function runQc(
 
   child.stderr?.setEncoding('utf8')
   child.stderr?.on('data', (chunk: string) => {
+    touch()
     const text = String(chunk).trim()
-    if (text) cb.onEvent({ ts: now(), kind: 'error', text })
+    if (text) {
+      stderrTail = `${stderrTail}\n${text}`.slice(-4000)
+      cb.onEvent({ ts: now(), kind: 'error', text })
+    }
   })
 
   child.on('error', (err) => cb.onError(err.message))
@@ -545,6 +669,7 @@ export function runQc(
   let exited = false
   child.on('close', () => {
     exited = true
+    if (watchdog) clearInterval(watchdog)
   })
 
   child.on('close', (code) => {
@@ -555,7 +680,14 @@ export function runQc(
       kind: 'done',
       text: success ? 'QC run finished' : `QC run exited with code ${code}`,
     })
-    cb.onDone({ success, resultText: lastResult })
+    const failure = resultSeen
+      ? resultIsError
+        ? classifyRunFailure(lastResult)
+        : null
+      : success
+        ? null
+        : classifyRunFailure(stderrTail)
+    cb.onDone({ success: success && !failure && !stalled, resultText: lastResult, failure })
   })
 
   // Emit a violet "Phase" marker only when the run ADVANCES to a new phase
@@ -627,6 +759,8 @@ export function runQc(
 
       case 'result': {
         lastResult = msg.result ?? msg.subtype ?? ''
+        resultSeen = true
+        resultIsError = !!msg.is_error
         const usage = usageFromResultObject(msg)
         if (usage) recordUsage({ source: 'qc-run', model: msg.model ?? null, ...usage })
         return

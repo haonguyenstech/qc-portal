@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react'
-import { Link } from 'react-router-dom'
-import { useQuery } from '@tanstack/react-query'
+import { Link, useNavigate } from 'react-router-dom'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { toast } from 'sonner'
 import {
   AlertCircle,
   ArrowUpRight,
@@ -19,6 +20,8 @@ import {
   Inbox,
   Layers,
   Link2,
+  Loader2,
+  RotateCcw,
   Search,
   Sparkles,
   Ticket as TicketIcon,
@@ -32,7 +35,7 @@ import { GuideTour, type TourStep } from '@/components/GuideTour'
 import { TargetTag } from '@/components/TargetTag'
 import { RunKindTag } from '@/components/RunKindTag'
 import { asRunKind } from '@/lib/runKind'
-import { listCrawledTickets, listRuns } from '@/lib/api'
+import { listCrawledTickets, listRuns, rerunRun } from '@/lib/api'
 import { StatusBadge } from '@/lib/status'
 import { useProjects } from '@/lib/project-context'
 import { asTestTarget } from '@/lib/testTarget'
@@ -238,44 +241,91 @@ function ResultCell({ run }: { run: RunSummary }) {
   )
 }
 
+/** Runs that didn't pass get a one-click Re-run on their row. */
+const RERUN_STATUSES: RunStatus[] = ['failed', 'error', 'canceled']
+
+/**
+ * Re-run beside the row, not inside its link (a button nested in an <a> is invalid and
+ * the click would also open the run). Starts a NEW run with this run's exact options.
+ */
+function RerunButton({ run }: { run: RunSummary }) {
+  const navigate = useNavigate()
+  const queryClient = useQueryClient()
+  const mutation = useMutation({
+    mutationFn: () => rerunRun(run.id),
+    onSuccess: (next) => {
+      toast.success(next.status === 'queued' ? 'Re-run queued' : 'Re-run started', {
+        description: `${run.ticketId} — same URL and options as before.`,
+      })
+      queryClient.invalidateQueries({ queryKey: ['runs'] })
+      navigate(`/run/${next.runId}`)
+    },
+    onError: (err) => {
+      toast.error('Could not re-run', {
+        description: err instanceof Error ? err.message : 'Re-run failed.',
+      })
+    },
+  })
+  return (
+    <Button
+      variant="ghost"
+      size="sm"
+      onClick={() => mutation.mutate()}
+      disabled={mutation.isPending}
+      title="Re-run with the same tickets, URL and options"
+      className="h-8 shrink-0 rounded-full px-2.5 text-muted-foreground transition-all duration-200 hover:text-foreground active:scale-[0.98]"
+    >
+      {mutation.isPending ? (
+        <Loader2 className="size-3.5 animate-spin" />
+      ) : (
+        <RotateCcw className="size-3.5" />
+      )}
+      <span className="hidden sm:inline">Re-run</span>
+    </Button>
+  )
+}
+
 /** A single run inside an expanded ticket group — a compact, clickable row. */
 function RunItem({ run }: { run: RunSummary }) {
   const to = `/run/${run.id}`
   const duration = formatDuration(run.createdAt, run.finishedAt)
   return (
-    <Link
-      to={to}
-      className="group/run flex items-center gap-3 rounded-2xl border border-transparent px-3 py-2.5 transition-all hover:border-border/60 hover:bg-muted/40"
-    >
-      <StatusBadge status={run.status} compact />
-      <div className="flex min-w-0 flex-1 items-center gap-3">
-        <span
-          className="flex min-w-0 items-center gap-1.5 whitespace-nowrap font-mono text-xs text-foreground"
-          title={formatDate(run.createdAt)}
-        >
-          <CalendarClock className="size-3.5 shrink-0 text-muted-foreground/70" />
-          {formatDateTime(run.createdAt)}
+    <div className="flex items-center gap-1">
+      <Link
+        to={to}
+        className="group/run flex min-w-0 flex-1 items-center gap-3 rounded-2xl border border-transparent px-3 py-2.5 transition-all hover:border-border/60 hover:bg-muted/40"
+      >
+        <StatusBadge status={run.status} compact />
+        <div className="flex min-w-0 flex-1 items-center gap-3">
+          <span
+            className="flex min-w-0 items-center gap-1.5 whitespace-nowrap font-mono text-xs text-foreground"
+            title={formatDate(run.createdAt)}
+          >
+            <CalendarClock className="size-3.5 shrink-0 text-muted-foreground/70" />
+            {formatDateTime(run.createdAt)}
+          </span>
+          <span className="hidden whitespace-nowrap font-mono text-[11px] text-muted-foreground/70 md:inline">
+            {relativeTime(run.createdAt)}
+          </span>
+          <span className="hidden items-center gap-1 font-mono text-[11px] text-muted-foreground/70 sm:inline-flex">
+            <Clock3 className="size-3 shrink-0 opacity-60" />
+            {duration ?? '—'}
+          </span>
+          <RunKindTag kind={asRunKind(run.kind)} compact />
+          <TargetTag target={asTestTarget(run.testTarget)} />
+          <span className="hidden min-w-0 flex-1 items-center gap-1.5 truncate font-mono text-[11px] text-muted-foreground/70 lg:flex" title={run.appUrl}>
+            <Link2 className="size-3 shrink-0 opacity-60" />
+            <span className="truncate">{hostOf(run.appUrl)}</span>
+          </span>
+        </div>
+        <ResultCell run={run} />
+        <span className="ml-1 hidden w-[5.5rem] justify-end sm:flex">
+          <StatusBadge status={run.status} />
         </span>
-        <span className="hidden whitespace-nowrap font-mono text-[11px] text-muted-foreground/70 md:inline">
-          {relativeTime(run.createdAt)}
-        </span>
-        <span className="hidden items-center gap-1 font-mono text-[11px] text-muted-foreground/70 sm:inline-flex">
-          <Clock3 className="size-3 shrink-0 opacity-60" />
-          {duration ?? '—'}
-        </span>
-        <RunKindTag kind={asRunKind(run.kind)} compact />
-        <TargetTag target={asTestTarget(run.testTarget)} />
-        <span className="hidden min-w-0 flex-1 items-center gap-1.5 truncate font-mono text-[11px] text-muted-foreground/70 lg:flex" title={run.appUrl}>
-          <Link2 className="size-3 shrink-0 opacity-60" />
-          <span className="truncate">{hostOf(run.appUrl)}</span>
-        </span>
-      </div>
-      <ResultCell run={run} />
-      <span className="ml-1 hidden w-[5.5rem] justify-end sm:flex">
-        <StatusBadge status={run.status} />
-      </span>
-      <ArrowUpRight className="size-4 shrink-0 text-muted-foreground/50 transition-all group-hover/run:text-foreground" />
-    </Link>
+        <ArrowUpRight className="size-4 shrink-0 text-muted-foreground/50 transition-all group-hover/run:text-foreground" />
+      </Link>
+      {run.canRerun && RERUN_STATUSES.includes(run.status) && <RerunButton run={run} />}
+    </div>
   )
 }
 

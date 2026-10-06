@@ -70,8 +70,11 @@ navigating; the window measured 2560x1410 maximized instead of 1619x936.
   (`writeHeadlessPlaywrightMcpConfig` → `data/playwright-mcp-headless.json`): the headed one
   says `viewport: null` + `--start-maximized`, and a headless Chrome has no window to fill,
   so the page would render at Chrome's 800x600 default — the wrong breakpoints and the wrong
-  screenshot shape. It pins 1440x900 instead (verified end to end: `window.innerWidth/Height`
-  came back 1440x900 through a real CLI run with the generated config, no window opened).
+  screenshot shape. It pins a desktop viewport instead — 1920x1080 since 2026-10 (it was
+  1440x900, verified end to end at that size: `window.innerWidth/Height` came back 1440x900
+  through a real CLI run with the generated config, no window opened). The same file is used
+  when the PROJECT is saved headless (`--headless` in `.mcp.json`): `applyPlaywrightWindowConfig`
+  used to give such a project the headed file, so its runs rendered at 800x600.
   **In attach mode there is nothing to hide** — the QC browser is a window the portal already
   opened — so the checkbox is disabled on the Run page and the run records a `system` event
   saying so rather than silently ignoring the request.

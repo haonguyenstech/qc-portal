@@ -20,6 +20,7 @@ import {
   EyeOff,
   Gauge,
   Globe,
+  KeyRound,
   Layers,
   Lightbulb,
   ListOrdered,
@@ -59,6 +60,9 @@ import { Checkbox } from '@/components/ui/checkbox'
 import {
   checkAppUrl,
   createRun,
+  getRunQueue,
+  listRunAccounts,
+  listTotp,
   uploadRunTestcaseDoc,
   listCrawledTickets,
   listMcp,
@@ -294,6 +298,123 @@ function StepHeader({ n, title, hint }: { n: number; title: string; hint?: strin
   )
 }
 
+/** Per project, like the device pick: which test account the last run signed in as. */
+const RUN_ACCOUNT_KEY = 'qc.runAccount.'
+const AUTO_ACCOUNT = '__auto'
+
+function loadRunAccount(projectId: string): string {
+  try {
+    return localStorage.getItem(RUN_ACCOUNT_KEY + projectId) ?? ''
+  } catch {
+    return ''
+  }
+}
+
+function saveRunAccount(projectId: string, label: string): void {
+  try {
+    if (label) localStorage.setItem(RUN_ACCOUNT_KEY + projectId, label)
+    else localStorage.removeItem(RUN_ACCOUNT_KEY + projectId)
+  } catch {
+    /* storage unavailable */
+  }
+}
+
+/**
+ * "Sign in as" — which test account the run logs in with. Field report: an engineer
+ * could not run login cases from this page at all, because the only way to name an
+ * account was to type its password into the notes (which then sits in the run request
+ * and in localStorage). The options come from the project's environments.md and carry
+ * IDENTITIES only; the run reads the credentials from that file. 2FA is covered by the
+ * authenticators registered on the same page — the run fetches live codes itself.
+ */
+function RunAccountPicker({
+  projectId,
+  value,
+  onChange,
+  disabled,
+}: {
+  projectId: string
+  value: string
+  onChange: (label: string) => void
+  disabled?: boolean
+}) {
+  const { data, isLoading } = useQuery({
+    queryKey: ['run-accounts', projectId],
+    queryFn: () => listRunAccounts(projectId),
+  })
+  const { data: totp } = useQuery({
+    queryKey: ['totp', projectId],
+    queryFn: () => listTotp(projectId),
+  })
+  const accounts = data?.accounts ?? []
+  const authenticators = totp?.entries.length ?? 0
+  // A remembered account that is no longer in the sheet is not sent (see onSubmit).
+  const missing = !!value && !isLoading && !accounts.some((a) => a.label === value)
+
+  return (
+    <div className="space-y-1.5">
+      <Label className="flex items-center gap-1.5 text-xs">
+        <KeyRound className="size-3.5 text-muted-foreground" />
+        Sign in as
+      </Label>
+      {accounts.length > 0 ? (
+        <Select
+          value={value && !missing ? value : AUTO_ACCOUNT}
+          onValueChange={(v) => onChange(v === AUTO_ACCOUNT ? '' : v)}
+          disabled={disabled}
+        >
+          <SelectTrigger className="h-10 w-full shadow-xs">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value={AUTO_ACCOUNT}>
+              <span className="text-muted-foreground">Let the AI pick from the accounts sheet</span>
+            </SelectItem>
+            {accounts.map((a) => (
+              <SelectItem key={a.label} value={a.label}>
+                <span className="flex items-center gap-2">
+                  <span className="font-mono text-xs">{a.label}</span>
+                  {a.detail && (
+                    <span className="text-[11px] text-muted-foreground">· {a.detail}</span>
+                  )}
+                </span>
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      ) : (
+        <p className="rounded-xl border border-dashed border-border/60 px-3 py-2 text-[11px] text-muted-foreground">
+          {isLoading ? (
+            'Reading the accounts sheet…'
+          ) : (
+            <>
+              No test accounts yet. Add them once in{' '}
+              <Link to="/instructions" className="font-medium text-foreground underline-offset-2 hover:underline">
+                Instructions → Environments &amp; test accounts
+              </Link>{' '}
+              and every run can sign in — no need to type passwords into the notes.
+            </>
+          )}
+        </p>
+      )}
+      {missing && (
+        <p className="text-[11px] text-amber-700 dark:text-amber-400">
+          <span className="font-mono">{value}</span> is no longer in the accounts sheet — the run
+          will let the AI pick unless you choose another.
+        </p>
+      )}
+      {accounts.length > 0 && (
+        <p className="text-[11px] text-muted-foreground">
+          The password stays in environments.md; only the account name goes to the run.
+          {authenticators > 0
+            ? ` 2FA codes are fetched automatically (${authenticators} authenticator${authenticators === 1 ? '' : 's'} registered).`
+            : ''}
+        </p>
+      )}
+    </div>
+  )
+}
+
 /**
  * Which booted device a mobile run drives. With one device the run is unambiguous,
  * but a QC engineer often has an Android emulator, an iOS simulator and Maestro's
@@ -336,6 +457,16 @@ function RunDevicePicker({
     retry: false,
   })
   const devices = devicesFromDetection(detection)
+  // Which devices a live run is driving — the queue is portal-wide, so not per project.
+  // Survey 2026-09: "while the AI tests, it owns the simulator and I can't use it".
+  const { data: queueState } = useQuery({
+    queryKey: ['run-queue'],
+    queryFn: getRunQueue,
+    refetchInterval: 5000,
+  })
+  const busy = queueState?.busyDevices ?? []
+  const busyIds = new Set(busy.map((b) => b.deviceId).filter(Boolean))
+  const busyAuto = busy.some((b) => !b.deviceId)
   // Why a chip reads as `emulator-5554` / `127.0.0.1:7555` rather than a device name.
   const nameHint = devices.some(isUnnamed) ? deviceNameHint(detection) : null
   // A remembered device that isn't booted any more is shown as unavailable rather
@@ -401,9 +532,27 @@ function RunDevicePicker({
                 active={value === d.deviceId}
                 disabled={disabled}
                 onClick={() => onChange(d.deviceId)}
+                busy={busyIds.has(d.deviceId)}
               />
             ))}
           </div>
+          {(busyIds.size > 0 || busyAuto) && (
+            <p className="text-[11px] text-amber-700 dark:text-amber-400">
+              {busyAuto && busyIds.size === 0
+                ? 'A QC run is driving a device right now (on Auto, so whichever Maestro listed first).'
+                : `A QC run is driving ${[...busyIds]
+                    .map((id) => devices.find((d) => d.deviceId === id)?.name ?? id)
+                    .join(', ')} right now.`}{' '}
+              A new run waits for it to finish. To keep using a device by hand, give the AI its own
+              one — boot a second simulator/emulator, Re-scan, and pick it here.
+            </p>
+          )}
+          {devices.length === 1 && busyIds.size === 0 && !busyAuto && (
+            <p className="text-[11px] text-muted-foreground">
+              The run takes over this device while it tests. To keep using one by hand, boot a
+              second simulator/emulator and pick it here.
+            </p>
+          )}
           {missing && (
             <p className="text-[11px] text-amber-700">
               The device you picked before (<span className="font-mono">{value}</span>) isn't booted
@@ -431,6 +580,7 @@ function DeviceChip({
   active,
   disabled,
   onClick,
+  busy,
 }: {
   label: string
   caption: string
@@ -438,6 +588,8 @@ function DeviceChip({
   active: boolean
   disabled?: boolean
   onClick: () => void
+  /** A live QC run is driving this device right now. */
+  busy?: boolean
 }) {
   return (
     <button
@@ -456,8 +608,14 @@ function DeviceChip({
       <Icon className={cn('size-3.5 shrink-0', active ? 'text-primary' : 'text-muted-foreground')} />
       <span className="min-w-0 leading-tight">
         <span className="block truncate text-xs font-medium">{label}</span>
-        {caption && (
-          <span className="block truncate text-[10px] text-muted-foreground">{caption}</span>
+        {busy ? (
+          <span className="block truncate text-[10px] font-medium text-amber-700 dark:text-amber-400">
+            in use by a run
+          </span>
+        ) : (
+          caption && (
+            <span className="block truncate text-[10px] text-muted-foreground">{caption}</span>
+          )
         )}
       </span>
       {active && <Check className="size-3.5 shrink-0 text-primary" />}
@@ -758,6 +916,7 @@ export default function RunPage() {
   // Maestro device_id the mobile run must drive ('' = let the run pick). Restored
   // per project below, and only sent when the picker confirms it's still booted.
   const [deviceId, setDeviceId] = useState('')
+  const [testAccount, setTestAccount] = useState('')
   const [skill, setSkill] = useState('')
   const [model, setModel] = useState<string>(loadRunModel)
   const [instructions, setInstructions] = useState('')
@@ -930,6 +1089,7 @@ export default function RunPage() {
     setAppUrl(saved?.appUrl ?? '')
     setAppName(loadAppName(activeProject.id))
     setDeviceId(loadRunDevice(activeProject.id))
+    setTestAccount(loadRunAccount(activeProject.id))
     setInstructions(saved?.instructions ?? '')
     // The project's default skill (set on the Skills page) wins on load; otherwise
     // restore the last-used skill. Reconciled against the skills list below.
@@ -1273,6 +1433,16 @@ export default function RunPage() {
         isMobileTarget && deviceId && (detected.length === 0 || detected.some((d) => d.deviceId === deviceId))
           ? deviceId
           : undefined
+      // Same rule for the account: one that left the sheet is dropped, not sent — the
+      // run would otherwise be told to sign in as a row that doesn't exist.
+      const sheet = queryClient.getQueryData<{ accounts: { label: string }[] }>([
+        'run-accounts',
+        activeProject.id,
+      ])
+      const pinnedAccount =
+        testAccount && sheet?.accounts.some((a) => a.label === testAccount)
+          ? testAccount
+          : undefined
 
       if (mode === 'simple') {
         // One run per ticket. The server executes runs strictly one at a time —
@@ -1299,6 +1469,7 @@ export default function RunPage() {
             // attached QC browser is a window nobody can hide, so don't claim otherwise.
             headless: testTarget === 'web' && !attachedBrowser ? headless : undefined,
             dataPolicy: seedData ? 'seed' : 'readonly',
+            testAccount: pinnedAccount,
           })
         }
       } else {
@@ -1343,6 +1514,7 @@ export default function RunPage() {
           deviceId: pinnedDevice,
           headless: testTarget === 'web' && !attachedBrowser ? headless : undefined,
           dataPolicy: seedData ? 'seed' : 'readonly',
+          testAccount: pinnedAccount,
           // No ticket exists here — `ticketId` is the flow name's slug.
           kind: 'flow',
         })
@@ -1807,6 +1979,17 @@ export default function RunPage() {
                       : 'Read-only: the run drives up to the final action and stops, so every case that needs data it would have to create comes back ⛔ Blocked. Tick this when the environment is safe to write to.'}
                   </p>
                 </div>
+                {activeProject && (
+                  <RunAccountPicker
+                    projectId={activeProject.id}
+                    value={testAccount}
+                    onChange={(label) => {
+                      setTestAccount(label)
+                      saveRunAccount(activeProject.id, label)
+                    }}
+                    disabled={submitting}
+                  />
+                )}
               </div>
 
               {/* Which booted device drives the run. Only for the Maestro targets, and
